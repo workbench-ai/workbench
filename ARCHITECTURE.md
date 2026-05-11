@@ -9,9 +9,9 @@ Workbench is the open, local-first product surface:
 - `packages/cli`: the published `workbench` command, command registry, local project commands, Workbench Cloud client commands, API client, config handling, output formatting, and CLI tests.
 - `packages/protocol`: the public adapter protocol. It owns adapter manifests, adapter request parsing, adapter result metadata, and auth-requirement discovery for `workbench.adapter.v1`.
 - `packages/contract`: serializable DTOs shared by the CLI, Workbench Cloud API, reusable UI, and execution helpers.
-- `packages/core`: the public execution core. It owns split YAML validation, source resolution, benchmark fingerprints, candidate file snapshots, execution graph planning, Docker-backed local execution, sandbox capability validation, phase staging, candidate/evaluation materialization, runs, lineage, file previews, and trace DTO helpers.
+- `packages/core`: the public execution core. It owns split YAML validation, source resolution, benchmark fingerprints, subject file snapshots, execution graph planning, Docker-backed local execution, sandbox capability validation, trial staging, subject/evaluation materialization, runs, lineage, file previews, and trace DTO helpers.
 - `packages/core/worker/sandbox-adapter-runner.cjs`: the small public runner copied into local Docker sandboxes. It validates scoped execution capability input and calls the core adapter runtime.
-- `packages/built-in-adapters`: first-party adapter manifests and commands for `codex`, `claude`, `pi`, `command`, and `rubric`.
+- `packages/built-in-adapters`: first-party adapter manifests and commands for `codex`, `claude`, `pi`, `command`, `rubric`, `tests`, and `harbor`.
 - `packages/workbench-ui`: the browser Workbench UX used by local `workbench open` and Workbench Cloud.
 - `environments/`: Dockerfiles for built-in local execution images.
 - `skills/workbench/`: canonical authored agent skill source.
@@ -29,13 +29,13 @@ The `packages/cli` package owns the `workbench` binary implementation, command r
 - The core package owns portable Workbench semantics and local Docker execution. It must not depend on Next.js, AWS SDKs, Stripe, Cognito, Daytona, E2B, Firecracker implementation code, Terraform, or hosted worker entrypoints.
 - Built-in adapters are normal adapter packages. Core can execute adapters, but it does not special-case built-in adapter ids. A project-declared adapter source with a built-in id intentionally overrides that built-in for the project; wrapping is implemented by that replacement adapter delegating however it chooses.
 - Workbench Cloud owns hosted persistence, billing, auth, Web routes, production infrastructure, queue workers, remote provider admission, and hosted sandbox providers.
-- Shared UI stays presentation-only. It renders benchmark, candidate, run, result, lineage, file, and trace DTOs without owning execution rules.
+- Shared UI stays presentation-only. It renders benchmark, subject, run, result, lineage, file, and trace DTOs without owning execution rules.
 
 This is a git/GitHub-style split: `workbench` is the open client and local engine; Workbench Cloud is an optional hosted service implemented by cloud-owned private packages.
 
 ## Public Source Repository
 
-The public repository `workbench-ai/workbench` is generated from the open Workbench boundary. It contains the Workbench packages, the shared `cli-web-ui` source package needed by `packages/workbench-ui`, the first-party harness packages required by built-in agent adapters, docs, environments, and the installable skill at `skills/workbench/SKILL.md`.
+The public repository `workbench-ai/workbench` is generated from the open Workbench boundary. It contains the Workbench packages, the shared `cli-web-ui` source package needed by `packages/workbench-ui`, the first-party adapter packages required by built-in agent adapters, docs, environments, and the installable skill at `skills/workbench/SKILL.md`.
 
 The public source repository intentionally has no root `SKILL.md`. The upstream `skills` installer treats a root `SKILL.md` as the skill root, which would copy the entire source tree into `.agents/skills/workbench`. Keeping the skill nested preserves the install UX `npx skills add workbench-ai/workbench` while installing only the skill directory.
 
@@ -43,20 +43,23 @@ The source export is maintained by the root command `pnpm workbench:public-sourc
 
 ## Core Execution Model
 
-Runnable source uses version-1 split YAML:
+Runnable source uses version-2 split YAML:
 
-- `benchmark.yaml` owns tasks, environment, adapters, and grading.
-- `candidates/<name>/candidate.yaml` owns how to run one candidate.
-- `candidates/<name>/files/` is the candidate file tree mounted at `/workspace/input/candidate`.
-- `optimizers/<name>.yaml` owns candidate-relative edit paths and improve behavior.
+- `benchmark.yaml` owns tasks, environment, adapters, and scoring.
+- `subjects/<name>/subject.yaml` owns how to run one subject.
+- `subjects/<name>/files/` is the optional subject file tree copied into the trial workspace.
+- `optimizers/<name>.yaml` owns subject-relative edit paths and improve behavior.
+- `tasks/<case>/files/` is subject-visible task material copied before the run.
+- `tasks/<case>/tests/` is verifier-only material injected before scoring.
 
-The benchmark fingerprint is the comparability boundary. Candidates from different benchmark fingerprints are not compared as peers.
+The benchmark fingerprint is the comparability boundary. Subjects from different benchmark fingerprints are not compared as peers.
 
-Core compiles eval and improve requests into generic execution phases:
+Core compiles eval and improve requests into generic executions:
 
-- `improve` can read candidate files and ancestor traces, then write `/workspace/output/candidate_patch.json`.
-- `run-task` can read candidate files and task input files, then write runner outputs under `/workspace/output`.
-- `grade-task` can read task expected files plus runner outputs, then write `/workspace/output/scorecard.json`.
+- `improve` can read subject files and ancestor traces, then write `/workspace/output/candidate_patch.json` with subject-file changes. The filename remains part of adapter protocol v1.
+- `trial` creates one mutable environment, runs the subject adapter, late-injects verifier files at `/tests`, runs the score adapter in the same environment, and reads a Workbench scorecard.
+
+Harbor is not a core runtime mode. `tasks.use: harbor` is a task-source adapter that resolves Harbor task directories into normalized Workbench tasks, and `score.use: tests` is a scorer adapter that reads verifier scorecards or reward files.
 
 Local execution uses the public Docker sandbox backend in `packages/core/src/sandbox-backends/docker.ts`. The same sandbox-plane interface validates input scope, output scope, allocation metadata, handles, and execution capabilities before any adapter command runs. Remote provider implementations are private cloud-runtime code that wrap the public core execution function with hosted provider factories.
 
@@ -64,7 +67,7 @@ Local execution uses the public Docker sandbox backend in `packages/core/src/san
 
 Local project state lives under `.workbench/` inside the project:
 
-- `.workbench/runtime` stores local runs, candidates, evaluations, traces, and file snapshots.
+- `.workbench/runtime` stores local runs, subjects, evaluations, traces, and file snapshots. Historical archive ids may still use the hosted `cand_...` id prefix.
 - `.workbench/origin.json` stores the configured Workbench Cloud origin.
 - `.workbench/fetch` stores downloaded remote source before `pull` updates managed files.
 

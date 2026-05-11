@@ -3,7 +3,6 @@ import type {
   WorkbenchExecutionEvent,
   WorkbenchExecutionEventBatch,
   WorkbenchExecutionEventSource,
-  WorkbenchExecutionPurpose,
 } from "@workbench-ai/workbench-contract";
 import type {
   HarnessTurnLivePersistence,
@@ -120,7 +119,7 @@ export function executionTracePersistenceForPublisher(
 export async function publishCommandPhaseEvent(
   publisher: WorkbenchExecutionEventPublisher | undefined,
   args: {
-    phase: WorkbenchExecutionPurpose;
+    phase: string;
     status: "started" | "succeeded" | "failed";
     role?: WorkbenchExecutionEvent["role"];
     exitCode?: number;

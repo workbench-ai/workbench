@@ -3,7 +3,7 @@ import type {
   HostedWorkbenchJob,
   Json,
   SurfaceSnapshotFile,
-  WorkbenchExecutionPurpose,
+  WorkbenchAdapterInvocation,
 } from "@workbench-ai/workbench-contract";
 
 import type {
@@ -43,7 +43,8 @@ export interface WorkbenchExecutionRuntimeInput {
 
 export interface WorkbenchWorkloadPhaseCommand {
   kind: "optimizer" | "runner" | "grader";
-  label: WorkbenchExecutionPurpose;
+  label: string;
+  adapter?: WorkbenchAdapterInvocation;
   command?: string;
   okExitCodes?: number[];
 }

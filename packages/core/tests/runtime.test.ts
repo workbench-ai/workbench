@@ -110,7 +110,7 @@ describe("Workbench runtime generic execution", () => {
     }]);
   });
 
-  test("validates only the split benchmark/candidate/optimizer authoring contract", () => {
+  test("validates only the split benchmark/subject/optimizer authoring contract", () => {
     const validation = validateWorkbenchResolvedSourceYaml(runtimeSpec());
 
     expect(validation.ok).toBe(true);
@@ -118,7 +118,7 @@ describe("Workbench runtime generic execution", () => {
     expect(resolveWorkbenchResolvedSourceYaml(runtimeSpec()).run.with).toMatchObject({
       command: expect.stringContaining("runner-output.json"),
     });
-    expect(validateWorkbenchResolvedSourceYaml(runtimeSpec().replace("version: 1", "version: 10")).ok).toBe(false);
+    expect(validateWorkbenchResolvedSourceYaml(runtimeSpec().replace("version: 2", "version: 20")).ok).toBe(false);
     expect(validateWorkbenchResolvedSourceYaml(runtimeSpec().replace("  description: Exercise the generic command runner and grader runtime path.\n", "")).errors).toContain("benchmark.yaml.description must be a non-empty string.");
   });
 
@@ -150,18 +150,10 @@ describe("Workbench runtime generic execution", () => {
       await expect(fs.access(path.join(root, "input", "traces", "events", "prior.ndjson"))).resolves.toBeUndefined();
       await expect(fs.access(path.join(root, "input", "task", "task.yaml"))).rejects.toBeTruthy();
 
-      await stageWorkbenchRunWorkload(root, stageWorkload("run-task"));
+      await stageWorkbenchRunWorkload(root, stageWorkload("trial"));
       await expect(fs.access(path.join(root, "input", "candidate", "prompt.md"))).resolves.toBeUndefined();
-      await expect(fs.access(path.join(root, "input", "task", "task.yaml"))).rejects.toBeTruthy();
-      await expect(fs.access(path.join(root, "input", "task", "input", "request.md"))).resolves.toBeUndefined();
-      await expect(fs.access(path.join(root, "input", "task", "expected", "secret.txt"))).rejects.toBeTruthy();
-      await expect(fs.access(path.join(root, "input", "traces"))).rejects.toBeTruthy();
-
-      await stageWorkbenchRunWorkload(root, stageWorkload("grade-task"));
-      await expect(fs.access(path.join(root, "input", "candidate", "prompt.md"))).rejects.toBeTruthy();
-      await expect(fs.access(path.join(root, "input", "task", "task.yaml"))).rejects.toBeTruthy();
-      await expect(fs.access(path.join(root, "input", "task", "input", "request.md"))).resolves.toBeUndefined();
-      await expect(fs.access(path.join(root, "input", "task", "expected", "secret.txt"))).resolves.toBeUndefined();
+      await expect(fs.access(path.join(root, "request.md"))).resolves.toBeUndefined();
+      await expect(fs.access(path.join(root, "tests", "secret.txt"))).rejects.toBeTruthy();
       await expect(fs.access(path.join(root, "input", "traces"))).rejects.toBeTruthy();
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -173,8 +165,8 @@ describe("Workbench runtime generic execution", () => {
     const now = "2026-04-27T00:00:00.000Z";
     const caseFiles = normalizeSurfaceFiles([
       { path: "case-001/task.yaml", content: "task: test\n" },
-      { path: "case-001/input/request.md", content: "public\n" },
-      { path: "case-001/expected/secret.txt", content: "hidden\n" },
+      { path: "case-001/files/request.md", content: "public\n" },
+      { path: "case-001/tests/secret.txt", content: "hidden\n" },
     ]);
     const common = {
       ownerUserId: "user_runtime",
@@ -189,8 +181,8 @@ describe("Workbench runtime generic execution", () => {
       caseFiles,
       now,
     };
-    const [runJob] = planWorkbenchExecutionJobsForPurpose({ ...common, purpose: "run-task" });
-    const [gradeJob] = planWorkbenchExecutionJobsForPurpose({ ...common, purpose: "grade-task" });
+    const [runJob] = planWorkbenchExecutionJobsForPurpose({ ...common, purpose: "trial" });
+    const [gradeJob] = planWorkbenchExecutionJobsForPurpose({ ...common, purpose: "trial" });
 
     const runInputs = await createWorkbenchSandboxFileStore({
       job: runJob!,
@@ -199,7 +191,8 @@ describe("Workbench runtime generic execution", () => {
       caseFiles,
     }).materializeInputs(executionFromJob(runJob!));
     expect(runInputs.find((input) => input.input.name === "task")?.files.map((file) => file.path)).toEqual([
-      "input/request.md",
+      "files/request.md",
+      "tests/secret.txt",
     ]);
 
     const gradeInputs = await createWorkbenchSandboxFileStore({
@@ -209,8 +202,8 @@ describe("Workbench runtime generic execution", () => {
       caseFiles,
     }).materializeInputs(executionFromJob(gradeJob!));
     expect(gradeInputs.find((input) => input.input.name === "task")?.files.map((file) => file.path)).toEqual([
-      "expected/secret.txt",
-      "input/request.md",
+      "files/request.md",
+      "tests/secret.txt",
     ]);
   });
 
@@ -219,8 +212,8 @@ describe("Workbench runtime generic execution", () => {
     const now = "2026-04-27T00:00:00.000Z";
     const caseFiles = normalizeSurfaceFiles([
       { path: "case-001/task.yaml", content: "task: test\n" },
-      { path: "case-001/input/request.md", content: "public\n" },
-      { path: "case-001/expected/secret.txt", content: "hidden\n" },
+      { path: "case-001/files/request.md", content: "public\n" },
+      { path: "case-001/tests/secret.txt", content: "hidden\n" },
     ]);
     const [runJob] = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
@@ -231,7 +224,7 @@ describe("Workbench runtime generic execution", () => {
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "run-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -245,20 +238,20 @@ describe("Workbench runtime generic execution", () => {
     });
 
     expect(workload.caseFiles.map((file) => file.path)).toEqual([
-      "expected/secret.txt",
-      "input/request.md",
+      "files/request.md",
       "task.yaml",
+      "tests/secret.txt",
     ]);
 
     const projectedWorkload = createWorkbenchRunWorkload({
       job: runJob!,
       spec,
       baseFiles: [],
-      caseFiles: normalizeSurfaceFiles([{ path: "input/request.md", content: "public\n" }]),
+      caseFiles: normalizeSurfaceFiles([{ path: "files/request.md", content: "public\n" }]),
     });
     expect(projectedWorkload.task?.task).toBe("test");
     expect(projectedWorkload.caseFiles.map((file) => file.path)).toEqual([
-      "input/request.md",
+      "files/request.md",
     ]);
   });
 
@@ -278,11 +271,11 @@ describe("Workbench runtime generic execution", () => {
 
   test("builds synced project source files with candidate and task prefixes", () => {
     const files = buildWorkbenchProjectSourceFiles({
-      specSource: "version: 1\nbenchmark:\n  version: 1\n  name: source-projection\n",
-      candidatePath: "candidates/app/files",
+      specSource: "version: 2\nbenchmark:\n  version: 2\n  name: source-projection\n",
+      candidatePath: "subjects/app/files",
       candidateFiles: normalizeSurfaceFiles([
         { path: "prompt.md", content: "candidate\n" },
-        { path: "candidates/app/files/already-prefixed.md", content: "already\n" },
+        { path: "subjects/app/files/already-prefixed.md", content: "already\n" },
       ]),
       tasksPath: "tasks",
       taskFiles: normalizeSurfaceFiles([
@@ -294,9 +287,9 @@ describe("Workbench runtime generic execution", () => {
 
     expect(files.map((file) => file.path)).toEqual([
       "benchmark.yaml",
-      "candidates/app/files/already-prefixed.md",
-      "candidates/app/files/prompt.md",
       "environment/Dockerfile",
+      "subjects/app/files/already-prefixed.md",
+      "subjects/app/files/prompt.md",
       "tasks/case-001/task.yaml",
     ]);
   });
@@ -319,7 +312,7 @@ describe("Workbench runtime generic execution", () => {
           projectId: "project_runtime",
           runId: "run_trace_history",
           candidateId: "cand_trace_001",
-          purpose: "run-task",
+          purpose: "trial",
           adapter: { use: "command", with: { command: "true" } },
           sandbox: { kind: "snapshot", ref: "workbench/test" },
           inputs: [],
@@ -338,7 +331,7 @@ describe("Workbench runtime generic execution", () => {
       finishedAt: now,
       output: {
         ok: true,
-        purpose: "run-task",
+        purpose: "trial",
         candidateId: "cand_trace_001",
         trialIndex: 0,
         sampleIndex: 0,
@@ -386,8 +379,8 @@ describe("Workbench runtime generic execution", () => {
     expect(workbenchTracePhaseDirectory({
       sequence: 7,
       runId: "run trace/history",
-      phase: "grade-task",
-    })).toBe(".workbench/traces/000007-run_trace_history/000003-grade-task");
+      phase: "trial",
+    })).toBe(".workbench/traces/000007-run_trace_history/000009-trial");
   });
 
   test("extracts execution usage from agent token usage events", () => {
@@ -531,7 +524,7 @@ describe("Workbench runtime generic execution", () => {
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "run-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -545,7 +538,7 @@ describe("Workbench runtime generic execution", () => {
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -553,7 +546,8 @@ describe("Workbench runtime generic execution", () => {
 
     expect(runnerJobs).toHaveLength(1);
     expect(graderJobs).toHaveLength(1);
-    expect([...runnerJobs, ...graderJobs].map((job) => job.kind)).toEqual(["execute", "execute"]);
+    expect(runnerJobs[0]?.id).toBe(graderJobs[0]?.id);
+    expect(runnerJobs.map((job) => job.kind)).toEqual(["execute"]);
 
     const commandManifest = await commandAdapterManifest();
     const runningRunner = runningJob(runnerJobs[0]!, now);
@@ -575,7 +569,12 @@ describe("Workbench runtime generic execution", () => {
         } : undefined,
       }, runnerExecution, now, createWorkbenchExecutionCapability(runnerExecution, { now }));
       if (progress) {
-        expect(progress.requests.map((request) => request.progressToken)).toEqual(["progress-token", "progress-token"]);
+        expect(progress.requests.map((request) => request.progressToken)).toEqual([
+          "progress-token",
+          "progress-token",
+          "progress-token",
+          "progress-token",
+        ]);
         expect(progress.requests.flatMap((request) => request.batch.events).map((event) => ({
           source: event.source,
           role: event.role,
@@ -586,13 +585,25 @@ describe("Workbench runtime generic execution", () => {
             source: "command",
             role: "runner",
             schema: "workbench.execution.phase.v1",
-            payload: { phase: "run-task", status: "started" },
+            payload: { phase: "run", status: "started" },
           },
           {
             source: "command",
             role: "runner",
             schema: "workbench.execution.phase.v1",
-            payload: { phase: "run-task", status: "succeeded" },
+            payload: { phase: "run", status: "succeeded" },
+          },
+          {
+            source: "command",
+            role: "grader",
+            schema: "workbench.execution.phase.v1",
+            payload: { phase: "score", status: "started" },
+          },
+          {
+            source: "command",
+            role: "grader",
+            schema: "workbench.execution.phase.v1",
+            payload: { phase: "score", status: "succeeded" },
           },
         ]);
       }
@@ -622,7 +633,7 @@ describe("Workbench runtime generic execution", () => {
             source: "command",
             role: "runner",
             schema: "workbench.execution.phase.v1",
-            payload: { phase: "run-task", status: "succeeded" },
+            payload: { phase: "run", status: "succeeded" },
           }],
         },
       },
@@ -637,25 +648,12 @@ describe("Workbench runtime generic execution", () => {
     parser.flush();
     expect(parsedProgress.map((envelope) => envelope.body.batch.seqStart)).toEqual([1, 2, 3]);
 
-    const runningGrader = runningJob(graderJobs[0]!, now);
-    const graderExecution = executionFromJob(runningGrader);
-    const completedGrader = await executeAdapterInCurrentSandboxRuntime({
-      job: runningGrader,
-      spec,
-      adapterManifests: [commandManifest],
-      baseFiles,
-      caseFiles,
-      runnerOutputFiles: completedOutputFiles(completedRunner),
-    }, graderExecution, now, createWorkbenchExecutionCapability(graderExecution, { now }));
-    expect(completedGrader.error).toBeUndefined();
-    expect(completedGrader.status).toBe("succeeded");
-
     const materialized = materializeWorkbenchRunResult({
       runId: "run_runtime",
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [proposal, completedRunner, completedGrader],
+      jobs: [proposal, completedRunner],
       existingCandidateCount: 0,
     });
 
@@ -663,11 +661,11 @@ describe("Workbench runtime generic execution", () => {
     expect(materialized.candidates).toHaveLength(1);
     expect(materialized.candidates[0]?.metrics?.score).toBe(0.91);
     expect(materialized.candidates[0]?.eval?.samples[0]?.cases).toBeUndefined();
-    expect(materialized.completedJobCount).toBe(3);
+    expect(materialized.completedJobCount).toBe(2);
     expect(materialized.evaluations[0]?.evaluation.subject.id).toBe(candidateId);
   });
 
-  test("materializes only candidate source files into candidate snapshots", () => {
+  test("materializes only subject source files into subject snapshots", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
     const candidateId = "cand_runtime_001";
@@ -702,7 +700,7 @@ describe("Workbench runtime generic execution", () => {
         sampleIndex: 0,
         execution: {
           id: "exec_run_runtime_trial_000_current_sample_000_grade",
-          purpose: "grade-task",
+          purpose: "trial",
           adapter: { use: "command", with: { command: "node grade.js" } },
           inputs: [],
           outputs: [],
@@ -831,7 +829,7 @@ describe("Workbench runtime generic execution", () => {
           caseId: "case-001",
           execution: {
             id: "exec_invalid_grade",
-            purpose: "grade-task",
+            purpose: "trial",
             adapter: { use: "command", with: { command: "node grade.js" } },
             inputs: [],
             outputs: [],
@@ -907,7 +905,7 @@ describe("Workbench runtime generic execution", () => {
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1068,7 +1066,7 @@ describe("Workbench runtime generic execution", () => {
       caseId: "task-001",
       phases: [{
         runId: "run_001",
-        phase: "run-task",
+        phase: "trial",
         role: "runner",
         status: "succeeded",
         jobIds: ["job_001"],
@@ -1096,7 +1094,7 @@ describe("Workbench runtime generic execution", () => {
       caseId: "task-001",
       phases: [{
         runId: "run_001",
-        phase: "run-task",
+        phase: "trial",
         role: "runner",
         status: "running",
         jobIds: ["job_001"],
@@ -1150,7 +1148,7 @@ describe("Workbench runtime generic execution", () => {
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "run-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1164,7 +1162,7 @@ describe("Workbench runtime generic execution", () => {
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1202,27 +1200,6 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
   usage: ${JSON.stringify(runnerUsage)}
 }, null, 2));
 `);
-    const completedRunner = await executeAdapterInCurrentSandboxRuntime({
-      job: runningRunner,
-      spec,
-      adapterManifests: [codexAdapter],
-      baseFiles,
-      caseFiles,
-    }, runnerExecution, now, createWorkbenchExecutionCapability(runnerExecution, { now }));
-
-    expect(completedRunner.error).toBeUndefined();
-    expect(completedRunner.status).toBe("succeeded");
-    const runnerOutputPaths = completedOutputFiles(completedRunner).map((file) => file.path);
-    expect(runnerOutputPaths).toContain("runner-summary.md");
-    expect(runnerOutputPaths.some((filePath) => filePath.startsWith(".workbench/internal/"))).toBe(false);
-    expect((completedRunner.output as { usage?: { runner?: { costUsd?: number } } }).usage?.runner?.costUsd).toBe(0.0042);
-    expect((completedRunner.output as { traces?: string[] }).traces).toEqual([
-      `.workbench/traces/000001-run_skill_runtime/000002-run-task/${runningRunner.id}/runner.json`,
-      `.workbench/traces/000001-run_skill_runtime/000002-run-task/${runningRunner.id}/runner/session/events.ndjson`,
-    ]);
-
-    const runningGrader = runningJob(graderJobs[0]!, now);
-    const graderExecution = executionFromJob(runningGrader);
     const graderUsage = {
       total: {
         provider: "openai/codex",
@@ -1242,25 +1219,37 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
   score: 0.88,
   metrics: { score: 0.88 },
   cases: [{ id: request.execution.caseId, status: "completed", metrics: { score: 0.88 } }],
+  usage: {
+    grader: ${JSON.stringify(graderUsage.total)},
+    total: ${JSON.stringify(graderUsage.total)}
+  },
   feedback: { metadata: {} }
 }, null, 2));
-fs.mkdirSync(path.join(output, ".workbench"), { recursive: true });
-fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify({
-  usage: ${JSON.stringify(graderUsage)}
-}, null, 2));
 `);
-    const completedGrader = await executeAdapterInCurrentSandboxRuntime({
-      job: runningGrader,
+    const completedRunner = await executeAdapterInCurrentSandboxRuntime({
+      job: runningRunner,
       spec,
-      adapterManifests: [rubricAdapter],
+      adapterManifests: [codexAdapter, rubricAdapter],
       baseFiles,
       caseFiles,
-      runnerOutputFiles: completedOutputFiles(completedRunner),
-    }, graderExecution, now, createWorkbenchExecutionCapability(graderExecution, { now }));
+    }, runnerExecution, now, createWorkbenchExecutionCapability(runnerExecution, { now }));
+
+    expect(completedRunner.error).toBeUndefined();
+    expect(completedRunner.status).toBe("succeeded");
+    const runnerOutputPaths = completedOutputFiles(completedRunner).map((file) => file.path);
+    expect(runnerOutputPaths).toContain("runner-summary.md");
+    expect(runnerOutputPaths.some((filePath) => filePath.startsWith(".workbench/internal/"))).toBe(false);
+    expect((completedRunner.output as { usage?: { runner?: { costUsd?: number } } }).usage?.runner?.costUsd).toBe(0.0042);
+    expect((completedRunner.output as { traces?: string[] }).traces).toEqual([
+      `.workbench/traces/000001-run_skill_runtime/000009-trial/${runningRunner.id}/runner.json`,
+      `.workbench/traces/000001-run_skill_runtime/000009-trial/${runningRunner.id}/runner/session/events.ndjson`,
+    ]);
+
+    const completedGrader = completedRunner;
     expect(completedGrader.error).toBeUndefined();
     expect(completedGrader.status).toBe("succeeded");
     expect(completedScore(completedGrader)).toBe(0.88);
-    expect((completedGrader.output as { usage?: { grader?: { costUsd?: number } } }).usage?.grader?.costUsd).toBe(0.001);
+    expect((completedGrader.output as { usage?: { runner?: { costUsd?: number } } }).usage?.runner?.costUsd).toBe(0.0042);
     expect((completedGrader.output?.scorecard as { feedback?: { metadata?: { usage?: unknown } } } | undefined)?.feedback?.metadata?.usage).toBeUndefined();
     expect((completedGrader.output?.scorecard as { cases?: Array<{ id?: string }> } | undefined)?.cases?.[0]?.id).toBe("case-001");
     const proposal = createSyntheticProposalJob({
@@ -1300,18 +1289,18 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [proposalWithUsage, completedRunner, completedGrader],
+      jobs: [proposalWithUsage, completedRunner],
       existingCandidateCount: 0,
     });
     expect(materialized.candidates[0]?.usage?.optimizer?.costUsd).toBe(0.002);
-    expect(materialized.candidates[0]?.usage?.runner?.costUsd).toBe(0.0042);
-    expect(materialized.candidates[0]?.usage?.grader?.costUsd).toBe(0.001);
-    expect(materialized.candidates[0]?.usage?.total?.costUsd).toBe(0.0072);
-    expect(materialized.candidates[0]?.eval?.usage?.total?.costUsd?.mean).toBe(0.0052);
-    expect(materialized.candidates[0]?.eval?.usage?.total?.totalTokens?.mean).toBe(1_500);
-    expect(materialized.candidates[0]?.eval?.usage?.runner?.costUsd?.mean).toBe(0.0042);
-    expect(materialized.candidates[0]?.eval?.usage?.grader?.costUsd?.mean).toBe(0.001);
-    expect(materialized.evaluations[0]?.usage?.total?.costUsd?.mean).toBe(0.0052);
+    expect(materialized.candidates[0]?.usage?.runner?.costUsd).toBeUndefined();
+    expect(materialized.candidates[0]?.usage?.grader?.costUsd).toBe(0.0042);
+    expect(materialized.candidates[0]?.usage?.total?.costUsd).toBe(0.0062);
+    expect(materialized.candidates[0]?.eval?.usage?.total?.costUsd?.mean).toBe(0.0042);
+    expect(materialized.candidates[0]?.eval?.usage?.total?.totalTokens?.mean).toBe(1_200);
+    expect(materialized.candidates[0]?.eval?.usage?.runner?.costUsd?.mean).toBeUndefined();
+    expect(materialized.candidates[0]?.eval?.usage?.grader?.costUsd?.mean).toBe(0.0042);
+    expect(materialized.evaluations[0]?.usage?.total?.costUsd?.mean).toBe(0.0042);
   });
 
   test("uses criterion scores when rubric judges return an unnormalized top-level score", async () => {
@@ -1330,7 +1319,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1347,10 +1336,11 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
         rationale: "The runner output missed the required output.",
       }],
     });
+    const runnerAdapter = await scriptedRunnerAdapter();
     const completedGrader = await executeAdapterInCurrentSandboxRuntime({
       job: runningGrader,
       spec,
-      adapterManifests: [rubricAdapter],
+      adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles: normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]),
       caseFiles,
       runnerOutputFiles: normalizeSurfaceFiles([{ path: "runner-summary.md", content: "Hidden runner file body.\n" }]),
@@ -1380,7 +1370,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1405,10 +1395,11 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
         },
       },
     });
+    const runnerAdapter = await scriptedRunnerAdapter();
     const completedGrader = await executeAdapterInCurrentSandboxRuntime({
       job: runningGrader,
       spec,
-      adapterManifests: [rubricAdapter],
+      adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles: normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]),
       caseFiles,
       runnerOutputFiles: normalizeSurfaceFiles([{ path: "runner-summary.md", content: "Hidden runner file body.\n" }]),
@@ -1438,7 +1429,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1455,10 +1446,11 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
         rationale: "The workbook references C:\\Temp\\model and remains usable.",
       }],
     });
+    const runnerAdapter = await scriptedRunnerAdapter();
     const completedGrader = await executeAdapterInCurrentSandboxRuntime({
       job: runningGrader,
       spec,
-      adapterManifests: [rubricAdapter],
+      adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles: normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]),
       caseFiles,
       runnerOutputFiles: normalizeSurfaceFiles([{ path: "runner-summary.md", content: "Hidden runner file body.\n" }]),
@@ -1489,7 +1481,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "run-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1503,7 +1495,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1516,12 +1508,13 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       caseCount: caseExecutionIds(caseFiles).length,
       gradeJobCount: gradeJobCountForRunSpec(spec),
-    })).toBe(3);
+    })).toBe(2);
     expect(Object.keys(executionFromJob(graderJobs[0]!).metadata)).toEqual([
       "trialIndex",
       "sampleIndex",
       "caseId",
       "task",
+      "scoreAdapter",
     ]);
 
     const completedRunner = {
@@ -1533,7 +1526,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       updatedAt: now,
       output: {
         ok: true,
-        purpose: "run-task",
+        purpose: "trial",
         candidateId,
         trialIndex: 0,
         sampleIndex: 0,
@@ -1578,10 +1571,11 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       criteria,
       feedback: { metadata: { ids } },
     });
+    const runnerAdapter = await scriptedRunnerAdapter();
     const completedGrader = await executeAdapterInCurrentSandboxRuntime({
       job: runningGrader,
       spec,
-      adapterManifests: [rubricAdapter],
+      adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles,
       caseFiles,
       runnerOutputFiles: completedOutputFiles(completedRunner),
@@ -1648,7 +1642,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "run-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1662,7 +1656,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1677,7 +1671,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       updatedAt: now,
       output: {
         ok: true,
-        purpose: "run-task",
+        purpose: "trial",
         candidateId,
         trialIndex: 0,
         sampleIndex: 0,
@@ -1747,7 +1741,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "run-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1761,7 +1755,7 @@ fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify(
       samples: 1,
       spec,
       workflow: "eval",
-      purpose: "grade-task",
+      purpose: "trial",
       caseIds: caseExecutionIds(caseFiles),
       caseFiles,
       now,
@@ -1776,10 +1770,11 @@ fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "scratch.tmp"), "scratch\\n");
 fs.writeFileSync(path.join(output, "runner-summary.md"), "pipeline agent runner completed");
 `);
+    const rubricAdapter = await scriptedRubricAdapter({ score: 0.77 });
     const completedRunner = await executeAdapterInCurrentSandboxRuntime({
       job: runningRunner,
       spec,
-      adapterManifests: [codexAdapter],
+      adapterManifests: [codexAdapter, rubricAdapter],
       baseFiles,
       caseFiles,
     }, runnerExecution, now, createWorkbenchExecutionCapability(runnerExecution, { now }));
@@ -1794,11 +1789,10 @@ fs.writeFileSync(path.join(output, "runner-summary.md"), "pipeline agent runner 
 
     const runningGrader = runningJob(graderJobs[0]!, now);
     const graderExecution = executionFromJob(runningGrader);
-    const rubricAdapter = await scriptedRubricAdapter({ score: 0.77 });
     const completedGrader = await executeAdapterInCurrentSandboxRuntime({
       job: runningGrader,
       spec,
-      adapterManifests: [rubricAdapter],
+      adapterManifests: [codexAdapter, rubricAdapter],
       baseFiles,
       caseFiles,
       runnerOutputFiles: outputFiles,
@@ -1935,7 +1929,7 @@ function completedScore(job: HostedWorkbenchJob): number | undefined {
   return typeof scorecard.score === "number" ? scorecard.score : undefined;
 }
 
-function stageWorkload(purpose: "improve" | "run-task" | "grade-task"): WorkbenchRunWorkload {
+function stageWorkload(purpose: "improve" | "run-task" | "grade-task" | "trial"): WorkbenchRunWorkload {
   const now = "2026-04-27T00:00:00.000Z";
   return {
     job: {
@@ -1968,8 +1962,8 @@ function stageWorkload(purpose: "improve" | "run-task" | "grade-task"): Workbenc
     candidateFiles: normalizeSurfaceFiles([{ path: "prompt.md", content: "candidate" }]),
     caseFiles: normalizeSurfaceFiles([
       { path: "task.yaml", content: "task: test" },
-      { path: "input/request.md", content: "public request\n" },
-      { path: "expected/secret.txt", content: "hidden\n" },
+      { path: "files/request.md", content: "public request\n" },
+      { path: "tests/secret.txt", content: "hidden\n" },
     ]),
     traceFiles: normalizeSurfaceFiles([{ path: "events/prior.ndjson", content: "{\"event\":\"prior\"}\n" }]),
     task: { id: "case-001", task: "test" },
@@ -2023,9 +2017,9 @@ function runtimeSpec(): string {
     "fs.writeFileSync('output/scorecard.json',JSON.stringify({score:0.91,summary:'Generic runtime path passed.'},null,2));",
   ].join(""))}`);
   return [
-    "version: 1",
+    "version: 2",
     "benchmark:",
-    "  version: 1",
+    "  version: 2",
     "  name: runtime-generic-execution",
     "  description: Exercise the generic command runner and grader runtime path.",
     "  tasks: tasks",
@@ -2037,21 +2031,21 @@ function runtimeSpec(): string {
     "      timeoutMinutes: 5",
     "    network:",
     "      egress: none",
-    "  grade:",
+    "  score:",
     "    use: command",
     "    with:",
     `      command: ${graderCommand}`,
-    "candidate:",
-    "  version: 1",
+    "subject:",
+    "  version: 2",
     "  name: runtime-generic-execution",
-    "  description: Candidate runner for the generic runtime benchmark.",
-    "  path: candidates/runtime-generic-execution/files",
+    "  description: Subject runner for the generic runtime benchmark.",
+    "  path: subjects/runtime-generic-execution/files",
     "  run:",
     "    use: command",
     "    with:",
     `      command: ${runnerCommand}`,
     "optimizer:",
-    "  version: 1",
+    "  version: 2",
     "  name: runtime-generic-optimizer",
     "  edits:",
     "    - prompt.md",
@@ -2136,21 +2130,31 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
 `);
 }
 
+async function scriptedRunnerAdapter(id = "codex") {
+  return scriptedAdapterManifest(id, `
+import fs from "node:fs";
+import path from "node:path";
+const output = process.env.WORKBENCH_OUTPUT;
+fs.mkdirSync(output, { recursive: true });
+fs.writeFileSync(path.join(output, "runner-summary.md"), "runner output\\n");
+`);
+}
+
 function shellWord(value: string): string {
   return `'${value.replace(/'/gu, "'\"'\"'")}'`;
 }
 
 function skillRunnerSpec(): string {
   return [
-    "version: 1",
+    "version: 2",
     "benchmark:",
-    "  version: 1",
+    "  version: 2",
     "  name: runtime-skill-runner",
     "  description: Exercise an agent skill runner with rubric grading.",
     "  tasks: tasks",
     "  environment:",
     "    dockerfile: environment/Dockerfile",
-    "  grade:",
+    "  score:",
     "    use: rubric",
     "    with:",
     "      judge:",
@@ -2160,18 +2164,18 @@ function skillRunnerSpec(): string {
     "      criteria:",
     "        - id: useful",
     "          description: Output is useful.",
-    "candidate:",
-    "  version: 1",
+    "subject:",
+    "  version: 2",
     "  name: runtime-skill-runner",
     "  description: Candidate skill runner.",
-    "  path: candidates/invoice-review/files",
+    "  path: subjects/invoice-review/files",
     "  run:",
     "    use: codex",
     "    with:",
     "      instructions: Run the skill for the current task.",
     "      model: gpt-5.4-mini",
     "optimizer:",
-    "  version: 1",
+    "  version: 2",
     "  name: runtime-skill-optimizer",
     "  edits:",
     "    - SKILL.md",
@@ -2221,15 +2225,15 @@ function fiveCriterionSkillRunnerSpec(): string {
 
 function pipelineRunnerSpec(): string {
   return [
-    "version: 1",
+    "version: 2",
     "benchmark:",
-    "  version: 1",
+    "  version: 2",
     "  name: runtime-pipeline-runner",
     "  description: Exercise an agent pipeline runner with rubric grading.",
     "  tasks: tasks",
     "  environment:",
     "    dockerfile: environment/Dockerfile",
-    "  grade:",
+    "  score:",
     "    use: rubric",
     "    with:",
     "      judge:",
@@ -2239,18 +2243,18 @@ function pipelineRunnerSpec(): string {
     "      criteria:",
     "        - id: useful",
     "          description: Output is useful.",
-    "candidate:",
-    "  version: 1",
+    "subject:",
+    "  version: 2",
     "  name: runtime-pipeline-runner",
     "  description: Candidate pipeline runner.",
-    "  path: candidates/runtime-pipeline-runner/files",
+    "  path: subjects/runtime-pipeline-runner/files",
     "  run:",
     "    use: codex",
     "    with:",
     "      instructions: Run the pipeline for the current task.",
     "      model: gpt-5.4-mini",
     "optimizer:",
-    "  version: 1",
+    "  version: 2",
     "  name: runtime-pipeline-optimizer",
     "  edits:",
     "    - pipeline.yaml",

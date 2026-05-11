@@ -21,12 +21,12 @@ describe("built-in Workbench adapters", () => {
   test("prefers built adapter commands before monorepo TypeScript source fallbacks", () => {
     const manifest = builtinWorkbenchAdapterManifest("codex");
     const setup = manifest?.setup.join("\n") ?? "";
-    const packageRunnerIndex = setup.indexOf("/app/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/codex.js");
-    const monorepoRunnerIndex = setup.indexOf("/app/products/workbench/packages/built-in-adapters/src/bin/codex.ts");
+    const packageRunnerIndex = setup.indexOf("/workbench-runtime/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/codex.js");
+    const monorepoRunnerIndex = setup.indexOf("/workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/codex.ts");
 
     expect(packageRunnerIndex).toBeGreaterThanOrEqual(0);
     expect(monorepoRunnerIndex).toBeGreaterThan(packageRunnerIndex);
-    expect(setup).toContain("node --experimental-strip-types /app/products/workbench/packages/built-in-adapters/src/bin/codex.ts");
+    expect(setup).toContain("node --experimental-strip-types /workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/codex.ts");
   });
 
   test("executes Codex-shaped agent adapters through the generic adapter command request", async () => {

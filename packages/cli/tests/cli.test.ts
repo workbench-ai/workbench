@@ -34,22 +34,22 @@ async function writeDockerNodeWorkbenchSpec(
   const scorecardPayload = Buffer.from(JSON.stringify(scorecard), "utf8").toString("base64");
   const graderCommand = JSON.stringify(`node -e "const fs=require('fs'),path=require('path');const out='/workspace/output';fs.mkdirSync(out,{recursive:true});fs.writeFileSync(path.join(out,'scorecard.json'),Buffer.from('${scorecardPayload}','base64').toString('utf8'));"`);
   await writeFile(path.join(workspace, "benchmark.yaml"), [
-    "version: 1",
+    "version: 2",
     "name: local-workbench",
     "description: Exercise the local command-based Workbench development path.",
     "tasks: tasks",
     "environment:",
     "  dockerfile: environment/Dockerfile",
-    "grade:",
+    "score:",
     "  use: command",
     "  with:",
     `    command: ${graderCommand}`,
     "",
   ].join("\n"));
-  await mkdir(path.join(workspace, "candidates", "command", "files"), { recursive: true });
+  await mkdir(path.join(workspace, "subjects", "command", "files"), { recursive: true });
   await mkdir(path.join(workspace, "optimizers"), { recursive: true });
-  await writeFile(path.join(workspace, "candidates", "command", "candidate.yaml"), [
-    "version: 1",
+  await writeFile(path.join(workspace, "subjects", "command", "subject.yaml"), [
+    "version: 2",
     "name: local-command-eval",
     "run:",
     "  use: command",
@@ -57,11 +57,11 @@ async function writeDockerNodeWorkbenchSpec(
     `    command: ${runnerCommand}`,
     "",
   ].join("\n"));
-  await writeFile(path.join(workspace, "candidates", "command", "files", "run.js"), "console.log('local command candidate');\n");
+  await writeFile(path.join(workspace, "subjects", "command", "files", "run.js"), "console.log('local command subject');\n");
   await writeFile(path.join(workspace, "optimizers", "command.yaml"), [
-    "version: 1",
+    "version: 2",
     "name: local-command-eval optimizer",
-    "description: Improve candidate command files for local-command-eval.",
+    "description: Improve subject command files for local-command-eval.",
     "edits:",
     "  - run.js",
     "improve:",
@@ -87,7 +87,7 @@ async function appendCandidateAdapters(
 }
 
 function commandCandidateSpecPath(workspace: string): string {
-  return path.join(workspace, "candidates", "command", "candidate.yaml");
+  return path.join(workspace, "subjects", "command", "subject.yaml");
 }
 
 function commandOptimizerSpecPath(workspace: string): string {
@@ -111,12 +111,12 @@ describe("workbench CLI", () => {
     expect(io.stdoutText()).toContain("workbench cloud star OWNER/BENCHMARK");
     expect(io.stdoutText()).toContain("workbench init");
     expect(io.stdoutText()).toContain("workbench check [SOURCE] [--dir DIR]");
-    expect(io.stdoutText()).toContain("workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID]");
+    expect(io.stdoutText()).toContain("workbench improve [SOURCE] [--dir DIR] [--from SUBJECT_ID]");
     expect(io.stdoutText()).toContain("workbench adapters test ID|SOURCE");
     expect(io.stdoutText()).toContain("workbench open [SOURCE] [--dir DIR]");
     expect(io.stdoutText()).toContain("workbench cloud benchmarks|runs|candidates");
-    expect(io.stdoutText()).toContain("Workbench project containing benchmark.yaml plus candidates/<name>/candidate.yaml");
-    expect(io.stdoutText()).toContain("Candidate files live beside the candidate manifest");
+    expect(io.stdoutText()).toContain("Workbench project containing benchmark.yaml plus subjects/<name>/subject.yaml");
+    expect(io.stdoutText()).toContain("Subject files live beside the subject manifest");
     expect(io.stdoutText()).toContain("WORKBENCH_API_URL");
     expect(io.stdoutText()).toContain("https://v2.workbench.ai");
   });
@@ -146,7 +146,7 @@ describe("workbench CLI", () => {
     const openIo = createIo();
     expect(await runCli(["open", "--help"], openIo)).toBe(0);
     expect(openIo.stdoutText()).toContain("workbench open [SOURCE] [--dir DIR]");
-    expect(openIo.stdoutText()).toContain("Workbench project containing benchmark.yaml plus candidates/<name>/candidate.yaml");
+    expect(openIo.stdoutText()).toContain("Workbench project containing benchmark.yaml plus subjects/<name>/subject.yaml");
     expect(openIo.stdoutText()).toContain("Keep this command running while using the local web view");
     const evalIo = createIo();
     expect(await runCli(["cloud", "eval", "--help"], evalIo)).toBe(0);
@@ -180,16 +180,18 @@ describe("workbench CLI", () => {
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line.startsWith("workbench ") && !line.includes("<command>"));
-    const docs = await Promise.all([
-      readFile(path.join(productRoot, "docs", "cli.md"), "utf8"),
-      readFile(path.join(productRoot, "SPEC.md"), "utf8"),
-    ]);
+    const cliDocs = await readFile(path.join(productRoot, "docs", "cli.md"), "utf8");
+    const spec = await readFile(path.join(productRoot, "SPEC.md"), "utf8");
 
     for (const command of commandLines) {
-      for (const source of docs) {
-        expect(source).toContain(command);
-      }
+      const documentedCommand = command
+        .replace("--base SUBJECT_ID", "--base CANDIDATE_ID")
+        .replace("OWNER/BENCHMARK[@REF]|RUN_ID|SUBJECT_ID", "OWNER/BENCHMARK[@REF]|RUN_ID|CANDIDATE_ID");
+      expect(cliDocs).toContain(documentedCommand);
     }
+    expect(spec).toContain("workbench eval [SOURCE] [--dir DIR] [--subject ID]");
+    expect(spec).toContain("workbench subjects list|show|files|preview");
+    expect(spec).toContain("subjects/<name>/subject.yaml");
   });
 
   test("keeps public onboarding, skill metadata, and eval prompts aligned with current hosted paths", async () => {
@@ -231,17 +233,17 @@ describe("workbench CLI", () => {
     expect(onboardingSource).toContain("workbench eval candidates/codex --samples 1 --json");
     expect(onboardingSource).toContain("workbench cloud eval candidates/codex --samples 1 --watch --json");
     expect(onboardingSource).toContain("workbench open --json --no-open");
-    expect(cliDocs).toContain("workbench init --skill invoice-review --agent codex");
+    expect(cliDocs).toContain("workbench init [DIR] --skill NAME --agent ADAPTER");
     expect(cliDocs).toContain("workbench improve --budget 1 --samples 1");
-    expect(cliDocs).toContain("workbench cloud improve candidates/codex --base cand_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
+    expect(cliDocs).toContain("workbench cloud improve subjects/codex --base cand_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
     expect(cliDocs).toContain("workbench push --tag v1");
-    expect(cliDocs).toContain("candidate.yaml does not declare a benchmark or path");
+    expect(cliDocs).toContain("`subject.yaml` does not declare a benchmark or path");
     expect(cliDocs).not.toContain("Paths are relative to the YAML file that declares them, or absolute.");
     expect(cliDocs).not.toContain("Agent Browser Workflow");
     expect(skill).toContain("workbench init --skill my-eval --agent codex");
     expect(skill).toContain("workbench improve --budget 1 --samples 1");
-    expect(skill).toContain("workbench cloud improve candidates/codex --base cand_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
-    expect(skill).toContain("Candidate manifests do not declare a benchmark or path.");
+    expect(skill).toContain("workbench cloud improve subjects/codex --base cand_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
+    expect(skill).toContain("subjects/<name>/subject.yaml");
     expect(skill).not.toContain("Paths are relative to the YAML file that declares them, or absolute.");
     expect(skill).toContain("workbench open --json --no-open");
     expect(agentYaml).toContain("install @workbench-ai/workbench");
@@ -254,7 +256,7 @@ describe("workbench CLI", () => {
     expect(installEval?.expected_output).toContain("installs the published package");
     expect(installEval?.assertions.some((assertion) => assertion.value?.includes("@workbench-ai/workbench"))).toBe(true);
     expect(skillEvalsRaw).toContain("opens or returns the Workbench Cloud benchmark URL");
-    expect(skillEvalsRaw).toContain("opens or returns the resulting candidate URL");
+    expect(skillEvalsRaw).toContain("opens or returns the resulting subject URL");
   });
 
   test("local source development uses Docker and fails closed without templates", async () => {
@@ -286,7 +288,7 @@ describe("workbench CLI", () => {
         adapters?: {
           improve?: { use?: string };
           run?: { use?: string; command?: string };
-          grade?: { use?: string; command?: string };
+          score?: { use?: string; command?: string };
         };
       };
     };
@@ -294,7 +296,7 @@ describe("workbench CLI", () => {
     expect(validation.plan?.benchmarkDescription).toBe("Exercise the local command-based Workbench development path.");
     expect(validation.plan?.source?.dockerfile).toBe("environment/Dockerfile");
     expect(validation.plan?.candidate).toMatchObject({
-      path: "candidates/command/files",
+      path: "subjects/command/files",
       files: 1,
     });
     expect(validation.plan?.optimizer).toMatchObject({
@@ -309,7 +311,7 @@ describe("workbench CLI", () => {
     expect(validation.plan?.adapters?.improve?.use).toBe("command");
     expect(validation.plan?.adapters?.run?.use).toBe("command");
     expect(validation.plan?.adapters?.run?.command).toContain("/workspace/output");
-    expect(validation.plan?.adapters?.grade?.use).toBe("command");
+    expect(validation.plan?.adapters?.score?.use).toBe("command");
     const baseId = await seedLocalCandidate(workspace);
     expect(await runCli([
       "improve",
@@ -358,7 +360,7 @@ describe("workbench CLI", () => {
       metrics: { score: 0.75 },
       meta: {
         source: {
-          files: [textFile("candidates/command/candidate.yaml", "version: 1\nname: local-command-eval\n")],
+          files: [textFile("subjects/command/subject.yaml", "version: 2\nname: local-command-eval\n")],
         },
       },
     });
@@ -391,13 +393,13 @@ describe("workbench CLI", () => {
 
       const sourceFiles = await fetchJson<Array<{ path: string }>>(`${server.url}api/source/files`);
       const sourcePaths = sourceFiles.map((file) => file.path).sort();
-      expect(sourcePaths).toContain("task-001/expected/required-output.txt");
+      expect(sourcePaths).toContain("task-001/tests/required-output.txt");
       expect(sourcePaths).not.toContain("task-001/task.yaml");
       expect(sourcePaths).not.toContain("benchmark.yaml");
       expect(sourcePaths).not.toContain("environment/Dockerfile");
-      expect(sourcePaths).not.toContain("candidates/command/candidate.yaml");
+      expect(sourcePaths).not.toContain("subjects/command/subject.yaml");
       expect(sourcePaths).not.toContain("optimizers/command.yaml");
-      expect(sourcePaths).not.toContain("candidates/command/files/run.js");
+      expect(sourcePaths).not.toContain("subjects/command/files/run.js");
       expect(sourcePaths).not.toContain("README.md");
       expect(sourcePaths).not.toContain("docs/notes.md");
 
@@ -588,9 +590,9 @@ describe("workbench CLI", () => {
     expect(await runCli(["init", customAgentWorkspace, "--skill", "custom-agent-skill", "--agent", "my-agent", "--json"], createIo())).toBe(0);
 
     const skillBenchmark = await readFile(path.join(skillWorkspace, "benchmark.yaml"), "utf8");
-    const skillCandidate = await readFile(path.join(skillWorkspace, "candidates", "codex", "candidate.yaml"), "utf8");
+    const skillCandidate = await readFile(path.join(skillWorkspace, "subjects", "codex", "subject.yaml"), "utf8");
     const skillOptimizer = await readFile(path.join(skillWorkspace, "optimizers", "codex.yaml"), "utf8");
-    expect(skillBenchmark).toContain("version: 1");
+    expect(skillBenchmark).toContain("version: 2");
     expect(skillBenchmark).toContain("description: \"Evaluate the invoice-review skill across representative tasks.\"");
     expect(skillBenchmark).toContain("tasks: tasks");
     expect(skillBenchmark).toContain("environment:\n  dockerfile: environment/Dockerfile");
@@ -600,8 +602,8 @@ describe("workbench CLI", () => {
     expect(skillOptimizer).toContain("edits:\n  - SKILL.md");
     expect(skillOptimizer).not.toMatch(new RegExp("object" + "ive:"));
     expect(skillCandidate).not.toContain("promptFile");
-    expect(await readFile(path.join(skillWorkspace, "candidates", "codex", "files", "SKILL.md"), "utf8")).toContain("name: invoice-review");
-    expect(await readFile(path.join(skillWorkspace, "tasks", "task-001", "expected", "rubric.md"), "utf8")).toContain("Reward complete");
+    expect(await readFile(path.join(skillWorkspace, "subjects", "codex", "files", "SKILL.md"), "utf8")).toContain("name: invoice-review");
+    expect(await readFile(path.join(skillWorkspace, "tasks", "task-001", "tests", "rubric.md"), "utf8")).toContain("Reward complete");
     const skillDockerfile = await readFile(path.join(skillWorkspace, "environment", "Dockerfile"), "utf8");
     expect(skillDockerfile).toContain("ca-certificates");
     expect(skillDockerfile).not.toContain("npm install --global @openai/codex");
@@ -609,38 +611,38 @@ describe("workbench CLI", () => {
     await expect(stat(path.join(skillWorkspace, "tasks", "task-001", "rubric.md"))).rejects.toBeTruthy();
 
     const pipelineBenchmark = await readFile(path.join(pipelineWorkspace, "benchmark.yaml"), "utf8");
-    const pipelineCandidate = await readFile(path.join(pipelineWorkspace, "candidates", "claude", "candidate.yaml"), "utf8");
-    expect(pipelineBenchmark).toContain("version: 1");
+    const pipelineCandidate = await readFile(path.join(pipelineWorkspace, "subjects", "claude", "subject.yaml"), "utf8");
+    expect(pipelineBenchmark).toContain("version: 2");
     expect(pipelineBenchmark).toContain("description: \"Evaluate the report-pipeline pipeline across representative tasks.\"");
     expect(pipelineCandidate).not.toContain("benchmark:");
     expect(pipelineCandidate).not.toContain("path:");
     expect(pipelineCandidate).toContain("run:\n  use: claude");
     expect(pipelineCandidate).not.toContain("  kind:");
     expect(pipelineCandidate).not.toContain("defaults:");
-    expect(await readFile(path.join(pipelineWorkspace, "candidates", "claude", "files", "pipeline.yaml"), "utf8")).toContain("metadata:");
-    expect(await readFile(path.join(pipelineWorkspace, "tasks", "task-001", "expected", "rubric.md"), "utf8")).toContain("Reward pipeline runs");
+    expect(await readFile(path.join(pipelineWorkspace, "subjects", "claude", "files", "pipeline.yaml"), "utf8")).toContain("metadata:");
+    expect(await readFile(path.join(pipelineWorkspace, "tasks", "task-001", "tests", "rubric.md"), "utf8")).toContain("Reward pipeline runs");
     const pipelineDockerfile = await readFile(path.join(pipelineWorkspace, "environment", "Dockerfile"), "utf8");
     expect(pipelineDockerfile).toContain("ca-certificates");
     expect(pipelineDockerfile).not.toContain("npm install --global @anthropic-ai/claude-code");
     await expect(stat(path.join(pipelineWorkspace, "tasks", "task-001", "input"))).rejects.toBeTruthy();
 
     const commandBenchmark = await readFile(path.join(commandWorkspace, "benchmark.yaml"), "utf8");
-    const commandCandidate = await readFile(path.join(commandWorkspace, "candidates", "command", "candidate.yaml"), "utf8");
-    expect(commandBenchmark).toContain("version: 1");
+    const commandCandidate = await readFile(path.join(commandWorkspace, "subjects", "command", "subject.yaml"), "utf8");
+    expect(commandBenchmark).toContain("version: 2");
     expect(commandBenchmark).toContain("description: \"Evaluate the command-eval command implementation across representative tasks.\"");
     expect(commandCandidate).not.toContain("benchmark:");
     expect(commandCandidate).not.toContain("path:");
     expect(commandCandidate).not.toContain("environment:");
     expect(commandCandidate).toContain("run:\n  use: command");
-    expect(commandBenchmark).toContain("grade:\n  use: command");
+    expect(commandBenchmark).toContain("score:\n  use: tests");
     expect(commandCandidate).not.toContain("  kind:");
     expect(commandCandidate).not.toContain("defaults:");
-    expect(await readFile(path.join(commandWorkspace, "candidates", "command", "files", "run.js"), "utf8")).toContain("command candidate ran");
-    expect(await readFile(path.join(commandWorkspace, "tasks", "task-001", "expected", "required-output.txt"), "utf8")).toContain("command candidate ran");
+    expect(await readFile(path.join(commandWorkspace, "subjects", "command", "files", "run.js"), "utf8")).toContain("command subject ran");
+    expect(await readFile(path.join(commandWorkspace, "tasks", "task-001", "tests", "required-output.txt"), "utf8")).toContain("command subject ran");
     expect(await readFile(path.join(commandWorkspace, "environment", "Dockerfile"), "utf8")).toContain("ca-certificates");
     await expect(stat(path.join(commandWorkspace, "tasks", "task-001", "input"))).rejects.toBeTruthy();
 
-    await expect(readFile(path.join(customAgentWorkspace, "candidates", "my-agent", "candidate.yaml"), "utf8"))
+    await expect(readFile(path.join(customAgentWorkspace, "subjects", "my-agent", "subject.yaml"), "utf8"))
       .resolves.toContain("run:\n  use: my-agent");
 
     for (const workspace of [skillWorkspace, pipelineWorkspace, commandWorkspace]) {
@@ -712,12 +714,12 @@ describe("workbench CLI", () => {
       ok: true,
       plan: {
         source: {
-          files: 11,
+          files: 12,
         },
       },
     });
     expect(JSON.parse(checkIo.stdoutText()).plan.source).toMatchObject({
-      files: 11,
+      files: 12,
     });
 
     const manifestPath = path.join(workspace, "adapters", "my-agent", "workbench.adapter.yaml");
@@ -1120,14 +1122,14 @@ describe("workbench CLI", () => {
     expect(spec).toContain(`npm:${packageRoot}`);
   });
 
-  test("check rejects root task fixtures outside task.yaml, input, and expected", async () => {
+  test("check rejects root task fixtures outside supported task package directories", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-task-layout-"));
     expect(await runCli(["init", workspace, "--command", "command-eval", "--json"], createIo())).toBe(0);
     await writeFile(path.join(workspace, "tasks", "task-001", "rubric.md"), "unsupported root rubric\n");
 
     const io = createIo();
     expect(await runCli(["check", "--dir", workspace, "--json"], io)).toBe(1);
-    expect(io.stdoutText()).toContain("outside task.yaml, input/, or expected/");
+    expect(io.stdoutText()).toContain("unsupported file outside task.yaml");
   });
 
   test("local improve requires sandbox configuration before execution", async () => {
@@ -1251,7 +1253,7 @@ describe("workbench CLI", () => {
     expect(generatedSkill).not.toContain("Paths are relative to the YAML file that declares them, or absolute.");
     expect(generatedSkill).toContain("benchmark.environment.dockerfile");
     expect(generatedSkill).toContain("ca-certificates");
-    expect(generatedSkill).toContain("/workspace/output/scorecard.json");
+    expect(generatedSkill).toContain("score: use: tests");
   });
 
   test("keeps eval authoring guidance routed through the Workbench skill", async () => {
@@ -1265,8 +1267,8 @@ describe("workbench CLI", () => {
     expect(skill).toContain("from-file-outputs.md");
     expect(evalReadme).toContain("Existing workflow");
     expect(evalReadme).toContain("File-output tasks");
-    expect(skill).toContain("Default to `grade: use: rubric`");
-    expect(fileOutputGuide).toContain("Do not write a custom grader just because a task produces binary files");
+    expect(skill).toContain("Default to `score: use: rubric`");
+    expect(fileOutputGuide).toContain("Do not write a custom scorer just because a task produces binary files");
     expect(fileOutputGuide).toContain(".docx");
     expect(fileOutputGuide).toContain(".xlsx");
     expect(fileOutputGuide).toContain(".pdf");
@@ -1934,7 +1936,7 @@ describe("workbench CLI", () => {
       ],
       taskFiles: expect.arrayContaining([
         expect.objectContaining({ path: "task-001/task.yaml" }),
-        expect.objectContaining({ path: "task-001/expected/required-output.txt" }),
+        expect.objectContaining({ path: "task-001/tests/required-output.txt" }),
       ]),
       network: "off",
       resources: {},
@@ -1990,9 +1992,9 @@ describe("workbench CLI", () => {
             sourceFingerprint: "fp_0001",
           },
           files: [
-            { path: "benchmark.yaml", content: "version: 1\nname: demo\ndescription: Demo benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\ngrade:\n  use: command\n  with:\n    command: 'true'\n" },
-            { path: "candidates/command/candidate.yaml", content: "version: 1\nname: demo\nrun:\n  use: command\n  with:\n    command: node /workspace/input/candidate/run.js\n" },
-            { path: "candidates/command/files/run.js", content: "console.log('ok')\n" },
+            { path: "benchmark.yaml", content: "version: 2\nname: demo\ndescription: Demo benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\nscore:\n  use: command\n  with:\n    command: 'true'\n" },
+            { path: "subjects/command/subject.yaml", content: "version: 2\nname: demo\nrun:\n  use: command\n  with:\n    command: node run.js\n" },
+            { path: "subjects/command/files/run.js", content: "console.log('ok')\n" },
           ],
         });
       }
@@ -2095,9 +2097,9 @@ describe("workbench CLI", () => {
             sourceFingerprint: "fp_fork",
           },
           files: [
-            { path: "benchmark.yaml", content: "version: 1\nname: demo-fork\ndescription: Fork benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\ngrade:\n  use: command\n  with:\n    command: 'true'\n" },
-            { path: "candidates/command/candidate.yaml", content: "version: 1\nname: demo-fork\nrun:\n  use: command\n  with:\n    command: node /workspace/input/candidate/run.js\n" },
-            { path: "candidates/command/files/run.js", content: "console.log('fork')\n" },
+            { path: "benchmark.yaml", content: "version: 2\nname: demo-fork\ndescription: Fork benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\nscore:\n  use: command\n  with:\n    command: 'true'\n" },
+            { path: "subjects/command/subject.yaml", content: "version: 2\nname: demo-fork\nrun:\n  use: command\n  with:\n    command: node run.js\n" },
+            { path: "subjects/command/files/run.js", content: "console.log('fork')\n" },
             { path: "tasks/case-a/task.yaml", content: "task: fork\n" },
             { path: "environment/Dockerfile", content: "FROM node:22-alpine\n" },
           ],
@@ -2238,34 +2240,34 @@ describe("workbench CLI", () => {
 
   test("pull downloads hosted benchmark source state", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-source-pull-cli-"));
-    await mkdir(path.join(root, "candidates", "command", "files"), { recursive: true });
+    await mkdir(path.join(root, "subjects", "command", "files"), { recursive: true });
     await mkdir(path.join(root, "optimizers"), { recursive: true });
     await mkdir(path.join(root, "tasks", "old-case"), { recursive: true });
     await mkdir(path.join(root, "environment"), { recursive: true });
     await writeFile(path.join(root, "benchmark.yaml"), [
-      "version: 1",
+      "version: 2",
       "name: demo",
       "description: Old benchmark state",
       "tasks: tasks",
       "environment:",
       "  dockerfile: environment/Dockerfile",
-      "grade:",
+      "score:",
       "  use: command",
       "  with:",
       "    command: printf '{\"score\":1}' > /workspace/output/scorecard.json",
       "",
     ].join("\n"));
-    await writeFile(path.join(root, "candidates", "command", "candidate.yaml"), [
-      "version: 1",
+    await writeFile(path.join(root, "subjects", "command", "subject.yaml"), [
+      "version: 2",
       "name: demo",
       "run:",
       "  use: command",
       "  with:",
-      "    command: node /workspace/input/candidate/old.js",
+      "    command: node old.js",
       "",
     ].join("\n"));
     await writeFile(path.join(root, "optimizers", "command.yaml"), [
-      "version: 1",
+      "version: 2",
       "name: demo optimizer",
       "edits:",
       "  - old.js",
@@ -2275,7 +2277,7 @@ describe("workbench CLI", () => {
       "    command: cp -R /workspace/input/candidate/. /workspace/output/",
       "",
     ].join("\n"));
-    await writeFile(path.join(root, "candidates", "command", "files", "old.js"), "console.log('old')\n");
+    await writeFile(path.join(root, "subjects", "command", "files", "old.js"), "console.log('old')\n");
     await writeFile(path.join(root, "tasks", "old-case", "task.yaml"), "task: old\n");
     await writeFile(path.join(root, "environment", "Dockerfile"), "FROM node:22-alpine\n");
     await writeFile(path.join(root, "notes.md"), "local note\n");
@@ -2308,10 +2310,10 @@ describe("workbench CLI", () => {
             sourceFingerprint: "fp_0002",
           },
           files: [
-            { path: "benchmark.yaml", content: "version: 1\nname: demo\ndescription: New benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\ngrade:\n  use: command\n  with:\n    command: 'true'\n" },
-            { path: "candidates/command/candidate.yaml", content: "version: 1\nname: demo\nrun:\n  use: command\n  with:\n    command: ./run.sh\n" },
-            { path: "optimizers/command.yaml", content: "version: 1\nname: demo optimizer\nedits:\n  - run.sh\nimprove:\n  use: command\n  with:\n    command: cp -R /workspace/input/candidate/. /workspace/output/\n" },
-            { path: "candidates/command/files/run.sh", content: "echo ok\n", executable: true },
+            { path: "benchmark.yaml", content: "version: 2\nname: demo\ndescription: New benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\nscore:\n  use: command\n  with:\n    command: 'true'\n" },
+            { path: "subjects/command/subject.yaml", content: "version: 2\nname: demo\nrun:\n  use: command\n  with:\n    command: ./run.sh\n" },
+            { path: "optimizers/command.yaml", content: "version: 2\nname: demo optimizer\nedits:\n  - run.sh\nimprove:\n  use: command\n  with:\n    command: cp -R /workspace/input/candidate/. /workspace/output/\n" },
+            { path: "subjects/command/files/run.sh", content: "echo ok\n", executable: true },
             { path: "tasks/case-a/task.yaml", content: "task: test\n" },
             { path: "environment/Dockerfile", content: "FROM node:22-alpine\n" },
           ],
@@ -2333,15 +2335,15 @@ describe("workbench CLI", () => {
       "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc/source",
     ]);
     expect(await readTextTree(root)).toMatchObject({
-      "benchmark.yaml": "file\nversion: 1\nname: demo\ndescription: New benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\ngrade:\n  use: command\n  with:\n    command: 'true'\n",
-      "candidates/command/candidate.yaml": "file\nversion: 1\nname: demo\nrun:\n  use: command\n  with:\n    command: ./run.sh\n",
-      "candidates/command/files/run.sh": "executable\necho ok\n",
-      "optimizers/command.yaml": "file\nversion: 1\nname: demo optimizer\nedits:\n  - run.sh\nimprove:\n  use: command\n  with:\n    command: cp -R /workspace/input/candidate/. /workspace/output/\n",
+      "benchmark.yaml": "file\nversion: 2\nname: demo\ndescription: New benchmark.\ntasks: tasks\nenvironment:\n  dockerfile: environment/Dockerfile\nscore:\n  use: command\n  with:\n    command: 'true'\n",
+      "subjects/command/subject.yaml": "file\nversion: 2\nname: demo\nrun:\n  use: command\n  with:\n    command: ./run.sh\n",
+      "subjects/command/files/run.sh": "executable\necho ok\n",
+      "optimizers/command.yaml": "file\nversion: 2\nname: demo optimizer\nedits:\n  - run.sh\nimprove:\n  use: command\n  with:\n    command: cp -R /workspace/input/candidate/. /workspace/output/\n",
       "environment/Dockerfile": "file\nFROM node:22-alpine\n",
       "notes.md": "file\nlocal note\n",
       "tasks/case-a/task.yaml": "file\ntask: test\n",
     });
-    await expect(readFile(path.join(root, "candidates", "command", "files", "old.js"), "utf8"))
+    await expect(readFile(path.join(root, "subjects", "command", "files", "old.js"), "utf8"))
       .rejects
       .toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(root, "tasks", "old-case", "task.yaml"), "utf8"))
@@ -2919,10 +2921,10 @@ describe("workbench CLI", () => {
   test("push uploads candidate directories as utf8 snapshots", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-cloud-cli-"));
     expect(await runCli(["init", root, "--command", "push-command-eval", "--json"], createIo())).toBe(0);
-    await writeFile(path.join(root, "candidates", "command", "files", "notes.txt"), "case notes\n");
-    await mkdir(path.join(root, "candidates", "command", "files", "__pycache__"));
-    await writeFile(path.join(root, "candidates", "command", "files", "__pycache__", "run.cpython-314.pyc"), "bytecode\n");
-    await writeFile(path.join(root, "candidates", "command", "files", ".DS_Store"), "finder metadata\n");
+    await writeFile(path.join(root, "subjects", "command", "files", "notes.txt"), "case notes\n");
+    await mkdir(path.join(root, "subjects", "command", "files", "__pycache__"));
+    await writeFile(path.join(root, "subjects", "command", "files", "__pycache__", "run.cpython-314.pyc"), "bytecode\n");
+    await writeFile(path.join(root, "subjects", "command", "files", ".DS_Store"), "finder metadata\n");
     await mkdir(path.join(root, ".workbench"), { recursive: true });
     await writeFile(
       path.join(root, ".workbench", "origin.json"),
@@ -2963,7 +2965,7 @@ describe("workbench CLI", () => {
     expect(bodies["http://workbench.test/api/workbench/benchmarks/wb_123456789abc/source"]).toMatchObject({
       candidateFiles: [
         { path: "notes.txt", content: "case notes\n" },
-        { path: "run.js", content: expect.stringContaining("command candidate ran") },
+        { path: "run.js", content: expect.stringContaining("command subject ran") },
       ],
     });
   });
@@ -2990,7 +2992,7 @@ describe("workbench CLI", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-binary-cli-"));
     expect(await runCli(["init", root, "--command", "binary-command-eval", "--json"], createIo())).toBe(0);
     const fileBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]);
-    await writeFile(path.join(root, "tasks", "task-001", "expected", "golden.docx"), fileBytes);
+    await writeFile(path.join(root, "tasks", "task-001", "tests", "golden.docx"), fileBytes);
     await mkdir(path.join(root, ".workbench"), { recursive: true });
     await writeFile(
       path.join(root, ".workbench", "origin.json"),
@@ -3028,7 +3030,7 @@ describe("workbench CLI", () => {
 
     expect(exitCode).toBe(0);
     expect(bodies["http://workbench.test/api/workbench/benchmarks/wb_123456789abc/source"]?.taskFiles).toContainEqual({
-      path: "task-001/expected/golden.docx",
+      path: "task-001/tests/golden.docx",
       content: fileBytes.toString("base64"),
       encoding: "base64",
     });

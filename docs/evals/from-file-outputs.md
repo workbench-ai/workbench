@@ -1,19 +1,19 @@
 # From File Outputs
 
-Use this path when tasks, outputs, examples, or goldens are files such as `.docx`, `.xlsx`, `.pdf`, or `.pptx`. The candidate is still only the mutable thing Workbench improves, such as a skill, pipeline, prompt, script, template, or workflow. The benchmark owns tasks, environment, and grading; the candidate manifest owns how to run the candidate.
+Use this path when tasks, outputs, examples, or goldens are files such as `.docx`, `.xlsx`, `.pdf`, or `.pptx`. The subject is still only the mutable thing Workbench improves, such as a skill, pipeline, prompt, script, template, or workflow. The benchmark owns tasks, environment, and scoring; the subject manifest owns how to run the subject.
 
 ## Authoring Boundary
 
 Keep the Workbench boundary simple:
 
-- Put public supporting files under `tasks/<case>/input/`.
-- Put private goldens, references, rubrics, tolerances, and task-specific command-grader material under `tasks/<case>/expected/`.
-- Keep the mutable workflow under `candidates/<name>/files/`; do not put eval-only goldens or grader logic in the candidate unless the evaluator itself is the product being improved.
-- Put each runnable candidate/runner choice in its own candidate directory, such as `candidates/claude/` or `candidates/codex/`.
-- Put improve settings in optimizer YAML; `workbench improve` uses the current candidate by default.
-- Have the runner write generated files and any useful diagnostics under `/workspace/output`.
-- Do not write a custom grader just because a task produces binary files.
-- Use `grade: use: rubric` for judgment-heavy quality; use `grade: use: command` only for deterministic checks or an existing scorer.
+- Put public supporting files under `tasks/<case>/files/`.
+- Put private goldens, references, rubrics, tolerances, and task-specific scorer material under `tasks/<case>/tests/`.
+- Keep the mutable workflow under `subjects/<name>/files/`; do not put eval-only goldens or scorer logic in the subject unless the evaluator itself is the product being improved.
+- Put each runnable subject choice in its own subject directory, such as `subjects/claude/` or `subjects/codex/`.
+- Put improve settings in optimizer YAML; `workbench improve` uses the current subject by default.
+- Have the subject write generated files and any useful diagnostics into the trial workspace.
+- Do not write a custom scorer just because a task produces binary files.
+- Use `score: use: rubric` for judgment-heavy quality; use `score: use: tests` or `score: use: command` only for deterministic checks or an existing scorer.
 
 ## Task Layout
 
@@ -23,41 +23,43 @@ Use one folder per task:
 tasks/
   board-report-format/
     task.yaml
-    input/
+    files/
       source-notes.md
-    expected/
+    tests/
       golden.docx
       rubric.md
+      test.sh
   forecast-workbook/
     task.yaml
-    input/
+    files/
       draft.xlsx
-    expected/
+    tests/
       golden.xlsx
       checks.json
+      test.sh
 ```
 
-`task.yaml` contains the task instruction and is not mounted as a runtime file. Runners see optional `/workspace/input/task/input`; graders also see optional `/workspace/input/task/expected` and runner output files at `/workspace/input/runner-output`.
+`task.yaml` contains the task instruction and is not staged as a source file. Subjects see task `files/` in the trial workspace. Scorers see the final mutated workspace plus `/tests`.
 
-## Candidate Layout
+## Subject Layout
 
 Keep the mutable surface narrow:
 
 ```text
-candidates/
+subjects/
   claude/
-    candidate.yaml
+    subject.yaml
     files/
       SKILL.md
 ```
 
-If Workbench should improve a source file, include that file in `optimizer.edits`. If Workbench should improve a prompt, skill, pipeline, or generation script, keep examples and goldens in `tasks/` and include only the mutable candidate-relative source paths under `optimizer.edits`.
+If Workbench should improve a source file, include that file in `optimizer.edits`. If Workbench should improve a prompt, skill, pipeline, or generation script, keep examples and goldens in `tasks/` and include only the mutable subject-relative source paths under `optimizer.edits`.
 
-For agent-facing generation workflows, prefer a skill candidate unless the pipeline or command-line workflow itself is clearly what should improve.
+For agent-facing generation workflows, prefer a skill subject unless the pipeline or command-line workflow itself is clearly what should improve.
 
 ## Environment Essentials
 
-File-output evals often need format-specific tools in `benchmark.environment.dockerfile`. Install only what the run or grade phase actually needs. When in doubt, choose the recipe for the primary output type:
+File-output evals often need format-specific tools in `benchmark.environment.dockerfile`. Install only what the subject or score phase actually needs. When in doubt, choose the recipe for the primary output type:
 
 - Word documents: [file-recipes/docx.md](file-recipes/docx.md)
 - Excel workbooks: [file-recipes/xlsx.md](file-recipes/xlsx.md)

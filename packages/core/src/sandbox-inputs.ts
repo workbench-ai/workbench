@@ -84,7 +84,7 @@ function selectSandboxTaskFiles(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
 ): SurfaceSnapshotFile[] {
-  if (execution.purpose !== "run-task" && execution.purpose !== "grade-task") {
+  if (execution.purpose !== "run-task" && execution.purpose !== "grade-task" && execution.purpose !== "trial") {
     return [];
   }
   const metadata = asRuntimeRecord(execution.metadata);

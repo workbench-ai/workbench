@@ -173,6 +173,7 @@ function resolvedBuiltinAdapter(manifest: WorkbenchAdapterManifest): ResolvedWor
     stability: "builtin",
     manifest: {
       ...manifest,
+      ...(manifest.capabilities ? { capabilities: [...manifest.capabilities] } : {}),
       setup: [...manifest.setup],
       ...(manifest.refs ? { refs: [...manifest.refs] } : {}),
     },
@@ -350,7 +351,7 @@ function topLevelAdapterIds(spec: GenericSpec): string[] {
   return [...new Set([
     ...(spec.improve ? [spec.improve.use] : []),
     spec.run.use,
-    spec.grade.use,
+    spec.score.use,
   ])];
 }
 
@@ -363,7 +364,7 @@ function requiredAdapterIds(
     [
       ...(spec.improve ? [spec.improve] : []),
       spec.run,
-      spec.grade,
+      spec.score,
     ],
     manifests,
   )) {

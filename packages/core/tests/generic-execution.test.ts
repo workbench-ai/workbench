@@ -48,10 +48,10 @@ function compileTestExecutionGraph(
 }
 
 describe("generic sandbox execution contract", () => {
-  test("parses split benchmark/candidate/optimizer source without leaking runtime-specific role schemas", () => {
+  test("parses split benchmark/subject/optimizer source without leaking runtime-specific role schemas", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
 
-    expect(spec.version).toBe(1);
+    expect(spec.version).toBe(2);
     expect(spec.description).toBe("Exercise generic file-output execution with command running and rubric grading.");
     expect(spec.improve).toEqual({
       use: "codex",
@@ -64,7 +64,7 @@ describe("generic sandbox execution contract", () => {
     expect(spec.grade.use).toBe("rubric");
   });
 
-  test("source spec validation is the split benchmark/candidate/optimizer contract", () => {
+  test("source spec validation is the split benchmark/subject/optimizer contract", () => {
     const validation = validateWorkbenchResolvedSourceYaml(genericSpec());
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
 
@@ -80,30 +80,30 @@ describe("generic sandbox execution contract", () => {
 
   test("adapter manifest refs drive nested default auth without role-specific logic", () => {
     const spec = resolveWorkbenchResolvedSourceYaml([
-      "version: 1",
+      "version: 2",
       "benchmark:",
-      "  version: 1",
+      "  version: 2",
       "  name: nested-auth",
       "  description: Exercise manifest-declared nested adapter auth.",
       "  tasks: tasks",
       "  environment:",
       "    dockerfile: environment/Dockerfile",
-      "  grade:",
+      "  score:",
       "    use: command",
       "    with:",
       "      command: 'true'",
-      "candidate:",
-      "  version: 1",
+      "subject:",
+      "  version: 2",
       "  name: nested-auth",
-      "  description: Candidate runner for nested auth.",
-      "  path: candidates/nested-auth/files",
+      "  description: Subject runner for nested auth.",
+      "  path: subjects/nested-auth/files",
       "  run:",
       "    use: orchestrator",
       "    with:",
       "      child:",
       "        use: secret-agent",
       "optimizer:",
-      "  version: 1",
+      "  version: 2",
       "  name: nested-auth optimizer",
       "  edits:",
       "    - SKILL.md",
@@ -139,27 +139,27 @@ describe("generic sandbox execution contract", () => {
 
   test("defaults multi-slot adapter auth to each declared slot", () => {
     const spec = resolveWorkbenchResolvedSourceYaml([
-      "version: 1",
+      "version: 2",
       "benchmark:",
-      "  version: 1",
+      "  version: 2",
       "  name: deployer-eval",
       "  description: Exercise multi-slot adapter auth defaults.",
       "  tasks: tasks",
       "  environment:",
       "    dockerfile: environment/Dockerfile",
-      "  grade:",
+      "  score:",
       "    use: command",
       "    with:",
       "      command: 'true'",
-      "candidate:",
-      "  version: 1",
+      "subject:",
+      "  version: 2",
       "  name: deployer-eval",
-      "  description: Candidate runner for deployer auth.",
-      "  path: candidates/deployer/files",
+      "  description: Subject runner for deployer auth.",
+      "  path: subjects/deployer/files",
       "  run:",
       "    use: deployer",
       "optimizer:",
-      "  version: 1",
+      "  version: 2",
       "  name: deployer-eval optimizer",
       "  edits:",
       "    - prompt.md",
@@ -232,18 +232,18 @@ describe("generic sandbox execution contract", () => {
 
   test("rejects absolute resolved paths instead of normalizing them", () => {
     const validation = validateWorkbenchResolvedSourceYaml(genericSpec().replace(
-      "  path: candidates/generic-file-output-eval/files",
-      "  path: /candidates/generic-file-output-eval/files",
+      "  path: subjects/generic-file-output-eval/files",
+      "  path: /subjects/generic-file-output-eval/files",
     ));
 
     expect(validation.ok).toBe(false);
-    expect(validation.errors).toContain("resolved Workbench source.candidate.path must be a relative path, not an absolute path.");
+    expect(validation.errors).toContain("resolved Workbench source.subject.path must be a relative path, not an absolute path.");
   });
 
-  test("rejects globs in resolved candidate file paths", () => {
+  test("rejects globs in resolved subject file paths", () => {
     const rootValidation = validateWorkbenchResolvedSourceYaml(genericSpec().replace(
-      "  path: candidates/generic-file-output-eval/files",
-      "  path: candidates/**",
+      "  path: subjects/generic-file-output-eval/files",
+      "  path: subjects/**",
     ));
     const editsValidation = validateWorkbenchResolvedSourceYaml(genericSpec().replace(
       "    - scripts/evaluate.py",
@@ -251,7 +251,7 @@ describe("generic sandbox execution contract", () => {
     ));
 
     expect(rootValidation.ok).toBe(false);
-    expect(rootValidation.errors).toContain("resolved Workbench source.candidate.path must be a literal path, not a glob.");
+    expect(rootValidation.errors).toContain("resolved Workbench source.subject.path must be a literal path, not a glob.");
     expect(editsValidation.ok).toBe(false);
     expect(editsValidation.errors).toContain("optimizer YAML.edits[1] must be a literal path, not a glob.");
   });
@@ -378,7 +378,7 @@ describe("generic sandbox execution contract", () => {
     expect(spec.run.with).toMatchObject({ temperature: 0.2 });
   });
 
-  test("compiles improve, run, and grade phases into generic sandbox executions", () => {
+  test("compiles improve and trial phases into generic sandbox executions", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const graph = compileTestExecutionGraph({
       ownerUserId: "user_123",
@@ -391,18 +391,17 @@ describe("generic sandbox execution contract", () => {
       workflow: "improve",
     });
 
-    expect(graph.executions.map((execution) => execution.purpose)).toEqual(["improve", "run-task", "grade-task"]);
-    expect(graph.executions.map((execution) => execution.adapter.use)).toEqual(["codex", "command", "rubric"]);
+    expect(graph.executions.map((execution) => execution.purpose)).toEqual(["improve", "trial"]);
+    expect(graph.executions.map((execution) => execution.adapter.use)).toEqual(["codex", "command"]);
+    expect(graph.executions[1]?.metadata.scoreAdapter).toMatchObject({ use: "rubric" });
     expect(graph.executions[0]?.outputs).toContainEqual({
       name: "candidate_patch",
       schema: "workbench.candidate_patch.v1",
       required: true,
     });
     expect(graph.executions[1]?.inputs.find((input) => input.name === "candidate")?.writable).toBe(false);
-    expect(graph.executions[1]?.outputs).toEqual([]);
-    expect(graph.executions[2]?.inputs.find((input) => input.name === "runner-output")?.ref)
-      .toContain("/runner-output");
-    expect(graph.executions[2]?.outputs).toContainEqual({
+    expect(graph.executions[1]?.inputs.map((input) => input.name)).toEqual(["candidate", "task"]);
+    expect(graph.executions[1]?.outputs).toContainEqual({
       name: "scorecard",
       schema: "workbench.scorecard.v1",
       required: true,
@@ -410,7 +409,6 @@ describe("generic sandbox execution contract", () => {
     expect(graph.nodes.map((node) => node.dependsOn)).toEqual([
       [],
       [graph.executions[0]!.id],
-      [graph.executions[1]!.id],
     ]);
   });
 
@@ -428,7 +426,7 @@ describe("generic sandbox execution contract", () => {
       workflow: "eval",
     });
 
-    expect(graph.executions.map((execution) => execution.purpose)).toEqual(["run-task", "grade-task"]);
+    expect(graph.executions.map((execution) => execution.purpose)).toEqual(["trial"]);
     expect(graph.executions[0]?.inputs.find((input) => input.name === "candidate")?.ref)
       .toBe("workbench://benchmarks/project_123/candidates/cand_123");
     expect(graph.executions[0]?.inputs.find((input) => input.name === "task")?.ref)
@@ -462,7 +460,7 @@ describe("generic sandbox execution contract", () => {
     const secondOptimizer = secondSample.executions.find((execution) => execution.purpose === "improve");
 
     expect(firstOptimizer?.id).toBe(secondOptimizer?.id);
-    expect(secondSample.nodes.find((node) => node.execution.purpose === "run-task")?.dependsOn)
+    expect(secondSample.nodes.find((node) => node.execution.purpose === "trial")?.dependsOn)
       .toEqual([firstOptimizer!.id]);
   });
 
@@ -499,7 +497,7 @@ describe("generic sandbox execution contract", () => {
       samples: 2,
       spec,
       workflow: "improve",
-      purpose: "run-task",
+      purpose: "trial",
       caseIds,
       caseFiles,
       now: "2026-04-27T00:00:00.000Z",
@@ -521,9 +519,9 @@ describe("generic sandbox execution contract", () => {
 
     expect(optimizerJobs).toHaveLength(1);
     expect(runnerJobs).toHaveLength(2);
-    expect(graderJobs).toHaveLength(2);
+    expect(graderJobs).toHaveLength(0);
     expect([...optimizerJobs, ...runnerJobs, ...graderJobs].every((job) => job.kind === "execute")).toBe(true);
-    expect(graderJobs.every((job) => {
+    expect(runnerJobs.every((job) => {
       const input = job.input as { dependsOn?: unknown };
       return Array.isArray(input.dependsOn) && input.dependsOn.length === 1;
     })).toBe(true);
@@ -557,7 +555,7 @@ describe("generic sandbox execution contract", () => {
       caseFiles,
       spec,
       workflow: "eval",
-      purpose: "run-task",
+      purpose: "trial",
       now: "2026-04-27T00:00:00.000Z",
     })).toThrow("task-a/task.yaml includes unsupported field: run.");
   });
@@ -691,7 +689,7 @@ describe("generic sandbox execution contract", () => {
     }, allocation, execution)).toContain(`Sandbox handle lifecycle id does not match allocation ${allocation.lifecycleId}.`);
   });
 
-  test("candidate patch outputs cannot modify paths outside optimizer edits", () => {
+  test("subject patch outputs cannot modify paths outside optimizer edits", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const graph = compileTestExecutionGraph({
       ownerUserId: "user_123",
@@ -717,7 +715,7 @@ describe("generic sandbox execution contract", () => {
     })).toThrow(/outside optimizer edits: secrets\.txt/u);
   });
 
-  test("candidate patch file entries default missing kind and encoding", () => {
+  test("subject patch file entries default missing kind and encoding", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const graph = compileTestExecutionGraph({
       ownerUserId: "user_123",
@@ -759,7 +757,7 @@ describe("generic sandbox execution contract", () => {
       spec,
       workflow: "eval",
     });
-    const grader = graph.executions.find((execution) => execution.purpose === "grade-task")!;
+    const grader = graph.executions.find((execution) => execution.purpose === "trial")!;
     const materialized: string[] = [];
     const result = await executeValidatedSandboxExecution({
       backend: {
@@ -818,7 +816,7 @@ describe("generic sandbox execution contract", () => {
       },
     });
 
-    expect(materialized).toEqual(["task", "runner-output"]);
+    expect(materialized).toEqual(["candidate", "task"]);
     expect(result.payloads.scorecard?.score).toBe(0.75);
   });
 
@@ -907,7 +905,7 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
         profile: "default",
         method: "oauth",
         status: "connected",
-        version: 1,
+        version: 2,
         files: [{
           path: ".codex/auth.json",
           content: "{}",
@@ -937,7 +935,7 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
     expect(completed.status).toBe("succeeded");
   });
 
-  test("sandbox execution dispatches command improve adapters by declared candidate patch output", async () => {
+  test("sandbox execution dispatches command improve adapters by declared subject patch output", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const graph = compileTestExecutionGraph({
       ownerUserId: "user_123",
@@ -1004,13 +1002,13 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
       executable: false,
       content: "task: Run execution adapter output.\n",
     }, {
-      path: "case-001/input/request.md",
+      path: "case-001/files/request.md",
       kind: "text" as const,
       encoding: "utf8" as const,
       executable: false,
       content: "public request\n",
     }, {
-      path: "case-001/expected/secret.txt",
+      path: "case-001/tests/secret.txt",
       kind: "text" as const,
       encoding: "utf8" as const,
       executable: false,
@@ -1028,11 +1026,20 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
       workflow: "eval",
     });
     const execution = {
-      ...graph.executions.find((entry) => entry.purpose === "run-task")!,
+      ...graph.executions.find((entry) => entry.purpose === "trial")!,
       adapter: {
         use: "command",
         with: {
-          command: "test -z \"${WORKBENCH_TASK_DIR:-}\" && test -z \"${WORKBENCH_TASK_ID:-}\" && test -f input/task/input/request.md && test ! -e input/task/task.yaml && test ! -e input/task/expected/secret.txt && mkdir -p output && printf 'execution-adapter\\n' > output/runner-output.txt",
+          command: "test -z \"${WORKBENCH_TASK_DIR:-}\" && test -z \"${WORKBENCH_TASK_ID:-}\" && test -f request.md && test ! -e tests/secret.txt && mkdir -p output && printf 'execution-adapter\\n' > output/runner-output.txt",
+        },
+      },
+      metadata: {
+        ...graph.executions.find((entry) => entry.purpose === "trial")!.metadata,
+        scoreAdapter: {
+          use: "command",
+          with: {
+            command: "test -f tests/secret.txt && mkdir -p output && printf '{\"score\":1}' > output/scorecard.json",
+          },
         },
       },
     };
@@ -1064,7 +1071,7 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
 
     expect(completed.status).toBe("succeeded");
     expect((completed.output as { fileChanges?: string[] }).fileChanges)
-      .toEqual(["runner-output.txt"]);
+      .toContain("runner-output.txt");
   });
 
   test("sandbox adapter runtime materializes generic adapter auth", async () => {
@@ -1080,6 +1087,10 @@ if (!root) process.exit(12);
 if (request.auth?.adapters?.["my-agent"]?.default?.filesRoot !== root) process.exit(14);
 if (fs.readFileSync(path.join(root, ".my-agent/config.json"), "utf8") !== "{\\"token\\":\\"file\\"}") process.exit(13);
 fs.mkdirSync(process.env.WORKBENCH_OUTPUT, { recursive: true });
+if (request.execution.role !== "runner") {
+  fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "scorecard.json"), "{\\"score\\":1}\\n");
+  process.exit(0);
+}
 fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "authed\\n");
 `, { mode: 0o755 });
     vi.stubEnv("PATH", `${binRoot}:${process.env.PATH ?? ""}`);
@@ -1096,11 +1107,18 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
       workflow: "eval",
     });
     const execution = {
-      ...graph.executions.find((entry) => entry.purpose === "run-task")!,
+      ...graph.executions.find((entry) => entry.purpose === "trial")!,
       adapter: {
         use: "my-agent",
         auth: "default",
         with: {},
+      },
+      metadata: {
+        ...graph.executions.find((entry) => entry.purpose === "trial")!.metadata,
+        scoreAdapter: {
+          use: "command",
+          with: { command: "mkdir -p output && printf '{\"score\":0.75}\\n' > output/scorecard.json" },
+        },
       },
     };
     const job = createWorkbenchExecutionJob({
@@ -1116,7 +1134,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
       profile: "default",
       method: "api-key",
       status: "connected",
-      version: 1,
+      version: 2,
       files: [{
         path: ".my-agent/config.json",
         content: "{\"token\":\"file\"}",
@@ -1126,9 +1144,11 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
       updatedAt: "2026-04-27T00:00:00.000Z",
     }];
 
+    const commandManifest = await commandAdapterManifest();
     const completed = await executeAdapterInCurrentSandboxRuntime({
       job,
       spec,
+      adapterManifests: [commandManifest],
       adapterAuthProfiles,
       baseFiles: [{
         path: "prompt.md",
@@ -1150,7 +1170,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
 
     expect(completed.status).toBe("succeeded");
     expect((completed.output as { fileChanges?: string[] }).fileChanges)
-      .toEqual(["runner-output.txt"]);
+      .toContain("runner-output.txt");
   });
 
   test("sandbox adapter runtime namespaces nested adapter auth", async () => {
@@ -1164,6 +1184,10 @@ if (process.env.SECRET_AGENT_KEY !== "nested-secret") process.exit(11);
 if (request.auth?.default) process.exit(12);
 if (request.auth?.adapters?.["secret-agent"]?.default?.env?.SECRET_AGENT_KEY !== "materialized") process.exit(13);
 fs.mkdirSync(process.env.WORKBENCH_OUTPUT, { recursive: true });
+if (request.execution.role !== "runner") {
+  fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "scorecard.json"), "{\\"score\\":1}\\n");
+  process.exit(0);
+}
 fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "nested auth\\n");
 `, { mode: 0o755 });
     vi.stubEnv("PATH", `${binRoot}:${process.env.PATH ?? ""}`);
@@ -1180,7 +1204,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
       workflow: "eval",
     });
     const execution = {
-      ...graph.executions.find((entry) => entry.purpose === "run-task")!,
+      ...graph.executions.find((entry) => entry.purpose === "trial")!,
       adapter: {
         use: "orchestrator",
         with: {
@@ -1188,6 +1212,13 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
             use: "secret-agent",
             auth: "default",
           },
+        },
+      },
+      metadata: {
+        ...graph.executions.find((entry) => entry.purpose === "trial")!.metadata,
+        scoreAdapter: {
+          use: "command",
+          with: { command: "mkdir -p output && printf '{\"score\":0.75}\\n' > output/scorecard.json" },
         },
       },
     };
@@ -1200,6 +1231,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
       now: "2026-04-27T00:00:00.000Z",
     });
 
+    const commandManifest = await commandAdapterManifest();
     const completed = await executeAdapterInCurrentSandboxRuntime({
       job,
       spec,
@@ -1215,13 +1247,13 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
         setup: [],
         command: "workbench-adapter-secret-agent",
         auth: { methods: { "api-key": { env: ["SECRET_AGENT_KEY"] } } },
-      }],
+      }, commandManifest],
       adapterAuthProfiles: [{
         adapterId: "secret-agent",
         profile: "default",
         method: "api-key",
         status: "connected",
-        version: 1,
+        version: 2,
         files: [],
         env: [{ name: "SECRET_AGENT_KEY", value: "nested-secret" }],
         updatedAt: "2026-04-27T00:00:00.000Z",
@@ -1246,10 +1278,10 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "
 
     expect(completed.status).toBe("succeeded");
     expect((completed.output as { fileChanges?: string[] }).fileChanges)
-      .toEqual(["runner-output.txt"]);
+      .toContain("runner-output.txt");
   });
 
-  test("agent improve adapter outputs only candidate files covered by optimizer edits", async () => {
+  test("agent improve adapter outputs only subject files covered by optimizer edits", async () => {
     const binRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-codex-improve-"));
     const adapterPath = path.join(binRoot, "codex-improve.mjs");
     await fs.writeFile(adapterPath, `import fs from "node:fs";
@@ -1330,7 +1362,7 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
       budget: 2,
       samples: 3,
       caseCount: 1,
-    })).toBe(14);
+    })).toBe(8);
     expect(validateWorkbenchRunEnvelope({
       workflow: "improve",
       budget: 2,
@@ -1363,9 +1395,9 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
       workflow: "eval",
     });
     const execution = {
-      ...graph.executions.find((entry) => entry.purpose === "run-task")!,
+      ...graph.executions.find((entry) => entry.purpose === "trial")!,
       policy: {
-        ...graph.executions.find((entry) => entry.purpose === "run-task")!.policy,
+        ...graph.executions.find((entry) => entry.purpose === "trial")!.policy,
         network: {
           egress: "allowlist" as const,
           allow: ["api.openai.com"],
@@ -1401,7 +1433,6 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
     expect(graph.executions.map((execution) => execution.policy.network)).toEqual([
       { egress: "open" },
       { egress: "open" },
-      { egress: "open" },
     ]);
   });
 
@@ -1429,10 +1460,6 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
     });
 
     expect(graph.executions.map((execution) => execution.policy.network)).toEqual([
-      {
-        egress: "allowlist",
-        allow: ["api.example.com", "proxy.example.com:8443"],
-      },
       {
         egress: "allowlist",
         allow: ["api.example.com", "proxy.example.com:8443"],
@@ -1652,7 +1679,7 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
     })).rejects.toThrow(/outside the execution capability/u);
   });
 
-  test("candidate patch application preserves immutable files and updates optimizer edit paths", () => {
+  test("subject patch application preserves immutable files and updates optimizer edit paths", () => {
     const files = applyWorkbenchCandidatePatch({
       edits: ["prompt.md", "scripts"],
       baseFiles: [{
@@ -1691,7 +1718,7 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
     expect(files.find((file) => file.path === "README.md")?.content).toBe("unchanged\n");
   });
 
-  test("candidate patch application rejects changes outside optimizer edits", () => {
+  test("subject patch application rejects changes outside optimizer edits", () => {
     expect(() => applyWorkbenchCandidatePatch({
       edits: ["prompt.md"],
       baseFiles: [],
@@ -1717,16 +1744,16 @@ fs.writeFileSync(path.join(output, "candidate_patch.json"), JSON.stringify({
         executable: false,
       }],
       patch: {
-        fileChanges: ["candidates/my-skill/files/SKILL.md"],
+        fileChanges: ["subjects/my-skill/files/SKILL.md"],
         files: [{
-          path: "candidates/my-skill/files/SKILL.md",
+          path: "subjects/my-skill/files/SKILL.md",
           kind: "text",
           encoding: "utf8",
           content: "bad\n",
           executable: false,
         }],
       },
-    })).toThrow(/outside optimizer edits: candidates\/my-skill\/files\/SKILL\.md/u);
+    })).toThrow(/outside optimizer edits: subjects\/my-skill\/files\/SKILL\.md/u);
   });
 });
 
@@ -1780,9 +1807,9 @@ function inputBundleForExecution(
 
 function genericSpec(): string {
   return [
-    "version: 1",
+    "version: 2",
     "benchmark:",
-    "  version: 1",
+    "  version: 2",
     "  name: generic-file-output-eval",
     "  description: Exercise generic file-output execution with command running and rubric grading.",
     "  tasks: tasks",
@@ -1794,7 +1821,7 @@ function genericSpec(): string {
     "      timeoutMinutes: 20",
     "    network:",
     "      egress: none",
-    "  grade:",
+    "  score:",
     "    use: rubric",
     "    with:",
     "      instructions: Grade only from runner output.",
@@ -1806,17 +1833,17 @@ function genericSpec(): string {
     "        - id: correctness",
     "          description: Output satisfies the task requirements.",
     "          weight: 1",
-    "candidate:",
-    "  version: 1",
+    "subject:",
+    "  version: 2",
     "  name: generic-file-output-eval",
-    "  description: Candidate runner for the generic file-output benchmark.",
-    "  path: candidates/generic-file-output-eval/files",
+    "  description: Subject runner for the generic file-output benchmark.",
+    "  path: subjects/generic-file-output-eval/files",
     "  run:",
     "    use: command",
     "    with:",
     "      command: python scripts/evaluate.py --run",
     "optimizer:",
-    "  version: 1",
+    "  version: 2",
     "  name: generic-file-output-optimizer",
     "  edits:",
     "    - prompt.md",

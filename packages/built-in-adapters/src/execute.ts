@@ -94,9 +94,13 @@ export async function executeWorkbenchBuiltInAdapterCommand(
     await executeCommandAdapterRequest(request);
     return;
   }
+  if (adapterId === "tests") {
+    await executeTestsScorerRequest(request);
+    return;
+  }
   if (adapterId === "rubric") {
-    if (request.execution.purpose !== "grade-task") {
-      throw new Error(`Rubric adapter cannot handle ${request.execution.purpose} executions.`);
+    if (request.execution.role !== "grader") {
+      throw new Error(`Rubric adapter cannot handle ${request.execution.role} executions.`);
     }
     await writeRubricJudgeScorecard(
       request,
@@ -123,7 +127,7 @@ export async function executeWorkbenchBuiltInAdapterCommand(
       });
       return;
     }
-    if (request.execution.purpose === "run-task") {
+    if (request.execution.role === "runner") {
       await writeAgentRunnerOutput(request, workload, agent, {
         agentExecutor: args.agentExecutor,
         adapterAuthRoot: args.adapterAuthRoot,
@@ -141,9 +145,47 @@ async function executeCommandAdapterRequest(
 ): Promise<void> {
   const runtime = await importWorkbenchRuntime();
   const command = requiredAdapterCommandString(request, "command");
-  await runAdapterShellCommand(command, request.paths.workspace);
+  await runAdapterShellCommand(command, request.paths.cwd ?? request.paths.workspace);
   await runtime.writeWorkbenchAdapterResultMetadata(request.paths.output, {
     ok: true,
+  });
+}
+
+async function executeTestsScorerRequest(
+  request: WorkbenchAdapterCommandRequest,
+): Promise<void> {
+  if (request.execution.role !== "grader") {
+    throw new Error(`Tests adapter cannot handle ${request.execution.role} executions.`);
+  }
+  const runtime = await importWorkbenchRuntime();
+  const testsRoot = request.paths.tests ?? path.join(request.paths.workspace, "tests");
+  const logsRoot = request.paths.logs ?? path.join(request.paths.workspace, "logs");
+  const verifierLogs = path.join(logsRoot, "verifier");
+  await fs.mkdir(verifierLogs, { recursive: true });
+  const script = await firstExistingFile([
+    path.join(testsRoot, "test.sh"),
+    path.join(testsRoot, "run.sh"),
+  ]);
+  if (!script) {
+    throw new Error(`Tests scorer requires ${path.join(testsRoot, "test.sh")}.`);
+  }
+  await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.cwd ?? request.paths.workspace);
+  const scorecard = await readTestsScorecard({
+    outputRoot: request.paths.output,
+    logsRoot,
+    caseId: request.execution.caseId ?? "current",
+  });
+  await fs.mkdir(request.paths.output, { recursive: true });
+  await fs.writeFile(
+    path.join(request.paths.output, "scorecard.json"),
+    `${JSON.stringify(scorecard, null, 2)}\n`,
+  );
+  await runtime.writeWorkbenchAdapterResultMetadata(request.paths.output, {
+    ok: true,
+    ...(typeof scorecard.summary === "string" ? { summary: scorecard.summary } : {}),
+    feedback: {
+      scorer: "tests",
+    },
   });
 }
 
@@ -167,6 +209,107 @@ async function runAdapterShellCommand(command: string, cwd: string): Promise<voi
       ));
     });
   });
+}
+
+async function firstExistingFile(files: readonly string[]): Promise<string | null> {
+  for (const file of files) {
+    const stat = await fs.stat(file).catch(() => null);
+    if (stat?.isFile()) {
+      return file;
+    }
+  }
+  return null;
+}
+
+async function readTestsScorecard(args: {
+  outputRoot: string;
+  logsRoot: string;
+  caseId: string;
+}): Promise<Record<string, Json>> {
+  const direct = await readOptionalJson(path.join(args.outputRoot, "scorecard.json"));
+  if (direct) {
+    return normalizeTestsScorecard(direct, args.caseId);
+  }
+  const rewardJson = await readOptionalJson(path.join(args.logsRoot, "verifier", "reward.json"));
+  if (rewardJson) {
+    return normalizeTestsScorecard(rewardJson, args.caseId);
+  }
+  const rewardText = await fs.readFile(path.join(args.logsRoot, "verifier", "reward.txt"), "utf8").catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  if (rewardText !== null) {
+    const score = Number.parseFloat(rewardText.trim());
+    if (!Number.isFinite(score)) {
+      throw new Error("Tests scorer reward.txt must contain a finite numeric reward.");
+    }
+    return normalizeTestsScorecard({ reward: score }, args.caseId);
+  }
+  throw new Error("Tests scorer did not find scorecard.json, /logs/verifier/reward.json, or /logs/verifier/reward.txt.");
+}
+
+async function readOptionalJson(filePath: string): Promise<Record<string, unknown> | null> {
+  const source = await fs.readFile(filePath, "utf8").catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  if (source === null) {
+    return null;
+  }
+  const parsed = JSON.parse(source) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${filePath} must contain a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function normalizeTestsScorecard(
+  record: Record<string, unknown>,
+  caseId: string,
+): Record<string, Json> {
+  const rawScore = typeof record.score === "number"
+    ? record.score
+    : typeof record.reward === "number"
+      ? record.reward
+      : undefined;
+  if (rawScore === undefined || !Number.isFinite(rawScore)) {
+    throw new Error("Tests scorer reward must include a finite numeric score or reward.");
+  }
+  const metrics = normalizeTestsMetrics(record, rawScore);
+  return {
+    score: rawScore,
+    metrics,
+    cases: [{
+      id: caseId,
+      status: "completed",
+      metrics,
+    }] as unknown as Json,
+    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+    feedback: {
+      reward: record as Json,
+    },
+  };
+}
+
+function normalizeTestsMetrics(record: Record<string, unknown>, score: number): Record<string, number> {
+  const metrics: Record<string, number> = { score };
+  const source = record.metrics && typeof record.metrics === "object" && !Array.isArray(record.metrics)
+    ? record.metrics as Record<string, unknown>
+    : record;
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      metrics[key === "reward" ? "score" : key] = value;
+    }
+  }
+  return metrics;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/gu, "'\\''")}'`;
 }
 
 function workloadFromAdapterCommandRequest(
@@ -289,8 +432,8 @@ async function writeAgentRunnerOutput(
     adapterAuthEnv?: Record<string, string>;
   } = {},
 ): Promise<void> {
-  if (request.execution.purpose !== "run-task") {
-    throw new Error("Agent runner results can only complete run-task executions.");
+  if (request.execution.role !== "runner") {
+    throw new Error("Agent runner results can only complete runner executions.");
   }
   const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-runner");
   const agentResult = await executeWorkbenchAgentTurn(
@@ -302,7 +445,7 @@ async function writeAgentRunnerOutput(
       adapterAuthRequest: options.adapterAuthRequest,
       adapterAuthEnv: options.adapterAuthEnv,
       workspaceRoot: request.paths.workspace,
-      cwd: request.paths.workspace,
+      cwd: request.paths.cwd ?? request.paths.workspace,
       prompt: buildAgentRunnerPrompt(workload, runner),
       traceRoot,
       jobId: workload.job.id,
@@ -349,12 +492,12 @@ function buildAgentRunnerPrompt(
     ...(runner.instructions ? ["Instructions:", runner.instructions, ""] : []),
     "Context:",
     "- Candidate files are mounted at /workspace/input/candidate.",
+    "- Subject files are also present in the task working directory.",
     ...(workload.task?.task ? ["Task:", workload.task.task, ""] : []),
-    "- Public task input files are mounted at /workspace/input/task/input.",
-    "- task.yaml and expected/ are not mounted for runner executions.",
-    "- Write runner outputs under /workspace/output.",
-    "- Do not mutate /workspace/input.",
-    "- Workbench will persist non-internal files from /workspace/output for grading and inspection.",
+    "- Public task files are already copied into the current working directory.",
+    "- Verifier tests are not present while you run.",
+    "- Mutate the current working directory to complete the task.",
+    "- You may write inspection artifacts under /workspace/output.",
   ].join("\n");
 }
 
@@ -470,7 +613,7 @@ async function writeRubricJudgeScorecard(
     adapterAuthRequest: options.adapterAuthRequest,
     adapterAuthEnv: options.adapterAuthEnv,
     workspaceRoot: request.paths.workspace,
-    cwd: request.paths.workspace,
+    cwd: request.paths.cwd ?? request.paths.workspace,
     prompt: buildRubricJudgePrompt(workload, grader),
     traceRoot: path.join(request.paths.output, ".workbench", "internal", "rubric-grader"),
     jobId: workload.job.id,
@@ -546,12 +689,11 @@ function buildRubricJudgePrompt(
     JSON.stringify(grader.criteria, null, 2),
     "",
     "Context:",
-    "- Public task input files are mounted at /workspace/input/task/input.",
-    "- Grader-only expected files are mounted at /workspace/input/task/expected when the task provides them.",
-    "- task.yaml is not mounted as a runtime file.",
-    "- Runner output files are mounted at /workspace/input/runner-output.",
+    "- The subject already ran in this same working directory.",
+    "- Public task files and subject outputs are available in the current working directory.",
+    "- Verifier-only files are mounted at /tests when the task provides them.",
     "- Workbench will persist your JSON result to /workspace/output/scorecard.json.",
-    "- Grade only from the mounted task files, mounted runner output files, and criteria above.",
+    "- Score only from the current working directory, /tests, and the criteria above.",
     "",
     "Output:",
     "Return only a JSON object. Do not wrap it in Markdown.",

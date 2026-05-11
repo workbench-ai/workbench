@@ -50,6 +50,12 @@ export interface WorkbenchAdapterCommandRequest {
     task?: string;
     runnerOutput?: string;
     traces?: string;
+    cwd?: string;
+    subject?: string;
+    tests?: string;
+    logs?: string;
+    artifacts?: string;
+    scorecard?: string;
   };
 }
 
@@ -82,7 +88,7 @@ export function normalizeWorkbenchAdapterCommandRequest(
   const adapter = requiredJsonRecord(record.adapter, "adapter request adapter");
   const paths = requiredJsonRecord(record.paths, "adapter request paths");
   const purpose = requiredPurpose(execution.purpose, "adapter request execution.purpose");
-  const role = executionPurposeRole(purpose);
+  const role = normalizeExecutionRole(execution.role, purpose);
   const use = requiredString(adapter.use, "adapter request adapter.use");
   return {
     protocol: "workbench.adapter.v1",
@@ -117,6 +123,12 @@ export function normalizeWorkbenchAdapterCommandRequest(
       ...(typeof paths.task === "string" ? { task: paths.task } : {}),
       ...(typeof paths.runnerOutput === "string" ? { runnerOutput: paths.runnerOutput } : {}),
       ...(typeof paths.traces === "string" ? { traces: paths.traces } : {}),
+      ...(typeof paths.cwd === "string" ? { cwd: paths.cwd } : {}),
+      ...(typeof paths.subject === "string" ? { subject: paths.subject } : {}),
+      ...(typeof paths.tests === "string" ? { tests: paths.tests } : {}),
+      ...(typeof paths.logs === "string" ? { logs: paths.logs } : {}),
+      ...(typeof paths.artifacts === "string" ? { artifacts: paths.artifacts } : {}),
+      ...(typeof paths.scorecard === "string" ? { scorecard: paths.scorecard } : {}),
     },
   };
 }
@@ -229,10 +241,10 @@ function requiredPurpose(
   value: unknown,
   label: string,
 ): WorkbenchExecutionSpec["purpose"] {
-  if (value === "improve" || value === "run-task" || value === "grade-task") {
+  if (value === "improve" || value === "trial" || value === "run-task" || value === "grade-task") {
     return value;
   }
-  throw new Error(`${label} must be improve, run-task, or grade-task.`);
+  throw new Error(`${label} must be improve, trial, run-task, or grade-task.`);
 }
 
 function requiredString(value: unknown, label: string): string {
@@ -251,7 +263,20 @@ function executionPurposeRole(
   if (purpose === "run-task") {
     return "runner";
   }
+  if (purpose === "trial") {
+    return "runner";
+  }
   return "grader";
+}
+
+function normalizeExecutionRole(
+  value: unknown,
+  purpose: WorkbenchExecutionSpec["purpose"],
+): "optimizer" | "runner" | "grader" {
+  if (value === "optimizer" || value === "runner" || value === "grader") {
+    return value;
+  }
+  return executionPurposeRole(purpose);
 }
 
 function jsonRecord(value: unknown): Record<string, Json> {

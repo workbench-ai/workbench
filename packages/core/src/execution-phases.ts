@@ -25,7 +25,7 @@ export function buildCandidateCasePhaseRefs(args: {
     const jobCaseId = readWorkbenchExecutionMetadataString(job, "caseId");
     if (
       jobCandidateId === args.candidateId &&
-      (phase === "run-task" || phase === "grade-task") &&
+      (phase === "trial" || phase === "run-task" || phase === "grade-task") &&
       taskReviewCaseIdsMatch(jobCaseId, args.caseId) &&
       taskReviewSampleIndicesMatch(
         readWorkbenchExecutionMetadataNumber(job, "sampleIndex"),
@@ -50,7 +50,7 @@ export function buildCandidateCasePhaseRefs(args: {
         return [];
       }
       const phase = readWorkbenchExecutionPurpose(first);
-      if (phase !== "run-task" && phase !== "grade-task") {
+      if (phase !== "trial" && phase !== "run-task" && phase !== "grade-task") {
         return [];
       }
       const startedAt = minTimestamp(group.map((job) => job.startedAt));
@@ -142,7 +142,7 @@ export function readWorkbenchExecutionPurpose(
     return null;
   }
   const purpose = readExecutionRecord(job)?.purpose;
-  return purpose === "improve" || purpose === "run-task" || purpose === "grade-task"
+  return purpose === "improve" || purpose === "trial" || purpose === "run-task" || purpose === "grade-task"
     ? purpose
     : null;
 }
@@ -317,6 +317,9 @@ function phasePurposeOrder(purpose: string | null): number {
     return 0;
   }
   if (purpose === "run-task") {
+    return 1;
+  }
+  if (purpose === "trial") {
     return 1;
   }
   if (purpose === "grade-task") {

@@ -52,6 +52,9 @@ const BUILT_IN_ENVIRONMENT_IMAGES: Record<string, string> = {
   "workbench/workbench-libreoffice-agent:envv_libreoffice_agent": "products/workbench/environments/libreoffice-agent/Dockerfile",
 };
 
+const DOCKER_RUNTIME_MOUNT = "/workbench-runtime";
+const DOCKER_DEFAULT_WORKSPACE = "/workspace";
+
 type DockerRuntimePayload = {
   mountRoot: string;
   runnerPath: string;
@@ -239,6 +242,7 @@ async function runDockerSandboxExecution(
   const resources = execution.policy.resources;
   const tmpfsSize = dockerSize(resources.diskGb);
   const memorySize = dockerSize(resources.memoryGb);
+  const workspaceRoot = dockerExecutionWorkspaceRoot(execution);
   const [{ execFile, spawn }, fs, { promisify }] = await Promise.all([
     importNodeModule<typeof import("node:child_process")>(nodeBuiltin("child_process")),
     importNodeModule<typeof import("node:fs/promises")>(nodeBuiltin("fs/promises")),
@@ -246,6 +250,14 @@ async function runDockerSandboxExecution(
   ]);
   const execFileAsync = promisify(execFile);
   await execFileAsync("docker", ["rm", "-f", containerName], { maxBuffer: 1024 * 1024 }).catch(() => undefined);
+  const tmpfsArgs = [
+    tmpfsDockerArg(DOCKER_DEFAULT_WORKSPACE, sandboxUid, sandboxGid, tmpfsSize),
+    tmpfsDockerArg("/tests", sandboxUid, sandboxGid, tmpfsSize),
+    tmpfsDockerArg("/logs", sandboxUid, sandboxGid, tmpfsSize),
+    ...(workspaceRoot !== DOCKER_DEFAULT_WORKSPACE
+      ? [tmpfsDockerArg(workspaceRoot, sandboxUid, sandboxGid, tmpfsSize)]
+      : []),
+  ].flatMap((entry) => ["--tmpfs", entry]);
   const dockerArgs = [
     "run",
     "--rm",
@@ -261,18 +273,21 @@ async function runDockerSandboxExecution(
     memorySize,
     "--user",
     `${sandboxUid}:${sandboxGid}`,
-    "--tmpfs",
-    `/workspace:rw,exec,uid=${sandboxUid},gid=${sandboxGid},mode=1777,size=${tmpfsSize}`,
+    ...tmpfsArgs,
     "--workdir",
-    "/app",
+    DOCKER_RUNTIME_MOUNT,
     "-v",
     `${root}:/workbench-execution`,
     "-v",
-    `${runtimeRoot}:/app:ro`,
+    `${runtimeRoot}:${DOCKER_RUNTIME_MOUNT}:ro`,
     "--env",
     "HOME=/tmp",
     "--env",
     "USER=workbench",
+    "--env",
+    "WORKBENCH_IN_DOCKER_SANDBOX=1",
+    "--env",
+    `WORKBENCH_WORKSPACE_ROOT=${workspaceRoot}`,
     "--env",
     `WORKBENCH_RUNTIME_IMPORT=${runtimeImport}`,
     image,
@@ -313,6 +328,34 @@ async function runDockerSandboxExecution(
     throw new Error("Sandbox adapter runner response omitted job.");
   }
   return response.job as HostedWorkbenchJob;
+}
+
+function tmpfsDockerArg(pathname: string, uid: number, gid: number, size: string): string {
+  return `${pathname}:rw,exec,uid=${uid},gid=${gid},mode=1777,size=${size}`;
+}
+
+function dockerExecutionWorkspaceRoot(execution: WorkbenchExecutionSpec): string {
+  const metadata = asRuntimeRecord(execution.metadata);
+  const workdir = typeof metadata.workdir === "string" ? metadata.workdir.trim() : "";
+  if (!workdir || workdir === DOCKER_DEFAULT_WORKSPACE) {
+    return DOCKER_DEFAULT_WORKSPACE;
+  }
+  if (!isSafeDockerWorkspaceRoot(workdir)) {
+    return DOCKER_DEFAULT_WORKSPACE;
+  }
+  return workdir;
+}
+
+function isSafeDockerWorkspaceRoot(value: string): boolean {
+  return value.startsWith("/") &&
+    value !== "/" &&
+    value !== "/tests" &&
+    value !== "/logs" &&
+    value !== DOCKER_RUNTIME_MOUNT &&
+    value !== "/workbench-execution" &&
+    !value.startsWith(`${DOCKER_RUNTIME_MOUNT}/`) &&
+    !value.startsWith("/workbench-execution/") &&
+    !/[\0\r\n:]/u.test(value);
 }
 
 async function destroyDockerSandbox(sandbox: SandboxHandle): Promise<void> {
@@ -549,8 +592,8 @@ function resolveLocalDockerRuntimePayload(): DockerRuntimePayload {
 function monorepoDockerPayload(root: string): DockerRuntimePayload {
   return {
     mountRoot: root,
-    runnerPath: "/app/products/workbench/packages/core/worker/sandbox-adapter-runner.cjs",
-    runtimeImport: "/app/products/workbench/packages/core/src/index.ts",
+    runnerPath: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/worker/sandbox-adapter-runner.cjs`,
+    runtimeImport: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/src/index.ts`,
     builtInDockerfileRoot: path.join(root, "products/workbench/environments"),
   };
 }
@@ -569,8 +612,8 @@ function findInstalledPackageDockerPayload(): DockerRuntimePayload | null {
   ) {
     return {
       mountRoot: path.dirname(nodeModulesRoot),
-      runnerPath: "/app/node_modules/@workbench-ai/workbench-core/worker/sandbox-adapter-runner.cjs",
-      runtimeImport: "/app/node_modules/@workbench-ai/workbench-core/dist/index.js",
+      runnerPath: `${DOCKER_RUNTIME_MOUNT}/node_modules/@workbench-ai/workbench-core/worker/sandbox-adapter-runner.cjs`,
+      runtimeImport: `${DOCKER_RUNTIME_MOUNT}/node_modules/@workbench-ai/workbench-core/dist/index.js`,
       builtInDockerfileRoot: path.join(packageRoot, "environments"),
     };
   }

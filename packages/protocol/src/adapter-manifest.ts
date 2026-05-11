@@ -3,11 +3,14 @@ import YAML from "yaml";
 export interface WorkbenchAdapterManifest {
   id: string;
   protocol: "workbench.adapter.v1";
+  capabilities?: WorkbenchAdapterCapability[];
   setup: string[];
   command: string;
   auth?: WorkbenchAdapterAuthManifest;
   refs?: string[];
 }
+
+export type WorkbenchAdapterCapability = "task-source" | "runner" | "scorer" | "optimizer";
 
 export interface WorkbenchAdapterAuthManifest {
   methods?: Record<string, WorkbenchAdapterAuthMethodManifest>;
@@ -53,6 +56,7 @@ export function cloneWorkbenchAdapterManifest(
 ): WorkbenchAdapterManifest {
   return {
     ...manifest,
+    ...(manifest.capabilities ? { capabilities: [...manifest.capabilities] } : {}),
     setup: [...manifest.setup],
     ...(manifest.auth ? { auth: cloneJson(manifest.auth) as WorkbenchAdapterAuthManifest } : {}),
     ...(manifest.refs ? { refs: [...manifest.refs] } : {}),
@@ -68,7 +72,7 @@ export function parseWorkbenchAdapterManifest(
     throw new Error(`${label} must be a YAML object.`);
   }
   const record = parsed as Record<string, unknown>;
-  rejectUnknownManifestKeys(record, label, ["id", "protocol", "setup", "command", "auth", "refs"]);
+  rejectUnknownManifestKeys(record, label, ["id", "protocol", "capabilities", "setup", "command", "auth", "refs"]);
   const id = readAdapterId(record.id, `${label}.id`);
   if (record.protocol !== "workbench.adapter.v1") {
     throw new Error(`${label}.protocol must be workbench.adapter.v1.`);
@@ -79,6 +83,9 @@ export function parseWorkbenchAdapterManifest(
   const setup = record.setup === undefined
     ? []
     : readStringArray(record.setup, `${label}.setup`);
+  const capabilities = record.capabilities === undefined
+    ? undefined
+    : readAdapterCapabilities(record.capabilities, `${label}.capabilities`);
   const refs = record.refs === undefined
     ? undefined
     : readAdapterRefs(record.refs, `${label}.refs`);
@@ -86,11 +93,22 @@ export function parseWorkbenchAdapterManifest(
   return {
     id,
     protocol: "workbench.adapter.v1",
+    ...(capabilities ? { capabilities } : {}),
     setup,
     command,
     ...(auth ? { auth } : {}),
     ...(refs ? { refs } : {}),
   };
+}
+
+function readAdapterCapabilities(value: unknown, label: string): WorkbenchAdapterCapability[] {
+  const allowed = new Set(["task-source", "runner", "scorer", "optimizer"]);
+  return readStringArray(value, label).map((entry, index) => {
+    if (!allowed.has(entry)) {
+      throw new Error(`${label}[${index}] must be task-source, runner, scorer, or optimizer.`);
+    }
+    return entry as WorkbenchAdapterCapability;
+  });
 }
 
 export function workbenchAdapterManifestRequiresAuth(
@@ -136,7 +154,8 @@ export function collectWorkbenchAdapterAuthRequirements(
 export function withDefaultWorkbenchAdapterAuthProfiles<T extends {
   improve?: WorkbenchAdapterInvocationLike;
   run: WorkbenchAdapterInvocationLike;
-  grade: WorkbenchAdapterInvocationLike;
+  score?: WorkbenchAdapterInvocationLike;
+  grade?: WorkbenchAdapterInvocationLike;
 }>(
   spec: T,
   manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
@@ -147,7 +166,12 @@ export function withDefaultWorkbenchAdapterAuthProfiles<T extends {
     clone.improve = withDefaultWorkbenchAdapterAuth(clone.improve, manifestById);
   }
   clone.run = withDefaultWorkbenchAdapterAuth(clone.run, manifestById);
-  clone.grade = withDefaultWorkbenchAdapterAuth(clone.grade, manifestById);
+  if (clone.score) {
+    clone.score = withDefaultWorkbenchAdapterAuth(clone.score, manifestById);
+  }
+  if (clone.grade) {
+    clone.grade = withDefaultWorkbenchAdapterAuth(clone.grade, manifestById);
+  }
   return clone;
 }
 

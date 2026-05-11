@@ -147,6 +147,9 @@ function expectedInputsForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): R
   if (purpose === "run-task") {
     return new Set(["candidate", "task"]);
   }
+  if (purpose === "trial") {
+    return new Set(["candidate", "task"]);
+  }
   return new Set(["task", "runner-output"]);
 }
 
@@ -156,6 +159,9 @@ function expectedOutputForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): s
   }
   if (purpose === "run-task") {
     return null;
+  }
+  if (purpose === "trial") {
+    return "scorecard";
   }
   return "scorecard";
 }
@@ -176,6 +182,9 @@ function outputAllowedForPurpose(
   }
   if (purpose === "run-task") {
     return false;
+  }
+  if (purpose === "trial") {
+    return output.schema === "workbench.scorecard.v1";
   }
   return output.schema === "workbench.scorecard.v1";
 }

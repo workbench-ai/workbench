@@ -62,7 +62,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const optimizerExecutionId = executionId(input, "improve", "current", 0);
   const optimizerOutputRef = `execution://${optimizerExecutionId}/candidate_patch`;
   const runnerAdapter = executionConfig.run;
-  const graderAdapter = executionConfig.grade;
+  const scorerAdapter = executionConfig.score;
   if (workflow === "improve") {
     if (!input.spec.optimizer || !input.spec.improve) {
       throw new Error("Optimizer YAML is required for improve execution graphs.");
@@ -89,47 +89,27 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   }
 
   const runCandidateRef = workflow === "improve" ? optimizerOutputRef : candidateRef;
-  const runnerExecutionId = executionId(input, "run-task", caseId, sampleIndex);
-  const runnerOutputRef = `execution://${runnerExecutionId}/runner-output`;
+  const trialExecutionId = executionId(input, "trial", caseId, sampleIndex);
   pushExecution(nodes, executions, createExecution({
     input,
-    purpose: "run-task",
+    purpose: "trial",
     adapter: runnerAdapter,
     inputs: [
       inputRef("candidate", runCandidateRef, "/workspace/input/candidate", false),
       inputRef("task", taskRef, "/workspace/input/task", false),
     ],
-    outputs: [],
+    outputs: [outputContract("scorecard", "workbench.scorecard.v1")],
     metadata: {
       trialIndex: input.trialIndex,
       sampleIndex,
       caseId,
       task: executionConfig.task,
+      scoreAdapter: scorerAdapter as unknown as Json,
+      ...(executionConfig.environment.workdir ? { workdir: executionConfig.environment.workdir } : {}),
     },
     runtime: executionConfig.environment,
-    idOverride: runnerExecutionId,
+    idOverride: trialExecutionId,
   }), workflow === "improve" ? [optimizerExecutionId] : []);
-
-  const gradeInputs = [
-    inputRef("task", taskRef, "/workspace/input/task", false),
-    inputRef("runner-output", runnerOutputRef, "/workspace/input/runner-output", false),
-  ];
-  const gradeOutputs = [outputContract("scorecard", "workbench.scorecard.v1")];
-  const gradeBaseMetadata = {
-    trialIndex: input.trialIndex,
-    sampleIndex,
-    caseId,
-    task: executionConfig.task,
-  };
-  pushExecution(nodes, executions, createExecution({
-    input,
-    purpose: "grade-task",
-    adapter: graderAdapter,
-    inputs: gradeInputs,
-    outputs: gradeOutputs,
-    metadata: gradeBaseMetadata,
-    runtime: executionConfig.environment,
-  }), [runnerExecutionId]);
 
   return { nodes, executions };
 }

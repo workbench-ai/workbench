@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench-built-in-adapters",
-  "version": "0.0.41",
+  "version": "0.0.42",
   "type": "module",
   "repository": {
     "type": "git",
@@ -17,6 +17,8 @@
   },
   "bin": {
     "workbench-adapter-command": "dist/bin/command.js",
+    "workbench-adapter-tests": "dist/bin/tests.js",
+    "workbench-adapter-harbor": "dist/bin/harbor.js",
     "workbench-adapter-rubric": "dist/bin/rubric.js",
     "workbench-adapter-codex": "dist/bin/codex.js",
     "workbench-adapter-claude": "dist/bin/claude.js",

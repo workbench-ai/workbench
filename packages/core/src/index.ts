@@ -108,6 +108,8 @@ import {
 } from "./trace-files.ts";
 import {
   selectCaseFilesForRuntimePurpose,
+  selectTaskPublicFilesForTrial,
+  selectTaskTestFilesForTrial,
   selectTaskCaseFiles,
   taskSpecFromCaseFiles,
 } from "./execution-jobs.ts";
@@ -247,6 +249,8 @@ export {
   planWorkbenchExecutionJobsForPurpose,
   selectCaseFilesForExecution,
   selectCaseFilesForRuntimePurpose,
+  selectTaskPublicFilesForTrial,
+  selectTaskTestFilesForTrial,
   selectTaskCaseFiles,
   taskSpecFromCaseFiles,
   validateWorkbenchRunEnvelope,
@@ -637,7 +641,7 @@ function formatOptimizerSummary(spec: GenericRunSpec): string {
 }
 
 function formatGradeSummary(spec: GenericRunSpec): string {
-  return `adapter:${spec.grade.use}`;
+  return `adapter:${spec.score.use}`;
 }
 
 function environmentImage(spec: GenericRunSpec): string {
@@ -692,8 +696,47 @@ function protocolPhaseForExecution(
   return {
     kind: role,
     label: execution.purpose,
+    adapter: execution.adapter,
     command: command.command,
   };
+}
+
+function trialPhasesForExecution(
+  execution: WorkbenchExecutionSpec,
+  spec: GenericRunSpec,
+  manifests?: readonly WorkbenchAdapterManifest[],
+): WorkbenchWorkloadPhaseCommand[] {
+  const scorer = trialScoreAdapter(execution, spec);
+  return [
+    {
+      kind: "runner",
+      label: "run",
+      adapter: execution.adapter,
+      command: adapterProtocolCommandSpec(execution.adapter, manifests).command,
+    },
+    {
+      kind: "grader",
+      label: "score",
+      adapter: scorer,
+      command: adapterProtocolCommandSpec(scorer, manifests).command,
+    },
+  ];
+}
+
+function trialScoreAdapter(
+  execution: WorkbenchExecutionSpec,
+  spec: GenericRunSpec,
+): WorkbenchExecutionSpec["adapter"] {
+  const metadata = jsonRecord(execution.metadata);
+  const scoreAdapter = jsonRecord(metadata.scoreAdapter);
+  if (typeof scoreAdapter.use === "string" && scoreAdapter.use.length > 0) {
+    return {
+      use: scoreAdapter.use,
+      with: isJsonPayload(scoreAdapter.with) ? scoreAdapter.with : {},
+      ...(scoreAdapter.auth !== undefined && isJsonPayload(scoreAdapter.auth) ? { auth: scoreAdapter.auth } : {}),
+    };
+  }
+  return spec.score;
 }
 
 function adapterConfigRecord(
@@ -729,6 +772,7 @@ export function materializeWorkbenchRunResult(args: {
     .sort((left, right) => left.trialIndex - right.trialIndex);
   const evaluationJobs = args.jobs.filter(
     (job) =>
+      workbenchExecutionPurpose(job) === "trial" ||
       workbenchExecutionPurpose(job) === "grade-task" ||
       (workbenchExecutionPurpose(job) === "run-task" && job.status === "failed"),
   );
@@ -875,7 +919,7 @@ function candidateSourceMetadata(
   files: readonly SurfaceSnapshotFile[] | undefined,
 ): Json | null {
   const sourceFiles = (files ?? [])
-    .filter((file) => /^candidates\/[^/]+\/candidate\.ya?ml$/iu.test(file.path))
+    .filter((file) => /^subjects\/[^/]+\/subject\.ya?ml$/iu.test(file.path))
     .sort((left, right) => left.path.localeCompare(right.path))
     .map((file): Record<string, Json> => ({
       path: file.path,
@@ -988,7 +1032,7 @@ export function selectExecutionOutputFilesForInspection(args: {
   if (purpose === "run-task") {
     return selectRunnerOutputFilesForGrading(args.files);
   }
-  if (purpose === "grade-task") {
+  if (purpose === "grade-task" || purpose === "trial") {
     return args.files.filter((file) =>
       !isWorkbenchInternalOutputPath(file.path) &&
       normalizeRelativePath(file.path) === "scorecard.json",
@@ -1084,6 +1128,9 @@ function purposeSortKey(purpose: WorkbenchExecutionSpec["purpose"] | null): numb
     return 0;
   }
   if (purpose === "run-task") {
+    return 1;
+  }
+  if (purpose === "trial") {
     return 1;
   }
   if (purpose === "grade-task") {
@@ -1741,18 +1788,22 @@ function createInitialCandidateFiles(args: {
   changedPaths: string[];
   prompt: string;
 } {
-  const editPath = normalizeRelativePath(requireOptimizerEdits(args.spec)[0]!);
-  const candidatePaths = [editPath];
+  const editablePaths = optimizerEdits(args.spec).map(normalizeRelativePath);
+  const editPath = editablePaths[0];
+  const candidatePaths = editPath ? [editPath] : [];
   const files =
     args.baseFiles.length > 0
       ? args.baseFiles.map((file) => ({ ...file }))
-      : normalizeSurfaceFiles([{ path: editPath, content: "" }]);
+      : editPath
+        ? normalizeSurfaceFiles([{ path: editPath, content: "" }])
+        : [];
   const prompt = [
     `Run the candidate workload for benchmark: ${args.spec.benchmark.description}`,
-    `Trial ${args.trialIndex + 1} uses ${formatOptimizerSummary(args.spec)}; the improve adapter may edit the candidate before the run and grade phases score it.`,
+    `Trial ${args.trialIndex + 1} uses ${formatOptimizerSummary(args.spec)}; the improve adapter may edit the subject before Workbench scores it.`,
   ].join("\n");
   const byPath = new Map(files.map((file) => [file.path, file]));
   if (
+    editPath &&
     ![...byPath.keys()].some((filePath) => candidatePaths.includes(filePath))
   ) {
     byPath.set(editPath, {
@@ -1917,6 +1968,15 @@ export async function executeAdapterInCurrentSandboxRuntime(
     }
     if (execution.purpose === "run-task") {
       return await executeRunExecutionInSandbox(
+        runtimeInput,
+        execution,
+        startedAt,
+        capability,
+        eventPublisher,
+      );
+    }
+    if (execution.purpose === "trial") {
+      return await executeTrialExecutionInSandbox(
         runtimeInput,
         execution,
         startedAt,
@@ -2217,6 +2277,104 @@ async function executeRunExecutionInSandbox(
   return completedRunJob(args.job, execution, workload, result, startedAt);
 }
 
+async function executeTrialExecutionInSandbox(
+  args: WorkbenchExecutionRuntimeInput,
+  execution: WorkbenchExecutionSpec,
+  startedAt: string,
+  capability: ReturnType<typeof createWorkbenchExecutionCapability>,
+  eventPublisher?: WorkbenchExecutionEventPublisher,
+): Promise<HostedWorkbenchJob> {
+  const workload = createWorkbenchRunWorkload({
+    job: args.job,
+    spec: args.spec,
+    baseFiles: args.baseFiles,
+    caseFiles: args.caseFiles,
+    traceFiles: args.traceFiles,
+  });
+  const result = await runHostedCommandExecutionPhases(
+    args,
+    workload,
+    trialPhasesForExecution(execution, args.spec, args.adapterManifests),
+    startedAt,
+    {
+      capability,
+      eventPublisher,
+    },
+  );
+  if (result.error || (result.exitCode ?? 0) !== 0) {
+    return failWorkbenchRunJob(
+      args.job,
+      startedAt,
+      result.error ?? `Trial adapter execution exited with status ${result.exitCode}.`,
+      result.finishedAt,
+      result,
+    );
+  }
+  const scorecard = result.scorecard;
+  if (
+    !scorecard ||
+    typeof scorecard.score !== "number" ||
+    !Number.isFinite(scorecard.score)
+  ) {
+    return failWorkbenchRunJob(
+      args.job,
+      startedAt,
+      "Trial scorer must write /workspace/output/scorecard.json with a finite numeric score.",
+      result.finishedAt,
+      result,
+    );
+  }
+  const finishedAt = result.finishedAt ?? new Date().toISOString();
+  const usage = mergeUsageSummaries([
+    result.usage,
+    scorecard.usage,
+  ]);
+  const sample = evaluateSample({
+    candidateId: workload.candidateId,
+    files: result.files,
+    caseFiles: workload.caseFiles,
+    spec: workload.spec,
+    trialIndex: workload.trialIndex,
+    sampleIndex: workload.sampleIndex,
+    caseId: workload.caseId,
+    startedAt,
+    finishedAt,
+    durationMs: result.durationMs,
+    workload: {
+      ...result,
+      ...(usage ? { usage } : {}),
+      score: scorecard.score,
+    },
+  });
+  return {
+    ...args.job,
+    status: "succeeded",
+    attempt: Math.max(1, args.job.attempt),
+    startedAt,
+    finishedAt: sample.finishedAt,
+    updatedAt: sample.finishedAt ?? startedAt,
+    output: {
+      ok: true,
+      executionId: execution.id,
+      purpose: execution.purpose,
+      candidateId: workload.candidateId,
+      trialIndex: workload.trialIndex,
+      sampleIndex: workload.sampleIndex,
+      caseId: workload.caseId,
+      prompt: workload.prompt,
+      scorecard,
+      fileChanges:
+        result.fileChanges.length > 0
+          ? result.fileChanges
+          : workload.changedPaths,
+      files: result.files,
+      sample,
+      ...(usage ? { usage } : {}),
+      traces: traceFilePaths(result.files),
+    } as unknown as Json,
+  };
+}
+
 async function runHostedProtocolExecutionResult(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
@@ -2441,6 +2599,9 @@ async function runHostedCommandExecutionPhases(
       const execution = readWorkbenchExecutionSpec(workload.job);
       for (const phase of phases) {
         await resetHostedWorkloadPhaseOutput(workspace.root, phase);
+        if (phase.kind === "grader" && execution.purpose === "trial") {
+          await stageTrialScoringInputs(workspace.root, workload);
+        }
         const adapterRequestPath = await writeWorkbenchAdapterRequest(
           workspace.root,
           workload,
@@ -2587,6 +2748,9 @@ function executionPurposeRole(
   if (purpose === "run-task") {
     return "runner";
   }
+  if (purpose === "trial") {
+    return "runner";
+  }
   return "grader";
 }
 
@@ -2692,6 +2856,25 @@ export async function stageWorkbenchRunWorkload(
   ]);
   await fs.mkdir(inputDir(root), { recursive: true });
   await fs.mkdir(outputDir(root), { recursive: true });
+  if (purpose === "trial") {
+    await Promise.all([
+      fs.rm(runtimeTestsDir(root), { recursive: true, force: true }).catch(() => undefined),
+      fs.rm(runtimeLogsDir(root), { recursive: true, force: true }).catch(() => undefined),
+    ]);
+    await fs.mkdir(candidateDir(root), { recursive: true });
+    await fs.mkdir(taskDir(root), { recursive: true });
+    await fs.mkdir(runtimeLogsAgentDir(root), { recursive: true });
+    await fs.mkdir(runtimeLogsVerifierDir(root), { recursive: true });
+    await fs.mkdir(runtimeLogsArtifactsDir(root), { recursive: true });
+    await writeSurfaceFiles(candidateDir(root), workload.candidateFiles);
+    await writeSurfaceFiles(taskDir(root), workload.caseFiles);
+    await writeSurfaceFiles(
+      root,
+      selectTaskPublicFilesForTrial(workload.caseFiles, workload.caseId),
+    );
+    await writeSurfaceFiles(root, workload.candidateFiles);
+    return;
+  }
   if (purpose === "improve" || purpose === "run-task") {
     await fs.mkdir(candidateDir(root), { recursive: true });
     await writeSurfaceFiles(candidateDir(root), workload.candidateFiles);
@@ -2711,6 +2894,19 @@ export async function stageWorkbenchRunWorkload(
     await fs.mkdir(tracesDir(root), { recursive: true });
     await writeSurfaceFiles(tracesDir(root), workload.traceFiles);
   }
+}
+
+async function stageTrialScoringInputs(
+  root: string,
+  workload: WorkbenchRunWorkload,
+): Promise<void> {
+  const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
+  await fs.mkdir(runtimeTestsDir(root), { recursive: true });
+  await fs.mkdir(runtimeLogsVerifierDir(root), { recursive: true });
+  await writeSurfaceFiles(
+    runtimeTestsDir(root),
+    selectTaskTestFilesForTrial(workload.caseFiles, workload.caseId),
+  );
 }
 
 async function readHostedRunFailureResult(
@@ -2764,7 +2960,7 @@ async function readWorkbenchRunWorkloadResult(
           candidatePatchManifestPath(root),
           "candidate patch",
         )
-      : purpose === "grade-task"
+      : purpose === "grade-task" || purpose === "trial"
         ? await readRequiredRuntimeResult(
             scorecardManifestPath(root),
             "scorecard",
@@ -2774,7 +2970,7 @@ async function readWorkbenchRunWorkloadResult(
     ? validateWorkbenchExecutionOutputPayloads(readWorkbenchExecutionSpec(workload.job), {
         candidate_patch: result as Json,
       })
-    : purpose === "grade-task"
+    : purpose === "grade-task" || purpose === "trial"
       ? validateWorkbenchExecutionOutputPayloads(readWorkbenchExecutionSpec(workload.job), {
           scorecard: result as Json,
         })
@@ -2788,7 +2984,7 @@ async function readWorkbenchRunWorkloadResult(
   const candidatePatch =
     purpose === "improve" ? validatedPayloads.candidatePatch : undefined;
   const scorecard =
-    purpose === "grade-task" ? validatedPayloads.scorecard : undefined;
+    purpose === "grade-task" || purpose === "trial" ? validatedPayloads.scorecard : undefined;
   const declaredChanges =
     candidatePatch?.fileChanges ??
     (Array.isArray(result.fileChanges)
@@ -2899,6 +3095,10 @@ async function writeWorkbenchAdapterRequest(
   const requestPath = path.join(root, ".workbench", "request.json");
   await fs.mkdir(path.dirname(requestPath), { recursive: true });
   const task = workload.task?.task;
+  const adapter = phase.adapter ?? execution.adapter;
+  const expectedOutputs = phase.kind === "runner" && execution.purpose === "trial"
+    ? []
+    : execution.outputs;
   await fs.writeFile(
     requestPath,
     `${JSON.stringify({
@@ -2907,16 +3107,16 @@ async function writeWorkbenchAdapterRequest(
         id: execution.id,
         jobId: workload.job.id,
         purpose: execution.purpose,
-        role: executionPurposeRole(execution.purpose),
+        role: phase.kind,
         candidateId: workload.candidateId,
         trialIndex: workload.trialIndex,
         sampleIndex: workload.sampleIndex,
         caseId: workload.caseId,
       },
       adapter: {
-        use: execution.adapter.use,
-        with: adapterConfigRecord(execution.adapter),
-        ...(execution.adapter.auth !== undefined ? { auth: execution.adapter.auth } : {}),
+        use: adapter.use,
+        with: adapterConfigRecord(adapter),
+        ...(adapter.auth !== undefined ? { auth: adapter.auth } : {}),
       },
       ...(auth !== undefined ? { auth } : {}),
       benchmark: {
@@ -2930,7 +3130,7 @@ async function writeWorkbenchAdapterRequest(
         ? { optimizer: { edits: [...workload.spec.optimizer.edits] } }
         : {}),
       ...(task ? { task: { text: task } } : {}),
-      expectedOutputs: execution.outputs.map((output) => ({
+      expectedOutputs: expectedOutputs.map((output) => ({
         ...output,
         path: path.join(outputDir(root), output.name === "candidate_patch"
           ? "candidate_patch.json"
@@ -2940,12 +3140,18 @@ async function writeWorkbenchAdapterRequest(
       })),
       paths: {
         workspace: root,
+        cwd: root,
         input: inputDir(root),
         output: outputDir(root),
         candidate: candidateDir(root),
+        subject: candidateDir(root),
         task: taskDir(root),
         runnerOutput: runnerOutputDir(root),
         traces: tracesDir(root),
+        tests: runtimeTestsDir(root),
+        logs: runtimeLogsDir(root),
+        artifacts: runtimeLogsArtifactsDir(root),
+        scorecard: scorecardManifestPath(root),
       },
     }, null, 2)}\n`,
   );
@@ -2993,7 +3199,7 @@ function readWorkloadExecutionPurpose(
   workload: WorkbenchRunWorkload,
 ): WorkbenchExecutionSpec["purpose"] {
   const purpose = workbenchExecutionPurpose(workload.job);
-  if (purpose === "improve" || purpose === "run-task" || purpose === "grade-task") {
+  if (purpose === "improve" || purpose === "trial" || purpose === "run-task" || purpose === "grade-task") {
     return purpose;
   }
   throw new Error(
@@ -3033,6 +3239,26 @@ function inputDir(root: string): string {
 
 function outputDir(root: string): string {
   return `${root}/output`;
+}
+
+function runtimeTestsDir(root: string): string {
+  return process.env.WORKBENCH_IN_DOCKER_SANDBOX === "1" ? "/tests" : `${root}/tests`;
+}
+
+function runtimeLogsDir(root: string): string {
+  return process.env.WORKBENCH_IN_DOCKER_SANDBOX === "1" ? "/logs" : `${root}/logs`;
+}
+
+function runtimeLogsAgentDir(root: string): string {
+  return `${runtimeLogsDir(root)}/agent`;
+}
+
+function runtimeLogsVerifierDir(root: string): string {
+  return `${runtimeLogsDir(root)}/verifier`;
+}
+
+function runtimeLogsArtifactsDir(root: string): string {
+  return `${runtimeLogsDir(root)}/artifacts`;
 }
 
 function candidatePatchManifestPath(root: string): string {
@@ -3635,9 +3861,6 @@ function normalizeProposalJobOutput(
   const files = Array.isArray(record.files)
     ? record.files.filter(isSurfaceSnapshotFile)
     : [];
-  if (files.length === 0) {
-    return null;
-  }
   if (
     typeof record.trialIndex !== "number" ||
     !Number.isFinite(record.trialIndex)

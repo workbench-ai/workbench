@@ -393,7 +393,7 @@ export interface CandidateCaseCriterionResult {
   rationale?: string;
 }
 
-export type CandidateCasePhasePurpose = "run-task" | "grade-task";
+export type CandidateCasePhasePurpose = "trial" | "run-task" | "grade-task";
 
 export interface CandidateCasePhaseRef {
   runId: string;
@@ -538,7 +538,7 @@ export interface AuthoredWorkbenchSourceSpec {
   optimizer?: AuthoredWorkbenchOptimizerSpec;
 }
 
-export type WorkbenchExecutionPurpose = "improve" | "run-task" | "grade-task";
+export type WorkbenchExecutionPurpose = "improve" | "trial" | "run-task" | "grade-task";
 
 export type WorkbenchSandboxTemplateKind = "snapshot" | "oci";
 

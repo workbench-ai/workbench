@@ -31,7 +31,7 @@ async function main() {
       {
         ...validated.jobInput,
         now: startedAt,
-        workspaceRoot: "/workspace",
+        workspaceRoot: workspaceRootFromEnvironment(),
         pullImages: false,
         runtimeRegistry: "",
       },
@@ -49,6 +49,23 @@ async function main() {
     }, null, 2)}\n`);
     process.exitCode = 1;
   }
+}
+
+function workspaceRootFromEnvironment() {
+  const value = typeof process.env.WORKBENCH_WORKSPACE_ROOT === "string"
+    ? process.env.WORKBENCH_WORKSPACE_ROOT.trim()
+    : "";
+  return isSafeWorkspaceRoot(value) ? value : "/workspace";
+}
+
+function isSafeWorkspaceRoot(value) {
+  return value.startsWith("/")
+    && value !== "/"
+    && !value.startsWith("/workbench-runtime")
+    && !value.startsWith("/workbench-execution")
+    && value !== "/tests"
+    && value !== "/logs"
+    && !/[\0\r\n:]/u.test(value);
 }
 
 async function validateSandboxAdapterRequest(request) {

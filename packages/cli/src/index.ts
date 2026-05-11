@@ -214,7 +214,7 @@ interface WorkbenchCheckPlan {
   adapters: {
     improve: WorkbenchAdapterSummary | null;
     run: WorkbenchAdapterSummary;
-    grade: WorkbenchAdapterSummary;
+    score: WorkbenchAdapterSummary;
     sources: WorkbenchAdapterSourceSummary[];
   };
 }
@@ -373,12 +373,16 @@ export async function runCli(
         return await localRunList(rest, io);
       case "runs show":
         return await localRunShow(rest, io);
+      case "subjects list":
       case "candidates list":
         return await localCandidateList(rest, io);
+      case "subjects show":
       case "candidates show":
         return await localCandidateShow(rest, io);
+      case "subjects files":
       case "candidates files":
         return await localCandidateFiles(rest, io);
+      case "subjects preview":
       case "candidates preview":
         return await localCandidatePreview(rest, io);
       default:
@@ -420,7 +424,7 @@ function commandPathForHelp(argv: readonly string[]): string {
     return positionals.slice(0, 2).join(" ");
   }
   if (
-    positionals[0] === "candidates" &&
+    (positionals[0] === "subjects" || positionals[0] === "candidates") &&
     ["list", "show", "files", "preview"].includes(positionals[1] ?? "")
   ) {
     return positionals.slice(0, 2).join(" ");
@@ -678,7 +682,7 @@ function buildWorkbenchCheckPlan(source: LocalProjectSource): WorkbenchCheckPlan
     adapters: {
       improve: source.spec.improve ? adapterSummary(source.spec.improve) : null,
       run: adapterSummary(source.spec.run),
-      grade: adapterSummary(source.spec.grade),
+      score: adapterSummary(source.spec.score),
       sources: source.adapters.map(adapterSourceSummary),
     },
   };
@@ -704,7 +708,7 @@ function formatWorkbenchCheckPlan(
     `Optimizer edits: ${edits}`,
     `Tasks: ${plan.tasks.cases} case(s) from ${plan.tasks.path} (${plan.tasks.files} file(s))`,
     `Environment: ${plan.environment.dockerfile}, network ${network}, ${resources.cpu} CPU, ${resources.memoryGb}GB RAM, ${resources.timeoutMinutes}m timeout`,
-    `Execution: improve ${plan.adapters.improve ? formatAdapterSummary(plan.adapters.improve) : "not configured"}, run ${formatAdapterSummary(plan.adapters.run)}, grade ${formatAdapterSummary(plan.adapters.grade)}`,
+    `Execution: improve ${plan.adapters.improve ? formatAdapterSummary(plan.adapters.improve) : "not configured"}, run ${formatAdapterSummary(plan.adapters.run)}, score ${formatAdapterSummary(plan.adapters.score)}`,
     ...adapterSourceLines(plan.adapters.sources),
   ].join("\n");
 }
@@ -940,7 +944,7 @@ async function localRun(
               ),
             )
           : baseFiles;
-      const runnerJobs = planWorkbenchExecutionJobsForPurpose({
+      const trialJobs = planWorkbenchExecutionJobsForPurpose({
         ownerUserId: "local",
         projectId: "local",
         runId,
@@ -953,25 +957,10 @@ async function localRun(
         spec,
         environmentRef,
         workflow: "improve",
-        purpose: "run-task",
-      });
-      const graderJobs = planWorkbenchExecutionJobsForPurpose({
-        ownerUserId: "local",
-        projectId: "local",
-        runId,
-        candidateId,
-        trialIndex,
-        samples,
-        now: new Date().toISOString(),
-        caseIds,
-        caseFiles,
-        spec,
-        environmentRef,
-        workflow: "improve",
-        purpose: "grade-task",
+        purpose: "trial",
       });
       const dagJobs = await executeLocalDevelopmentDag({
-        jobs: [proposed, ...runnerJobs, ...graderJobs],
+        jobs: [proposed, ...trialJobs],
         spec,
         adapterManifests,
         baseFiles: proposedFiles,
@@ -1047,7 +1036,7 @@ async function localRun(
     finishedAt,
     durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
     optimizer: formatSpecOptimizer(spec),
-    grade: spec.grade.use,
+    grade: spec.score.use,
     strategy: "greedy",
     budget,
     repairBudget: 0,
@@ -1188,7 +1177,7 @@ async function localEvaluateCandidate(
 ): Promise<number> {
   void runtimeOptions;
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "samples", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "subject", "candidate", "samples", "json"]));
   const sourceArg = resolveSourceDir(parsed);
   const projectSource = await readLocalProjectSource(sourceArg);
   const workspace = projectSource.dir;
@@ -1215,7 +1204,7 @@ async function localEvaluateCandidate(
   let snapshot = await loadLocalArchive(workspace);
   const benchmarkFingerprint = await readLocalBenchmarkFingerprint(workspace);
   const sourceCandidateFingerprint = localCandidateFingerprint(projectSource);
-  const explicitCandidateId = asOptionalString(parsed.flags.candidate);
+  const explicitCandidateId = asOptionalString(parsed.flags.subject) ?? asOptionalString(parsed.flags.candidate);
   const existingSourceCandidate = snapshot.candidates.find((candidate) =>
     candidate.benchmarkFingerprint === benchmarkFingerprint &&
     candidate.candidateFingerprint === sourceCandidateFingerprint
@@ -1241,7 +1230,7 @@ async function localEvaluateCandidate(
     baseId: null,
   });
   const completedJobs: HostedWorkbenchJob[] = [proposal];
-  const runnerJobs = planWorkbenchExecutionJobsForPurpose({
+  const trialJobs = planWorkbenchExecutionJobsForPurpose({
     ownerUserId: "local",
     projectId: "local",
     runId,
@@ -1254,25 +1243,10 @@ async function localEvaluateCandidate(
     spec,
     environmentRef,
     workflow: "eval",
-    purpose: "run-task",
-  });
-  const graderJobs = planWorkbenchExecutionJobsForPurpose({
-    ownerUserId: "local",
-    projectId: "local",
-    runId,
-    candidateId: evaluatedCandidateId,
-    trialIndex: 0,
-    samples,
-    now: startedAt,
-    caseIds,
-    caseFiles,
-    spec,
-    environmentRef,
-    workflow: "eval",
-    purpose: "grade-task",
+    purpose: "trial",
   });
   const dagJobs = await executeLocalDevelopmentDag({
-    jobs: [proposal, ...runnerJobs, ...graderJobs],
+    jobs: [proposal, ...trialJobs],
     spec,
     adapterManifests,
     baseFiles: files,
@@ -1318,7 +1292,7 @@ async function localEvaluateCandidate(
     finishedAt,
     durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
     optimizer: "none",
-    grade: spec.grade.use,
+    grade: spec.score.use,
     strategy: "direct",
     budget: 1,
     repairBudget: 0,
@@ -1651,7 +1625,7 @@ async function localRestore(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "dry-run", "yes", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "subject", "candidate", "dry-run", "yes", "json"]));
   const workspace = resolveDir(parsed);
   const spec = await readLocalSpecIfValid(workspace);
   if (!spec) {
@@ -1718,7 +1692,7 @@ async function localCandidateShow(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "subject", "candidate", "json"]));
   const snapshot = await loadLocalArchive(resolveDir(parsed));
   const candidateId = readCandidateIdFlag(parsed, snapshot);
   const candidate = readLocalCandidate(snapshot, candidateId);
@@ -1743,7 +1717,7 @@ async function localCandidateFiles(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "subject", "candidate", "json"]));
   const snapshot = await loadLocalArchive(resolveDir(parsed));
   const candidateId = readCandidateIdFlag(parsed, snapshot);
   const candidate = readLocalCandidate(snapshot, candidateId);
@@ -1768,7 +1742,7 @@ async function localCandidatePreview(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "path", "output", "view", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "subject", "candidate", "path", "output", "view", "json"]));
   const snapshot = await loadLocalArchive(resolveDir(parsed));
   const candidateId = readCandidateIdFlag(parsed, snapshot);
   const preview = createCandidateFilePreview({
@@ -2630,7 +2604,7 @@ function requiredAuthTargetsForSpec(
     [
       ...(spec.improve ? [spec.improve] : []),
       spec.run,
-      spec.grade,
+      spec.score,
     ],
     manifests,
   ).map((target) => ({
@@ -5541,7 +5515,7 @@ function readCandidateIdFlag(
   parsed: ParsedArgs,
   snapshot: { activeId: string | null },
 ): string {
-  const explicit = asOptionalString(parsed.flags.candidate);
+  const explicit = asOptionalString(parsed.flags.subject) ?? asOptionalString(parsed.flags.candidate);
   if (explicit) {
     return explicit;
   }
@@ -5549,7 +5523,7 @@ function readCandidateIdFlag(
     return snapshot.activeId;
   }
   throw new UsageError(
-    "Missing required --candidate; no active candidate exists.",
+    "Missing required --subject; no active subject exists.",
   );
 }
 

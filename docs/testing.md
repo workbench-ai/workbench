@@ -16,25 +16,47 @@ The standard product validation surface is:
 
 These commands exercise the open Workbench packages: `workbench-contract`, `workbench-protocol`, `workbench-core`, `workbench-built-in-adapters`, `workbench-ui`, and `workbench`.
 
-Private monorepo maintainers validate this source-backed public repository layout before publishing changes here.
+Run `pnpm workbench:public-source:validate` from the monorepo root when package, docs, UI, adapter, or skill changes should be proven against the source-backed public repository layout.
 
-Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox capabilities, phase-specific file staging, Docker local execution, candidate materialization, runs, lineage, traces, and the public sandbox adapter runner.
+Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox capabilities, same-environment trials, Docker local execution, subject materialization, runs, lineage, traces, and the public sandbox adapter runner.
 
 Useful manual spot checks:
 
 - `pnpm cli --help`
 - `tmpdir=$(mktemp -d); pnpm cli init "$tmpdir" --command smoke-command --json`
 - `pnpm cli check --dir "$tmpdir" --json`
-- `pnpm cli eval "$tmpdir/candidates/command" --samples 1 --json`
-- `pnpm cli improve "$tmpdir/candidates/command" --optimizer "$tmpdir/optimizers/command.yaml" --budget 1 --samples 1 --json`
+- `pnpm cli eval "$tmpdir/subjects/command" --samples 1 --json`
+- `pnpm cli improve "$tmpdir/subjects/command" --optimizer "$tmpdir/optimizers/command.yaml" --budget 1 --samples 1 --json`
 - `pnpm cli runs list --dir "$tmpdir" --json`
-- `pnpm cli candidates list --dir "$tmpdir" --json`
+- `pnpm cli subjects list --dir "$tmpdir" --json`
 - `pnpm cli open --dir "$tmpdir" --no-open --json`
 - `pnpm cli push --help`
 - `pnpm cli clone --help`
 - `pnpm cli pull --help`
 - `pnpm cli cloud eval --help`
 - `pnpm cli --version`
+
+## Harbor Smoke
+
+For Harbor interop, create or select a tiny Harbor task directory containing `instruction.md`, `task.toml`, `environment/Dockerfile`, and `tests/test.sh`. Then create a Workbench project with:
+
+```yaml
+tasks:
+  use: harbor
+  with:
+    path: ../harbor-tasks
+score:
+  use: tests
+```
+
+Run:
+
+```bash
+pnpm cli check --dir "$tmpdir" --json
+pnpm cli eval "$tmpdir/subjects/command" --samples 1 --json
+```
+
+The score should come from `scorecard.json`, `/logs/verifier/reward.json`, or `/logs/verifier/reward.txt`.
 
 ## Workbench Cloud Client Checks
 
@@ -61,16 +83,16 @@ That harness starts the cloud-owned builder, host supervisor, and sandbox host. 
 
 ## Three-Statement Bench
 
-Use the real benchmark package as a local regression target:
+Use the real benchmark package as a local regression target after it has been migrated to subject/task v2 source:
 
 ```bash
 pnpm cli check --dir ../three-statement-bench --json
 pnpm cli runs list --dir ../three-statement-bench --json
-pnpm cli candidates list --dir ../three-statement-bench --json
+pnpm cli subjects list --dir ../three-statement-bench --json
 pnpm cli open --dir ../three-statement-bench --no-open --json
 ```
 
-When validating in a browser, open the URL returned by `workbench open`, verify the benchmark master pane, version selector, Manifest and Files tabs, candidate list, candidate detail Manifest and Files tabs, Runs, Results, and Lineage.
+When validating in a browser, open the URL returned by `workbench open`, verify the benchmark master pane, version selector, Manifest and Files tabs, subject list, subject detail Manifest and Files tabs, Runs, Results, and Lineage.
 
 ## Release
 

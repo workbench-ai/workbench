@@ -1,29 +1,29 @@
 # CLI
 
-`workbench` is local-first. Normal commands run, inspect, and serve the local project. Workbench Cloud is a remote layer for cloning, pushing, pulling, hosted execution, stars, and forks.
+`workbench` is local-first. Normal commands run, inspect, improve, and serve the local project. Workbench Cloud is an optional remote layer for cloning, pushing, pulling, hosted execution, stars, and forks.
 
-The project model is small:
+The public project model is intentionally small:
 
-- benchmark: `benchmark.yaml`, tasks, environment, and grading
-- benchmark fingerprint: the comparability boundary
-- candidate: `candidates/<name>/candidate.yaml` plus mounted files at `candidates/<name>/files/`
+- benchmark: `benchmark.yaml`, tasks, environment, score adapter, and benchmark-owned adapter sources
+- subject: `subjects/<name>/subject.yaml` plus optional files at `subjects/<name>/files/`
+- trial: one subject attempt on one task in one mutable environment
+- scorecard: normalized score, metrics, feedback, traces, and artifacts for a trial
 - optimizer: optional `optimizers/<name>.yaml` improve configuration
-- run: chronological evidence for eval or improve work
 - remote: Workbench Cloud origin used by `clone`, `fetch`, `pull`, and `push`
 
 ## Local Flow
 
 ```bash
-workbench init --skill invoice-review --agent codex
+workbench init --command smoke
 workbench check
-workbench eval candidates/codex --samples 1
+workbench eval subjects/command --samples 1
 workbench improve --budget 1 --samples 1
-workbench candidates list
+workbench subjects list
 workbench runs list
 workbench open
 ```
 
-`workbench improve` uses the current candidate by default and evaluates it first if needed. Use `--from CANDIDATE_ID` only when improving a specific historical candidate.
+`workbench eval` evaluates a subject against the current benchmark. `workbench improve` uses the current subject by default, evaluates it first if needed, then asks the optimizer to patch subject files. Use `--from SUBJECT_ID` only when improving a specific historical subject snapshot.
 
 `workbench open` starts a local read-only web server. Keep the command running while the page is open.
 
@@ -44,13 +44,15 @@ workbench cloud star alice/invoice-review
 ## Hosted Execution
 
 ```bash
-workbench cloud eval candidates/codex --benchmark alice/invoice-review@v1 --samples 1 --watch
-workbench cloud improve candidates/codex --base cand_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch
+workbench cloud eval subjects/codex --benchmark alice/invoice-review@v1 --samples 1 --watch
+workbench cloud improve subjects/codex --base cand_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch
 workbench cloud open cand_123 --no-open --json
 workbench cloud runs show run_123 --json
 workbench cloud runs cancel run_123
 workbench cloud candidates publish cand_123
 ```
+
+Hosted resource ids still use the existing cloud `cand_...` id prefix. That is a storage/API id, not the authored source model.
 
 Hosted watch commands are client-side polling only. Stopping the client does not cancel the hosted run; use `workbench cloud runs cancel RUN_ID`.
 
@@ -65,17 +67,17 @@ workbench adapters create PATH [--dir DIR] [--json]
 workbench adapters list [--dir DIR] [--json]
 workbench adapters inspect ID [--dir DIR] [--json]
 workbench adapters test ID|SOURCE [--dir DIR] [--request PATH] [--output DIR] [--json]
-workbench eval [SOURCE] [--dir DIR] [--candidate ID] [--samples N] [--json]
-workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--json]
+workbench eval [SOURCE] [--dir DIR] [--subject ID] [--samples N] [--json]
+workbench improve [SOURCE] [--dir DIR] [--from SUBJECT_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--json]
 workbench open [SOURCE] [--dir DIR] [--host HOST] [--port N] [--no-open] [--json]
 workbench checkpoint [--dir DIR] [--json]
-workbench restore [--dir DIR] [--candidate ID] [--dry-run] [--yes] [--json]
+workbench restore [--dir DIR] [--subject ID] [--dry-run] [--yes] [--json]
 workbench runs list [--dir DIR] [--json]
 workbench runs show RUN_ID [--dir DIR] [--json]
-workbench candidates list [--dir DIR] [--json]
-workbench candidates show CANDIDATE_ID [--dir DIR] [--json]
-workbench candidates files [--dir DIR] [--candidate ID] [--json]
-workbench candidates preview --path PATH [--dir DIR] [--candidate ID] [--output PATH|-] [--json]
+workbench subjects list [--dir DIR] [--json]
+workbench subjects show SUBJECT_ID [--dir DIR] [--json]
+workbench subjects files [--dir DIR] [--subject ID] [--json]
+workbench subjects preview --path PATH [--dir DIR] [--subject ID] [--output PATH|-] [--json]
 workbench login [--base-url URL] [--no-open] [--json]
 workbench logout [--json]
 workbench whoami [--dir DIR] [--json]
@@ -104,18 +106,37 @@ workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--j
 
 ```text
 benchmark.yaml
-candidates/
+subjects/
   codex/
-    candidate.yaml
+    subject.yaml
     files/
       SKILL.md
 optimizers/
   codex.yaml
 tasks/
+  task-001/
+    task.yaml
+    files/
+    tests/
 environment/
   Dockerfile
 ```
 
-candidate.yaml does not declare a benchmark or path. The project benchmark is `benchmark.yaml`, and the candidate files are the sibling `files/` directory.
+`subject.yaml` does not declare a benchmark or path. The project benchmark is `benchmark.yaml`, and subject files are the sibling `files/` directory.
 
 Adapter sources can be benchmark-contained paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by the adapter resolver. A declared source whose manifest id matches a built-in id overrides that built-in for the project. Use `workbench adapters test` to validate a manifest, or add `--request` to replay an adapter command locally against a `workbench.adapter.v1` fixture.
+
+## Harbor Tasks
+
+Harbor interop is adapter-based:
+
+```yaml
+tasks:
+  use: harbor
+  with:
+    path: ../terminal-bench-subset
+score:
+  use: tests
+```
+
+The Harbor task-source adapter resolves Harbor task directories into Workbench task packages. The `tests` scorer runs verifier scripts in the same mutated environment after the subject run and normalizes `scorecard.json`, `/logs/verifier/reward.json`, or `/logs/verifier/reward.txt` into a Workbench scorecard.

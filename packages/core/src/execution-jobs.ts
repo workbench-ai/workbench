@@ -20,8 +20,14 @@ export type WorkbenchRunWorkflow = "eval" | "improve";
 
 export const MAX_WORKBENCH_RUN_BUDGET = 20;
 const TASK_CONTROL_FILE = "task.yaml";
-const TASK_INPUT_PREFIX = "input/";
-const TASK_EXPECTED_PREFIX = "expected/";
+const TASK_INSTRUCTION_FILE = "instruction.md";
+const TASK_HARBOR_CONFIG_FILE = "task.toml";
+const TASK_PUBLIC_PREFIX = "files/";
+const TASK_TESTS_PREFIX = "tests/";
+const TASK_SOLUTION_PREFIX = "solution/";
+const TASK_ENVIRONMENT_PREFIX = "environment/";
+const LEGACY_TASK_INPUT_PREFIX = "input/";
+const LEGACY_TASK_EXPECTED_PREFIX = "expected/";
 
 export function expectedWorkbenchRunJobCount(args: {
   workflow: WorkbenchRunWorkflow;
@@ -31,12 +37,10 @@ export function expectedWorkbenchRunJobCount(args: {
   gradeJobCount?: number;
 }): number {
   const caseCount = Math.max(1, Math.floor(args.caseCount));
-  const gradeJobCount = Math.max(1, Math.floor(args.gradeJobCount ?? 1));
   if (args.workflow === "improve") {
-    return args.budget *
-      (1 + (args.samples * caseCount * (1 + gradeJobCount)));
+    return args.budget * (1 + (args.samples * caseCount));
   }
-  return 1 + (args.samples * caseCount * (1 + gradeJobCount));
+  return 1 + (args.samples * caseCount);
 }
 
 export function validateWorkbenchRunEnvelope(args: {
@@ -129,7 +133,10 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
 export function caseExecutionIds(files: readonly SurfaceSnapshotFile[]): string[] {
   return [...new Set(files.flatMap((file) => {
     const normalized = normalizeRelativePath(file.path);
-    if (!normalized.endsWith(`/${TASK_CONTROL_FILE}`)) {
+    if (
+      !normalized.endsWith(`/${TASK_CONTROL_FILE}`) &&
+      !normalized.endsWith(`/${TASK_INSTRUCTION_FILE}`)
+    ) {
       return [];
     }
     const slash = normalized.indexOf("/");
@@ -176,17 +183,27 @@ export function taskSpecFromCaseFiles(
   caseId: string,
 ): GenericTaskSpec {
   assertTaskCaseLayout(files, caseId);
-  const taskFile = files.find((file) => normalizeRelativePath(file.path) === TASK_CONTROL_FILE && file.encoding === "utf8");
-  if (!taskFile) {
-    throw new Error(`Task ${caseId} is missing ${TASK_CONTROL_FILE}.`);
+  const taskFile = files.find((file) =>
+    normalizeRelativePath(file.path) === TASK_CONTROL_FILE && file.encoding === "utf8"
+  );
+  if (taskFile) {
+    return parseGenericTaskSpec(taskFile.content, `${caseId}/${TASK_CONTROL_FILE}`);
   }
-  return parseGenericTaskSpec(taskFile.content, `${caseId}/${TASK_CONTROL_FILE}`);
+  const instructionFile = files.find((file) =>
+    normalizeRelativePath(file.path) === TASK_INSTRUCTION_FILE && file.encoding === "utf8"
+  );
+  if (!instructionFile) {
+    throw new Error(`Task ${caseId} is missing ${TASK_CONTROL_FILE} or ${TASK_INSTRUCTION_FILE}.`);
+  }
+  return {
+    task: instructionFile.content.trim(),
+  };
 }
 
 export function selectCaseFilesForRuntimePurpose(
   files: readonly SurfaceSnapshotFile[],
   caseId: string,
-  purpose: "run-task" | "grade-task",
+  purpose: "run-task" | "grade-task" | "trial",
 ): SurfaceSnapshotFile[] {
   assertTaskCaseLayout(files, caseId);
   return files
@@ -195,13 +212,44 @@ export function selectCaseFilesForRuntimePurpose(
       if (filePath === TASK_CONTROL_FILE) {
         return false;
       }
-      if (filePath.startsWith(TASK_INPUT_PREFIX)) {
+      if (filePath.startsWith(TASK_PUBLIC_PREFIX) || filePath.startsWith(LEGACY_TASK_INPUT_PREFIX)) {
         return true;
       }
-      return purpose === "grade-task" && filePath.startsWith(TASK_EXPECTED_PREFIX);
+      return (purpose === "grade-task" || purpose === "trial") &&
+        (filePath.startsWith(TASK_TESTS_PREFIX) || filePath.startsWith(LEGACY_TASK_EXPECTED_PREFIX));
     })
     .map((file) => ({ ...file, path: normalizeRelativePath(file.path) }))
     .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function selectTaskPublicFilesForTrial(
+  files: readonly SurfaceSnapshotFile[],
+  caseId: string,
+): SurfaceSnapshotFile[] {
+  assertTaskCaseLayout(files, caseId);
+  return stripTaskPrefix(files, [TASK_PUBLIC_PREFIX, LEGACY_TASK_INPUT_PREFIX]);
+}
+
+export function selectTaskTestFilesForTrial(
+  files: readonly SurfaceSnapshotFile[],
+  caseId: string,
+): SurfaceSnapshotFile[] {
+  assertTaskCaseLayout(files, caseId);
+  return stripTaskPrefix(files, [TASK_TESTS_PREFIX, LEGACY_TASK_EXPECTED_PREFIX]);
+}
+
+function stripTaskPrefix(
+  files: readonly SurfaceSnapshotFile[],
+  prefixes: readonly string[],
+): SurfaceSnapshotFile[] {
+  return files.flatMap((file): SurfaceSnapshotFile[] => {
+    const filePath = normalizeRelativePath(file.path);
+    const prefix = prefixes.find((entry) => filePath.startsWith(entry));
+    if (!prefix) {
+      return [];
+    }
+    return [{ ...file, path: filePath.slice(prefix.length) }];
+  }).sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function assertTaskCaseLayout(
@@ -221,8 +269,14 @@ function assertTaskCaseLayout(
 function isTaskCaseRootPath(filePath: string): boolean {
   return (
     filePath === TASK_CONTROL_FILE ||
-    filePath.startsWith(TASK_INPUT_PREFIX) ||
-    filePath.startsWith(TASK_EXPECTED_PREFIX)
+    filePath === TASK_INSTRUCTION_FILE ||
+    filePath === TASK_HARBOR_CONFIG_FILE ||
+    filePath.startsWith(TASK_PUBLIC_PREFIX) ||
+    filePath.startsWith(TASK_TESTS_PREFIX) ||
+    filePath.startsWith(TASK_SOLUTION_PREFIX) ||
+    filePath.startsWith(TASK_ENVIRONMENT_PREFIX) ||
+    filePath.startsWith(LEGACY_TASK_INPUT_PREFIX) ||
+    filePath.startsWith(LEGACY_TASK_EXPECTED_PREFIX)
   );
 }
 
@@ -379,7 +433,7 @@ export function workbenchExecutionJobPurpose(job: HostedWorkbenchJob): Workbench
   }
   const execution = asRecord(asRecord(job.input).execution);
   const purpose = execution.purpose;
-  return purpose === "improve" || purpose === "run-task" || purpose === "grade-task" ? purpose : null;
+  return purpose === "improve" || purpose === "trial" || purpose === "run-task" || purpose === "grade-task" ? purpose : null;
 }
 
 function readExecutionMetadataNumber(

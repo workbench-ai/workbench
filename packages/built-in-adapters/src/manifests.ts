@@ -2,12 +2,13 @@ import type {
   WorkbenchAdapterManifest,
 } from "@workbench-ai/workbench-protocol";
 
-export type WorkbenchBuiltInAdapterId = "codex" | "claude" | "pi" | "command" | "rubric";
+export type WorkbenchBuiltInAdapterId = "codex" | "claude" | "pi" | "command" | "rubric" | "tests" | "harbor";
 
 const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAdapterManifest> = {
   codex: {
     id: "codex",
     protocol: "workbench.adapter.v1",
+    capabilities: ["runner", "optimizer"],
     setup: [
       builtInAdapterCommandSetup("codex"),
       "npm install --global @openai/codex@0.125.0",
@@ -23,6 +24,7 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
   claude: {
     id: "claude",
     protocol: "workbench.adapter.v1",
+    capabilities: ["runner", "optimizer"],
     setup: [
       builtInAdapterCommandSetup("claude"),
       "npm install --global @anthropic-ai/claude-code@2.1.119",
@@ -57,6 +59,7 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
   pi: {
     id: "pi",
     protocol: "workbench.adapter.v1",
+    capabilities: ["runner", "optimizer"],
     setup: [
       builtInAdapterCommandSetup("pi"),
       "npm install --global @mariozechner/pi-coding-agent@0.70.2",
@@ -66,15 +69,31 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
   command: {
     id: "command",
     protocol: "workbench.adapter.v1",
+    capabilities: ["runner", "scorer", "optimizer"],
     setup: [builtInAdapterCommandSetup("command")],
     command: adapterCommandName("command"),
   },
   rubric: {
     id: "rubric",
     protocol: "workbench.adapter.v1",
+    capabilities: ["scorer"],
     setup: [builtInAdapterCommandSetup("rubric")],
     command: adapterCommandName("rubric"),
     refs: ["/judge"],
+  },
+  tests: {
+    id: "tests",
+    protocol: "workbench.adapter.v1",
+    capabilities: ["scorer"],
+    setup: [builtInAdapterCommandSetup("tests")],
+    command: adapterCommandName("tests"),
+  },
+  harbor: {
+    id: "harbor",
+    protocol: "workbench.adapter.v1",
+    capabilities: ["task-source"],
+    setup: [],
+    command: adapterCommandName("harbor"),
   },
 };
 
@@ -100,9 +119,9 @@ export function adapterCommandName(adapterId: string): string {
 
 function builtInAdapterCommandSetup(adapterId: WorkbenchBuiltInAdapterId): string {
   const command = adapterCommandName(adapterId);
-  const packageRunner = `/app/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
+  const packageRunner = `/workbench-runtime/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
   const globalRunner = `/usr/local/lib/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
-  const monorepoRunner = `/app/products/workbench/packages/built-in-adapters/src/bin/${adapterId}.ts`;
+  const monorepoRunner = `/workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/${adapterId}.ts`;
   return [
     `printf '%s\\n'`,
     "'#!/bin/sh'",
@@ -119,6 +138,7 @@ function builtInAdapterCommandSetup(adapterId: WorkbenchBuiltInAdapterId): strin
 function cloneManifest(manifest: WorkbenchAdapterManifest): WorkbenchAdapterManifest {
   return {
     ...manifest,
+    ...(manifest.capabilities ? { capabilities: [...manifest.capabilities] } : {}),
     setup: [...manifest.setup],
     ...(manifest.auth ? { auth: JSON.parse(JSON.stringify(manifest.auth)) as WorkbenchAdapterManifest["auth"] } : {}),
     ...(manifest.refs ? { refs: [...manifest.refs] } : {}),

@@ -14,7 +14,7 @@ The evals intentionally cover the local-first CLI, Workbench Cloud layer, and ev
 - idempotent pushes
 - starting and watching eval/improve workflows
 - opening or returning Workbench Cloud URLs so an agent can keep an embedded browser synchronized with CLI work
-- inspecting, previewing, and exporting hosted candidates
+- inspecting, previewing, and exporting hosted subject snapshots
 
 They should reward the public local workflow, hosted `workbench cloud` workflow, and eval-authoring behavior.
 

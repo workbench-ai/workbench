@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import {
@@ -31,10 +32,13 @@ import {
 import YAML from "yaml";
 
 export const WORKBENCH_BENCHMARK_FILE = BENCHMARK_SPEC_FILE;
-export const WORKBENCH_CANDIDATES_DIR = "candidates";
+export const WORKBENCH_SUBJECTS_DIR = "subjects";
+export const WORKBENCH_CANDIDATES_DIR = WORKBENCH_SUBJECTS_DIR;
 export const WORKBENCH_OPTIMIZERS_DIR = "optimizers";
-export const WORKBENCH_CANDIDATE_FILE = "candidate.yaml";
-export const WORKBENCH_CANDIDATE_FILES_DIR = "files";
+export const WORKBENCH_SUBJECT_FILE = "subject.yaml";
+export const WORKBENCH_CANDIDATE_FILE = WORKBENCH_SUBJECT_FILE;
+export const WORKBENCH_SUBJECT_FILES_DIR = "files";
+export const WORKBENCH_CANDIDATE_FILES_DIR = WORKBENCH_SUBJECT_FILES_DIR;
 
 export type HostedFile = WorkspaceSnapshotFile;
 
@@ -45,6 +49,7 @@ export interface LocalProjectSource {
   spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>;
   benchmarkPath: string;
   benchmarkSource: string;
+  subjectName: string;
   candidateName: string;
   candidateDir: string;
   candidateFilesPath: string;
@@ -84,11 +89,11 @@ export async function readLocalProjectSource(
     optimizerPath,
   } = paths;
   const benchmarkSource = await readRequiredTextFile(benchmarkPath, WORKBENCH_BENCHMARK_FILE);
-  const candidateSource = await readRequiredTextFile(candidateSpecPath, "candidate YAML");
+  const candidateSource = await readRequiredTextFile(candidateSpecPath, "subject YAML");
   const optimizerSource = optimizerPath
     ? await readRequiredTextFile(optimizerPath, "optimizer YAML")
     : undefined;
-  const normalizedSources = normalizeSourceYamlForExecution({
+  const normalizedSources = await normalizeSourceYamlForExecution({
     dir,
     benchmarkPath,
     benchmarkSource,
@@ -100,9 +105,9 @@ export async function readLocalProjectSource(
   });
   const resolvedSource = parseWorkbenchSourceFiles({
     benchmarkSource: normalizedSources.benchmarkSource,
-    candidateSource: normalizedSources.candidateSource,
+    subjectSource: normalizedSources.candidateSource,
     optimizerSource: normalizedSources.optimizerSource,
-    candidatePath: normalizedSources.candidatePath,
+    subjectPath: normalizedSources.candidatePath,
   });
   const specSource = serializeWorkbenchResolvedSourceYaml(resolvedSource);
   const validation = validateWorkbenchResolvedSourceYaml(specSource);
@@ -123,7 +128,7 @@ export async function readLocalProjectSource(
   const adapters = await resolveWorkbenchAdaptersForProject(dir, spec);
   const benchmarkAdapterIds = [
     ...new Set(collectWorkbenchAdapterInvocations(
-      [spec.grade],
+      [spec.score],
       adapters.map((adapter) => adapter.manifest),
     ).map((invocation) => invocation.use)),
   ];
@@ -132,14 +137,10 @@ export async function readLocalProjectSource(
     adapters,
   );
   const adapterFiles = adapterSourceFiles(adapters);
-  const candidateFiles = normalizeSurfaceFiles(
-    await readSnapshotFiles(resolveProjectPath(dir, spec.candidate.path)),
-  );
-  if (candidateFiles.length === 0) {
-    throw new WorkspaceSnapshotError(
-      `Candidate snapshot has no files: ${resolveProjectPath(dir, spec.candidate.path)}`,
-    );
-  }
+  const absoluteCandidateFilesPath = resolveProjectPath(dir, spec.candidate.path);
+  const candidateFiles = await directoryExists(absoluteCandidateFilesPath)
+    ? normalizeSurfaceFiles(await readSnapshotFiles(absoluteCandidateFilesPath))
+    : [];
   const rawCaseFiles = normalizeSurfaceFiles(
     await readSnapshotFiles(resolveProjectPath(dir, spec.tasks.path)),
   );
@@ -172,6 +173,7 @@ export async function readLocalProjectSource(
     spec,
     benchmarkPath,
     benchmarkSource,
+    subjectName: path.basename(candidateDir),
     candidateName: path.basename(candidateDir),
     candidateDir,
     candidateFilesPath,
@@ -250,7 +252,7 @@ async function resolveLocalProjectSourcePaths(
     }
     if (isOptimizerSourceRecord(sourceRecord)) {
       throw new WorkspaceSnapshotError(
-        `Optimizer source must be passed with --optimizer; pass a source directory or candidate YAML as SOURCE: ${resolved}`,
+        `Optimizer source must be passed with --optimizer; pass a source directory or subject YAML as SOURCE: ${resolved}`,
       );
     }
     throw new WorkspaceSnapshotError(`Unsupported Workbench YAML source: ${resolved}`);
@@ -316,11 +318,11 @@ async function resolveCandidatePaths(dir: string): Promise<{
   }
   if (candidates.length > 1) {
     throw new WorkspaceSnapshotError(
-      `Multiple candidate directories found under ${candidatesDir}; pass candidates/NAME or candidates/NAME/candidate.yaml explicitly.`,
+        `Multiple subject directories found under ${candidatesDir}; pass subjects/NAME or subjects/NAME/subject.yaml explicitly.`,
     );
   }
   throw new WorkspaceSnapshotError(
-    `No candidate directories found under ${candidatesDir}; create candidates/NAME/candidate.yaml and candidates/NAME/files/.`,
+    `No subject directories found under ${candidatesDir}; create subjects/NAME/subject.yaml and subjects/NAME/files/.`,
   );
 }
 
@@ -346,7 +348,7 @@ async function resolveOptimizerPath(
   return undefined;
 }
 
-function normalizeSourceYamlForExecution(args: {
+async function normalizeSourceYamlForExecution(args: {
   dir: string;
   benchmarkPath: string;
   benchmarkSource: string;
@@ -355,12 +357,12 @@ function normalizeSourceYamlForExecution(args: {
   candidateSource: string;
   optimizerPath?: string;
   optimizerSource?: string;
-}): {
+}): Promise<{
   benchmarkSource: string;
   candidateSource: string;
   candidatePath: string;
   optimizerSource?: string;
-} {
+}> {
   const benchmark = parseYamlRecord(args.benchmarkSource, args.benchmarkPath);
   const candidate = parseYamlRecord(args.candidateSource, args.candidateSpecPath);
   const optimizer = args.optimizerSource === undefined || args.optimizerPath === undefined
@@ -374,6 +376,16 @@ function normalizeSourceYamlForExecution(args: {
       args.dir,
       resolveYamlReference(benchmarkDir, benchmark.tasks),
     );
+  } else {
+    const taskSource = await resolveTaskSourceAdapter({
+      root: args.dir,
+      yamlDir: benchmarkDir,
+      value: benchmark.tasks,
+    });
+    benchmark.tasks = taskSource.tasksPath;
+    if (!yamlRecord(benchmark.environment) && taskSource.environment) {
+      benchmark.environment = taskSource.environment;
+    }
   }
   const environment = yamlRecord(benchmark.environment);
   if (environment && typeof environment.dockerfile === "string") {
@@ -412,12 +424,147 @@ function normalizeAdapterSourcePaths(
   );
 }
 
+async function resolveTaskSourceAdapter(args: {
+  root: string;
+  yamlDir: string;
+  value: unknown;
+}): Promise<{
+  tasksPath: string;
+  environment?: Record<string, unknown>;
+}> {
+  const record = yamlRecord(args.value);
+  if (!record || typeof record.use !== "string") {
+    throw new WorkspaceSnapshotError("benchmark.yaml.tasks must be a relative path or an adapter invocation.");
+  }
+  if (record.use !== "harbor") {
+    throw new WorkspaceSnapshotError(`Unsupported task-source adapter ${record.use}.`);
+  }
+  const config = yamlRecord(record.with) ?? {};
+  const sourcePath = typeof config.path === "string"
+    ? resolveYamlReference(args.yamlDir, config.path)
+    : null;
+  if (!sourcePath) {
+    throw new WorkspaceSnapshotError("tasks.use: harbor requires tasks.with.path.");
+  }
+  return await resolveHarborTaskSource({
+    root: args.root,
+    sourcePath,
+  });
+}
+
+async function resolveHarborTaskSource(args: {
+  root: string;
+  sourcePath: string;
+}): Promise<{
+  tasksPath: string;
+  environment?: Record<string, unknown>;
+}> {
+  const stat = await fs.stat(args.sourcePath).catch(() => null);
+  if (!stat?.isDirectory()) {
+    throw new WorkspaceSnapshotError(`Harbor task source path is not a directory: ${args.sourcePath}`);
+  }
+  const childTasks = await listHarborTaskDirectories(args.sourcePath);
+  if (childTasks.length === 0) {
+    throw new WorkspaceSnapshotError(`Harbor task source has no task directories: ${args.sourcePath}`);
+  }
+  const digest = createHash("sha256")
+    .update(path.resolve(args.sourcePath))
+    .digest("hex")
+    .slice(0, 16);
+  const generatedRoot = path.join(args.root, ".workbench", "generated", "harbor", digest);
+  const tasksRoot = path.join(generatedRoot, "tasks");
+  await fs.rm(generatedRoot, { recursive: true, force: true }).catch(() => undefined);
+  await fs.mkdir(tasksRoot, { recursive: true });
+  let firstEnvironment: Record<string, unknown> | undefined;
+  for (const taskDir of childTasks) {
+    const taskId = path.basename(taskDir);
+    const target = path.join(tasksRoot, taskId);
+    await fs.mkdir(target, { recursive: true });
+    await copyIfExists(path.join(taskDir, "environment"), path.join(target, "environment"));
+    await copyIfExists(path.join(taskDir, "tests"), path.join(target, "tests"));
+    await copyIfExists(path.join(taskDir, "solution"), path.join(target, "solution"));
+    await copyIfExists(path.join(taskDir, "files"), path.join(target, "files"));
+    await copyIfExists(path.join(taskDir, "instruction.md"), path.join(target, "instruction.md"));
+    await copyIfExists(path.join(taskDir, "task.toml"), path.join(target, "task.toml"));
+    const instruction = await fs.readFile(path.join(taskDir, "instruction.md"), "utf8").catch(() => "");
+    const taskToml = await fs.readFile(path.join(taskDir, "task.toml"), "utf8").catch(() => "");
+    const workdir = readHarborWorkdir(taskToml);
+    const taskYaml = {
+      task: instruction.trim() || taskId,
+      environment: {
+        dockerfile: "environment/Dockerfile",
+        ...(workdir ? { workdir } : {}),
+      },
+    };
+    await fs.writeFile(path.join(target, "task.yaml"), `${YAML.stringify(taskYaml).trimEnd()}\n`);
+    if (!firstEnvironment) {
+      firstEnvironment = {
+        dockerfile: toRootRelativePath(args.root, path.join(target, "environment", "Dockerfile")),
+        ...(workdir ? { workdir } : {}),
+      };
+    }
+  }
+  return {
+    tasksPath: toRootRelativePath(args.root, tasksRoot),
+    ...(firstEnvironment ? { environment: firstEnvironment } : {}),
+  };
+}
+
+async function listHarborTaskDirectories(root: string): Promise<string[]> {
+  const direct = await isHarborTaskDirectory(root);
+  if (direct) {
+    return [root];
+  }
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  const tasks: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const candidate = path.join(root, entry.name);
+    if (await isHarborTaskDirectory(candidate)) {
+      tasks.push(candidate);
+    }
+  }
+  return tasks.sort((left, right) => left.localeCompare(right));
+}
+
+async function isHarborTaskDirectory(dir: string): Promise<boolean> {
+  const [instruction, taskToml, tests] = await Promise.all([
+    fileExists(path.join(dir, "instruction.md")),
+    fileExists(path.join(dir, "task.toml")),
+    fs.stat(path.join(dir, "tests")).then((stat) => stat.isDirectory(), () => false),
+  ]);
+  return instruction && taskToml && tests;
+}
+
+async function copyIfExists(source: string, target: string): Promise<void> {
+  const stat = await fs.stat(source).catch(() => null);
+  if (!stat) {
+    return;
+  }
+  if (stat.isDirectory()) {
+    await fs.cp(source, target, { recursive: true });
+    return;
+  }
+  if (stat.isFile()) {
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(source, target);
+    await fs.chmod(target, stat.mode).catch(() => undefined);
+  }
+}
+
+function readHarborWorkdir(taskToml: string): string | undefined {
+  const match = /^\s*workdir\s*=\s*"([^"]+)"\s*$/gmu.exec(taskToml);
+  return match?.[1];
+}
+
 function isPathAdapterSource(source: string): boolean {
   return !/^(?:npm|git):/iu.test(source.trim());
 }
 
 function isBenchmarkSourceRecord(record: Record<string, unknown>): boolean {
-  return record.tasks !== undefined && record.environment !== undefined && record.grade !== undefined;
+  return record.tasks !== undefined && record.environment !== undefined && record.score !== undefined;
 }
 
 function isCandidateSourceRecord(record: Record<string, unknown>): boolean {
@@ -457,7 +604,7 @@ function projectRootForCandidateDir(candidateDir: string): string {
   const parent = path.basename(path.dirname(candidateDir));
   if (parent !== WORKBENCH_CANDIDATES_DIR) {
     throw new WorkspaceSnapshotError(
-      `Candidate directory must be under ${WORKBENCH_CANDIDATES_DIR}/NAME: ${candidateDir}`,
+      `Subject directory must be under ${WORKBENCH_CANDIDATES_DIR}/NAME: ${candidateDir}`,
     );
   }
   return path.dirname(path.dirname(candidateDir));
@@ -498,6 +645,10 @@ function normalizeSnapshotPath(filePath: string): string {
 
 async function fileExists(filePath: string): Promise<boolean> {
   return await fs.stat(filePath).then((stat) => stat.isFile(), () => false);
+}
+
+async function directoryExists(filePath: string): Promise<boolean> {
+  return await fs.stat(filePath).then((stat) => stat.isDirectory(), () => false);
 }
 
 async function listCandidateManifestFiles(dir: string): Promise<string[]> {
