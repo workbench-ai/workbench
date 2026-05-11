@@ -1,0 +1,390 @@
+{
+  "owner_id": "workbench",
+  "suite_name": "workbench-hosted",
+  "suite_scope": "product-local",
+  "submission_schema_version": 1,
+  "suite_latency_expectation": {
+    "minimum_significant_improvement_ratio": 0.2,
+    "notes": "Tasks measure whether an agent can drive the local-first CLI, Workbench Cloud client commands, and eval authoring without relying on private hosted implementation state."
+  },
+  "evals": [
+    {
+      "id": "install-or-verify-cli",
+      "title": "Verify or install Workbench",
+      "category": "cli_install",
+      "prompt": "Prepare Workbench access for this repo from scratch. Assume the `workbench` binary is not installed. Install the published package, verify the binary, authenticate to `https://v2.workbench.ai`, and report whether Workbench Cloud access is ready.",
+      "expected_output": "The response uses the Workbench skill, installs the published package only because the binary is missing, verifies the binary, starts the Workbench login flow, and explains that npm registry or auth failures should stop the cloud access flow cleanly.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 120000,
+        "target_ms": 60000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "uses the Workbench skill",
+          "kind": "includes",
+          "path": "skills_used",
+          "value": "workbench"
+        },
+        {
+          "text": "installs the published Workbench package",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "npm\\s+(?:install|i)\\s+-g\\s+@workbench-ai/workbench\\b"
+        },
+        {
+          "text": "verifies the workbench binary",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench\\s+--version|command\\s+-v\\s+workbench)\\b"
+        },
+        {
+          "text": "starts hosted Workbench login",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+login(?:\\s+--base-url\\s+https://v2\\.workbench\\.ai)?\\b"
+        },
+        {
+          "text": "reports install is conditional on a missing binary",
+          "kind": "equals",
+          "path": "answer.installs_only_when_missing",
+          "value": true
+        },
+        {
+          "text": "reports registry or auth failures stop the cloud access flow cleanly",
+          "kind": "equals",
+          "path": "answer.registry_or_auth_failure_stops_setup",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "hosted-benchmark-and-spec",
+      "title": "Create a hosted benchmark and apply a spec",
+      "category": "hosted_spec",
+      "prompt": "Create a hosted Workbench benchmark named `invoice-parser`, push local source idempotently, and report the benchmark id plus the push result.",
+      "expected_output": "The response targets a hosted Workbench server, creates or selects a benchmark with the local-first CLI, pushes the local source, opens or returns the Workbench Cloud benchmark URL for an embedded browser, and reports hosted benchmark metadata.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 150000,
+        "target_ms": 75000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "uses the Workbench skill",
+          "kind": "includes",
+          "path": "skills_used",
+          "value": "workbench"
+        },
+        {
+          "text": "creates or updates a hosted benchmark",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+push\\b"
+        },
+        {
+          "text": "checks local source before push",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+check\\b"
+        },
+        {
+          "text": "reports that hosted benchmark state is durable",
+          "kind": "equals",
+          "path": "answer.uses_hosted_benchmark_state",
+          "value": true
+        },
+        {
+          "text": "opens or returns the Workbench Cloud benchmark URL",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
+        }
+      ]
+    },
+    {
+      "id": "existing-workflow-eval-authoring",
+      "title": "Author an eval from an existing workflow",
+      "category": "eval_authoring",
+      "prompt": "Create a Workbench eval around an existing command `python scripts/check_report.py --tasks tasks --out result.json`. Write the source-shaped files, adapt the runner/grader contract, validate `benchmark.yaml` and a candidate directory, and explain how to push and start one smoke run.",
+      "expected_output": "The response uses the Workbench skill eval-authoring docs, starts from the existing-workflow guide, writes split version-1 `benchmark.yaml`, a candidate manifest such as `candidates/command/candidate.yaml`, candidate files under `candidates/command/files`, and optional optimizer YAML such as `optimizers/command.yaml` with required benchmark `name`, `description`, `tasks`, shared `environment`, and `grade`, required candidate `name` and `run`, and optimizer `edits` and `improve` when improve is needed, uses task `input/` for runner-visible fixtures and task `expected/` for private grading material, wraps the existing command in explicit single-command `use: command` run/grade envelopes where the run phase writes inspectable files under `/workspace/output`, the grade phase writes `/workspace/output/scorecard.json` with a finite `score`, and uses `workbench check`, `workbench push`, and a smoke eval with an explicit candidate directory.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 210000,
+        "target_ms": 105000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "uses the Workbench skill",
+          "kind": "includes",
+          "path": "skills_used",
+          "value": "workbench"
+        },
+        {
+          "text": "routes through the existing-workflow authoring guide",
+          "kind": "equals",
+          "path": "answer.uses_existing_workflow_guide",
+          "value": true
+        },
+        {
+          "text": "writes hosted benchmark and candidate YAML",
+          "kind": "equals",
+          "path": "answer.writes_split_yaml",
+          "value": true
+        },
+        {
+          "text": "requires the scorecard file",
+          "kind": "equals",
+          "path": "answer.requires_scorecard_file",
+          "value": true
+        },
+        {
+          "text": "validates the local spec",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+check\\b"
+        }
+      ]
+    },
+    {
+      "id": "file-output-task-eval-authoring",
+      "title": "Author an eval from file outputs",
+      "category": "eval_authoring",
+      "prompt": "Create a hosted Workbench eval for a workflow that produces Office files from uploaded materials: a source DOCX, golden DOCX, and reference XLSX. Build tasks, choose an Office-capable runtime, keep the candidate as the mutable workflow, validate the spec, and describe the first smoke run.",
+      "expected_output": "The response uses the Workbench skill file-output task docs, chooses focused file recipes, keeps the candidate as the mutable workflow being improved, creates source-shaped candidate and task files with a candidate manifest plus sibling `files/` directory and `benchmark.tasks`, puts only supporting public file inputs under task `input/`, puts non-empty private expected files under task `expected/`, uses rubric grading for qualitative scoring by default, uses command grading only for deterministic checks or an existing scorer, uses an Office-capable Dockerfile runtime through `benchmark.environment.dockerfile`, and validates the source before push/run commands.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 240000,
+        "target_ms": 120000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "uses the Workbench skill",
+          "kind": "includes",
+          "path": "skills_used",
+          "value": "workbench"
+        },
+        {
+          "text": "routes through the file-output task authoring guide",
+          "kind": "equals",
+          "path": "answer.uses_file_output_task_guide",
+          "value": true
+        },
+        {
+          "text": "loads only the relevant file recipes",
+          "kind": "includes",
+          "path": "answer.loaded_file_recipes",
+          "value": "docx"
+        },
+        {
+          "text": "requires non-empty expected files",
+          "kind": "equals",
+          "path": "answer.requires_non_empty_expected_files",
+          "value": true
+        },
+        {
+          "text": "uses rubric grading by default for qualitative file scoring",
+          "kind": "equals",
+          "path": "answer.uses_rubric_grading_by_default",
+          "value": true
+        },
+        {
+          "text": "uses the source-shaped template layout",
+          "kind": "equals",
+          "path": "answer.template_layout",
+          "value": "source-shaped"
+        },
+        {
+          "text": "uses an Office-capable Dockerfile environment",
+          "kind": "equals",
+          "path": "answer.uses_dockerfile_environment",
+          "value": true
+        },
+        {
+          "text": "validates the local spec",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+check\\b"
+        }
+      ]
+    },
+    {
+      "id": "hosted-upload-and-run",
+      "title": "Sync snapshots and start a hosted run",
+      "category": "hosted_run",
+      "prompt": "Push `./candidates/claude/files` and `./tasks` to an existing hosted benchmark, start one hosted improve run from base candidate `cand_123` with optimizer `optimizers/claude.yaml`, budget 1, and samples 1, watch it to terminal status, and report the run id and candidate id.",
+      "expected_output": "The response treats local directories as Workbench project source, pushes benchmark source, starts a hosted improve run with `workbench cloud improve`, explicit `--base cand_123`, and `--optimizer optimizers/claude.yaml`, watches the hosted run, uses the hosted command returned URLs or `workbench cloud open` when browser navigation is needed, and reports the resulting run and candidate.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 180000,
+        "target_ms": 90000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "uses the Workbench skill",
+          "kind": "includes",
+          "path": "skills_used",
+          "value": "workbench"
+        },
+        {
+          "text": "pushes local source",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+push\\b"
+        },
+        {
+          "text": "starts a hosted run",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+improve\\b[^\\n]*--base\\s+cand_123[^\\n]*--optimizer\\s+optimizers/claude\\.yaml"
+        },
+        {
+          "text": "watches the hosted run",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+(?:watch\\b|improve\\b[^\\n]*--watch)"
+        },
+        {
+          "text": "reports the requested budget",
+          "kind": "equals",
+          "path": "answer.budget",
+          "value": 1
+        },
+        {
+          "text": "opens or returns the resulting candidate URL after the run when needed",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:cand_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
+        }
+      ]
+    },
+    {
+      "id": "hosted-candidate-inspection",
+      "title": "Inspect and export a hosted candidate",
+      "category": "candidate_inspection",
+      "prompt": "List hosted candidates for a benchmark, list files for the selected candidate, preview `workbench-run-summary.md`, and export the candidate to `./best-candidate`.",
+      "expected_output": "The response uses hosted candidate inspection commands, opens or returns the selected candidate's Workbench Cloud URL for browser inspection, and pulls the selected candidate without mutating hosted state.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 120000,
+        "target_ms": 60000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "uses the Workbench skill",
+          "kind": "includes",
+          "path": "skills_used",
+          "value": "workbench"
+        },
+        {
+          "text": "lists hosted candidates",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+list\\b"
+        },
+        {
+          "text": "lists candidate files",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+files\\b"
+        },
+        {
+          "text": "previews a candidate file",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+preview\\b"
+        },
+        {
+          "text": "pulls the hosted candidate",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+pull\\b"
+        },
+        {
+          "text": "opens or returns the selected candidate URL",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:cand_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
+        },
+        {
+          "text": "reports export as non-mutating",
+          "kind": "equals",
+          "path": "answer.export_mutates_hosted_state",
+          "value": false
+        }
+      ]
+    },
+    {
+      "id": "hosted-api-targeting",
+      "title": "Configure the hosted API target",
+      "category": "configuration",
+      "prompt": "Configure the CLI to target `https://v2.workbench.ai`, explain the environment-variable override for a one-off command, and state whether the user needs a git repository or preexisting local Workbench state.",
+      "expected_output": "The response uses workbench login or WORKBENCH_API_URL for hosted API targeting and makes clear that git and preexisting local Workbench state are not required.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 90000,
+        "target_ms": 45000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "uses the Workbench skill",
+          "kind": "includes",
+          "path": "skills_used",
+          "value": "workbench"
+        },
+        {
+          "text": "records login command output",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+login\\s+--base-url\\s+https://v2\\.workbench\\.ai\\b"
+        },
+        {
+          "text": "mentions environment override",
+          "kind": "equals",
+          "path": "answer.env_override",
+          "value": "WORKBENCH_API_URL"
+        },
+        {
+          "text": "reports git is not required",
+          "kind": "equals",
+          "path": "answer.requires_git_repo",
+          "value": false
+        },
+        {
+          "text": "reports preexisting local Workbench state is not required",
+          "kind": "equals",
+          "path": "answer.requires_local_state",
+          "value": false
+        }
+      ]
+    }
+  ]
+}
