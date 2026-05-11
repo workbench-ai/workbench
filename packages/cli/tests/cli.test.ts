@@ -112,6 +112,7 @@ describe("workbench CLI", () => {
     expect(io.stdoutText()).toContain("workbench init");
     expect(io.stdoutText()).toContain("workbench check [SOURCE] [--dir DIR]");
     expect(io.stdoutText()).toContain("workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID]");
+    expect(io.stdoutText()).toContain("workbench adapters test ID|SOURCE");
     expect(io.stdoutText()).toContain("workbench open [SOURCE] [--dir DIR]");
     expect(io.stdoutText()).toContain("workbench cloud benchmarks|runs|candidates");
     expect(io.stdoutText()).toContain("Workbench project containing benchmark.yaml plus candidates/<name>/candidate.yaml");
@@ -154,9 +155,23 @@ describe("workbench CLI", () => {
     expect(await runCli(["cloud", "benchmarks", "delete", "--help"], deleteIo)).toBe(0);
     expect(deleteIo.stdoutText()).toContain("workbench cloud benchmarks delete OWNER/BENCHMARK");
     expect(deleteIo.stdoutText()).toContain("--dry-run");
+    const adapterTestIo = createIo();
+    expect(await runCli(["adapters", "test", "--help"], adapterTestIo)).toBe(0);
+    expect(adapterTestIo.stdoutText()).toContain("workbench adapters test ID|SOURCE");
+    expect(adapterTestIo.stdoutText()).toContain("replay");
     const loginIo = createIo();
     expect(await runCli(["login", "--help"], loginIo)).toBe(0);
     expect(loginIo.stdoutText()).not.toContain("Bare project commands target the current directory.");
+  });
+
+  test("rejects invalid hosted flags", async () => {
+    const runListIo = createIo();
+    expect(await runCli(["cloud", "runs", "list", "--watc", "--json"], runListIo)).toBe(2);
+    expect(runListIo.stdoutText()).toContain("Unsupported flag: --watc");
+
+    const watchIo = createIo();
+    expect(await runCli(["cloud", "eval", "--interval-ms", "10", "--json"], watchIo)).toBe(2);
+    expect(watchIo.stdoutText()).toContain("--interval-ms and --timeout-ms require --watch");
   });
 
   test("keeps command docs aligned with the public CLI registry", async () => {
@@ -712,6 +727,232 @@ describe("workbench CLI", () => {
     );
     const refreshedCheckIo = createIo();
     expect(await runCli(["check", "--dir", workspace, "--json"], refreshedCheckIo)).toBe(0);
+  });
+
+  test("project-declared adapter sources can override built-in ids", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-adapter-override-"));
+
+    expect(await runCli(["init", workspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
+    expect(await runCli(["adapters", "create", "adapters/codex", "--dir", workspace, "--json"], createIo())).toBe(0);
+    await appendCandidateAdapters(workspace, ["../../adapters/codex"]);
+
+    const listIo = createIo();
+    expect(await runCli(["adapters", "list", "--dir", workspace, "--json"], listIo)).toBe(0);
+    const listed = JSON.parse(listIo.stdoutText()) as {
+      adapters: Array<{ id: string; kind: string; installed: boolean; overridesBuiltin?: boolean }>;
+    };
+    const codexEntries = listed.adapters.filter((adapter) => adapter.id === "codex");
+    expect(codexEntries).toHaveLength(1);
+    expect(codexEntries[0]).toMatchObject({
+      id: "codex",
+      kind: "path",
+      installed: true,
+      overridesBuiltin: true,
+    });
+
+    const inspectIo = createIo();
+    expect(await runCli(["adapters", "inspect", "codex", "--dir", workspace, "--json"], inspectIo)).toBe(0);
+    expect(JSON.parse(inspectIo.stdoutText())).toMatchObject({
+      ok: true,
+      adapter: {
+        id: "codex",
+        kind: "path",
+        declaredSource: "adapters/codex",
+        overridesBuiltin: true,
+      },
+    });
+  });
+
+  test("duplicate custom adapter ids are still rejected", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-adapter-conflict-"));
+
+    expect(await runCli(["init", workspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
+    await mkdir(path.join(workspace, "adapters", "left"), { recursive: true });
+    await mkdir(path.join(workspace, "adapters", "right"), { recursive: true });
+    for (const source of ["left", "right"]) {
+      await writeFile(path.join(workspace, "adapters", source, "workbench.adapter.yaml"), [
+        "id: duplicate",
+        "protocol: workbench.adapter.v1",
+        "setup: []",
+        `command: node ${source}.mjs`,
+        "",
+      ].join("\n"));
+      await writeFile(path.join(workspace, "adapters", source, `${source}.mjs`), "");
+    }
+    await appendCandidateAdapters(workspace, ["../../adapters/left", "../../adapters/right"]);
+
+    const checkIo = createIo();
+    expect(await runCli(["check", "--dir", workspace, "--json"], checkIo)).toBe(1);
+    expect(checkIo.stdoutText()).toContain("Adapter id duplicate is provided by both adapters/left and adapters/right");
+
+    const listIo = createIo();
+    expect(await runCli(["adapters", "list", "--dir", workspace, "--json"], listIo)).toBe(1);
+    expect(listIo.stdoutText()).toContain("Adapter id duplicate is provided by both adapters/left and adapters/right");
+  });
+
+  test("adapters test validates manifests and replays a request fixture", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-adapter-test-"));
+
+    expect(await runCli(["init", workspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
+    expect(await runCli(["adapters", "create", "adapters/my-agent", "--dir", workspace, "--json"], createIo())).toBe(0);
+
+    const manifestOnlyIo = createIo();
+    expect(await runCli(["adapters", "test", "adapters/my-agent", "--dir", workspace, "--json"], manifestOnlyIo)).toBe(0);
+    expect(JSON.parse(manifestOnlyIo.stdoutText())).toMatchObject({
+      ok: true,
+      mode: "manifest",
+      adapter: { id: "my-agent" },
+    });
+
+    const adapterRoot = path.join(workspace, "adapters", "grader");
+    await mkdir(adapterRoot, { recursive: true });
+    await writeFile(path.join(adapterRoot, "workbench.adapter.yaml"), [
+      "id: grader",
+      "protocol: workbench.adapter.v1",
+      "setup: []",
+      "command: node adapter.mjs",
+      "",
+    ].join("\n"));
+    await writeFile(path.join(adapterRoot, "adapter.mjs"), [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, 'utf8'));",
+      "if (request.execution.purpose !== 'grade-task') process.exit(3);",
+      "const output = process.env.WORKBENCH_OUTPUT;",
+      "fs.mkdirSync(output, { recursive: true });",
+      "fs.writeFileSync(path.join(output, 'scorecard.json'), JSON.stringify({ score: 1, summary: 'ok' }));",
+      "",
+    ].join("\n"));
+    const requestPath = path.join(workspace, "grader-request.json");
+    await writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v1",
+      execution: {
+        id: "exec_adapter_test",
+        purpose: "grade-task",
+      },
+      adapter: {
+        use: "grader",
+        with: {},
+      },
+      expectedOutputs: [{
+        name: "scorecard",
+        path: "/workspace/output/scorecard.json",
+      }],
+      paths: {
+        workspace,
+        output: "/workspace/output",
+      },
+    }, null, 2)}\n`);
+
+    const replayIo = createIo();
+    expect(await runCli([
+      "adapters",
+      "test",
+      "adapters/grader",
+      "--dir",
+      workspace,
+      "--request",
+      "grader-request.json",
+      "--output",
+      "grader-output",
+      "--json",
+    ], replayIo)).toBe(0);
+    expect(JSON.parse(replayIo.stdoutText())).toMatchObject({
+      ok: true,
+      mode: "replay",
+      replay: {
+        purpose: "grade-task",
+        outputs: ["scorecard.json"],
+      },
+    });
+    await expect(readFile(path.join(workspace, "grader-output", "scorecard.json"), "utf8")).resolves.toContain("ok");
+
+    const runnerRoot = path.join(workspace, "adapters", "runner");
+    await mkdir(runnerRoot, { recursive: true });
+    await writeFile(path.join(runnerRoot, "workbench.adapter.yaml"), [
+      "id: runner",
+      "protocol: workbench.adapter.v1",
+      "setup: []",
+      "command: node adapter.mjs",
+      "",
+    ].join("\n"));
+    await writeFile(path.join(runnerRoot, "adapter.mjs"), [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "const output = process.env.WORKBENCH_OUTPUT;",
+      "fs.mkdirSync(output, { recursive: true });",
+      "fs.writeFileSync(path.join(output, 'runner.txt'), 'ok');",
+      "",
+    ].join("\n"));
+    const runnerRequestPath = path.join(workspace, "runner-request.json");
+    await writeFile(runnerRequestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v1",
+      execution: {
+        id: "exec_adapter_runner_test",
+        purpose: "run-task",
+      },
+      adapter: {
+        use: "runner",
+        with: {},
+      },
+      paths: {
+        workspace,
+        output: "/workspace/output",
+      },
+    }, null, 2)}\n`);
+    const runnerReplayIo = createIo();
+    expect(await runCli([
+      "adapters",
+      "test",
+      "adapters/runner",
+      "--dir",
+      workspace,
+      "--request",
+      "runner-request.json",
+      "--output",
+      "runner-output",
+      "--json",
+    ], runnerReplayIo)).toBe(0);
+    expect(JSON.parse(runnerReplayIo.stdoutText())).toMatchObject({
+      ok: true,
+      mode: "replay",
+      replay: {
+        purpose: "run-task",
+        outputs: ["runner.txt"],
+      },
+    });
+  });
+
+  test("checked-in echo adapter example replays its request fixture", async () => {
+    const output = await mkdtemp(path.join(os.tmpdir(), "workbench-echo-adapter-output-"));
+    const io = createIo();
+
+    expect(await runCli([
+      "adapters",
+      "test",
+      "examples/adapters/echo",
+      "--dir",
+      productRoot,
+      "--request",
+      "examples/adapters/echo/requests/grade-task.json",
+      "--output",
+      output,
+      "--json",
+    ], io)).toBe(0);
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      mode: "replay",
+      adapter: {
+        id: "echo",
+        auth: expect.any(Object),
+        refs: ["/judge"],
+      },
+      replay: {
+        purpose: "grade-task",
+        outputs: ["scorecard.json"],
+      },
+    });
+    await expect(readFile(path.join(output, "scorecard.json"), "utf8")).resolves.toContain("echo accepted");
   });
 
   test("push sends authored Dockerfile source separately from composed adapter runtime", async () => {

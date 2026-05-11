@@ -5,7 +5,7 @@ import type {
   TraceSpan,
   TraceSpanStatus,
   TraceSummary,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 
 import { createId, nowIso } from "./internal-utils.js";
 

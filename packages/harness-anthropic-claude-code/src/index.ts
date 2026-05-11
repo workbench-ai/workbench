@@ -36,14 +36,14 @@ import {
   type StartSessionArgs,
   type StartTurnArgs,
   buildCanonicalToolCall,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 import type {
   HarnessAuth,
   HarnessEvent,
   JsonObject,
   JsonValue,
   TraceSpan,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 import { z } from "zod";
 import {
   projectClaudeGlobalSkills,

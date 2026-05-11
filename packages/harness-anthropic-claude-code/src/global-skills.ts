@@ -4,7 +4,7 @@ import path from "node:path";
 import {
   projectGlobalSkills,
   syncEnabledGlobalSkillsToTarget,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 
 function claudeSkillsRoot(homeDir: string): string {
   return path.join(homeDir, ".claude", "skills");

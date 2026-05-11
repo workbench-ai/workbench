@@ -46,7 +46,9 @@ import {
 } from "@workbench-ai/workbench-core";
 import {
   collectWorkbenchAdapterAuthRequirements,
+  normalizeWorkbenchAdapterCommandRequest,
   withDefaultWorkbenchAdapterAuthProfiles as applyDefaultWorkbenchAdapterAuthProfiles,
+  type WorkbenchAdapterCommandRequest,
 } from "@workbench-ai/workbench-protocol";
 
 import {
@@ -64,6 +66,7 @@ import {
 import {
   builtinAdapterManifests,
   composeRuntimeDockerfileWithAdapters,
+  resolveBuiltinWorkbenchAdapter,
   resolveProjectAdapterSource,
   resolveWorkbenchAdaptersForProject,
   WORKBENCH_ADAPTER_MANIFEST_FILE,
@@ -230,6 +233,7 @@ interface WorkbenchAdapterSourceSummary {
   declaredSource: string;
   resolvedSource: string;
   stability: "builtin" | "local" | "pinned" | "floating";
+  overridesBuiltin?: boolean;
 }
 
 type HostedFile = WorkspaceSnapshotFile;
@@ -402,6 +406,9 @@ function commandPathForHelp(argv: readonly string[]): string {
   );
   if (positionals[0] === "cloud") {
     return positionals.slice(0, 3).join(" ");
+  }
+  if (positionals[0] === "adapters" && positionals[1] === "test") {
+    return "adapters test";
   }
   if (positionals[0] === "auth" || positionals[0] === "remote") {
     return positionals.slice(0, 2).join(" ");
@@ -741,6 +748,7 @@ function adapterSourceSummary(adapter: ResolvedWorkbenchAdapter): WorkbenchAdapt
     declaredSource: adapter.declaredSource,
     resolvedSource: adapter.source,
     stability: adapter.stability,
+    ...(adapter.overridesBuiltin ? { overridesBuiltin: true } : {}),
   };
 }
 
@@ -755,7 +763,8 @@ function adapterSourceLines(sources: readonly WorkbenchAdapterSourceSummary[]): 
 }
 
 function formatAdapterSourceSummary(source: WorkbenchAdapterSourceSummary): string {
-  return `${source.id} ${source.stability} ${formatAdapterResolution(source)}`;
+  const override = source.overridesBuiltin ? " overrides built-in" : "";
+  return `${source.id} ${source.stability}${override} ${formatAdapterResolution(source)}`;
 }
 
 function formatAdapterResolution(source: {
@@ -816,7 +825,7 @@ async function localRun(
   runtimeOptions: CliRuntimeOptions,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "optimizer", "base", "from", "budget", "samples", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "optimizer", "from", "budget", "samples", "json"]));
   const sourceArg = resolveSourceDir(parsed);
   const projectSource = await readLocalProjectSource(sourceArg, {
     optimizerPath: asOptionalString(parsed.flags.optimizer),
@@ -1099,7 +1108,7 @@ async function ensureLocalImproveBaseCandidate(args: {
   runtimeOptions: CliRuntimeOptions;
 }): Promise<CandidateRecord> {
   let snapshot = await loadLocalArchive(args.workspace);
-  const explicitBase = asOptionalString(args.parsed.flags.base) ?? asOptionalString(args.parsed.flags.from);
+  const explicitBase = asOptionalString(args.parsed.flags.from);
   const benchmarkFingerprint = await readLocalBenchmarkFingerprint(args.workspace);
   if (explicitBase) {
     let candidate = readLocalCandidate(snapshot, explicitBase);
@@ -1317,7 +1326,7 @@ async function localEvaluateCandidate(
     trialsExecuted: 1,
     samples,
     sampleConcurrency: 1,
-    stoppedReason: materialized.failedJobCount > 0 ? "completed" : "completed",
+    stoppedReason: "completed",
     outcome: materialized.failedJobCount > 0 ? "error" : "ok",
   }, []);
   await saveLocalJobs(workspace, completedJobs);
@@ -1863,6 +1872,8 @@ async function runAdaptersCommand(
       return await adaptersList(rest, io);
     case "inspect":
       return await adaptersInspect(rest, io);
+    case "test":
+      return await adaptersTest(rest, io);
     default:
       throw new UsageError(`Unknown command: adapters ${argv.join(" ")}`);
   }
@@ -1912,22 +1923,23 @@ async function adaptersList(argv: readonly string[], io: CliIo): Promise<number>
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "json"]));
   const dir = resolveDir(parsed);
-  const projectSource = await readLocalProjectSource(dir).catch(() => null);
+  const projectSource = await readLocalProjectSourceIfPresent(dir);
   const projectAdapters = projectSource
     ? await resolveWorkbenchAdaptersForProject(dir, projectSource.spec)
     : [];
-  const installedIds = new Set(projectAdapters.map((adapter) => adapter.manifest.id));
-  const builtins = builtinAdapterManifests().map((manifest) => ({
-    id: manifest.id,
-    declaredSource: `builtin:${manifest.id}`,
-    resolvedSource: `builtin:${manifest.id}`,
-    kind: "builtin",
-    stability: "builtin",
-    installed: installedIds.has(manifest.id),
-    command: manifest.command,
-  }));
-  const external = projectAdapters
-    .filter((adapter) => adapter.kind !== "builtin")
+  const projectAdaptersById = new Map(projectAdapters.map((adapter) => [adapter.manifest.id, adapter]));
+  const builtins = builtinAdapterManifests()
+    .filter((manifest) => !projectAdaptersById.has(manifest.id))
+    .map((manifest) => ({
+      id: manifest.id,
+      declaredSource: `builtin:${manifest.id}`,
+      resolvedSource: `builtin:${manifest.id}`,
+      kind: "builtin",
+      stability: "builtin",
+      installed: false,
+      command: manifest.command,
+    }));
+  const project = projectAdapters
     .map((adapter) => ({
       id: adapter.manifest.id,
       kind: adapter.kind,
@@ -1936,8 +1948,9 @@ async function adaptersList(argv: readonly string[], io: CliIo): Promise<number>
       stability: adapter.stability,
       installed: true,
       command: adapter.manifest.command,
+      ...(adapter.overridesBuiltin ? { overridesBuiltin: true } : {}),
     }));
-  const adapters = [...builtins, ...external].sort((left, right) => left.id.localeCompare(right.id));
+  const adapters = [...builtins, ...project].sort((left, right) => left.id.localeCompare(right.id));
   writeOutput(
     { ok: true, adapters },
     parsed,
@@ -1950,10 +1963,11 @@ async function adaptersList(argv: readonly string[], io: CliIo): Promise<number>
           resolvedSource: string;
           stability: string;
           installed: boolean;
+          overridesBuiltin?: boolean;
         }>;
       };
       return value.adapters.map((adapter) =>
-        `${adapter.id}\t${adapter.installed ? "installed" : "available"}\t${adapter.stability}\t${formatAdapterResolution(adapter)}`
+        `${adapter.id}\t${adapter.installed ? "installed" : "available"}\t${adapter.stability}${adapter.overridesBuiltin ? " override" : ""}\t${formatAdapterResolution(adapter)}`
       ).join("\n");
     },
   );
@@ -1968,7 +1982,7 @@ async function adaptersInspect(argv: readonly string[], io: CliIo): Promise<numb
   if (!id || parsed.positionals.length > 1) {
     throw new UsageError("workbench adapters inspect requires exactly one adapter id.");
   }
-  const projectSource = await readLocalProjectSource(dir).catch(() => null);
+  const projectSource = await readLocalProjectSourceIfPresent(dir);
   const projectAdapters = projectSource
     ? await resolveWorkbenchAdaptersForProject(dir, projectSource.spec)
     : [];
@@ -1976,17 +1990,7 @@ async function adaptersInspect(argv: readonly string[], io: CliIo): Promise<numb
     projectAdapters.find((entry) =>
       entry.manifest.id === id || entry.declaredSource === id || entry.source === id
     ) ??
-    builtinAdapterManifests()
-      .filter((manifest) => manifest.id === id)
-      .map((manifest) => ({
-        source: `builtin:${manifest.id}`,
-        declaredSource: `builtin:${manifest.id}`,
-        kind: "builtin" as const,
-        stability: "builtin" as const,
-        manifest,
-        manifestHash: "",
-        contentHash: "",
-      } satisfies ResolvedWorkbenchAdapter))[0];
+    resolveBuiltinWorkbenchAdapter(id);
   if (!adapter) {
     throw new UsageError(`Adapter ${id} is not installed or built in.`);
   }
@@ -2000,8 +2004,9 @@ async function adaptersInspect(argv: readonly string[], io: CliIo): Promise<numb
     (record) => {
       const value = record as { adapter: ReturnType<typeof adapterRecordForOutput> };
       const setup = value.adapter.setup.length > 0 ? value.adapter.setup.join("; ") : "none";
+      const override = value.adapter.overridesBuiltin ? "overrides built-in" : value.adapter.kind;
       return [
-        `${value.adapter.id} (${formatAdapterResolution(value.adapter)}, ${value.adapter.stability})`,
+        `${value.adapter.id} (${formatAdapterResolution(value.adapter)}, ${value.adapter.stability}, ${override})`,
         `command: ${value.adapter.command}`,
         `setup: ${setup}`,
         `auth: ${value.adapter.auth ? "declared" : "none"}`,
@@ -2009,6 +2014,308 @@ async function adaptersInspect(argv: readonly string[], io: CliIo): Promise<numb
     },
   );
   return 0;
+}
+
+async function adaptersTest(argv: readonly string[], io: CliIo): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "request", "output", "json"]));
+  const dir = resolveDir(parsed);
+  const target = parsed.positionals[0];
+  if (!target || parsed.positionals.length > 1) {
+    throw new UsageError("workbench adapters test requires exactly one adapter id or source.");
+  }
+  const adapter = await resolveAdapterForAdaptersTest(dir, target);
+  const requestArg = asOptionalString(parsed.flags.request);
+  const replay = requestArg
+    ? await runAdapterTestReplay({
+        adapter,
+        dir,
+        requestPath: path.resolve(dir, requestArg),
+        outputRoot: asOptionalString(parsed.flags.output),
+      })
+    : null;
+  writeOutput(
+    {
+      ok: true,
+      mode: replay ? "replay" : "manifest",
+      adapter: adapterRecordForOutput(adapter),
+      ...(replay ? { replay } : {}),
+    },
+    parsed,
+    io,
+    (record) => {
+      const value = record as {
+        mode: "manifest" | "replay";
+        adapter: ReturnType<typeof adapterRecordForOutput>;
+        replay?: AdapterTestReplayResult;
+      };
+      if (value.mode === "manifest") {
+        return `Adapter ${value.adapter.id} manifest is valid (${formatAdapterResolution(value.adapter)}).`;
+      }
+      return [
+        `Adapter ${value.adapter.id} replay passed (${value.replay?.purpose ?? "unknown"}, ${value.replay?.outputs.length ?? 0} output(s)).`,
+        `output: ${value.replay?.outputRoot ?? ""}`,
+      ].join("\n");
+    },
+  );
+  return 0;
+}
+
+interface AdapterTestReplayResult {
+  requestPath: string;
+  outputRoot: string;
+  purpose: WorkbenchAdapterCommandRequest["execution"]["purpose"];
+  command: string;
+  stdout: string;
+  stderr: string;
+  outputs: string[];
+}
+
+async function resolveAdapterForAdaptersTest(
+  dir: string,
+  target: string,
+): Promise<ResolvedWorkbenchAdapter> {
+  const projectSource = await readLocalProjectSourceIfPresent(dir);
+  if (projectSource) {
+    const adapters = await resolveWorkbenchAdaptersForProject(dir, projectSource.spec);
+    const adapter = adapters.find((entry) =>
+      entry.manifest.id === target || entry.declaredSource === target || entry.source === target
+    );
+    if (adapter) {
+      return adapter;
+    }
+  }
+  if (isAdapterSourceTarget(target)) {
+    return await resolveProjectAdapterSource(dir, target);
+  }
+  const builtin = resolveBuiltinWorkbenchAdapter(target);
+  if (builtin) {
+    return builtin;
+  }
+  throw new UsageError(`Adapter ${target} is not installed, built in, or resolvable as a source.`);
+}
+
+function isAdapterSourceTarget(target: string): boolean {
+  return target.startsWith("npm:") ||
+    target.startsWith("git:") ||
+    target.startsWith(".") ||
+    target.startsWith("/") ||
+    target.includes("/");
+}
+
+async function runAdapterTestReplay(args: {
+  adapter: ResolvedWorkbenchAdapter;
+  dir: string;
+  requestPath: string;
+  outputRoot?: string;
+}): Promise<AdapterTestReplayResult> {
+  const request = normalizeWorkbenchAdapterCommandRequest(
+    JSON.parse(await fs.readFile(args.requestPath, "utf8")) as unknown,
+  );
+  if (request.adapter.use !== args.adapter.manifest.id) {
+    throw new Error(
+      `Request adapter.use ${request.adapter.use} does not match adapter id ${args.adapter.manifest.id}.`,
+    );
+  }
+  const outputRoot = args.outputRoot
+    ? path.resolve(args.dir, args.outputRoot)
+    : await fs.mkdtemp(path.join(os.tmpdir(), "workbench-adapter-output-"));
+  await fs.mkdir(outputRoot, { recursive: true });
+  const replayRequest = adapterTestRequestForOutput(request, outputRoot);
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-adapter-test-"));
+  const runtimeRequestPath = path.join(tempRoot, "request.json");
+  try {
+    await fs.writeFile(runtimeRequestPath, `${JSON.stringify(replayRequest, null, 2)}\n`);
+    const commandOutput = await runAdapterCommandForTest({
+      adapter: args.adapter,
+      cwd: adapterCommandCwd(args.adapter, args.dir),
+      requestPath: runtimeRequestPath,
+      outputRoot,
+    });
+    const outputs = await validateAdapterTestOutputs(replayRequest, outputRoot);
+    return {
+      requestPath: args.requestPath,
+      outputRoot,
+      purpose: replayRequest.execution.purpose,
+      command: args.adapter.manifest.command,
+      stdout: commandOutput.stdout,
+      stderr: commandOutput.stderr,
+      outputs,
+    };
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function adapterTestRequestForOutput(
+  request: WorkbenchAdapterCommandRequest,
+  outputRoot: string,
+): WorkbenchAdapterCommandRequest {
+  const originalOutput = request.paths.output;
+  return {
+    ...request,
+    ...(request.expectedOutputs
+      ? {
+          expectedOutputs: request.expectedOutputs.map((output) => ({
+            ...output,
+            ...(output.path
+              ? { path: rewriteAdapterExpectedOutputPath(output.path, originalOutput, outputRoot) }
+              : {}),
+          })),
+        }
+      : {}),
+    paths: {
+      ...request.paths,
+      output: outputRoot,
+    },
+  };
+}
+
+function rewriteAdapterExpectedOutputPath(
+  filePath: string,
+  originalOutput: string,
+  outputRoot: string,
+): string {
+  const absolute = path.isAbsolute(filePath) ? filePath : path.join(originalOutput, filePath);
+  const relative = path.relative(originalOutput, absolute);
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+    ? path.join(outputRoot, relative)
+    : filePath;
+}
+
+function adapterCommandCwd(adapter: ResolvedWorkbenchAdapter, fallback: string): string {
+  return adapter.root ?? fallback;
+}
+
+async function runAdapterCommandForTest(args: {
+  adapter: ResolvedWorkbenchAdapter;
+  cwd: string;
+  requestPath: string;
+  outputRoot: string;
+}): Promise<{ stdout: string; stderr: string }> {
+  const env = adapterTestEnv(args.requestPath, args.outputRoot);
+  return await runShellCommand({
+    command: args.adapter.manifest.command,
+    cwd: args.cwd,
+    env,
+    errorLabel: `Adapter command ${args.adapter.manifest.command}`,
+  });
+}
+
+function adapterTestEnv(
+  requestPath: string,
+  outputRoot: string,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string" && !key.startsWith("WORKBENCH_")) {
+      env[key] = value;
+    }
+  }
+  env.PATH = process.env.PATH
+    ? `${process.env.PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
+    : "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  env.WORKBENCH_ADAPTER_REQUEST = requestPath;
+  env.WORKBENCH_OUTPUT = outputRoot;
+  return env;
+}
+
+async function validateAdapterTestOutputs(
+  request: WorkbenchAdapterCommandRequest,
+  outputRoot: string,
+): Promise<string[]> {
+  const outputs = adapterTestOutputPaths(request, outputRoot);
+  for (const outputPath of outputs) {
+    await assertAdapterTestOutput(outputRoot, outputPath);
+  }
+  const checkedOutputs = outputs.map((outputPath) => path.relative(outputRoot, outputPath) || path.basename(outputPath));
+  if (request.execution.purpose !== "run-task") {
+    return checkedOutputs;
+  }
+  const visibleOutputs = await listAdapterVisibleOutputFiles(outputRoot);
+  if (visibleOutputs.length === 0) {
+    throw new Error(`Adapter did not write any runner output files under ${outputRoot}.`);
+  }
+  return checkedOutputs.length > 0 ? checkedOutputs : visibleOutputs;
+}
+
+function adapterTestOutputPaths(
+  request: WorkbenchAdapterCommandRequest,
+  outputRoot: string,
+): string[] {
+  const outputs = new Set<string>();
+  if (request.execution.purpose === "improve") {
+    outputs.add(path.join(outputRoot, "candidate_patch.json"));
+  }
+  if (request.execution.purpose === "grade-task") {
+    outputs.add(path.join(outputRoot, "scorecard.json"));
+  }
+  for (const expected of request.expectedOutputs ?? []) {
+    if (expected.path) {
+      outputs.add(path.isAbsolute(expected.path) ? expected.path : path.join(outputRoot, expected.path));
+      continue;
+    }
+    if (expected.name === "candidate_patch") {
+      outputs.add(path.join(outputRoot, "candidate_patch.json"));
+    } else if (expected.name === "scorecard") {
+      outputs.add(path.join(outputRoot, "scorecard.json"));
+    } else if (expected.name) {
+      outputs.add(path.join(outputRoot, `${expected.name}.json`));
+    }
+  }
+  return [...outputs];
+}
+
+async function assertAdapterTestOutput(
+  outputRoot: string,
+  outputPath: string,
+): Promise<void> {
+  const relative = path.relative(outputRoot, outputPath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Adapter expected output must stay under ${outputRoot}: ${outputPath}`);
+  }
+  const stat = await fs.stat(outputPath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`Adapter did not write expected output: ${outputPath}`);
+    }
+    throw error;
+  });
+  if (!stat.isFile()) {
+    throw new Error(`Adapter expected output is not a file: ${outputPath}`);
+  }
+}
+
+async function listAdapterVisibleOutputFiles(outputRoot: string): Promise<string[]> {
+  const files: string[] = [];
+  async function visit(relativeDir: string): Promise<void> {
+    const absoluteDir = path.join(outputRoot, relativeDir);
+    const entries = await fs.readdir(absoluteDir, { withFileTypes: true }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    });
+    for (const entry of entries) {
+      const relativePath = path.join(relativeDir, entry.name);
+      if (entry.isDirectory()) {
+        if (relativePath === ".workbench") {
+          continue;
+        }
+        await visit(relativePath);
+        continue;
+      }
+      if (
+        entry.isFile() &&
+        relativePath !== "candidate_patch.json" &&
+        relativePath !== "scorecard.json" &&
+        !relativePath.startsWith(`.workbench${path.sep}`)
+      ) {
+        files.push(relativePath);
+      }
+    }
+  }
+  await visit("");
+  return files.sort((left, right) => left.localeCompare(right));
 }
 
 function adapterRecordForOutput(adapter: ResolvedWorkbenchAdapter): {
@@ -2020,6 +2327,7 @@ function adapterRecordForOutput(adapter: ResolvedWorkbenchAdapter): {
   command: string;
   setup: string[];
   refs: string[];
+  overridesBuiltin?: boolean;
   auth?: unknown;
   integrity?: string;
   manifestHash: string;
@@ -2034,6 +2342,7 @@ function adapterRecordForOutput(adapter: ResolvedWorkbenchAdapter): {
     command: adapter.manifest.command,
     setup: [...adapter.manifest.setup],
     refs: adapter.manifest.refs ?? [],
+    ...(adapter.overridesBuiltin ? { overridesBuiltin: true } : {}),
     ...(adapter.manifest.auth !== undefined ? { auth: adapter.manifest.auth } : {}),
     ...(adapter.integrity ? { integrity: adapter.integrity } : {}),
     manifestHash: adapter.manifestHash,
@@ -2088,7 +2397,7 @@ if (purpose === "grade-task") {
     summary: "${id} did not propose changes.",
   }, null, 2));
 } else {
-	  const task = request.task?.text || "No task text was provided.";
+  const task = request.task?.text || "No task text was provided.";
   fs.writeFileSync(path.join(outputRoot, "adapter-output.txt"), [
     "adapter: ${id}",
     "task:",
@@ -2108,6 +2417,10 @@ fs.writeFileSync(path.join(outputRoot, ".workbench", "result.json"), JSON.string
     "",
     "This is a Workbench adapter. It receives a JSON request at `WORKBENCH_ADAPTER_REQUEST` and writes phase outputs under `WORKBENCH_OUTPUT`.",
     "",
+    "Validate the manifest with `workbench adapters test PATH`. Replay a request fixture with `workbench adapters test PATH --request adapter-request.json --output out/adapter-test`.",
+    "",
+    "See `docs/evals/adapters.md` in the Workbench source for the full adapter contract.",
+    "",
   ].join("\n");
   return [
     { path: WORKBENCH_ADAPTER_MANIFEST_FILE, content: manifest },
@@ -2119,13 +2432,9 @@ fs.writeFileSync(path.join(outputRoot, ".workbench", "result.json"), JSON.string
 
 async function login(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["base-url", "no-open", "json"]));
   const baseUrl =
     asOptionalString(parsed.flags["base-url"]) ?? DEFAULT_BASE_URL;
-  if (parsed.flags.token != null) {
-    throw new UsageError(
-      "Manual --token login is no longer supported. Run workbench login and approve access in Workbench.",
-    );
-  }
   const authorization = await requestDeviceAuthorization(baseUrl);
   if (parsed.flags.json === true) {
     writeJson(
@@ -2153,6 +2462,7 @@ async function login(argv: readonly string[], io: CliIo): Promise<number> {
 
 async function logout(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["json"]));
   const config = await loadConfig();
   const baseUrl = normalizeBaseUrl(
     process.env.WORKBENCH_API_URL ?? config.baseUrl ?? DEFAULT_BASE_URL,
@@ -2683,7 +2993,11 @@ async function adapterAuthBundleFromCommand(args: {
   command: string;
   cwd: string;
 }): Promise<WorkbenchAdapterAuthBundle> {
-  const { stdout } = await runShellCommandForStdout(args.command, args.cwd);
+  const { stdout } = await runShellCommand({
+    command: args.command,
+    cwd: args.cwd,
+    env: process.env,
+  });
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -2730,15 +3044,18 @@ function normalizeAdapterCommandAuthEnv(value: unknown): Record<string, string> 
   throw new UsageError("Adapter auth command env must be an object or a list.");
 }
 
-async function runShellCommandForStdout(
-  command: string,
-  cwd: string,
-): Promise<{ stdout: string; stderr: string }> {
+async function runShellCommand(args: {
+  command: string;
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  errorLabel?: string;
+}): Promise<{ stdout: string; stderr: string }> {
+  const label = args.errorLabel ?? args.command;
   return await new Promise((resolve, reject) => {
-    const child = spawn("sh", ["-lc", command], {
-      cwd,
+    const child = spawn("sh", ["-lc", args.command], {
+      cwd: args.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: args.env,
     });
     let stdout = "";
     let stderr = "";
@@ -2756,9 +3073,20 @@ async function runShellCommandForStdout(
         resolve({ stdout, stderr });
         return;
       }
-      reject(new Error(`${command} exited with code ${code ?? "null"} signal ${signal ?? "null"}${stderr.trim() ? `: ${stderr.trim()}` : ""}.`));
+      reject(new Error(`${label} exited with code ${code ?? "null"} signal ${signal ?? "null"}${stderr.trim() ? `: ${stderr.trim()}` : ""}.`));
     });
   });
+}
+
+async function readLocalProjectSourceIfPresent(dir: string): Promise<LocalProjectSource | null> {
+  if (!(await fileIsReadable(path.join(dir, WORKBENCH_BENCHMARK_FILE)))) {
+    return null;
+  }
+  return await readLocalProjectSource(dir);
+}
+
+async function fileIsReadable(filePath: string): Promise<boolean> {
+  return await fs.stat(filePath).then((stat) => stat.isFile(), () => false);
 }
 
 function adapterAuthMethodNames(
@@ -3196,9 +3524,9 @@ async function runRemoteCommand(
     case "show":
       return await remoteShow(argv.slice(1), io);
     case "add":
-      return await remoteAdd(argv.slice(1), io);
+      return await remoteAdd(argv.slice(1), io, "add");
     case "set-url":
-      return await remoteAdd(argv.slice(1), io);
+      return await remoteAdd(argv.slice(1), io, "set-url");
     case "remove":
       return await remoteRemove(argv.slice(1), io);
     default:
@@ -3233,12 +3561,13 @@ async function remoteShow(
 async function remoteAdd(
   argv: readonly string[],
   io: CliIo,
+  command: "add" | "set-url",
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "json"]));
   const [name, refValue] = parsed.positionals;
   if (name !== "origin" || !refValue || parsed.positionals.length !== 2) {
-    throw new UsageError("workbench remote add accepts: origin OWNER/BENCHMARK[@REF].");
+    throw new UsageError(`workbench remote ${command} accepts: origin OWNER/BENCHMARK[@REF].`);
   }
   const ref = parseBenchmarkRef(refValue);
   const baseUrl = await effectiveBaseUrl();
@@ -3433,7 +3762,7 @@ async function startHostedWorkflow(
     "json",
   ]));
   if (parsed.positionals.length > 1) {
-    throw new UsageError(`workbench ${workflow} accepts at most one source file or directory argument.`);
+    throw new UsageError(`workbench cloud ${workflow} accepts at most one source file or directory argument.`);
   }
   const optimizerPath = asOptionalString(parsed.flags.optimizer);
   const sourceArg = parsed.positionals[0] ?? asOptionalString(parsed.flags.dir) ?? process.cwd();
@@ -3464,7 +3793,13 @@ async function startHostedWorkflow(
           ...(baseCandidateId ? { candidateId: baseCandidateId } : {}),
         };
   if (workflow === "improve" && !optimizerPath) {
-    throw new UsageError("workbench improve requires --optimizer OPTIMIZER_YAML.");
+    throw new UsageError("workbench cloud improve requires --optimizer OPTIMIZER_YAML.");
+  }
+  if (parsed.flags.watch !== true && (
+    parsed.flags["interval-ms"] !== undefined ||
+    parsed.flags["timeout-ms"] !== undefined
+  )) {
+    throw new UsageError("--interval-ms and --timeout-ms require --watch.");
   }
   const projectSource = await readLocalProjectSource(path.resolve(sourceArg), {
     optimizerPath,
@@ -3613,6 +3948,8 @@ async function benchmarkList(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks list", 0);
   const response = await apiRequest<{ benchmarks: unknown[] }>(
     "/api/workbench/public/benchmarks",
   );
@@ -3642,6 +3979,8 @@ async function benchmarkShow(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks show", 1);
   const dir = resolveDir(parsed);
   const origin = await readWorkbenchOrigin(dir);
   const projectRef =
@@ -3747,6 +4086,8 @@ async function benchmarkVersions(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks versions", 1);
   const projectRef = parsed.positionals[0];
   const origin = await readWorkbenchOrigin(resolveDir(parsed));
   if (!projectRef && !origin) {
@@ -3779,6 +4120,8 @@ async function benchmarkStarred(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks starred", 0);
   const response = await apiRequest<{ benchmarks: unknown[] }>(
     "/api/workbench/benchmarks",
   );
@@ -3803,6 +4146,8 @@ async function candidateList(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates list", 0);
   const target = await resolveHostedTarget(parsed);
   const response = await apiRequest<{ candidates: unknown[] }>(
     projectApiPath(target.projectId, "/candidates"),
@@ -3835,6 +4180,8 @@ async function candidateShow(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates show", 1);
   const target = await resolveHostedTarget(parsed);
   const candidateId = readRequiredCandidateId(parsed);
   const params = new URLSearchParams({ id: candidateId });
@@ -3859,6 +4206,8 @@ async function candidateFiles(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates files", 1);
   const target = await resolveHostedTarget(parsed);
   const candidateId = readRequiredCandidateId(parsed);
   const response = await apiRequest<{ files: unknown[] }>(
@@ -3883,6 +4232,8 @@ async function candidatePreview(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "path", "output", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates preview", 1);
   const target = await resolveHostedTarget(parsed);
   const candidateId = readRequiredCandidateId(parsed);
   const filePath = requireFlag(parsed, "path");
@@ -3923,24 +4274,11 @@ async function candidateExport(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "out", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates pull", 1);
   const target = await resolveHostedTarget(parsed);
   const candidateId = readRequiredCandidateId(parsed);
   const outputDir = requireOutDir(parsed);
-  if (parsed.flags["dry-run"] === true) {
-    writeOutput(
-      {
-        ok: true,
-        dryRun: true,
-        projectId: target.projectId,
-        candidateId,
-        outputDir,
-      },
-      parsed,
-      io,
-      () => `Would export ${candidateId} to ${outputDir}.`,
-    );
-    return 0;
-  }
   const response = await apiRequest<{ files: HostedFile[] }>(
     projectApiPath(target.projectId, `/candidates/${encodeURIComponent(candidateId)}/export`),
     {},
@@ -3948,7 +4286,7 @@ async function candidateExport(
   );
   await writeFiles(outputDir, response.files);
   writeOutput(
-    { outputDir, files: response.files.length },
+    { ok: true, outputDir, files: response.files.length },
     parsed,
     io,
     (result) => {
@@ -3965,6 +4303,8 @@ async function candidateVisibility(
   visibility: "private" | "public",
 ): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, `workbench cloud candidates ${visibility === "public" ? "publish" : "unpublish"}`, 1);
   const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
   const candidateId = readRequiredCandidateId(parsed);
   const response = await apiRequest<{ candidate: unknown }>(
@@ -3983,6 +4323,8 @@ async function candidateVisibility(
 
 async function runList(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud runs list", 0);
   const target = await resolveHostedTarget(parsed);
   const response = await apiRequest<{ runs: unknown[] }>(
     projectApiPath(target.projectId, "/runs"),
@@ -4012,6 +4354,7 @@ async function runList(argv: readonly string[], io: CliIo): Promise<number> {
 async function runShow(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud runs show", 1);
   const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
   const runId = readRequiredRunId(parsed);
   const response = await apiRequest<{
@@ -4030,6 +4373,7 @@ async function runShow(argv: readonly string[], io: CliIo): Promise<number> {
 async function runCancel(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud runs cancel", 1);
   const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
   const runId = readRequiredRunId(parsed);
   const response = await apiRequest<{ run: HostedRunRecord }>(
@@ -4050,6 +4394,8 @@ async function runCancel(argv: readonly string[], io: CliIo): Promise<number> {
 
 async function runWatch(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "interval-ms", "timeout-ms", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud watch", 1);
   const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
   const runId = readRequiredRunId(parsed);
   if (parsed.flags.json !== true) {
@@ -4076,9 +4422,10 @@ async function runWatch(argv: readonly string[], io: CliIo): Promise<number> {
 
 async function runLogs(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud logs", 1);
   const target = await resolveHostedTarget(parsed);
-  const requestedRunId =
-    parsed.positionals[0] ?? asOptionalString(parsed.flags.run);
+  const requestedRunId = parsed.positionals[0];
   if (requestedRunId) {
     const response = await apiRequest<{
       run: HostedRunRecord;
@@ -4161,7 +4508,7 @@ async function openWorkbench(
   }
   const target = await resolveOpenTarget(parsed);
   const ref = target.openRef;
-  const url = await resolveWorkbenchWebUrl(target, ref);
+  const url = buildWorkbenchWebUrl(target, ref);
   if (parsed.flags.json === true) {
     writeJson({ ok: true, url }, io);
   } else {
@@ -4171,13 +4518,6 @@ async function openWorkbench(
     await openBrowser(url).catch(() => undefined);
   }
   return 0;
-}
-
-async function resolveWorkbenchWebUrl(
-  target: HostedTarget,
-  ref?: string,
-): Promise<string> {
-  return buildWorkbenchWebUrl(target, ref);
 }
 
 function buildWorkbenchWebUrl(
@@ -4395,15 +4735,6 @@ function formatProjectRef(project: { id: string; name?: string }): string {
   return project.name ? `${project.name} (${project.id})` : project.id;
 }
 
-function withProjectUrls<T extends object>(target: HostedTarget, value: T): T & {
-  urls: WorkbenchResourceUrls;
-} {
-  return {
-    ...value,
-    urls: buildWorkbenchResourceUrls(target),
-  };
-}
-
 function withRunUrls(
   target: HostedTarget,
   run: HostedRunRecord,
@@ -4502,10 +4833,6 @@ function hostedEnvironmentOptions(source: LocalProjectSource): {
           : undefined,
     },
   };
-}
-
-function isJsonRecord(value: unknown): value is Record<string, Json> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 async function watchHostedRun(args: {
@@ -4780,10 +5107,6 @@ function readOptionalCandidateId(parsed: ParsedArgs): string | undefined {
   return asOptionalString(parsed.flags.candidate) ?? parsed.positionals[0];
 }
 
-function readOptionalFlagCandidateId(parsed: ParsedArgs): string | undefined {
-  return asOptionalString(parsed.flags.candidate);
-}
-
 function readRequiredCandidateId(parsed: ParsedArgs): string {
   const candidateId = readOptionalCandidateId(parsed);
   if (!candidateId) {
@@ -4793,7 +5116,7 @@ function readRequiredCandidateId(parsed: ParsedArgs): string {
 }
 
 function readRequiredRunId(parsed: ParsedArgs): string {
-  const runId = asOptionalString(parsed.flags.run) ?? parsed.positionals[0];
+  const runId = parsed.positionals[0];
   if (!runId) {
     throw new UsageError("Missing required RUN_ID.");
   }
@@ -4801,8 +5124,7 @@ function readRequiredRunId(parsed: ParsedArgs): string {
 }
 
 function requireOutDir(parsed: ParsedArgs): string {
-  const output =
-    asOptionalString(parsed.flags.out) ?? asOptionalString(parsed.flags.output);
+  const output = asOptionalString(parsed.flags.out);
   if (!output) {
     throw new UsageError("Missing required --out.");
   }
@@ -5048,6 +5370,19 @@ function rejectUnknownFlags(
   }
 }
 
+function rejectUnexpectedPositionals(
+  parsed: ParsedArgs,
+  command: string,
+  max: number,
+): void {
+  if (parsed.positionals.length <= max) {
+    return;
+  }
+  throw new UsageError(
+    `Unexpected argument for ${command}: ${parsed.positionals.slice(max).join(" ")}`,
+  );
+}
+
 function readInitSelection(parsed: ParsedArgs): {
   kind: InitCandidateKind;
   name: string;
@@ -5232,7 +5567,10 @@ async function readLocalSpecIfValid(
   try {
     return (await readLocalProjectSource(workspace)).spec;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      error instanceof WorkspaceSnapshotError
+    ) {
       return null;
     }
     throw error;

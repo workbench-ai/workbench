@@ -7,7 +7,7 @@ import type {
 } from "@workbench-ai/workbench-contract";
 import type {
   HarnessTurnLivePersistence,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 
 import {
   isJsonPayload,

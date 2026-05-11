@@ -1,4 +1,4 @@
-import type { JsonValue } from "@workbench-ai/contracts";
+import type { JsonValue } from "@workbench-ai/flow-contracts";
 
 export type CanonicalToolSubjectKind =
   | "command"

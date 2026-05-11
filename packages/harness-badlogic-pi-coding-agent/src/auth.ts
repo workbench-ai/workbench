@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { ensureDir, resolveFlowEnv, type HarnessExecutionPlan } from "@workbench-ai/harness-sdk";
+import { ensureDir, resolveFlowEnv, type HarnessExecutionPlan } from "@workbench-ai/flow-harness-sdk";
 import { PiHarnessAuthSchema, type PiHarnessAuth } from "./schemas.js";
 import { resolvePiConfiguredModel } from "./cli.js";
 import { getPiHarness } from "./manifest.js";

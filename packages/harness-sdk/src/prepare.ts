@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { DEFAULT_HARNESS_PREPARE_TIMEOUT_MS } from "@workbench-ai/contracts";
+import { DEFAULT_HARNESS_PREPARE_TIMEOUT_MS } from "@workbench-ai/flow-contracts";
 
 import type { HarnessExecutionPlan } from "./index.js";
 

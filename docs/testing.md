@@ -75,9 +75,7 @@ When validating in a browser, open the URL returned by `workbench open`, verify 
 
 The guarded release path is:
 
-- `pnpm publish:check-versions`
-- `pnpm publish:build`
-- `pnpm publish:test`
-- `pnpm publish:local`
+- `pnpm release:check`
+- `pnpm release:publish`
 
-`pnpm publish:prepare <version>` rewrites the publishable Workbench package manifests. `pnpm publish:check-versions` compares the shared package version against GitHub Packages and fails when there is nothing new to publish. `pnpm publish:local` resolves GitHub Packages auth, reruns the guarded build and test steps, and publishes pending public Workbench packages with `--no-git-checks`.
+`pnpm release:prepare <version>` rewrites the publishable Workbench package manifests. `pnpm release:check` compares the shared package version against public npm. `pnpm release:publish` requires `NPM_TOKEN`, reruns the configured build and test steps, and publishes pending public Workbench packages to `https://registry.npmjs.org/`.

@@ -680,22 +680,13 @@ function adapterProtocolCommandSpec(
   };
 }
 
-function protocolCommandSpecFromAdapter(
-  adapter: WorkbenchExecutionSpec["adapter"],
-  _label: string,
-  manifests?: readonly WorkbenchAdapterManifest[],
-): RuntimeCommandSpec {
-  return adapterProtocolCommandSpec(adapter, manifests);
-}
-
 function protocolPhaseForExecution(
   execution: WorkbenchExecutionSpec,
   manifests?: readonly WorkbenchAdapterManifest[],
 ): WorkbenchWorkloadPhaseCommand {
   const role = executionPurposeRole(execution.purpose);
-  const command = protocolCommandSpecFromAdapter(
+  const command = adapterProtocolCommandSpec(
     execution.adapter,
-    "execution.adapter",
     manifests,
   );
   return {
@@ -1845,7 +1836,7 @@ async function explicitAdapterAuthProfilesForExecution(
   args: WorkbenchExecutionRuntimeInput,
   loadLocalAdapterProfiles: boolean,
 ): Promise<WorkbenchAdapterAuthBundle[]> {
-  const required = explicitAdapterAuthTargetsForExecution(execution, args);
+  const required = requiredAdapterAuthTargetsForExecution(execution, args);
   if (required.length === 0) {
     return [];
   }
@@ -1875,13 +1866,6 @@ async function explicitAdapterAuthProfilesForExecution(
     );
   }
   return required.map((target) => providedByTarget.get(adapterAuthTargetKey(target))!);
-}
-
-function explicitAdapterAuthTargetsForExecution(
-  execution: WorkbenchExecutionSpec,
-  args: WorkbenchExecutionRuntimeInput,
-): WorkbenchAdapterAuthTarget[] {
-  return requiredAdapterAuthTargetsForExecution(execution, args);
 }
 
 function adapterAuthTargetKey(target: {
@@ -2431,7 +2415,6 @@ async function runHostedCommandExecutionPhases(
     }
     let exitCode = 0;
     let runtimeError: string | undefined;
-    const phaseUsages: UsageSummary[] = [];
     try {
       if (!environmentVersion) {
         throw new Error(
@@ -2532,7 +2515,6 @@ async function runHostedCommandExecutionPhases(
     return await readWorkbenchRunWorkloadResult(workspace.root, workload, {
       exitCode,
       startedAt,
-      usage: mergeUsageSummaries(phaseUsages),
     });
   } finally {
     await workspace.cleanup();

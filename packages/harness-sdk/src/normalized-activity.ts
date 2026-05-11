@@ -1,4 +1,4 @@
-import type { JsonValue } from "@workbench-ai/contracts";
+import type { JsonValue } from "@workbench-ai/flow-contracts";
 
 import { nowIso } from "./internal-utils.js";
 import { HarnessTraceBuilder } from "./trace-builder.js";

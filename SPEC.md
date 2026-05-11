@@ -62,6 +62,7 @@ workbench check [SOURCE] [--dir DIR] [--json]
 workbench adapters create PATH [--dir DIR] [--json]
 workbench adapters list [--dir DIR] [--json]
 workbench adapters inspect ID [--dir DIR] [--json]
+workbench adapters test ID|SOURCE [--dir DIR] [--request PATH] [--output DIR] [--json]
 workbench eval [SOURCE] [--dir DIR] [--candidate ID] [--samples N] [--json]
 workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--json]
 workbench open [SOURCE] [--dir DIR] [--host HOST] [--port N] [--no-open] [--json]
@@ -106,6 +107,8 @@ workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--j
 `workbench open` starts the local read-only Workbench UI and keeps serving it until stopped.
 
 `workbench push` creates or updates a hosted benchmark version from local source and writes `.workbench/origin.json`. `workbench fetch` downloads remote source to `.workbench/fetch` without changing project files. `workbench pull` updates managed project files from the origin.
+
+`workbench adapters test` validates an adapter manifest. With `--request`, it locally replays the adapter command against a `workbench.adapter.v1` request fixture and checks phase-required outputs.
 
 `workbench cloud eval` and `workbench cloud improve` are the hosted execution entrypoints. Hosted resource inspection, candidate visibility, logs, and cancellation stay under `workbench cloud`.
 

@@ -39,13 +39,13 @@ import {
   type StartSessionArgs,
   type StartTurnArgs,
   buildCanonicalToolCall,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 import {
   type HarnessAuth,
   type HarnessEvent,
   type JsonValue,
   type TraceSpan,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 import { z } from "zod";
 import { codexHarnessPackageVersion } from "./package-version.js";
 import {

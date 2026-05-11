@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type { JsonValue } from "@workbench-ai/contracts";
+import type { JsonValue } from "@workbench-ai/flow-contracts";
 
 import { collectHarnessProviderConformanceIssues } from "./conformance.js";
 import type {

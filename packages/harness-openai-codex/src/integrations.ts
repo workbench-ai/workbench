@@ -5,7 +5,7 @@ import type {
   ProviderIntegrationCatalog,
   ProviderIntegrationCatalogEntry,
   ProviderIntegrationUpdate,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 
 interface CodexIntegrationRecord extends ProviderIntegrationCatalogEntry {
   ranges: Array<{ start: number; end: number }>;

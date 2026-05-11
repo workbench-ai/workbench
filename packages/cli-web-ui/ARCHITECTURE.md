@@ -20,7 +20,7 @@ This root owns the shared web presentation layer used by Flow web, hosted Workbe
 ## Boundaries
 
 - Chat-specific conversation composition stays in `products/agent-ui`.
-- Flow-specific branding, navigation, route composition, and runtime-backed views stay in `products/flow-cli`.
+- Flow-specific branding, navigation, route composition, and runtime-backed views stay in `products/flow`.
 - Workbench-specific archive views, lineage projections, and runtime-backed views stay in `products/workbench`.
 - Workbench Cloud and hosted Workbench routing, session handling, API semantics, and deployment ownership stay in `products/workbench-cloud`.
 - Legacy chat routing, session handling, and product semantics stay in `products/chat-web`.

@@ -1,4 +1,4 @@
-import { projectGlobalSkills } from "@workbench-ai/harness-sdk";
+import { projectGlobalSkills } from "@workbench-ai/flow-harness-sdk";
 
 import { clearCodexLegacySkillRoots } from "./integrations.js";
 

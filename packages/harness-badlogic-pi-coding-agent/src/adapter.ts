@@ -16,8 +16,8 @@ import {
   type PendingHarnessTurn,
   type StartSessionArgs,
   type StartTurnArgs,
-} from "@workbench-ai/harness-sdk";
-import type { JsonValue } from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-harness-sdk";
+import type { JsonValue } from "@workbench-ai/flow-contracts";
 import {
   getPiHarness,
   piCodingAgentHarnessManifest,

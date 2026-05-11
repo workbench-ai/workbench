@@ -25,6 +25,7 @@ export interface ResolvedWorkbenchAdapter {
   declaredSource: string;
   kind: "builtin" | "path" | "npm" | "git";
   stability: "builtin" | "local" | "pinned" | "floating";
+  overridesBuiltin?: boolean;
   manifest: WorkbenchAdapterManifest;
   root?: string;
   files?: WorkbenchAdapterSourceFile[];
@@ -45,26 +46,40 @@ export function builtinAdapterManifests(): WorkbenchAdapterManifest[] {
   return builtinWorkbenchAdapterManifests();
 }
 
+export function resolveBuiltinWorkbenchAdapter(id: string): ResolvedWorkbenchAdapter | null {
+  const manifest = builtinWorkbenchAdapterManifest(id);
+  return manifest ? resolvedBuiltinAdapter(manifest) : null;
+}
+
 export async function resolveWorkbenchAdaptersForProject(
   dir: string,
   spec: GenericSpec,
 ): Promise<ResolvedWorkbenchAdapter[]> {
   const adapters = new Map<string, ResolvedWorkbenchAdapter>();
   for (const id of topLevelAdapterIds(spec)) {
-    const builtin = builtinWorkbenchAdapterManifest(id);
+    const builtin = resolveBuiltinWorkbenchAdapter(id);
     if (builtin) {
-      adapters.set(id, resolvedBuiltinAdapter(builtin));
+      adapters.set(id, builtin);
     }
   }
   for (const source of spec.adapters) {
     const adapter = await resolveProjectAdapterSource(dir, source);
     const existing = adapters.get(adapter.manifest.id);
+    const override = adapterOverridesBuiltin(adapter);
+    const resolvedAdapter = {
+      ...adapter,
+      ...(override ? { overridesBuiltin: true } : {}),
+    };
+    if (existing?.kind === "builtin") {
+      adapters.set(adapter.manifest.id, resolvedAdapter);
+      continue;
+    }
     if (existing && existing.source !== adapter.source) {
       throw new Error(
         `Adapter id ${adapter.manifest.id} is provided by both ${existing.source} and ${adapter.source}. Remove one adapter source.`,
       );
     }
-    adapters.set(adapter.manifest.id, adapter);
+    adapters.set(adapter.manifest.id, resolvedAdapter);
   }
   let discovered = true;
   while (discovered) {
@@ -74,9 +89,9 @@ export async function resolveWorkbenchAdaptersForProject(
       if (adapters.has(id)) {
         continue;
       }
-      const builtin = builtinWorkbenchAdapterManifest(id);
+      const builtin = resolveBuiltinWorkbenchAdapter(id);
       if (builtin) {
-        adapters.set(id, resolvedBuiltinAdapter(builtin));
+        adapters.set(id, builtin);
         discovered = true;
         continue;
       }
@@ -164,6 +179,10 @@ function resolvedBuiltinAdapter(manifest: WorkbenchAdapterManifest): ResolvedWor
     manifestHash,
     contentHash: manifestHash,
   };
+}
+
+function adapterOverridesBuiltin(adapter: ResolvedWorkbenchAdapter): boolean {
+  return adapter.kind !== "builtin" && builtinWorkbenchAdapterManifest(adapter.manifest.id) !== null;
 }
 
 async function resolveNpmAdapterSource(source: string): Promise<ResolvedWorkbenchAdapter> {

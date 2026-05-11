@@ -8,7 +8,7 @@ import {
   DEFAULT_HARNESS_RETRY,
   type JsonValue,
   type WorkflowHarness,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 import type {
   SurfaceSnapshotFile,
   UsageSummary,
@@ -20,7 +20,7 @@ import {
   type ActiveHarnessSession,
   type HarnessExecutionPlan,
   type HarnessProvider,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 import type {
   WorkbenchExecutionEventPublisher,
 } from "@workbench-ai/workbench-core";
@@ -75,7 +75,7 @@ const AGENT_HARNESS_REGISTRY: Record<string, AgentHarnessRegistration> = {
       sandbox_mode: "danger-full-access",
     },
     async load() {
-      const module = await import("@workbench-ai/harness-openai-codex");
+      const module = await import("@workbench-ai/flow-harness-openai-codex");
       return module.codexHarness();
     },
   },
@@ -87,7 +87,7 @@ const AGENT_HARNESS_REGISTRY: Record<string, AgentHarnessRegistration> = {
       permission_mode: "bypassPermissions",
     },
     async load() {
-      const module = await import("@workbench-ai/harness-anthropic-claude-code");
+      const module = await import("@workbench-ai/flow-harness-anthropic-claude-code");
       return module.claudeCodeHarness();
     },
   },
@@ -95,7 +95,7 @@ const AGENT_HARNESS_REGISTRY: Record<string, AgentHarnessRegistration> = {
     executable: "pi",
     installHint: "@mariozechner/pi-coding-agent",
     async load() {
-      const module = await import("@workbench-ai/harness-badlogic-pi-coding-agent");
+      const module = await import("@workbench-ai/flow-harness-badlogic-pi-coding-agent");
       return module.piCodingAgentHarness();
     },
   },

@@ -1,8 +1,8 @@
-import type { HarnessEvent, JsonValue } from "@workbench-ai/contracts";
-import type { NormalizedHarnessActivity } from "@workbench-ai/harness-sdk";
-import type { ActiveHarnessSession } from "@workbench-ai/harness-sdk";
-import type { CanonicalToolCall } from "@workbench-ai/harness-sdk";
-import { buildCanonicalToolCall } from "@workbench-ai/harness-sdk";
+import type { HarnessEvent, JsonValue } from "@workbench-ai/flow-contracts";
+import type { NormalizedHarnessActivity } from "@workbench-ai/flow-harness-sdk";
+import type { ActiveHarnessSession } from "@workbench-ai/flow-harness-sdk";
+import type { CanonicalToolCall } from "@workbench-ai/flow-harness-sdk";
+import { buildCanonicalToolCall } from "@workbench-ai/flow-harness-sdk";
 import { piCodingAgentHarnessManifest } from "./manifest.js";
 import {
   isJsonObject,

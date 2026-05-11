@@ -63,7 +63,7 @@ Hosted commands return or print Workbench Cloud URLs. Prefer the `urls` object f
 
 ## Adapters
 
-Built-in adapters include `codex`, `claude`, `pi`, `command`, and `rubric`. Custom adapters can be workspace paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by editing the YAML source.
+Built-in adapters include `codex`, `claude`, `pi`, `command`, and `rubric`. Custom adapters can be workspace paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by editing the YAML source. A custom adapter whose manifest id matches a built-in intentionally overrides that built-in for the project. Use `workbench adapters test ID|SOURCE` to validate a manifest, and add `--request PATH --output DIR` to replay a local `workbench.adapter.v1` fixture.
 
 `benchmark.environment.dockerfile` owns task tools and should include `ca-certificates` when HTTPS tools are needed. Adapter setup owns adapter CLI dependencies.
 
@@ -74,5 +74,6 @@ When creating or editing Workbench evals, load only the relevant authored refere
 - `references/docs/evals/README.md` for the overall eval-authoring flow.
 - `references/docs/evals/spec-syntax.md` for split `benchmark.yaml`, candidate manifests, candidate files, and optimizer YAML.
 - `references/docs/evals/runner-contract.md` for improve, run, grade, staged input, `/workspace/output`, and `/workspace/output/scorecard.json` contracts.
+- `references/docs/evals/adapters.md` for custom adapter manifests, built-in overrides, auth, nested refs, and local replay.
 - `references/docs/evals/from-existing-workflow.md` when wrapping an existing benchmark, smoke test, script, or manual scoring workflow.
 - `references/docs/evals/from-file-outputs.md` when tasks or outputs involve `.docx`, `.xlsx`, `.pdf`, `.pptx`, or similar files.

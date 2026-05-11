@@ -2,7 +2,7 @@ import {
   defineHarnessProvider,
   type HarnessReadinessCheckArgs,
   type HarnessProvider,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 import { PiCodingAgentHarnessAdapter } from "./adapter.js";
 import {
   piCodingAgentHarnessDefinitionBase,

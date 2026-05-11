@@ -13,6 +13,7 @@ Before writing a spec, read:
 
 - [spec-syntax.md](spec-syntax.md) for the version-1 split benchmark/candidate/optimizer YAML shape.
 - [runner-contract.md](runner-contract.md) for staged directories, phase visibility, and output files.
+- [adapters.md](adapters.md) for custom adapter manifests, sources, overrides, auth, nested refs, and local replay.
 - [tasks-and-fixtures.md](tasks-and-fixtures.md) for task directory layout and expected files.
 - [run-and-inspect.md](run-and-inspect.md) for the local and hosted CLI loop.
 

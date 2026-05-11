@@ -64,6 +64,7 @@ workbench check [SOURCE] [--dir DIR] [--json]
 workbench adapters create PATH [--dir DIR] [--json]
 workbench adapters list [--dir DIR] [--json]
 workbench adapters inspect ID [--dir DIR] [--json]
+workbench adapters test ID|SOURCE [--dir DIR] [--request PATH] [--output DIR] [--json]
 workbench eval [SOURCE] [--dir DIR] [--candidate ID] [--samples N] [--json]
 workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--json]
 workbench open [SOURCE] [--dir DIR] [--host HOST] [--port N] [--no-open] [--json]
@@ -117,4 +118,4 @@ environment/
 
 candidate.yaml does not declare a benchmark or path. The project benchmark is `benchmark.yaml`, and the candidate files are the sibling `files/` directory.
 
-Adapter sources can be benchmark-contained paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by the adapter resolver.
+Adapter sources can be benchmark-contained paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by the adapter resolver. A declared source whose manifest id matches a built-in id overrides that built-in for the project. Use `workbench adapters test` to validate a manifest, or add `--request` to replay an adapter command locally against a `workbench.adapter.v1` fixture.

@@ -337,7 +337,7 @@ components:
 
 ## Overview
 
-This is the canonical design-system document for the shared web surfaces in this monorepo: `products/cli-web-ui`, `products/agent-ui`, Flow web, hosted Workbench Cloud and Workbench, legacy `chat-web`, and the embedded `@workbench-ai/flow-panel` surface.
+This is the canonical design-system document for the shared web surfaces in this monorepo: `products/cli-web-ui`, `products/agent-ui`, Flow web, hosted Workbench Cloud and Workbench, legacy `chat-web`, and the embedded `@workbench-internal/flow-panel` surface.
 
 The system is preset-first and shadcn-native. The primitive layer comes from the checked-in shadcn project defined by `products/cli-web-ui/shadcn.foundation.json` and materialized through the local shadcn sync flow. The current live foundation is preset `b2BVC6PHE`, which resolves to the `radix-nova` project. Product surfaces compose those primitives through thin shared wrappers and product-owned route shells.
 
@@ -389,7 +389,7 @@ The shape language comes from the shadcn radius scale in `styles/preset.css`: co
 - **Foundation**: `components/ui/*` plus `hooks/use-mobile.ts` are the generated shadcn foundation. Buttons, cards, inputs, dialogs, sheets, tabs, toggles, tooltips, sidebars, charts, and related controls come from this layer and stay as close to generated source as possible.
 - **Shared compositions**: `components/shared/*` adds behavior-heavy but product-neutral wrappers such as `FilesBrowser`, `PreviewPanel`, `RouteToolbar`, `ViewSwitch`, `WorkspaceRoot`, `WorkspacePane`, `DesktopWorkspaceSplit`, `SourceEditorDialogShell`, markdown and code rendering, and preview surfaces. `ViewSwitch` is the route-state wrapper for sibling-view navigation, but it should visually reuse the stock shadcn line-tabs treatment instead of inventing a second control style. `WorkspaceRoot`, `WorkspacePane`, and `DesktopWorkspaceSplit` are the shared shell contract for full-height operator workspaces; product routes should compose them instead of rebuilding pane headers, split dividers, or viewport roots locally.
 - **Chat composition**: `products/agent-ui` composes the shared primitives into thread lists, conversation layouts, composer shells, and lightweight activity renderers.
-- **Product composition**: Flow, Workbench Cloud/Workbench, legacy `chat-web`, and `@workbench-ai/flow-panel` own route composition, runtime-backed views, and product semantics while importing their foundation and shared wrappers from `@workbench-ai/cli-web-ui`.
+- **Product composition**: Flow, Workbench Cloud/Workbench, legacy `chat-web`, and `@workbench-internal/flow-panel` own route composition, runtime-backed views, and product semantics while importing their foundation and shared wrappers from `@workbench-ai/cli-web-ui`.
 
 Use built-in variants, semantic tokens, and stock shadcn composition first. Higher layers should add behavior, information architecture, or product semantics, not a second primitive system.
 
@@ -445,7 +445,7 @@ Component composition rules:
 
 `products/cli-web-ui/shadcn.foundation.json` stores the opaque preset id and template used to regenerate preset-owned files. `components.json` stays as the operational shadcn project config for this package and intentionally points its Tailwind CSS entry at `styles/preset.css` instead of the public consumer entrypoints.
 
-The raw foundation layer is enforced by `products/cli-web-ui/scripts/verify-shadcn-foundation.mjs`, which is exposed through `pnpm --dir products/cli-web-ui foundation:check` and also runs as part of the package `lint` and `build` scripts.
+The raw foundation layer is checked by `products/cli-web-ui/scripts/verify-shadcn-foundation.mjs`, which is exposed through `pnpm --dir products/cli-web-ui foundation:check`. It intentionally stays out of routine `lint` and `build` because it regenerates upstream shadcn scaffold state through networked CLI calls.
 
 The DESIGN.md token layer is linted through `pnpm --dir products/cli-web-ui design:lint`. The checked-in frontmatter intentionally uses OKLCH so it can mirror the Tailwind v4 and shadcn source tokens. The local lint wrapper preprocesses those OKLCH values to sRGB hex before invoking the current upstream `@google/design.md` linter, and reports any gamut clipping that occurs during conversion. Do not run the upstream `npx @google/design.md lint DESIGN.md` command directly for this package until the upstream spec accepts OKLCH color tokens.
 
@@ -455,7 +455,7 @@ The verifier rejects drift in `components.json`, `styles/preset.css`, `component
 
 ## Surface Mapping
 
-`products/cli-web-ui/styles.css` is the shared stylesheet for Flow web, Workbench Cloud, hosted Workbench, and the embedded `@workbench-ai/flow-panel` surface. It imports `styles/preset.css`, `styles/extensions.css`, and `styles/base.css`, then adds the consumer-specific `@source` declarations for the shared package tree.
+`products/cli-web-ui/styles.css` is the shared stylesheet for Flow web, Workbench Cloud, hosted Workbench, and the embedded `@workbench-internal/flow-panel` surface. It imports `styles/preset.css`, `styles/extensions.css`, and `styles/base.css`, then adds the consumer-specific `@source` declarations for the shared package tree.
 
 `products/cli-web-ui/chat-web.css` exists only for legacy `chat-web`, which needs widened Tailwind source scanning across both `products/chat-web` and `products/agent-ui`. It imports the same preset, extension, and base layers, then widens the `@source` surface for that app and the shared chat package. `chat-web` imports `@workbench-ai/cli-web-ui/chat-web.css`, while Flow web, Workbench Cloud, hosted Workbench, and `flow-panel` import `@workbench-ai/cli-web-ui/styles.css`.
 
@@ -467,4 +467,4 @@ The verifier rejects drift in `components.json`, `styles/preset.css`, `component
 
 `products/agent-ui` owns chat-specific composition on top of that base.
 
-`products/flow-cli`, `products/workbench-cloud`, `products/workbench`, legacy `products/chat-web`, and `products/flow-cli/packages/flow-panel` own routing, runtime-backed data, and product semantics. If a component exists only to restyle a primitive, it belongs back in the shared system or should be deleted.
+`products/flow`, `products/workbench-cloud`, `products/workbench`, legacy `products/chat-web`, and `products/flow/packages/flow-panel` own routing, runtime-backed data, and product semantics. If a component exists only to restyle a primitive, it belongs back in the shared system or should be deleted.

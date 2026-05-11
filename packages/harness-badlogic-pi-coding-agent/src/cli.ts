@@ -1,5 +1,5 @@
-import type { HarnessExecutionPlan } from "@workbench-ai/harness-sdk";
-import { resolveHarnessConfiguredEffort, resolveHarnessConfiguredModel } from "@workbench-ai/harness-sdk";
+import type { HarnessExecutionPlan } from "@workbench-ai/flow-harness-sdk";
+import { resolveHarnessConfiguredEffort, resolveHarnessConfiguredModel } from "@workbench-ai/flow-harness-sdk";
 import {
   getPiHarness,
   piCodingAgentHarnessManifest,

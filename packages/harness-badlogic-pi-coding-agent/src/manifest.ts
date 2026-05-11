@@ -1,8 +1,8 @@
 import type {
   HarnessExecutionPlan,
   HarnessManifest,
-} from "@workbench-ai/harness-sdk";
-import { createCliHarnessManifest } from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
+import { createCliHarnessManifest } from "@workbench-ai/flow-harness-sdk";
 import { PiHarnessAuthSchema, PiHarnessConfigSchema } from "./schemas.js";
 
 export const piCodingAgentHarnessDefinitionBase = {

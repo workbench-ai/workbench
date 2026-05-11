@@ -6,7 +6,7 @@ import {
   ensureDir,
   getManagedHarnessHomePath,
   type HarnessExecutionPlan,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 import {
   getPiHarnessAuth,
   resolvePiApiKeyAuth,

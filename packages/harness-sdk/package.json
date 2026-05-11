@@ -1,6 +1,6 @@
 {
-  "name": "@workbench-ai/harness-sdk",
-  "version": "0.0.43",
+  "name": "@workbench-ai/flow-harness-sdk",
+  "version": "0.0.44",
   "type": "module",
   "repository": {
     "type": "git",
@@ -8,7 +8,8 @@
     "directory": "packages/harness-sdk"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -28,7 +29,7 @@
     "format": "prettier --check 'src/**/*.ts'"
   },
   "dependencies": {
-    "@workbench-ai/contracts": "workspace:*",
+    "@workbench-ai/flow-contracts": "workspace:*",
     "zod": "^4.1.5"
   },
   "devDependencies": {

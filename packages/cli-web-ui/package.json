@@ -28,11 +28,11 @@
     }
   },
   "scripts": {
-    "build": "node ./scripts/verify-shadcn-foundation.mjs && tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit",
     "design:lint": "node ./scripts/lint-design-md.mjs",
     "foundation:check": "node ./scripts/verify-shadcn-foundation.mjs",
     "foundation:sync": "node ./scripts/sync-shadcn-foundation.mjs",
-    "lint": "node ./scripts/verify-shadcn-foundation.mjs && tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
@@ -96,6 +96,7 @@
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },
+  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/workbench-ai/workbench.git",

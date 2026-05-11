@@ -1,8 +1,8 @@
-import type { JsonValue } from "@workbench-ai/contracts";
+import type { JsonValue } from "@workbench-ai/flow-contracts";
 import {
   createHarnessEffortZodSchema,
   createHarnessEffortJsonSchemaProperty,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 import { z } from "zod";
 
 export const piHarnessEffortValues = [

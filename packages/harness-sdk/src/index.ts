@@ -9,7 +9,7 @@ import type {
   WorkflowDocument,
   WorkflowHarness,
   WorkspaceMode,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 
 export * from "./behavior-contract.js";
 export * from "./conformance.js";

@@ -2,7 +2,7 @@
 
 Workbench compiles `benchmark.yaml`, a candidate manifest, sibling candidate files, and optional optimizer YAML into improve, run-task, and grade-task executions. Hosted Workbench stores each executable node as one durable `execute` job with a `purpose` of `improve`, `run-task`, or `grade-task`.
 
-Eval runs record `run-task` followed by `grade-task`. Improve runs record `improve`, `run-task`, and `grade-task` chronologically for each trial. Improve executions run once per trial and write a candidate patch. Run-task executions use the current candidate and one current task to write ordinary output files. Grade-task executions score the immutable run output files mounted from the run-task phase. Rubric grading uses one grade execution per run sample; the judge prompt contains the full rubric and the runtime validates that every criterion receives a score and rationale. Built-in `codex`, `claude`, `pi`, `command`, and `rubric` adapters are shipped as first-party adapter manifests and commands. External adapters run through the same `workbench.adapter.v1` request and output contract inside the composed Dockerfile environment declared by `benchmark.environment.dockerfile` plus adapter setup.
+Eval runs record `run-task` followed by `grade-task`. Improve runs record `improve`, `run-task`, and `grade-task` chronologically for each trial. Improve executions run once per trial and write a candidate patch. Run-task executions use the current candidate and one current task to write ordinary output files. Grade-task executions score the immutable run output files mounted from the run-task phase. Rubric grading uses one grade execution per run sample; the judge prompt contains the full rubric and the runtime validates that every criterion receives a score and rationale. Built-in `codex`, `claude`, `pi`, `command`, and `rubric` adapters are shipped as first-party adapter manifests and commands. External adapters, including project-declared overrides for built-in ids, run through the same `workbench.adapter.v1` request and output contract inside the composed Dockerfile environment declared by `benchmark.environment.dockerfile` plus adapter setup.
 
 During hosted execution, command phases and agent harnesses may publish live `job_progress` event batches before the terminal job output exists. These batches are best-effort UI progress and trace deltas. The completed job output remains the authoritative candidate patch, runner files, or scorecard.
 
@@ -40,6 +40,7 @@ Source references are resolved before these directories are staged:
 - `optimizer.edits[]` entries are literal paths inside that candidate `files/` directory.
 - Workbench uses the whole candidate files directory and the whole tasks directory. At runtime, task files are projected by convention: `input/` is runner-visible, `expected/` is grader-only, and root task files other than `task.yaml` are invalid. There are no include globs.
 - `improve`, `run`, and `grade` identify adapters by `use`; all adapter-specific settings, including optional first-party `instructions`, live under `with`.
+- Adapter manifest `refs` point at nested adapter-shaped values under `with` so Workbench can include sources and collect/default auth. They do not automatically execute nested adapters; the parent adapter owns any delegation behavior.
 
 ## Outputs
 

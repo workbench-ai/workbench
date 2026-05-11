@@ -27,7 +27,7 @@ The `packages/cli` package owns the `workbench` binary implementation, command r
 - The CLI owns local project lifecycle commands and the open Cloud client surface: `login`, `clone`, `fetch`, `pull`, `push`, and `workbench cloud ...`.
 - The protocol package owns the stable adapter contract. Adapter authors should not need to import Web or cloud-runtime code.
 - The core package owns portable Workbench semantics and local Docker execution. It must not depend on Next.js, AWS SDKs, Stripe, Cognito, Daytona, E2B, Firecracker implementation code, Terraform, or hosted worker entrypoints.
-- Built-in adapters are normal adapter packages. Core can execute adapters, but it does not special-case built-in adapter ids.
+- Built-in adapters are normal adapter packages. Core can execute adapters, but it does not special-case built-in adapter ids. A project-declared adapter source with a built-in id intentionally overrides that built-in for the project; wrapping is implemented by that replacement adapter delegating however it chooses.
 - Workbench Cloud owns hosted persistence, billing, auth, Web routes, production infrastructure, queue workers, remote provider admission, and hosted sandbox providers.
 - Shared UI stays presentation-only. It renders benchmark, candidate, run, result, lineage, file, and trace DTOs without owning execution rules.
 
@@ -39,7 +39,7 @@ The public repository `workbench-ai/workbench` is generated from the open Workbe
 
 The public source repository intentionally has no root `SKILL.md`. The upstream `skills` installer treats a root `SKILL.md` as the skill root, which would copy the entire source tree into `.agents/skills/workbench`. Keeping the skill nested preserves the install UX `npx skills add workbench-ai/workbench` while installing only the skill directory.
 
-The source export is maintained by the root command `pnpm workbench:public-source:validate` and published with `pnpm workbench:public-source:publish`. `pnpm skills:public:publish` must not publish or force-push `workbench-ai/workbench`; it is only for generated root-skill repositories such as `workbench-ai/pipeline`.
+The source export is maintained by the root command `pnpm workbench:public-source:validate` and published with `pnpm workbench:public-source:publish`. `pnpm skills:public:publish` must not publish or force-push `workbench-ai/workbench`; source-backed public repositories publish through their product-specific source export wrappers.
 
 ## Core Execution Model
 
@@ -78,3 +78,4 @@ Workbench Cloud stores hosted state separately. Production storage, queueing, bi
 - The CLI must work outside git repositories.
 - The CLI must remain automation-friendly: stable JSON with `--json`, explicit flags, useful non-zero failures, and no hidden interactive prompts.
 - Adapter commands receive the standard `WORKBENCH_ADAPTER_REQUEST` file and staged filesystem paths. They do not receive source YAML files, job claim tokens, worker tokens, queue credentials, hosted billing state, or sandbox control request internals.
+- `workbench.adapter.v1` is additive within the protocol version: request fields may be added, but required phase output filenames and manifest meaning require a new protocol string if they need a breaking change.

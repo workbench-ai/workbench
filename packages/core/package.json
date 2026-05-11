@@ -1,7 +1,12 @@
 {
   "name": "@workbench-ai/workbench-core",
-  "version": "0.0.40",
+  "version": "0.0.41",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workbench-ai/workbench.git",
+    "directory": "packages/core"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -21,7 +26,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@workbench-ai/harness-sdk": "workspace:*",
+    "@workbench-ai/flow-harness-sdk": "workspace:*",
     "@workbench-ai/workbench-contract": "workspace:*",
     "@workbench-ai/workbench-protocol": "workspace:*",
     "yaml": "^2.8.2"
@@ -31,9 +36,8 @@
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/workbench-ai/workbench.git",
-    "directory": "packages/core"
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   }
 }

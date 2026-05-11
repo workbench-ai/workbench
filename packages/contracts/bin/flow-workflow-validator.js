@@ -9,7 +9,7 @@ const compiledCliPath = path.resolve(binDir, "../dist/workflow-validator-cli.js"
 
 if (!existsSync(compiledCliPath)) {
   process.stderr.write(
-    "flow-workflow-validator is not built yet. Run `pnpm --filter @workbench-ai/contracts run build` from the repo root and retry.\n",
+    "flow-workflow-validator is not built yet. Run `pnpm --filter @workbench-ai/flow-contracts run build` from the repo root and retry.\n",
   );
   process.exit(1);
 }

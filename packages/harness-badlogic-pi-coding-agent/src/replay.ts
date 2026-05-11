@@ -1,10 +1,10 @@
-import type { JsonValue, TraceSpan } from "@workbench-ai/contracts";
+import type { JsonValue, TraceSpan } from "@workbench-ai/flow-contracts";
 import {
   applyNormalizedHarnessActivity,
   HarnessTraceBuilder,
   readTraceString,
   type HarnessTraceReplayer,
-} from "@workbench-ai/harness-sdk";
+} from "@workbench-ai/flow-harness-sdk";
 import { piCodingAgentHarnessManifest } from "./manifest.js";
 import {
   createPiNormalizationState,

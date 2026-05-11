@@ -1,7 +1,7 @@
 import type {
   JsonValue,
   TraceSpan,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 
 import type { TraceBundle } from "./trace-builder.js";
 

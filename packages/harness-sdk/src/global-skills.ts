@@ -5,7 +5,7 @@ import type {
   GlobalSkillCatalog,
   GlobalSkillCatalogEntry,
   GlobalSkillProviderSupport,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 
 interface GlobalSkillRecord extends Omit<GlobalSkillCatalogEntry, "providerSupport"> {
   name: string;

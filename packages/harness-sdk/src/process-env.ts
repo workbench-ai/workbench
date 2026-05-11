@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parseEnv } from "node:util";
 
-import type { ExecutionOwner } from "@workbench-ai/contracts";
+import type { ExecutionOwner } from "@workbench-ai/flow-contracts";
 
 import {
   resolveCanonicalProjectRoot,

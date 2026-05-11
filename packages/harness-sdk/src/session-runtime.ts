@@ -4,7 +4,7 @@ import type {
   HarnessEvent,
   HarnessSession,
   JsonValue,
-} from "@workbench-ai/contracts";
+} from "@workbench-ai/flow-contracts";
 
 import { appendNdjson, createId, nowIso } from "./internal-utils.js";
 import {

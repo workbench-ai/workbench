@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { WorkspaceMode } from "@workbench-ai/contracts";
+import type { WorkspaceMode } from "@workbench-ai/flow-contracts";
 
 const managedHarnessEnvAllowlist = new Set([
   "PATH",
@@ -134,7 +134,6 @@ export function buildManagedHarnessEnv(
       (
         managedHarnessEnvAllowlist.has(key)
         || key.startsWith("FLOW_FAKE_")
-        || key.startsWith("FACTSET_")
         || key.startsWith("WORKBENCH_")
       )
     ) {
