@@ -10,8 +10,8 @@ This root owns the shared web presentation layer used by Flow web, hosted Workbe
 - `components/ui/`: generic UI primitives that are product-neutral.
 - `hooks/use-mobile.ts`: generated shadcn infrastructure that belongs to the foundation layer.
 - `components/shared/`: reusable shell helpers plus the shared read-only file preview stack (`streaming-markdown`, `markdown-document-view`, `ai-code-view`, `preview-panel`, `tabular-preview`, `pdf-preview`, `files-browser`, `view-switch`, `spreadsheet-viewer`, `execution-trace-timeline`, and related list helpers).
-- `lib/`: shared helpers such as class-name merging, source-format detection, tabular preview parsing, spreadsheet viewer parsing/runtime helpers, and the product-neutral execution trace timeline projection.
-- `spreadsheet-viewer.ts`: the ergonomic package entrypoint that re-exports the spreadsheet viewer component plus its parser/runtime types for shared consumers.
+- `lib/`: shared helpers such as class-name merging, source-format detection, tabular preview parsing, spreadsheet viewer OOXML parsing and model helpers, and the product-neutral execution trace timeline projection.
+- `spreadsheet-viewer.ts`: the ergonomic package entrypoint that re-exports the spreadsheet viewer component plus its parser/model types for shared consumers.
 - `styles/preset.css`: the preset-owned CSS-variable theme and base font layer regenerated from the active preset.
 - `styles/extensions.css`: repo-owned semantic token and utility extensions that sit on top of the preset layer.
 - `styles/base.css`: repo-owned resets and behavior styles for markdown, previews, and shared chrome.
