@@ -12,10 +12,11 @@ The standard product validation surface is:
 - `pnpm lint`
 - `pnpm test`
 - `pnpm test:e2e`
-- `pnpm skills:sync`
 - `pnpm cli-skill-evals:validate`
 
 These commands exercise the open Workbench packages: `workbench-contract`, `workbench-protocol`, `workbench-core`, `workbench-built-in-adapters`, `workbench-ui`, and `workbench`.
+
+Private monorepo maintainers validate this source-backed public repository layout before publishing changes here.
 
 Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox capabilities, phase-specific file staging, Docker local execution, candidate materialization, runs, lineage, traces, and the public sandbox adapter runner.
 

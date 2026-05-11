@@ -1226,7 +1226,7 @@ describe("workbench CLI", () => {
     expect(manifest).toContain("\"workbench-ai/workbench\"");
   });
 
-  test("keeps generated skill mirror synced with authored assets", async () => {
+  test("assembles installable skill assets from authored sources", async () => {
     const { syncSkillAssets } = await import(pathToFileURL(path.join(productRoot, "scripts", "sync-skill-assets.mjs")).href) as {
       syncSkillAssets: (args: {
         sourceRepoRoot: string;
@@ -1234,17 +1234,18 @@ describe("workbench CLI", () => {
         targetSkillRoot: string;
       }) => Promise<void>;
     };
-    const generatedRoot = path.join(productRoot, ".agents", "skills", "workbench");
-    const expectedRoot = await mkdtemp(path.join(os.tmpdir(), "workbench-skill-sync-"));
+    const assembledRoot = await mkdtemp(path.join(os.tmpdir(), "workbench-skill-sync-"));
 
     await syncSkillAssets({
       sourceRepoRoot: productRoot,
       sourceSkillRoot: path.join(productRoot, "skills", "workbench"),
-      targetSkillRoot: expectedRoot,
+      targetSkillRoot: assembledRoot,
     });
 
-    expect(await readTextTree(generatedRoot)).toEqual(await readTextTree(expectedRoot));
-    const generatedSkill = await readFile(path.join(generatedRoot, "SKILL.md"), "utf8");
+    const generatedTree = await readTextTree(assembledRoot);
+    expect(generatedTree).toHaveProperty("SKILL.md");
+    expect(generatedTree).not.toHaveProperty("skill.assets.json");
+    const generatedSkill = await readFile(path.join(assembledRoot, "SKILL.md"), "utf8");
     expect(generatedSkill).toContain("workbench push");
     expect(generatedSkill).not.toContain("workbench launch");
     expect(generatedSkill).not.toContain("Paths are relative to the YAML file that declares them, or absolute.");
