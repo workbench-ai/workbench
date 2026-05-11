@@ -119,15 +119,21 @@ export function adapterCommandName(adapterId: string): string {
 
 function builtInAdapterCommandSetup(adapterId: WorkbenchBuiltInAdapterId): string {
   const command = adapterCommandName(adapterId);
-  const packageRunner = `/workbench-runtime/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
+  const workbenchRuntimePackageRunner = `/workbench-runtime/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
+  const workbenchRuntimeSourceRunner = `/workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/${adapterId}.ts`;
+  const cloudRuntimePackageRunner = `/app/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
+  const cloudRuntimeDistRunner = `/app/products/workbench/packages/built-in-adapters/dist/bin/${adapterId}.js`;
+  const cloudRuntimeSourceRunner = `/app/products/workbench/packages/built-in-adapters/src/bin/${adapterId}.ts`;
   const globalRunner = `/usr/local/lib/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
-  const monorepoRunner = `/workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/${adapterId}.ts`;
   return [
     `printf '%s\\n'`,
     "'#!/bin/sh'",
-    `'if [ -f ${packageRunner} ]; then exec node ${packageRunner} "$@"; fi'`,
+    `'if [ -f ${workbenchRuntimePackageRunner} ]; then exec node ${workbenchRuntimePackageRunner} "$@"; fi'`,
+    `'if [ -f ${cloudRuntimePackageRunner} ]; then exec node ${cloudRuntimePackageRunner} "$@"; fi'`,
+    `'if [ -f ${cloudRuntimeDistRunner} ]; then exec node ${cloudRuntimeDistRunner} "$@"; fi'`,
     `'if [ -f ${globalRunner} ]; then exec node ${globalRunner} "$@"; fi'`,
-    `'if [ -f ${monorepoRunner} ]; then exec node --experimental-strip-types ${monorepoRunner} "$@"; fi'`,
+    `'if [ -f ${workbenchRuntimeSourceRunner} ]; then exec node --experimental-strip-types ${workbenchRuntimeSourceRunner} "$@"; fi'`,
+    `'if [ -f ${cloudRuntimeSourceRunner} ]; then exec node --experimental-strip-types ${cloudRuntimeSourceRunner} "$@"; fi'`,
     `'echo "Workbench built-in adapter ${adapterId} is unavailable." >&2'`,
     "'exit 127'",
     `> /usr/local/bin/${command}`,
