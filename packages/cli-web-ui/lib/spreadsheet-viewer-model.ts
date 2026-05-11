@@ -1,0 +1,1086 @@
+import type { CSSProperties } from "react";
+import {
+  excelColumnWidthToPx,
+  parseOoxmlWorkbook,
+  type OoxmlSheet,
+} from "./spreadsheet-viewer-ooxml";
+
+export type CellDataType =
+  | "unspecified"
+  | "shared-string"
+  | "inline-string"
+  | "string"
+  | "boolean"
+  | "number"
+  | "error"
+  | "date";
+
+export type WorkbookRange = {
+  address?: string;
+  rowCount?: number;
+  columnCount?: number;
+  rawValues?: unknown[][];
+  values?: unknown[][];
+  displayFormula?: string;
+  format?: {
+    numberFormat?: string;
+  };
+};
+
+export type WorkbookFreezePanes = {
+  rowCount?: number;
+  columnCount?: number;
+  freezeRows?: number;
+  freezeColumns?: number;
+};
+
+export type WorkbookWorksheet = {
+  name: string;
+  rowCount?: number;
+  columnCount?: number;
+  showGridLines?: boolean;
+  freezePanes?: WorkbookFreezePanes;
+  getUsedRange?(): WorkbookRange;
+  getRange(address: string): WorkbookRange;
+};
+
+export type CellAddress = {
+  col: number;
+  row: number;
+};
+
+export type GridRange = {
+  startCol: number;
+  endCol: number;
+  startRow: number;
+  endRow: number;
+};
+
+export type MergeSpan = {
+  colSpan: number;
+  rowSpan: number;
+  rangeLabel: string;
+};
+
+export type RenderedCellModel = {
+  address: string;
+  html: string;
+  text: string;
+  style: CSSProperties;
+  colSpan: number;
+  rowSpan: number;
+};
+
+type CellState = {
+  formatted: string;
+  raw: string;
+  formula: string;
+  numberFormatCode: string | null;
+  type: CellDataType;
+};
+
+export type WorkbookFile = {
+  id: string;
+  label: string;
+  source: string;
+  sizeBytes: number;
+  workbook: WorkbookModel;
+};
+
+export type WorkbookModel = {
+  activeSheetName: string;
+  sheetNames: string[];
+  sheets: Record<string, SheetModel>;
+};
+
+export type SheetViewportExtent = {
+  endRow: number;
+  endCol: number;
+};
+
+export type SheetViewportMetrics = {
+  scrollLeft: number;
+  scrollTop: number;
+  clientWidth: number;
+  clientHeight: number;
+};
+
+export type SheetModel = {
+  name: string;
+  visible: boolean;
+  worksheet: WorkbookWorksheet;
+  range: GridRange | null;
+  hiddenRows: Set<number>;
+  hiddenCols: Set<number>;
+  mergeLookup: Map<string, MergeSpan>;
+  mergeStartByAddress: Map<string, string>;
+  coveredCells: Set<string>;
+  colWidthMap: Map<number, number>;
+  rowHeightMap: Map<number, number>;
+  renderedCells: Map<string, RenderedCellModel>;
+  showGridLines: boolean;
+  freezePanes: {
+    rowCount: number;
+    columnCount: number;
+  };
+};
+
+export type SheetRowWindow = {
+  frozenRows: number[];
+  scrollableRows: number[];
+  topSpacerHeight: number;
+  bottomSpacerHeight: number;
+  frozenRowsHeight: number;
+};
+
+export type SelectionModel = {
+  address: string;
+  formatted: string;
+  raw: string;
+  formula: string;
+  type: CellDataType;
+  numberFormatCode: string | null;
+  mergeRange: string | null;
+};
+
+const DEFAULT_COLUMN_WIDTH = 96;
+const DEFAULT_ROW_HEIGHT = 22;
+
+export const MAX_SHEET_ROW_INDEX = 1_048_575;
+export const MAX_SHEET_COL_INDEX = 16_383;
+const DEFAULT_AXIS_OVERSCAN_COUNT = 8;
+
+export type SpreadsheetViewerParseOptions = {
+  source: string;
+};
+
+export async function parseSpreadsheetViewerWorkbook(
+  fileLike: { name: string; size: number },
+  bytes: ArrayBuffer,
+  options: SpreadsheetViewerParseOptions,
+): Promise<WorkbookFile> {
+  const byteArray = new Uint8Array(bytes);
+  const workbook = parseOoxmlWorkbook(byteArray);
+
+  return {
+    id: `${fileLike.name}:${fileLike.size}`,
+    label: fileLike.name,
+    source: options.source,
+    sizeBytes: fileLike.size,
+    workbook: buildWorkbookModel(workbook),
+  };
+}
+
+function buildWorkbookModel(workbook: ReturnType<typeof parseOoxmlWorkbook>): WorkbookModel {
+  const sheetEntries = workbook.sheets.map((sheet) => [
+    sheet.name,
+    buildSheetModel(sheet),
+  ] as const);
+
+  const sheets = Object.fromEntries(sheetEntries);
+  const sheetNames = sheetEntries
+    .filter(([, sheet]) => sheet.visible)
+    .map(([sheetName]) => sheetName);
+  const activeSheetName = sheets[workbook.activeSheetName]?.visible
+    ? workbook.activeSheetName
+    : sheetNames[0] ?? workbook.activeSheetName;
+
+  return {
+    activeSheetName,
+    sheetNames,
+    sheets,
+  };
+}
+
+function buildSheetModel(sheet: OoxmlSheet): SheetModel {
+  const name = sheet.name;
+  const hiddenRows = new Set<number>();
+  const hiddenCols = new Set<number>();
+  const mergeLookup = new Map<string, MergeSpan>();
+  const mergeStartByAddress = new Map<string, string>();
+  const coveredCells = new Set<string>();
+  const colWidthMap = new Map<number, number>();
+  const rowHeightMap = new Map<number, number>();
+  const range = createEmptyRange();
+
+  for (const column of sheet.columns) {
+    const min = Math.max(0, column.min - 1);
+    const max = Math.max(min, column.max - 1);
+
+    for (let col = min; col <= max; col += 1) {
+      touchRange(range, { col, row: 0 });
+      colWidthMap.set(col, excelColumnWidthToPx(column.width ?? sheet.defaultColWidth));
+
+      if (column.hidden) {
+        hiddenCols.add(col);
+      }
+    }
+  }
+
+  for (const row of sheet.rows) {
+    const rowIndex = Math.max(0, row.index - 1);
+    touchRange(range, { col: 0, row: rowIndex });
+    rowHeightMap.set(
+      rowIndex,
+      pointsToPixels(row.height ?? sheet.defaultRowHeight ?? 15, DEFAULT_ROW_HEIGHT),
+    );
+
+    if (row.hidden) {
+      hiddenRows.add(rowIndex);
+    }
+
+    for (const cell of row.cells) {
+      if (!cell.address) {
+        continue;
+      }
+
+      touchRange(range, decodeAddress(cell.address));
+    }
+  }
+
+  for (const merge of sheet.mergedCells) {
+    if (!merge.startAddress || !merge.endAddress) {
+      continue;
+    }
+
+    const start = decodeAddress(merge.startAddress);
+    const end = decodeAddress(merge.endAddress);
+    const startAddress = encodeAddress(start.col, start.row);
+
+    touchRange(range, start);
+    touchRange(range, end);
+
+    mergeLookup.set(startAddress, {
+      colSpan: end.col - start.col + 1,
+      rowSpan: end.row - start.row + 1,
+      rangeLabel: `${startAddress}:${encodeAddress(end.col, end.row)}`,
+    });
+
+    for (let row = start.row; row <= end.row; row += 1) {
+      for (let col = start.col; col <= end.col; col += 1) {
+        const address = encodeAddress(col, row);
+        mergeStartByAddress.set(address, startAddress);
+
+        if (address !== startAddress) {
+          coveredCells.add(address);
+        }
+      }
+    }
+  }
+
+  return {
+    name,
+    visible: sheet.hidden !== true,
+    worksheet: sheet.worksheet,
+    range: mergeGridRanges(
+      mergeGridRanges(finalizeRange(range), getWorksheetUsedRange(sheet.worksheet)),
+      sheet.range,
+    ),
+    hiddenRows,
+    hiddenCols,
+    mergeLookup,
+    mergeStartByAddress,
+    coveredCells,
+    colWidthMap,
+    rowHeightMap,
+    renderedCells: sheet.renderedCells,
+    showGridLines: sheet.worksheet.showGridLines ?? sheet.showGridLines ?? true,
+    freezePanes: normalizeFreezePanes(sheet.worksheet.freezePanes),
+  };
+}
+
+function normalizeFreezePanes(
+  freezePanes: WorkbookFreezePanes | undefined,
+): SheetModel["freezePanes"] {
+  return {
+    rowCount: Math.max(0, freezePanes?.rowCount ?? freezePanes?.freezeRows ?? 0),
+    columnCount: Math.max(0, freezePanes?.columnCount ?? freezePanes?.freezeColumns ?? 0),
+  };
+}
+
+function getWorksheetUsedRange(worksheet: WorkbookWorksheet): GridRange | null {
+  const usedRange = worksheet.getUsedRange?.();
+
+  if (!usedRange) {
+    return null;
+  }
+
+  return decodeRangeAddress(usedRange.address)
+    ?? createSizedRange(usedRange.rowCount, usedRange.columnCount);
+}
+
+function createEmptyRange() {
+  return {
+    minCol: Number.POSITIVE_INFINITY,
+    maxCol: Number.NEGATIVE_INFINITY,
+    minRow: Number.POSITIVE_INFINITY,
+    maxRow: Number.NEGATIVE_INFINITY,
+  };
+}
+
+function touchRange(
+  range: ReturnType<typeof createEmptyRange>,
+  address: CellAddress,
+): void {
+  range.minCol = Math.min(range.minCol, address.col);
+  range.maxCol = Math.max(range.maxCol, address.col);
+  range.minRow = Math.min(range.minRow, address.row);
+  range.maxRow = Math.max(range.maxRow, address.row);
+}
+
+function finalizeRange(range: ReturnType<typeof createEmptyRange>): GridRange | null {
+  if (!Number.isFinite(range.minCol) || !Number.isFinite(range.minRow)) {
+    return null;
+  }
+
+  return {
+    startCol: range.minCol,
+    endCol: range.maxCol,
+    startRow: range.minRow,
+    endRow: range.maxRow,
+  };
+}
+
+function mergeGridRanges(left: GridRange | null, right: GridRange | null): GridRange | null {
+  if (!left) {
+    return right;
+  }
+
+  if (!right) {
+    return left;
+  }
+
+  return {
+    startCol: Math.min(left.startCol, right.startCol),
+    endCol: Math.max(left.endCol, right.endCol),
+    startRow: Math.min(left.startRow, right.startRow),
+    endRow: Math.max(left.endRow, right.endRow),
+  };
+}
+
+function createSizedRange(rowCount: number | undefined, columnCount: number | undefined): GridRange | null {
+  if (!rowCount || !columnCount || rowCount <= 0 || columnCount <= 0) {
+    return null;
+  }
+
+  return {
+    startCol: 0,
+    endCol: columnCount - 1,
+    startRow: 0,
+    endRow: rowCount - 1,
+  };
+}
+
+function decodeRangeAddress(address: string | undefined): GridRange | null {
+  if (!address) {
+    return null;
+  }
+
+  const [startAddress, endAddress] = address.split(":");
+  const start = decodeAddress(startAddress ?? "");
+  const end = decodeAddress(endAddress ?? startAddress ?? "");
+
+  return {
+    startCol: Math.min(start.col, end.col),
+    endCol: Math.max(start.col, end.col),
+    startRow: Math.min(start.row, end.row),
+    endRow: Math.max(start.row, end.row),
+  };
+}
+
+function readWorksheetCellState(
+  worksheet: WorkbookWorksheet,
+  address: string,
+): CellState | null {
+  try {
+    const range = worksheet.getRange(address);
+    const rawValue = range.rawValues?.[0]?.[0];
+    const formattedValue = range.values?.[0]?.[0];
+
+    return {
+      formatted: formatCellStateValue(formattedValue),
+      raw: formatCellStateValue(rawValue),
+      formula: range.displayFormula ?? "",
+      numberFormatCode: range.format?.numberFormat ?? null,
+      type: inferCellType(rawValue, formattedValue),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatCellStateValue(value: unknown): string {
+  if (value == null) {
+    return "";
+  }
+
+  if (value instanceof Date) {
+    return formatCellStateDate(value);
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return JSON.stringify(value);
+}
+
+function inferCellType(rawValue: unknown, formattedValue: unknown): CellDataType {
+  const value = rawValue ?? formattedValue;
+
+  if (value == null) {
+    return "unspecified";
+  }
+
+  if (value instanceof Date) {
+    return "date";
+  }
+
+  if (typeof value === "boolean") {
+    return "boolean";
+  }
+
+  if (typeof value === "number") {
+    return "number";
+  }
+
+  if (typeof value === "string" && value.startsWith("#")) {
+    return "error";
+  }
+
+  return "string";
+}
+
+function formatCellStateDate(value: Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(value);
+}
+
+function pointsToPixels(points: number, fallback: number): number {
+  if (!points || !Number.isFinite(points)) {
+    return fallback;
+  }
+
+  return Math.max(DEFAULT_ROW_HEIGHT, Math.round(points * 1.3333));
+}
+
+export function getSheetSelection(
+  sheet: SheetModel,
+  address: string | null,
+): SelectionModel | null {
+  const resolvedAddress = resolveSelectionAddress(sheet, address);
+
+  if (!resolvedAddress) {
+    return null;
+  }
+
+  const renderedCell = getRenderedCell(sheet, resolvedAddress);
+  const cellState = readWorksheetCellState(sheet.worksheet, resolvedAddress);
+
+  return {
+    address: resolvedAddress,
+    formatted: renderedCell?.text || cellState?.formatted || "",
+    raw: cellState?.raw ?? "",
+    formula: cellState?.formula || "",
+    type: cellState?.type ?? "unspecified",
+    numberFormatCode: cellState?.numberFormatCode ?? null,
+    mergeRange: sheet.mergeLookup.get(resolvedAddress)?.rangeLabel ?? null,
+  };
+}
+
+export function getBaseSheetExtent(sheet: SheetModel): SheetViewportExtent {
+  return {
+    endRow: Math.max(0, sheet.range?.endRow ?? 0),
+    endCol: Math.max(0, sheet.range?.endCol ?? 0),
+  };
+}
+
+export function expandSheetExtentToIncludeCell(
+  extent: SheetViewportExtent,
+  address: CellAddress,
+): SheetViewportExtent {
+  const nextEndRow = Math.min(MAX_SHEET_ROW_INDEX, Math.max(extent.endRow, address.row));
+  const nextEndCol = Math.min(MAX_SHEET_COL_INDEX, Math.max(extent.endCol, address.col));
+
+  if (nextEndRow === extent.endRow && nextEndCol === extent.endCol) {
+    return extent;
+  }
+
+  return {
+    endRow: nextEndRow,
+    endCol: nextEndCol,
+  };
+}
+
+export function expandSheetExtentToCoverViewport(
+  extent: SheetViewportExtent,
+  metrics: {
+    scrollLeft: number;
+    scrollTop: number;
+    clientWidth: number;
+    clientHeight: number;
+    rowHeaderWidth: number;
+    columnHeaderHeight: number;
+  },
+  geometry: {
+    getColumnWidth: (col: number) => number;
+    getRowHeight: (row: number) => number;
+    isColumnHidden?: (col: number) => boolean;
+    isRowHidden?: (row: number) => boolean;
+  },
+): SheetViewportExtent {
+  const nextEndRow = growAxisToCoverViewport({
+    currentEnd: extent.endRow,
+    maxIndex: MAX_SHEET_ROW_INDEX,
+    scrollOffset: metrics.scrollTop,
+    clientSize: metrics.clientHeight,
+    headerSize: metrics.columnHeaderHeight,
+    getSize: geometry.getRowHeight,
+    isHidden: geometry.isRowHidden,
+  });
+  const nextEndCol = growAxisToCoverViewport({
+    currentEnd: extent.endCol,
+    maxIndex: MAX_SHEET_COL_INDEX,
+    scrollOffset: metrics.scrollLeft,
+    clientSize: metrics.clientWidth,
+    headerSize: metrics.rowHeaderWidth,
+    getSize: geometry.getColumnWidth,
+    isHidden: geometry.isColumnHidden,
+  });
+
+  if (nextEndRow === extent.endRow && nextEndCol === extent.endCol) {
+    return extent;
+  }
+
+  return {
+    endRow: nextEndRow,
+    endCol: nextEndCol,
+  };
+}
+
+function growAxisToCoverViewport(options: {
+  currentEnd: number;
+  maxIndex: number;
+  scrollOffset: number;
+  clientSize: number;
+  headerSize: number;
+  getSize: (index: number) => number;
+  isHidden?: (index: number) => boolean;
+}): number {
+  const targetSize = Math.max(
+    0,
+    Math.max(0, options.scrollOffset) + Math.max(0, options.clientSize - options.headerSize),
+  );
+
+  if (targetSize <= 0) {
+    return options.currentEnd;
+  }
+
+  let coveredSize = 0;
+
+  for (let index = 0; index <= options.currentEnd; index += 1) {
+    if (options.isHidden?.(index)) {
+      continue;
+    }
+
+    coveredSize += Math.max(0, options.getSize(index));
+  }
+
+  if (coveredSize >= targetSize) {
+    return options.currentEnd;
+  }
+
+  let nextEnd = options.currentEnd;
+
+  while (coveredSize < targetSize && nextEnd < options.maxIndex) {
+    nextEnd += 1;
+
+    if (options.isHidden?.(nextEnd)) {
+      continue;
+    }
+
+    coveredSize += Math.max(0, options.getSize(nextEnd));
+  }
+
+  return nextEnd;
+}
+
+export function getVisibleRowIndices(
+  sheet: SheetModel,
+  extent: SheetViewportExtent = getBaseSheetExtent(sheet),
+): number[] {
+  const rows: number[] = [];
+  const { endRow } = extent;
+
+  for (let row = 0; row <= endRow; row += 1) {
+    if (!sheet.hiddenRows.has(row)) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
+}
+
+export function getVisibleColIndices(
+  sheet: SheetModel,
+  extent: SheetViewportExtent = getBaseSheetExtent(sheet),
+): number[] {
+  const cols: number[] = [];
+  const { endCol } = extent;
+
+  for (let col = 0; col <= endCol; col += 1) {
+    if (!sheet.hiddenCols.has(col)) {
+      cols.push(col);
+    }
+  }
+
+  return cols;
+}
+
+export function getSheetRowWindow(
+  sheet: SheetModel,
+  extent: SheetViewportExtent,
+  metrics: SheetViewportMetrics,
+  options: {
+    headerHeight: number;
+    frozenRowCount: number;
+    getRowHeight: (row: number) => number;
+    overscanCount?: number;
+  },
+): SheetRowWindow {
+  const visibleRows = getVisibleRowIndices(sheet, extent);
+  const frozenRows = visibleRows.filter((row) => row < options.frozenRowCount);
+  const scrollableRows = visibleRows.filter((row) => row >= options.frozenRowCount);
+  const frozenRowsHeight = sumAxisSizes(frozenRows, options.getRowHeight);
+
+  if (scrollableRows.length === 0) {
+    return {
+      frozenRows,
+      scrollableRows,
+      topSpacerHeight: 0,
+      bottomSpacerHeight: 0,
+      frozenRowsHeight,
+    };
+  }
+
+  const scrollableViewportHeight = Math.max(
+    0,
+    metrics.clientHeight - options.headerHeight - frozenRowsHeight,
+  );
+  const axisWindow = getAxisWindow(scrollableRows, {
+    scrollOffset: metrics.scrollTop,
+    viewportSize: scrollableViewportHeight,
+    getSize: options.getRowHeight,
+    overscanCount: options.overscanCount ?? DEFAULT_AXIS_OVERSCAN_COUNT,
+  });
+  const mergeExpandedBounds = expandRowWindowForMerges(
+    sheet,
+    axisWindow.firstIndex == null ? null : scrollableRows[axisWindow.firstIndex] ?? null,
+    axisWindow.lastIndex == null ? null : scrollableRows[axisWindow.lastIndex] ?? null,
+  );
+  const rowBounds = mergeExpandedBounds
+    ? {
+        start: mergeExpandedBounds.startRow,
+        end: mergeExpandedBounds.endRow,
+      }
+    : null;
+  const renderStartIndex = rowBounds
+    ? findAxisIndexAtOrAfter(scrollableRows, rowBounds.start)
+    : axisWindow.firstIndex;
+  const renderEndIndex = rowBounds
+    ? findAxisIndexAtOrBefore(scrollableRows, rowBounds.end)
+    : axisWindow.lastIndex;
+
+  if (renderStartIndex == null || renderEndIndex == null) {
+    return {
+      frozenRows,
+      scrollableRows: [],
+      topSpacerHeight: 0,
+      bottomSpacerHeight: sumAxisSizes(scrollableRows, options.getRowHeight),
+      frozenRowsHeight,
+    };
+  }
+
+  const renderedScrollableRows = scrollableRows.slice(
+    renderStartIndex,
+    renderEndIndex + 1,
+  );
+  const topSpacerHeight = sumAxisSizes(
+    scrollableRows.slice(0, renderStartIndex),
+    options.getRowHeight,
+  );
+  const renderedScrollableHeight = sumAxisSizes(
+    renderedScrollableRows,
+    options.getRowHeight,
+  );
+  const totalScrollableHeight = sumAxisSizes(scrollableRows, options.getRowHeight);
+
+  return {
+    frozenRows,
+    scrollableRows: renderedScrollableRows,
+    topSpacerHeight,
+    bottomSpacerHeight: Math.max(
+      0,
+      totalScrollableHeight - topSpacerHeight - renderedScrollableHeight,
+    ),
+    frozenRowsHeight,
+  };
+}
+
+export function getDefaultSelectionAddress(
+  sheet: SheetModel,
+  extent: SheetViewportExtent = getBaseSheetExtent(sheet),
+): string | null {
+  const row = getFirstVisibleRow(sheet, extent);
+  const col = getFirstVisibleCol(sheet, extent);
+
+  if (row == null || col == null) {
+    return null;
+  }
+
+  return resolveSelectionAddress(sheet, encodeAddress(col, row));
+}
+
+export function getFirstVisibleRow(
+  sheet: SheetModel,
+  extent: SheetViewportExtent,
+): number | null {
+  return findNextVisibleIndex(sheet.hiddenRows, 0, 1, extent.endRow);
+}
+
+export function getLastVisibleRow(
+  sheet: SheetModel,
+  extent: SheetViewportExtent,
+): number | null {
+  return findNextVisibleIndex(sheet.hiddenRows, extent.endRow, -1, extent.endRow);
+}
+
+export function getFirstVisibleCol(
+  sheet: SheetModel,
+  extent: SheetViewportExtent,
+): number | null {
+  return findNextVisibleIndex(sheet.hiddenCols, 0, 1, extent.endCol);
+}
+
+export function getLastVisibleCol(
+  sheet: SheetModel,
+  extent: SheetViewportExtent,
+): number | null {
+  return findNextVisibleIndex(sheet.hiddenCols, extent.endCol, -1, extent.endCol);
+}
+
+export function findNearestVisibleRow(
+  sheet: SheetModel,
+  row: number,
+  maxRow: number,
+): number {
+  return findNearestVisibleIndex(sheet.hiddenRows, row, maxRow);
+}
+
+export function findNearestVisibleCol(
+  sheet: SheetModel,
+  col: number,
+  maxCol: number,
+): number {
+  return findNearestVisibleIndex(sheet.hiddenCols, col, maxCol);
+}
+
+export function findNextVisibleRow(
+  sheet: SheetModel,
+  row: number,
+  direction: -1 | 1,
+  maxRow: number,
+): number {
+  return findNextVisibleIndex(sheet.hiddenRows, row + direction, direction, maxRow)
+    ?? clampGridIndex(row, maxRow);
+}
+
+export function findNextVisibleCol(
+  sheet: SheetModel,
+  col: number,
+  direction: -1 | 1,
+  maxCol: number,
+): number {
+  return findNextVisibleIndex(sheet.hiddenCols, col + direction, direction, maxCol)
+    ?? clampGridIndex(col, maxCol);
+}
+
+export function resolveSelectionAddress(sheet: SheetModel, address: string | null): string | null {
+  if (!address) {
+    return null;
+  }
+
+  return sheet.mergeStartByAddress.get(address) ?? address;
+}
+
+export function isCoveredByMerge(sheet: SheetModel, address: string): boolean {
+  return sheet.coveredCells.has(address);
+}
+
+export function getMergeSpan(sheet: SheetModel, address: string): MergeSpan | null {
+  const resolvedAddress = resolveSelectionAddress(sheet, address);
+  return resolvedAddress ? sheet.mergeLookup.get(resolvedAddress) ?? null : null;
+}
+
+export function getRenderedCell(sheet: SheetModel, address: string): RenderedCellModel | null {
+  const resolvedAddress = resolveSelectionAddress(sheet, address);
+  return resolvedAddress ? sheet.renderedCells.get(resolvedAddress) ?? null : null;
+}
+
+export function getColumnWidth(sheet: SheetModel, col: number): number {
+  return sheet.colWidthMap.get(col) ?? DEFAULT_COLUMN_WIDTH;
+}
+
+export function getRowHeight(sheet: SheetModel, row: number): number {
+  return sheet.rowHeightMap.get(row) ?? DEFAULT_ROW_HEIGHT;
+}
+
+export function getColLabel(index: number): string {
+  return encodeColumn(index);
+}
+
+export function getCellAddress(col: number, row: number): string {
+  return encodeAddress(col, row);
+}
+
+export function safeSheetName(sheetName: string): string {
+  return sheetName.replace(/\s+/g, "-").replace(/[^a-z0-9-]/gi, "").toLowerCase();
+}
+
+export function decodeCellAddress(address: string | null): CellAddress | null {
+  if (!address) {
+    return null;
+  }
+
+  return decodeAddress(address);
+}
+
+function decodeAddress(address: string): CellAddress {
+  const match = address.match(/^([A-Z]+)(\d+)$/i);
+
+  if (!match) {
+    return { col: 0, row: 0 };
+  }
+
+  return {
+    col: decodeColumn(match[1] ?? "A"),
+    row: Math.max(0, Number.parseInt(match[2] ?? "1", 10) - 1),
+  };
+}
+
+function encodeAddress(col: number, row: number): string {
+  return `${encodeColumn(col)}${row + 1}`;
+}
+
+function encodeColumn(col: number): string {
+  let value = col + 1;
+  let label = "";
+
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    value = Math.floor((value - 1) / 26);
+  }
+
+  return label;
+}
+
+function decodeColumn(label: string): number {
+  let result = 0;
+
+  for (const char of label.toUpperCase()) {
+    result = result * 26 + (char.charCodeAt(0) - 64);
+  }
+
+  return result - 1;
+}
+
+function clampGridIndex(value: number, maxIndex: number): number {
+  return Math.max(0, Math.min(maxIndex, value));
+}
+
+function findNearestVisibleIndex(
+  hiddenIndices: Set<number>,
+  value: number,
+  maxIndex: number,
+): number {
+  const clampedValue = clampGridIndex(value, maxIndex);
+
+  if (!hiddenIndices.has(clampedValue)) {
+    return clampedValue;
+  }
+
+  for (let distance = 1; distance <= maxIndex + 1; distance += 1) {
+    const backward = clampedValue - distance;
+
+    if (backward >= 0 && !hiddenIndices.has(backward)) {
+      return backward;
+    }
+
+    const forward = clampedValue + distance;
+
+    if (forward <= maxIndex && !hiddenIndices.has(forward)) {
+      return forward;
+    }
+  }
+
+  return 0;
+}
+
+function findNextVisibleIndex(
+  hiddenIndices: Set<number>,
+  start: number,
+  direction: -1 | 1,
+  maxIndex: number,
+): number | null {
+  let candidate = clampGridIndex(start, maxIndex);
+
+  while (candidate >= 0 && candidate <= maxIndex) {
+    if (!hiddenIndices.has(candidate)) {
+      return candidate;
+    }
+
+    candidate += direction;
+  }
+
+  return null;
+}
+
+function sumAxisSizes(indices: number[], getSize: (index: number) => number): number {
+  let total = 0;
+
+  for (const index of indices) {
+    total += Math.max(0, getSize(index));
+  }
+
+  return total;
+}
+
+function getAxisWindow(
+  indices: number[],
+  options: {
+    scrollOffset: number;
+    viewportSize: number;
+    getSize: (index: number) => number;
+    overscanCount: number;
+  },
+): {
+  firstIndex: number | null;
+  lastIndex: number | null;
+} {
+  if (indices.length === 0) {
+    return {
+      firstIndex: null,
+      lastIndex: null,
+    };
+  }
+
+  const prefixSums = [0];
+
+  for (const index of indices) {
+    prefixSums.push(prefixSums[prefixSums.length - 1]! + Math.max(0, options.getSize(index)));
+  }
+
+  const viewportStart = Math.max(0, options.scrollOffset);
+  const viewportEnd = Math.max(viewportStart, viewportStart + Math.max(0, options.viewportSize));
+  const startIndex = clampWindowIndex(
+    lowerBoundPrefix(prefixSums, viewportStart) - 1,
+    indices.length - 1,
+  );
+  const endIndex = clampWindowIndex(
+    Math.max(startIndex, lowerBoundPrefix(prefixSums, viewportEnd) - 1),
+    indices.length - 1,
+  );
+
+  return {
+    firstIndex: Math.max(0, startIndex - options.overscanCount),
+    lastIndex: Math.min(indices.length - 1, endIndex + options.overscanCount),
+  };
+}
+
+function lowerBoundPrefix(prefixSums: number[], target: number): number {
+  let low = 0;
+  let high = prefixSums.length - 1;
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+
+    if (prefixSums[mid]! < target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
+}
+
+function clampWindowIndex(index: number, maxIndex: number): number {
+  if (!Number.isFinite(index)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(maxIndex, index));
+}
+
+function expandRowWindowForMerges(
+  sheet: SheetModel,
+  startRow: number | null,
+  endRow: number | null,
+): { startRow: number; endRow: number } | null {
+  if (startRow == null || endRow == null) {
+    return null;
+  }
+
+  let nextStartRow = startRow;
+  let nextEndRow = endRow;
+
+  for (const [address, merge] of sheet.mergeLookup) {
+    if (merge.rowSpan <= 1) {
+      continue;
+    }
+
+    const start = decodeAddress(address);
+    const mergeStartRow = start.row;
+    const mergeEndRow = start.row + merge.rowSpan - 1;
+
+    if (mergeEndRow < nextStartRow || mergeStartRow > nextEndRow) {
+      continue;
+    }
+
+    nextStartRow = Math.min(nextStartRow, mergeStartRow);
+    nextEndRow = Math.max(nextEndRow, mergeEndRow);
+  }
+
+  return {
+    startRow: nextStartRow,
+    endRow: nextEndRow,
+  };
+}
+
+function findAxisIndexAtOrAfter(indices: number[], target: number): number | null {
+  for (let index = 0; index < indices.length; index += 1) {
+    if (indices[index]! >= target) {
+      return index;
+    }
+  }
+
+  return null;
+}
+
+function findAxisIndexAtOrBefore(indices: number[], target: number): number | null {
+  for (let index = indices.length - 1; index >= 0; index -= 1) {
+    if (indices[index]! <= target) {
+      return index;
+    }
+  }
+
+  return null;
+}

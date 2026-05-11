@@ -1,0 +1,27 @@
+export {
+  adapterCommandName,
+  cloneWorkbenchAdapterManifest,
+  collectWorkbenchAdapterAuthRequirements,
+  collectWorkbenchAdapterInvocations,
+  parseWorkbenchAdapterManifest,
+  workbenchAdapterManifestRequiresAuth,
+  withDefaultWorkbenchAdapterAuth,
+  withDefaultWorkbenchAdapterAuthProfiles,
+  type WorkbenchAdapterAuthEnvManifest,
+  type WorkbenchAdapterAuthFileManifest,
+  type WorkbenchAdapterAuthManifest,
+  type WorkbenchAdapterAuthMethodManifest,
+  type WorkbenchAdapterAuthRequirement,
+  type WorkbenchAdapterInvocationLike,
+  type WorkbenchAdapterManifest,
+} from "./adapter-manifest.ts";
+export {
+  ensureWorkbenchAdapterOutputDir,
+  normalizeWorkbenchAdapterCommandRequest,
+  readWorkbenchAdapterCommandRequest,
+  readWorkbenchAdapterResultMetadata,
+  workbenchAdapterResultPath,
+  writeWorkbenchAdapterResultMetadata,
+  type WorkbenchAdapterCommandRequest,
+  type WorkbenchAdapterResultMetadata,
+} from "./adapter-protocol.ts";

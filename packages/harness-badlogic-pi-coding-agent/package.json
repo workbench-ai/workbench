@@ -1,0 +1,34 @@
+{
+  "name": "@workbench-ai/harness-badlogic-pi-coding-agent",
+  "version": "0.0.43",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workbench-ai/workbench.git",
+    "directory": "packages/harness-badlogic-pi-coding-agent"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/clean-paths.mjs dist && tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --check 'src/**/*.ts'"
+  },
+  "dependencies": {
+    "@workbench-ai/contracts": "workspace:*",
+    "@workbench-ai/harness-sdk": "workspace:*",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2"
+  }
+}

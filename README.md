@@ -1,26 +1,39 @@
 # Workbench
 
-Create skill-first evals by default, use rubric grading for qualitative scoring, use pipeline or advanced command evals when clearly appropriate, and configure, run, inspect, sync, and export Workbench benchmarks and candidates with workbench.
+Workbench is an open-source, local-first benchmark workbench for evaluating and improving agent candidates.
 
-This repository is a generated public skill for AI coding agents. It follows the [Agent Skills](https://agentskills.io) format with `SKILL.md` at the repository root.
+This public repository contains the Workbench CLI package, core benchmark engine, adapter protocol, reusable Workbench UI, the shared CLI Web UI package used by that UI, first-party harness packages used by the built-in adapters, documentation, environments, and the installable Workbench agent skill.
 
-## Installation
+Hosted Workbench Cloud infrastructure, hosted persistence, billing, auth, worker fleet code, and Terraform are not part of this repository.
+
+## Install The Agent Skill
 
 ```bash
 npx skills add workbench-ai/workbench
 ```
 
-## Use When
+The skill source lives at `skills/workbench/SKILL.md`. This repository intentionally has no root `SKILL.md`; keeping the skill nested ensures the installer copies only the skill directory, not the full source tree.
 
-- Verifying or installing the published `@workbench-ai/workbench` package before using Workbench Cloud
-- Scaffolding ambiguous candidates with `workbench init --skill NAME --agent ADAPTER`, using `workbench init --pipeline NAME --agent ADAPTER` when the pipeline is clearly the candidate, and using `workbench init --command NAME` only when the command-line implementation itself is the candidate
-- Authoring split Workbench benchmark, candidate, and optional optimizer YAML from existing workflows or file-output tasks with benchmark environment Dockerfiles, rubric grading by default, and command grading only for deterministic scoring contracts
-- Pushing hosted benchmark source from `benchmark.yaml` with `workbench push --tag v1` and `.workbench/origin.json`
-- Cloning, starring, and forking public benchmarks addressed as `owner/name[@ref]`
-- Running local candidates such as `candidates/claude` with `workbench eval` and `workbench improve`
-- Starting hosted eval and improve workflows with `workbench cloud`, watching completion, inspecting candidate files, and exporting selected candidates
-- Keeping the local Workbench UI open in an embedded browser with `workbench open --json --no-open` while an agent drives the CLI
+## Source Layout
 
-## Structure
+- `packages/cli`: `@workbench-ai/workbench`, the `workbench` command package
+- `packages/core`: local benchmark runtime and execution engine
+- `packages/protocol`: adapter protocol helpers
+- `packages/contract`: Workbench benchmark and result contract types
+- `packages/built-in-adapters`: built-in command, rubric, Codex, Claude, and Pi adapters
+- `packages/workbench-ui`: reusable Workbench UI surface
+- `packages/cli-web-ui`: shared UI primitives and preview components used by Workbench UI
+- `packages/harness-*` and `packages/contracts`: first-party harness packages used by built-in agent adapters
+- `docs`, `SPEC.md`, and `ARCHITECTURE.md`: Workbench behavior and architecture references
+- `environments`: reusable benchmark environment Dockerfiles
+- `skills/workbench`: installable Workbench skill for AI coding agents
 
-`SKILL.md` is the installable skill. Supporting directories such as `agents/`, `references/`, and `evals/` are included only when declared by the authored product skill.
+## Local Development
+
+```bash
+pnpm install
+pnpm build
+pnpm test
+```
+
+The exported source keeps package names unchanged so workspace imports match the published package names.

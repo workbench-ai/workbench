@@ -1,0 +1,63 @@
+@theme inline {
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-chart-performance: var(--chart-performance);
+  --color-chart-speed: var(--chart-speed);
+  --color-chart-cost: var(--chart-cost);
+  --color-chart-6: var(--chart-6);
+}
+
+@utility checkerboard-bg {
+  background-color: var(--checkerboard-base);
+  background-image:
+    linear-gradient(45deg, var(--checkerboard-accent) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checkerboard-accent) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checkerboard-accent) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checkerboard-accent) 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+}
+
+:root {
+  --success: oklch(0.627 0.154 150.03);
+  --success-foreground: oklch(0.985 0 0);
+  --warning: oklch(0.795 0.163 82.84);
+  --warning-foreground: oklch(0.205 0 0);
+  --chart-1: oklch(0.627 0.154 150.03);
+  --chart-2: oklch(0.623 0.188 259.81);
+  --chart-3: oklch(0.795 0.163 82.84);
+  --chart-4: oklch(0.68 0.2 33);
+  --chart-5: oklch(0.62 0.19 293);
+  --chart-6: oklch(0.646 0.133 202.352);
+  --chart-performance: var(--chart-1);
+  --chart-speed: var(--chart-2);
+  --chart-cost: var(--chart-3);
+  --checkerboard-base: oklch(0.985 0 0);
+  --checkerboard-accent: oklch(0.94 0 0);
+  --monaco-shell-background: oklch(0.205 0 0);
+}
+
+.dark {
+  --success: oklch(0.705 0.138 151.54);
+  --success-foreground: oklch(0.145 0 0);
+  --warning: oklch(0.84 0.162 84.43);
+  --warning-foreground: oklch(0.205 0 0);
+  --chart-1: oklch(0.705 0.138 151.54);
+  --chart-2: oklch(0.707 0.165 254.62);
+  --chart-3: oklch(0.84 0.162 84.43);
+  --chart-4: oklch(0.755 0.172 34);
+  --chart-5: oklch(0.71 0.17 293);
+  --chart-6: oklch(0.744 0.116 203.627);
+  --chart-performance: var(--chart-1);
+  --chart-speed: var(--chart-2);
+  --chart-cost: var(--chart-3);
+  --checkerboard-base: oklch(0.205 0 0);
+  --checkerboard-accent: oklch(0.255 0 0);
+  --monaco-shell-background: oklch(0.165 0 0);
+}

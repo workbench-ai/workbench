@@ -1,0 +1,662 @@
+import type {
+  HostedWorkbenchJob,
+  Json,
+  WorkbenchExecutionSpec,
+} from "@workbench-ai/workbench-contract";
+import {
+  createHash,
+} from "node:crypto";
+import {
+  createWriteStream,
+  existsSync,
+} from "node:fs";
+import path from "node:path";
+import {
+  fileURLToPath,
+} from "node:url";
+
+import {
+  createSandboxAdapterRequest,
+  executionResultFromCompletedSandboxJob,
+} from "../sandbox-inputs.ts";
+import type {
+  WorkbenchExecutionRuntimeInput,
+} from "../execution-runtime-types.ts";
+import {
+  type SandboxBackendDescriptor,
+  type SandboxCreateRequest,
+  type SandboxExecutionFileStore,
+  type SandboxHandle,
+  type SandboxPlane,
+} from "../sandbox-plane.ts";
+import {
+  asRuntimeRecord,
+  importNodeModule,
+  nodeBuiltin,
+} from "../runtime-utils.ts";
+import {
+  createWorkbenchProgressStdoutParser,
+  publishWorkbenchProgressStdoutEnvelope,
+} from "../execution-events.ts";
+import {
+  resolveSandboxTemplateImage,
+} from "./template-images.ts";
+import {
+  DOCKER_SANDBOX_BACKEND,
+} from "./names.ts";
+
+const BUILT_IN_ENVIRONMENT_IMAGES: Record<string, string> = {
+  "workbench/workbench-node-22:envv_node_22": "products/workbench/environments/node-22/Dockerfile",
+  "workbench/workbench-python-3.12:envv_python_3_12": "products/workbench/environments/python-3.12/Dockerfile",
+  "workbench/workbench-libreoffice-python:envv_libreoffice_python": "products/workbench/environments/libreoffice-python/Dockerfile",
+  "workbench/workbench-libreoffice-agent:envv_libreoffice_agent": "products/workbench/environments/libreoffice-agent/Dockerfile",
+};
+
+type DockerRuntimePayload = {
+  mountRoot: string;
+  runnerPath: string;
+  runtimeImport: string;
+  builtInDockerfileRoot: string;
+};
+
+interface DockerSandboxUser {
+  uid: number;
+  gid: number;
+}
+
+export function createDockerSandboxBackendDescriptor(
+): SandboxBackendDescriptor {
+  return {
+    name: DOCKER_SANDBOX_BACKEND,
+    version: "1",
+    capabilities: {
+      snapshots: true,
+      interactiveExec: false,
+      filesystemDiff: false,
+      networkPolicy: ["none", "open"],
+      fileCapabilities: true,
+    },
+  };
+}
+
+export function createDockerSandboxPlane(
+  args: WorkbenchExecutionRuntimeInput,
+  startedAt: string,
+  fileStore: SandboxExecutionFileStore,
+): SandboxPlane {
+  return {
+    backend: createDockerSandboxBackendDescriptor(),
+    async prepareEnvironment(execution) {
+      const [{ execFile }, { promisify }] = await Promise.all([
+        importNodeModule<typeof import("node:child_process")>(nodeBuiltin("child_process")),
+        importNodeModule<typeof import("node:util")>(nodeBuiltin("util")),
+      ]);
+      const execFileAsync = promisify(execFile);
+      const templateImage = await prepareDockerTemplateImage(execution, args, execFileAsync);
+      await ensureDockerExecutionImage(templateImage, execFileAsync);
+      return {
+        backend: DOCKER_SANDBOX_BACKEND,
+        kind: execution.sandbox.kind,
+        ref: execution.sandbox.ref,
+        metadata: {
+          templateImage,
+        },
+      };
+    },
+    async createSandbox(request) {
+      const metadata = await prepareDockerSandboxWorkspace(args, request, startedAt);
+      return {
+        sandboxId: request.allocation.sandboxId,
+        lifecycleId: request.allocation.lifecycleId,
+        backend: request.allocation.backend,
+        executionId: request.execution.id,
+        template: request.allocation.template,
+        metadata: {
+          allocation: request.allocation as unknown as Json,
+          ...metadata,
+        },
+      };
+    },
+    async exec(request) {
+      const completedJob = await runDockerSandboxExecution(request.sandbox, request.execution);
+      return await executionResultFromCompletedSandboxJob({
+        completedJob,
+        execution: request.execution,
+        startedAt,
+        backend: DOCKER_SANDBOX_BACKEND,
+        allocation: request.allocation,
+        capability: request.capability,
+        handle: request.sandbox,
+        fileStore,
+      });
+    },
+    async destroySandbox(sandbox) {
+      await destroyDockerSandbox(sandbox);
+    },
+  };
+}
+
+async function prepareDockerTemplateImage(
+  execution: WorkbenchExecutionSpec,
+  args: WorkbenchExecutionRuntimeInput,
+  execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
+): Promise<string> {
+  const ref = execution.sandbox.ref;
+  if (execution.sandbox.kind !== "oci" || !ref.startsWith("dockerfile://")) {
+    return resolveSandboxTemplateImage(execution, args);
+  }
+  const dockerfile = args.environmentDockerfile?.trim();
+  if (!dockerfile) {
+    throw new Error(`Execution ${execution.id} uses ${ref}, but the claimed job input omitted environmentDockerfile.`);
+  }
+  const [fs, os, path] = await Promise.all([
+    importNodeModule<typeof import("node:fs/promises")>(nodeBuiltin("fs/promises")),
+    importNodeModule<typeof import("node:os")>(nodeBuiltin("os")),
+    importNodeModule<typeof import("node:path")>(nodeBuiltin("path")),
+  ]);
+  const sourceHash = args.environmentVersion?.sourceHash?.trim() || createHash("sha256").update(dockerfile).digest("hex");
+  const image = `workbench/sandbox-${safeDockerImageSegment(args.environmentVersion?.id ?? "env")}:${sourceHash.slice(0, 16)}`;
+  const imageExists = await execFileAsync("docker", ["image", "inspect", image], { maxBuffer: 1024 * 1024 })
+    .then(() => true, () => false);
+  if (imageExists) {
+    return image;
+  }
+  const contextRoot = path.join(args.workdir ?? os.tmpdir(), "workbench-docker-environments", sourceHash.slice(0, 32));
+  const dockerfilePath = path.join(contextRoot, "Dockerfile");
+  await fs.rm(contextRoot, { recursive: true, force: true }).catch(() => undefined);
+  await fs.mkdir(contextRoot, { recursive: true });
+  await fs.writeFile(dockerfilePath, `${dockerfile}\n`, { mode: 0o600 });
+  await execFileAsync("docker", ["build", "-t", image, "-f", dockerfilePath, contextRoot], { maxBuffer: 20 * 1024 * 1024 });
+  return image;
+}
+
+async function prepareDockerSandboxWorkspace(
+  args: WorkbenchExecutionRuntimeInput,
+  request: SandboxCreateRequest,
+  startedAt: string,
+): Promise<Record<string, Json>> {
+  const [{ execFile }, fs, os, path, { promisify }] = await Promise.all([
+    importNodeModule<typeof import("node:child_process")>(nodeBuiltin("child_process")),
+    importNodeModule<typeof import("node:fs/promises")>(nodeBuiltin("fs/promises")),
+    importNodeModule<typeof import("node:os")>(nodeBuiltin("os")),
+    importNodeModule<typeof import("node:path")>(nodeBuiltin("path")),
+    importNodeModule<typeof import("node:util")>(nodeBuiltin("util")),
+  ]);
+  const execFileAsync = promisify(execFile);
+  const sandboxUser = dockerSandboxUser();
+  const workdir = args.workdir ?? os.tmpdir();
+  const sandboxRoot = path.join(workdir, "workbench-docker", request.allocation.sandboxId);
+  const requestPath = path.join(sandboxRoot, "request.json");
+  const responsePath = path.join(sandboxRoot, "response.json");
+  const stdoutPath = path.join(sandboxRoot, "stdout.log");
+  const stderrPath = path.join(sandboxRoot, "stderr.log");
+  await fs.rm(sandboxRoot, { recursive: true, force: true }).catch(() => undefined);
+  await fs.mkdir(sandboxRoot, { recursive: true });
+  await alignDockerSandboxPath(fs, sandboxRoot, sandboxUser, 0o700, 0o777);
+  await fs.writeFile(requestPath, `${JSON.stringify(createSandboxAdapterRequest(args, request, startedAt), null, 2)}\n`, { mode: 0o600 });
+  await alignDockerSandboxPath(fs, requestPath, sandboxUser, 0o600, 0o644);
+
+  const environmentMetadata = asRuntimeRecord(request.environment.metadata);
+  const image = typeof environmentMetadata.templateImage === "string"
+    ? environmentMetadata.templateImage
+    : await prepareDockerTemplateImage(request.execution, args, execFileAsync);
+  const network = dockerNetworkConfigForExecution(request.execution);
+  const runtimePayload = await prepareDockerRuntimePayload(workdir, execFileAsync, fs, path);
+  return {
+    root: sandboxRoot,
+    request: requestPath,
+    response: responsePath,
+    stdout: stdoutPath,
+    stderr: stderrPath,
+    templateImage: image,
+    containerName: dockerContainerName(request.allocation.sandboxId),
+    runtimeRoot: runtimePayload.mountRoot,
+    runnerPath: runtimePayload.runnerPath,
+    runtimeImport: runtimePayload.runtimeImport,
+    sandboxUid: sandboxUser.uid,
+    sandboxGid: sandboxUser.gid,
+    network: network as unknown as Json,
+  };
+}
+
+async function runDockerSandboxExecution(
+  sandbox: SandboxHandle,
+  execution: WorkbenchExecutionSpec,
+): Promise<HostedWorkbenchJob> {
+  const metadata = asRuntimeRecord(sandbox.metadata);
+  const root = readRequiredMetadataString(metadata, "root", DOCKER_SANDBOX_BACKEND);
+  const responsePath = readRequiredMetadataString(metadata, "response", DOCKER_SANDBOX_BACKEND);
+  const stdoutPath = readRequiredMetadataString(metadata, "stdout", DOCKER_SANDBOX_BACKEND);
+  const stderrPath = readRequiredMetadataString(metadata, "stderr", DOCKER_SANDBOX_BACKEND);
+  const image = readRequiredMetadataString(metadata, "templateImage", DOCKER_SANDBOX_BACKEND);
+  const containerName = readRequiredMetadataString(metadata, "containerName", DOCKER_SANDBOX_BACKEND);
+  const runtimeRoot = readRequiredMetadataString(metadata, "runtimeRoot", DOCKER_SANDBOX_BACKEND);
+  const runnerPath = readRequiredMetadataString(metadata, "runnerPath", DOCKER_SANDBOX_BACKEND);
+  const runtimeImport = readRequiredMetadataString(metadata, "runtimeImport", DOCKER_SANDBOX_BACKEND);
+  const sandboxUid = readRequiredMetadataNumber(metadata, "sandboxUid", DOCKER_SANDBOX_BACKEND);
+  const sandboxGid = readRequiredMetadataNumber(metadata, "sandboxGid", DOCKER_SANDBOX_BACKEND);
+  const network = asRuntimeRecord(metadata.network);
+  const resources = execution.policy.resources;
+  const tmpfsSize = dockerSize(resources.diskGb);
+  const memorySize = dockerSize(resources.memoryGb);
+  const [{ execFile, spawn }, fs, { promisify }] = await Promise.all([
+    importNodeModule<typeof import("node:child_process")>(nodeBuiltin("child_process")),
+    importNodeModule<typeof import("node:fs/promises")>(nodeBuiltin("fs/promises")),
+    importNodeModule<typeof import("node:util")>(nodeBuiltin("util")),
+  ]);
+  const execFileAsync = promisify(execFile);
+  await execFileAsync("docker", ["rm", "-f", containerName], { maxBuffer: 1024 * 1024 }).catch(() => undefined);
+  const dockerArgs = [
+    "run",
+    "--rm",
+    "--name",
+    containerName,
+    "--network",
+    typeof network.mode === "string" ? network.mode : "none",
+    "--cpus",
+    dockerCpu(resources.cpu),
+    "--memory",
+    memorySize,
+    "--memory-swap",
+    memorySize,
+    "--user",
+    `${sandboxUid}:${sandboxGid}`,
+    "--tmpfs",
+    `/workspace:rw,exec,uid=${sandboxUid},gid=${sandboxGid},mode=1777,size=${tmpfsSize}`,
+    "--workdir",
+    "/app",
+    "-v",
+    `${root}:/workbench-execution`,
+    "-v",
+    `${runtimeRoot}:/app:ro`,
+    "--env",
+    "HOME=/tmp",
+    "--env",
+    "USER=workbench",
+    "--env",
+    `WORKBENCH_RUNTIME_IMPORT=${runtimeImport}`,
+    image,
+    "node",
+    runnerPath,
+    "/workbench-execution/request.json",
+    "/workbench-execution/response.json",
+  ];
+  const timeoutMs = Math.max(60_000, execution.policy.resources.timeoutMinutes * 60_000 + 30_000);
+  let dockerError: string | null = null;
+  try {
+    await runDockerSandboxProcess(spawn, dockerArgs, {
+      stdoutPath,
+      stderrPath,
+      timeoutMs,
+    });
+  } catch (error) {
+    dockerError = error instanceof Error ? error.stack ?? error.message : String(error);
+  }
+  const responseText = await fs.readFile(responsePath, "utf8").catch(async (error: unknown) => {
+    const [stdout, stderr] = await Promise.all([
+      fs.readFile(stdoutPath, "utf8").catch(() => ""),
+      fs.readFile(stderrPath, "utf8").catch(() => ""),
+    ]);
+    const details = [
+      dockerError ? `Docker error: ${dockerError}` : null,
+      stdout.trim() ? `stdout: ${stdout.trim().slice(0, 4000)}` : null,
+      stderr.trim() ? `stderr: ${stderr.trim().slice(0, 4000)}` : null,
+    ].filter((entry): entry is string => Boolean(entry)).join(" ");
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Docker sandbox exited without a response: ${message}${details ? `. ${details}` : ""}`);
+  });
+  const response = JSON.parse(responseText);
+  if (!response.ok) {
+    throw new Error(typeof response.error === "string" ? response.error : "Sandbox adapter runner failed.");
+  }
+  if (!response.job || typeof response.job !== "object") {
+    throw new Error("Sandbox adapter runner response omitted job.");
+  }
+  return response.job as HostedWorkbenchJob;
+}
+
+async function destroyDockerSandbox(sandbox: SandboxHandle): Promise<void> {
+  const metadata = asRuntimeRecord(sandbox.metadata);
+  const root = typeof metadata.root === "string" ? metadata.root : null;
+  const containerName = typeof metadata.containerName === "string" ? metadata.containerName : null;
+  const [{ execFile }, fs, { promisify }] = await Promise.all([
+    importNodeModule<typeof import("node:child_process")>(nodeBuiltin("child_process")),
+    importNodeModule<typeof import("node:fs/promises")>(nodeBuiltin("fs/promises")),
+    importNodeModule<typeof import("node:util")>(nodeBuiltin("util")),
+  ]);
+  const execFileAsync = promisify(execFile);
+  if (containerName) {
+    await execFileAsync("docker", ["rm", "-f", containerName], { maxBuffer: 1024 * 1024 }).catch(() => undefined);
+  }
+  if (root) {
+    await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function runDockerSandboxProcess(
+  spawn: typeof import("node:child_process").spawn,
+  args: string[],
+  options: {
+    stdoutPath: string;
+    stderrPath: string;
+    timeoutMs: number;
+  },
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    const progressPublishes: Promise<void>[] = [];
+    const progressParser = createWorkbenchProgressStdoutParser((envelope) => {
+      progressPublishes.push(publishWorkbenchProgressStdoutEnvelope(envelope).catch(() => undefined));
+    });
+    const stdout = createWriteStream(options.stdoutPath);
+    const stderr = createWriteStream(options.stderrPath);
+    const child = spawn("docker", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, options.timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout.write(chunk);
+      progressParser.write(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr.write(chunk);
+    });
+
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      progressParser.flush();
+      const stdoutClosed = new Promise<void>((closeResolve) => stdout.end(closeResolve));
+      const stderrClosed = new Promise<void>((closeResolve) => stderr.end(closeResolve));
+      Promise.allSettled([...progressPublishes, stdoutClosed, stderrClosed]).then(() => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    };
+
+    child.on("error", (error) => finish(error));
+    child.on("exit", (code, signal) => {
+      if (timedOut) {
+        finish(new Error(`Docker sandbox timed out after ${options.timeoutMs}ms.`));
+        return;
+      }
+      if (code === 0) {
+        finish();
+        return;
+      }
+      finish(new Error(
+        code === null
+          ? `Docker sandbox exited from signal ${signal ?? "unknown"}.`
+          : `Docker sandbox exited with code ${code}.`,
+      ));
+    });
+  });
+}
+
+function dockerNetworkConfigForExecution(execution: WorkbenchExecutionSpec): Record<string, Json> {
+  if (execution.policy.network.egress === "none") {
+    return { mode: "none", egress: "none", allowlistEnforced: true };
+  }
+  if (execution.policy.network.egress === "open") {
+    return { mode: "bridge", egress: "open", allowlistEnforced: true };
+  }
+  return {
+    mode: "bridge",
+    egress: "allowlist",
+    allow: [...(execution.policy.network.allow ?? [])],
+    allowlistEnforced: false,
+  };
+}
+
+function dockerContainerName(sandboxId: string): string {
+  return `workbench-sandbox-${sandboxId}`.replace(/[^a-z0-9_.-]+/giu, "-").slice(0, 120);
+}
+
+function dockerCpu(value: number): string {
+  return String(value);
+}
+
+function dockerSize(gib: number): string {
+  return `${Math.ceil(gib * 1024)}m`;
+}
+
+function safeDockerImageSegment(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9_.-]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 80) || "env";
+}
+
+async function prepareDockerRuntimePayload(
+  workdir: string,
+  execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
+  fs: typeof import("node:fs/promises"),
+  path: typeof import("node:path"),
+): Promise<DockerRuntimePayload> {
+  const configured = process.env.WORKBENCH_DOCKER_RUNTIME_ROOT?.trim();
+  if (configured) {
+    return monorepoDockerPayload(configured);
+  }
+  const runtimeImage = process.env.WORKBENCH_DOCKER_RUNTIME_IMAGE?.trim();
+  if (!runtimeImage) {
+    return resolveLocalDockerRuntimePayload();
+  }
+  const runtimeImageId = await dockerImageId(runtimeImage, execFileAsync);
+  const cacheRoot = path.join(workdir, "workbench-docker-runtime", `${safeCacheSegment(runtimeImage)}-${safeCacheSegment(runtimeImageId).slice(0, 24)}`);
+  const marker = path.join(cacheRoot, ".workbench-core-ready");
+  try {
+    await fs.access(marker);
+    return monorepoDockerPayload(cacheRoot);
+  } catch {
+    // Rebuild the cache below.
+  }
+  const tmpRoot = `${cacheRoot}.tmp-${Date.now().toString(36)}`;
+  const containerName = `workbench-core-${Date.now().toString(36)}`.replace(/[^a-z0-9_.-]+/giu, "-");
+  await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+  await fs.mkdir(tmpRoot, { recursive: true });
+  try {
+    await execFileAsync("docker", ["rm", "-f", containerName], { maxBuffer: 1024 * 1024 }).catch(() => undefined);
+    await execFileAsync("docker", ["create", "--name", containerName, runtimeImage, "true"], { maxBuffer: 5 * 1024 * 1024 });
+    await execFileAsync("docker", ["cp", `${containerName}:/app/.`, tmpRoot], { maxBuffer: 20 * 1024 * 1024 });
+    await fs.writeFile(path.join(tmpRoot, ".workbench-core-ready"), `${runtimeImage}\n${runtimeImageId}\n`);
+    await fs.rm(cacheRoot, { recursive: true, force: true }).catch(() => undefined);
+    await fs.rename(tmpRoot, cacheRoot);
+    return monorepoDockerPayload(cacheRoot);
+  } finally {
+    await execFileAsync("docker", ["rm", "-f", containerName], { maxBuffer: 1024 * 1024 }).catch(() => undefined);
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function dockerImageId(
+  image: string,
+  execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
+): Promise<string> {
+  const result = await execFileAsync("docker", ["image", "inspect", image, "--format", "{{.Id}}"], { maxBuffer: 1024 * 1024 }) as { stdout?: string | Buffer };
+  const id = typeof result.stdout === "string" ? result.stdout.trim() : result.stdout?.toString("utf8").trim();
+  if (!id) {
+    throw new Error(`Docker image ${image} did not report an image id.`);
+  }
+  return id;
+}
+
+function safeCacheSegment(value: string): string {
+  return value.replace(/[^a-z0-9_.-]+/giu, "-");
+}
+
+async function ensureDockerExecutionImage(
+  image: string,
+  execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
+): Promise<void> {
+  const imageExists = await execFileAsync("docker", ["image", "inspect", image], { maxBuffer: 1024 * 1024 })
+    .then(() => true, () => false);
+  if (imageExists) {
+    return;
+  }
+
+  const builtInDockerfile = localBuiltInDockerfileForImage(image);
+  if (builtInDockerfile) {
+    await execFileAsync("docker", [
+      "build",
+      "-t",
+      image,
+      "-f",
+      builtInDockerfile,
+      path.dirname(builtInDockerfile),
+    ], { maxBuffer: 20 * 1024 * 1024 });
+    return;
+  }
+
+  await execFileAsync("docker", ["pull", image], { maxBuffer: 20 * 1024 * 1024 });
+}
+
+function localBuiltInDockerfileForImage(image: string): string | null {
+  if (hasRegistryHost(image)) {
+    return null;
+  }
+  const dockerfile = BUILT_IN_ENVIRONMENT_IMAGES[image];
+  if (!dockerfile) {
+    return null;
+  }
+  return path.join(resolveLocalDockerRuntimePayload().builtInDockerfileRoot, dockerfile.replace(/^products\/workbench\/environments\//u, ""));
+}
+
+function hasRegistryHost(image: string): boolean {
+  const first = image.split("/")[0] ?? "";
+  return first === "localhost" || first.includes(".") || first.includes(":");
+}
+
+function resolveLocalDockerRuntimePayload(): DockerRuntimePayload {
+  const sourceRoot = findDockerSourceRoot();
+  if (sourceRoot) {
+    return monorepoDockerPayload(sourceRoot);
+  }
+  const packagePayload = findInstalledPackageDockerPayload();
+  if (packagePayload) {
+    return packagePayload;
+  }
+  throw new Error(`Could not resolve Workbench runtime payload from ${process.cwd()}. Run from the monorepo checkout or install the published @workbench-ai/workbench package.`);
+}
+
+function monorepoDockerPayload(root: string): DockerRuntimePayload {
+  return {
+    mountRoot: root,
+    runnerPath: "/app/products/workbench/packages/core/worker/sandbox-adapter-runner.cjs",
+    runtimeImport: "/app/products/workbench/packages/core/src/index.ts",
+    builtInDockerfileRoot: path.join(root, "products/workbench/environments"),
+  };
+}
+
+function findInstalledPackageDockerPayload(): DockerRuntimePayload | null {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const packageRoot = path.resolve(moduleDir, "../..");
+  const nodeModulesRoot = findAncestorNamed(packageRoot, "node_modules");
+  if (!nodeModulesRoot) {
+    return null;
+  }
+  if (
+    existsSync(path.join(packageRoot, "worker/sandbox-adapter-runner.cjs")) &&
+    existsSync(path.join(packageRoot, "dist/index.js")) &&
+    existsSync(path.join(packageRoot, "environments/node-22/Dockerfile"))
+  ) {
+    return {
+      mountRoot: path.dirname(nodeModulesRoot),
+      runnerPath: "/app/node_modules/@workbench-ai/workbench-core/worker/sandbox-adapter-runner.cjs",
+      runtimeImport: "/app/node_modules/@workbench-ai/workbench-core/dist/index.js",
+      builtInDockerfileRoot: path.join(packageRoot, "environments"),
+    };
+  }
+  return null;
+}
+
+function findAncestorNamed(start: string, name: string): string | null {
+  let current = start;
+  for (;;) {
+    if (path.basename(current) === name) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+function findDockerSourceRoot(): string | null {
+  const configured = process.env.WORKBENCH_DOCKER_SOURCE_ROOT?.trim();
+  if (configured) {
+    return configured;
+  }
+  const cwd = process.cwd();
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    cwd,
+    path.resolve(cwd, ".."),
+    path.resolve(cwd, "../.."),
+    path.resolve(cwd, "../../.."),
+    path.resolve(moduleDir, "../../../../../.."),
+  ];
+  for (const candidate of candidates) {
+    if (
+      existsSync(path.join(candidate, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
+      existsSync(path.join(candidate, "products/workbench/packages/core/src/index.ts"))
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function readRequiredMetadataString(metadata: Record<string, unknown>, key: string, backend: string): string {
+  const value = metadata[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${backend} sandbox metadata is missing ${key}.`);
+  }
+  return value;
+}
+
+function readRequiredMetadataNumber(metadata: Record<string, unknown>, key: string, backend: string): number {
+  const value = metadata[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${backend} sandbox metadata is missing ${key}.`);
+  }
+  return value;
+}
+
+function dockerSandboxUser(): DockerSandboxUser {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const gid = typeof process.getgid === "function" ? process.getgid() : null;
+  if (typeof uid === "number" && Number.isInteger(uid) && uid > 0) {
+    return {
+      uid,
+      gid: typeof gid === "number" && Number.isInteger(gid) && gid >= 0 ? gid : uid,
+    };
+  }
+  return { uid: 1000, gid: 1000 };
+}
+
+async function alignDockerSandboxPath(
+  fs: typeof import("node:fs/promises"),
+  targetPath: string,
+  user: DockerSandboxUser,
+  privateMode: number,
+  fallbackMode: number,
+): Promise<void> {
+  await fs.chmod(targetPath, privateMode).catch(() => undefined);
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (currentUid === user.uid) {
+    return;
+  }
+  await fs.chown(targetPath, user.uid, user.gid).catch(async () => {
+    await fs.chmod(targetPath, fallbackMode).catch(() => undefined);
+  });
+}

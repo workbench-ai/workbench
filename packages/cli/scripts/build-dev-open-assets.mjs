@@ -1,0 +1,65 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import tailwindcss from "@tailwindcss/postcss";
+import { build } from "esbuild";
+import postcss from "postcss";
+
+const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const outdir = path.join(packageRoot, "dist", "dev-open");
+const fontOutdir = path.join(outdir, "fonts");
+
+await fs.rm(outdir, { force: true, recursive: true });
+await fs.mkdir(outdir, { recursive: true });
+
+await build({
+  entryPoints: [path.join(packageRoot, "src", "dev-open-client.tsx")],
+  outfile: path.join(outdir, "client.js"),
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: ["es2022"],
+  jsx: "automatic",
+  logLevel: "silent",
+});
+
+const cssInputPath = path.resolve(packageRoot, "..", "workbench-ui", "src", "styles.css");
+const css = await fs.readFile(cssInputPath, "utf8");
+const result = await postcss([tailwindcss()]).process(css, {
+  from: cssInputPath,
+  to: path.join(outdir, "client.css"),
+});
+await fs.writeFile(path.join(outdir, "client.css"), await copyStylesheetAssets({
+  css: result.css,
+  fromDir: path.dirname(cssInputPath),
+  toDir: fontOutdir,
+}));
+
+async function copyStylesheetAssets({ css, fromDir, toDir }) {
+  const refs = new Map();
+  for (const match of css.matchAll(/url\((["']?)(?!data:|https?:|\/)([^"')]+)\1\)/gu)) {
+    const rawUrl = match[2];
+    const sourcePath = path.resolve(fromDir, rawUrl);
+    const fileName = path.basename(rawUrl);
+    if (path.extname(fileName) !== ".woff2") {
+      throw new Error(`Unsupported Workbench dev stylesheet asset: ${rawUrl}`);
+    }
+    refs.set(rawUrl, {
+      sourcePath,
+      publicUrl: `./fonts/${fileName}`,
+    });
+  }
+  if (refs.size === 0) {
+    return css;
+  }
+  await fs.mkdir(toDir, { recursive: true });
+  for (const asset of refs.values()) {
+    await fs.copyFile(asset.sourcePath, path.join(toDir, path.basename(asset.publicUrl)));
+  }
+  let rewritten = css;
+  for (const [rawUrl, asset] of refs) {
+    rewritten = rewritten.replaceAll(rawUrl, asset.publicUrl);
+  }
+  return rewritten;
+}

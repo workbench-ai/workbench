@@ -1,0 +1,49 @@
+{
+  "name": "@workbench-ai/workbench-built-in-adapters",
+  "version": "0.0.40",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "workbench-adapter-command": "dist/bin/command.js",
+    "workbench-adapter-rubric": "dist/bin/rubric.js",
+    "workbench-adapter-codex": "dist/bin/codex.js",
+    "workbench-adapter-claude": "dist/bin/claude.js",
+    "workbench-adapter-pi": "dist/bin/pi.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && chmod 755 dist/bin/*.js",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@workbench-ai/contracts": "workspace:*",
+    "@workbench-ai/harness-anthropic-claude-code": "workspace:*",
+    "@workbench-ai/harness-badlogic-pi-coding-agent": "workspace:*",
+    "@workbench-ai/harness-openai-codex": "workspace:*",
+    "@workbench-ai/harness-sdk": "workspace:*",
+    "@workbench-ai/workbench-contract": "workspace:*",
+    "@workbench-ai/workbench-core": "workspace:*",
+    "@workbench-ai/workbench-protocol": "workspace:*",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workbench-ai/workbench.git",
+    "directory": "packages/built-in-adapters"
+  }
+}
