@@ -111,16 +111,10 @@ function sanitizeTracePathSegment(value: string): string {
 }
 
 function tracePhaseSequence(phase: WorkbenchExecutionPurpose): number {
-  if (phase === "improve") {
-    return 1;
-  }
-  if (phase === "run-task") {
-    return 2;
-  }
-  if (phase === "grade-task") {
-    return 3;
-  }
-  return 9;
+	  if (phase === "improve") {
+	    return 1;
+	  }
+	  return 2;
 }
 
 function normalizeRelativePath(filePath: string): string {

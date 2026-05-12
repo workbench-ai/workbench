@@ -1,5 +1,5 @@
 import type {
-  CandidateSummary,
+  SubjectSummary,
   EvaluationResultSummary,
   RunSummary,
   RuntimeEvent,
@@ -7,8 +7,8 @@ import type {
 
 type BadgeTone = "success" | "warning" | "destructive" | "outline" | "accent";
 
-interface CandidateSelectionLabelOptions {
-  summary: CandidateSummary;
+interface SubjectSelectionLabelOptions {
+  summary: SubjectSummary;
   active?: boolean;
   details?: Array<string | null | undefined>;
 }
@@ -110,27 +110,27 @@ export function formatMetricSummary(metrics: Record<string, number> | undefined)
     .join(" · ");
 }
 
-export function formatResultCandidateLabel(
-  candidateId: string | null | undefined,
+export function formatResultSubjectLabel(
+  subjectId: string | null | undefined,
 ): string {
-  if (!candidateId) {
-    return "Unknown candidate";
+  if (!subjectId) {
+    return "Unknown subject";
   }
-  return shortId(candidateId) ?? candidateId;
+  return shortId(subjectId) ?? subjectId;
 }
 
-export function formatCandidateSelectionLabel({
+export function formatSubjectSelectionLabel({
   summary,
   active = false,
   details = [],
-}: CandidateSelectionLabelOptions): string {
+}: SubjectSelectionLabelOptions): string {
   const baseId = summary.baseId && summary.baseId !== summary.id ? summary.baseId : null;
   return [
     shortId(summary.id) ?? summary.id,
-    baseId ? `From ${shortId(baseId)}` : "Genesis candidate",
+    baseId ? `From ${shortId(baseId)}` : "Genesis subject",
     statusLabel(summary.status),
     ...details,
-    active ? "active candidate" : null,
+    active ? "active subject" : null,
   ]
     .filter(Boolean)
     .join(". ");
@@ -138,7 +138,7 @@ export function formatCandidateSelectionLabel({
 
 export function statusLabel(
   status:
-    | CandidateSummary["status"]
+    | SubjectSummary["status"]
     | EvaluationResultSummary["status"]
     | RuntimeEvent["status"]
     | null
@@ -152,7 +152,7 @@ export function statusLabel(
 
 export function badgeToneForStatus(
   status:
-    | CandidateSummary["status"]
+    | SubjectSummary["status"]
     | EvaluationResultSummary["status"]
     | RuntimeEvent["status"]
     | null

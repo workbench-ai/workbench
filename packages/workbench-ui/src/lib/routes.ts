@@ -1,9 +1,9 @@
 import { isSnapshotPreviewMode } from "@workbench-ai/cli-web-ui/lib/file-preview";
 
-import type { CandidatePreviewMode } from "../types";
+import type { SubjectPreviewMode } from "../types";
 
-export type CandidateView = "evaluation" | "manifest" | "files";
-export type CandidateReviewTab = "overview" | "scoring" | "trace" | "files" | "raw";
+export type SubjectView = "evaluation" | "manifest" | "files";
+export type SubjectReviewTab = "overview" | "scoring" | "trace" | "files" | "raw";
 export type WorkbenchPersistentSearchParams = Record<string, string | null | undefined>;
 
 export type WorkbenchRoute =
@@ -11,21 +11,21 @@ export type WorkbenchRoute =
       kind: "benchmark";
     }
   | {
-      kind: "candidates";
+      kind: "subjects";
     }
   | {
       kind: "run";
       runId: string | null;
     }
   | {
-      kind: "candidate";
-      candidateId: string | null;
-      view: CandidateView;
+      kind: "subject";
+      subjectId: string | null;
+      view: SubjectView;
       filePath: string | null;
       directoryPath: string | null;
-      previewMode: CandidatePreviewMode;
+      previewMode: SubjectPreviewMode;
       reviewCaseId: string | null;
-      reviewTab: CandidateReviewTab;
+      reviewTab: SubjectReviewTab;
       reviewRunId: string | null;
     };
 
@@ -43,9 +43,9 @@ export function parseWorkbenchRoute(locationLike: {
     };
   }
 
-  if (segments.length === 1 && segments[0] === "candidates") {
+  if (segments.length === 1 && segments[0] === "subjects") {
     return {
-      kind: "candidates",
+      kind: "subjects",
     };
   }
 
@@ -56,8 +56,8 @@ export function parseWorkbenchRoute(locationLike: {
     };
   }
 
-  if (segments[0] === "candidate") {
-    const candidateId = segments[1] ?? null;
+  if (segments[0] === "subject") {
+    const subjectId = segments[1] ?? null;
     const requestedView = segments[2];
     const view =
       requestedView === "files"
@@ -66,14 +66,14 @@ export function parseWorkbenchRoute(locationLike: {
           ? "manifest"
           : "evaluation";
     return {
-      kind: "candidate",
-      candidateId,
+      kind: "subject",
+      subjectId,
       view,
       filePath: searchParams.get("file"),
       directoryPath: normalizeDirectoryPath(searchParams.get("dir")),
-      previewMode: normalizeCandidatePreviewMode(searchParams.get("view")),
+      previewMode: normalizeSubjectPreviewMode(searchParams.get("view")),
       reviewCaseId: searchParams.get("task"),
-      reviewTab: normalizeCandidateReviewTab(searchParams.get("tab")),
+      reviewTab: normalizeSubjectReviewTab(searchParams.get("tab")),
       reviewRunId: searchParams.get("run"),
     };
   }
@@ -107,8 +107,8 @@ export function buildWorkbenchHref(
     return withQuery("/", params);
   }
 
-  if (route.kind === "candidates") {
-    return withQuery("/candidates", params);
+  if (route.kind === "subjects") {
+    return withQuery("/subjects", params);
   }
 
   if (route.kind === "run") {
@@ -116,7 +116,7 @@ export function buildWorkbenchHref(
     return withQuery(`/runs/${runId}`, params);
   }
 
-  const candidateId = route.candidateId ? encodeURIComponent(route.candidateId) : "";
+  const subjectId = route.subjectId ? encodeURIComponent(route.subjectId) : "";
   if (route.view === "files" && route.filePath) {
     params.set("file", route.filePath);
   }
@@ -137,7 +137,7 @@ export function buildWorkbenchHref(
   }
 
   const query = params.toString();
-  return `/candidate/${candidateId}/${route.view}${query ? `?${query}` : ""}`;
+  return `/subject/${subjectId}/${route.view}${query ? `?${query}` : ""}`;
 }
 
 export function buildWorkbenchLocationHref(
@@ -154,9 +154,9 @@ export function createBenchmarkRoute(): WorkbenchRoute {
   };
 }
 
-export function createCandidatesRoute(): WorkbenchRoute {
+export function createSubjectsRoute(): WorkbenchRoute {
   return {
-    kind: "candidates",
+    kind: "subjects",
   };
 }
 
@@ -169,20 +169,20 @@ export function createRunRoute(args: {
   };
 }
 
-export function createCandidateRoute(args: {
-  candidateId: string | null;
-  view: CandidateView;
+export function createSubjectRoute(args: {
+  subjectId: string | null;
+  view: SubjectView;
   filePath?: string | null;
   directoryPath?: string | null;
-  previewMode?: CandidatePreviewMode;
+  previewMode?: SubjectPreviewMode;
   reviewCaseId?: string | null;
-  reviewTab?: CandidateReviewTab;
+  reviewTab?: SubjectReviewTab;
   reviewRunId?: string | null;
 }): WorkbenchRoute {
   const view = args.view;
   return {
-    kind: "candidate",
-    candidateId: args.candidateId,
+    kind: "subject",
+    subjectId: args.subjectId,
     view,
     filePath: view === "files" ? args.filePath ?? null : null,
     directoryPath: view === "files" ? normalizeDirectoryPath(args.directoryPath ?? null) : null,
@@ -198,7 +198,7 @@ function normalizeDirectoryPath(value: string | null): string | null {
   return normalized || null;
 }
 
-function normalizeCandidateReviewTab(value: string | null): CandidateReviewTab {
+function normalizeSubjectReviewTab(value: string | null): SubjectReviewTab {
   switch (value) {
     case "scoring":
     case "trace":
@@ -266,6 +266,6 @@ function normalizeRouteBasePath(routeBasePath: string): string {
   return `/${trimmed.replace(/^\/+|\/+$/gu, "")}`;
 }
 
-function normalizeCandidatePreviewMode(value: string | null): CandidatePreviewMode {
+function normalizeSubjectPreviewMode(value: string | null): SubjectPreviewMode {
   return value && isSnapshotPreviewMode(value) ? value : "rendered";
 }

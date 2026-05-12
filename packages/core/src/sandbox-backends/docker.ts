@@ -641,19 +641,19 @@ function findDockerSourceRoot(): string | null {
   }
   const cwd = process.cwd();
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
+  const subjects = [
     cwd,
     path.resolve(cwd, ".."),
     path.resolve(cwd, "../.."),
     path.resolve(cwd, "../../.."),
     path.resolve(moduleDir, "../../../../../.."),
   ];
-  for (const candidate of candidates) {
+  for (const subject of subjects) {
     if (
-      existsSync(path.join(candidate, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
-      existsSync(path.join(candidate, "products/workbench/packages/core/src/index.ts"))
+      existsSync(path.join(subject, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
+      existsSync(path.join(subject, "products/workbench/packages/core/src/index.ts"))
     ) {
-      return candidate;
+      return subject;
     }
   }
   return null;

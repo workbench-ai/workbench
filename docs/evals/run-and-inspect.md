@@ -33,8 +33,8 @@ For hosted validation, use `workbench cloud eval ... --watch --json` and `workbe
 
 If the sample errors, inspect the improve phase, subject runner, scorer, runtime environment, and output-writing logic. Most first-pass errors are one of:
 
-- the command path assumes a different working directory
-- the configured scorer writes score JSON somewhere other than `/workspace/output/scorecard.json`
+- the workflow path assumes a different working directory
+- the configured scorer does not publish `/workspace/output/workbench-result.json`
 - the scorer writes no valid `/logs/verifier/reward.json` or `/logs/verifier/reward.txt`
 - the result is missing finite numeric `score`
 - the Dockerfile runtime is missing a parser or renderer for the produced files

@@ -18,6 +18,7 @@
   "bin": {
     "workbench-adapter-command": "dist/bin/command.js",
     "workbench-adapter-tests": "dist/bin/tests.js",
+    "workbench-adapter-path": "dist/bin/path.js",
     "workbench-adapter-harbor": "dist/bin/harbor.js",
     "workbench-adapter-rubric": "dist/bin/rubric.js",
     "workbench-adapter-codex": "dist/bin/codex.js",

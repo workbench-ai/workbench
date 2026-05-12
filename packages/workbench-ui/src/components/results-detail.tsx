@@ -7,7 +7,7 @@ import {
   CardTitle,
 } from "@workbench-ai/cli-web-ui/components/ui/card";
 
-import { formatResultCandidateLabel } from "../lib/format";
+import { formatResultSubjectLabel } from "../lib/format";
 import { buildResultMetricDescriptors } from "../lib/result-metrics";
 import type {
   LabeledEvaluationResultRecord,
@@ -55,7 +55,7 @@ export function ResultsDetail({
         title={hasResults ? "Results unavailable" : "No results yet"}
         message={hasResults
           ? "The recorded results could not be loaded from run state."
-          : "Run an evaluation or improvement to record candidate results."}
+          : "Run an evaluation or improvement to record subject results."}
         variant="hero"
         size="sm"
       />
@@ -97,5 +97,5 @@ function formatResultLabel(
   result: EvaluationResultRecord,
 ): string {
   const subjectLabel = result.evaluation.subject.label;
-  return subjectLabel ?? formatResultCandidateLabel(result.candidateId);
+  return subjectLabel ?? formatResultSubjectLabel(result.subjectId);
 }

@@ -115,7 +115,7 @@
       "title": "Author an eval from an existing workflow",
       "category": "eval_authoring",
       "prompt": "Create a Workbench eval around an existing command `python scripts/check_report.py --tasks tasks --out result.json`. Write the source-shaped files, adapt the subject/trial/scorecard contract, validate `benchmark.yaml` and a subject directory, and explain how to push and start one smoke run.",
-      "expected_output": "The response uses the Workbench skill eval-authoring docs, starts from the existing-workflow guide, writes split version-2 `benchmark.yaml`, a subject manifest such as `subjects/command/subject.yaml`, subject files under `subjects/command/files`, and optional optimizer YAML such as `optimizers/command.yaml` with required benchmark `name`, `description`, `tasks`, shared `environment`, and `score`, required subject `name` and `run`, and optimizer `edits` and `improve` when improve is needed, uses task `files/` for subject-visible fixtures and task `tests/` for private verifier material, wraps the existing command in a single-command `use: command` subject runner, uses a `tests` or `command` scorer that writes `/workspace/output/scorecard.json` or a Harbor-style reward file with a finite `score`, and uses `workbench check`, `workbench push`, and a smoke eval with an explicit subject directory.",
+      "expected_output": "The response uses the Workbench skill eval-authoring docs, starts from the existing-workflow guide, writes split version-2 `benchmark.yaml`, a subject manifest such as `subjects/codex/subject.yaml`, subject files declared with `files: { path: files }` under `subjects/codex/files`, and optional optimizer YAML such as `optimizers/codex.yaml` with required benchmark `name`, `description`, shared `environment`, and `score`, omitting `benchmark.tasks` for the default `path` task-source adapter or using object-shaped `tasks` only for an explicit task source, required subject `name`, `files`, and `run`, and optimizer `edits` and `improve` when improve is needed, uses task `files/` for subject-visible fixtures and task `tests/` for private verifier material, treats task-source adapters as implementing `tasks.resolve` and writing `workbench-result.json` with protocol `workbench.adapter-result.v1`, writes native task manifests with `version: 2` for the `path` adapter, wraps the existing workflow with a `subject.run` adapter such as `codex`, uses a `tests` scorer whose verifier writes `/logs/verifier/reward.json` or `/logs/verifier/reward.txt` with a finite reward, and uses `workbench check`, `workbench push`, and a smoke eval with an explicit subject directory.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -145,9 +145,9 @@
           "value": true
         },
         {
-          "text": "requires the scorecard file",
+          "text": "requires verifier reward output",
           "kind": "equals",
-          "path": "answer.requires_scorecard_file",
+          "path": "answer.requires_verifier_reward_output",
           "value": true
         },
         {
@@ -163,7 +163,7 @@
       "title": "Author an eval from file outputs",
       "category": "eval_authoring",
       "prompt": "Create a hosted Workbench eval for a workflow that produces Office files from uploaded materials: a source DOCX, golden DOCX, and reference XLSX. Build tasks, choose an Office-capable runtime, keep the subject as the mutable workflow, validate the spec, and describe the first smoke run.",
-      "expected_output": "The response uses the Workbench skill file-output task docs, chooses focused file recipes, keeps the subject as the mutable workflow being improved, creates source-shaped subject and task files with a subject manifest plus sibling `files/` directory and `benchmark.tasks`, puts only supporting public file inputs under task `files/`, puts non-empty private verifier files under task `tests/`, uses rubric scoring for qualitative scoring by default, uses tests or command scoring only for deterministic checks or an existing scorer, uses an Office-capable Dockerfile runtime through `benchmark.environment.dockerfile`, and validates the source before push/run commands.",
+      "expected_output": "The response uses the Workbench skill file-output task docs, chooses focused file recipes, keeps the subject as the mutable workflow being improved, creates source-shaped subject and task files with a subject manifest declaring `files: { path: files }`, omits `benchmark.tasks` for the default `path` task-source adapter or uses object-shaped `tasks` only for an explicit task source, and writes native task manifests with `version: 2`, puts only supporting public file inputs under task `files/`, puts non-empty private verifier files under task `tests/`, treats task-source adapters as implementing `tasks.resolve` and writing `workbench-result.json` with protocol `workbench.adapter-result.v1`, uses rubric scoring for qualitative scoring by default, uses tests scoring only for deterministic checks or an existing scorer, uses an Office-capable Dockerfile runtime through `benchmark.environment.dockerfile`, and validates the source before push/run commands.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -228,8 +228,8 @@
       "id": "hosted-upload-and-run",
       "title": "Sync snapshots and start a hosted run",
       "category": "hosted_run",
-      "prompt": "Push `./subjects/claude/files` and `./tasks` to an existing hosted benchmark, start one hosted improve run from base subject id `cand_123` with optimizer `optimizers/claude.yaml`, budget 1, and samples 1, watch it to terminal status, and report the run id and subject id.",
-      "expected_output": "The response treats local directories as Workbench project source, pushes benchmark source, starts a hosted improve run with `workbench cloud improve`, explicit `--base cand_123`, and `--optimizer optimizers/claude.yaml`, watches the hosted run, uses the hosted command returned URLs or `workbench cloud open` when browser navigation is needed, and reports the resulting run and subject id.",
+      "prompt": "Push `./subjects/claude/files` and `./tasks` to an existing hosted benchmark, start one hosted improve run from base subject id `subject_123` with optimizer `optimizers/claude.yaml`, budget 1, and samples 1, watch it to terminal status, and report the run id and subject id.",
+      "expected_output": "The response treats local directories as Workbench project source, pushes benchmark source, starts a hosted improve run with `workbench cloud improve`, explicit `--base subject_123`, and `--optimizer optimizers/claude.yaml`, watches the hosted run, uses the hosted command returned URLs or `workbench cloud open` when browser navigation is needed, and reports the resulting run and subject id.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -256,7 +256,7 @@
           "text": "starts a hosted run",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+improve\\b[^\\n]*--base\\s+cand_123[^\\n]*--optimizer\\s+optimizers/claude\\.yaml"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+improve\\b[^\\n]*--base\\s+subject_123[^\\n]*--optimizer\\s+optimizers/claude\\.yaml"
         },
         {
           "text": "watches the hosted run",
@@ -274,7 +274,7 @@
           "text": "opens or returns the resulting subject URL after the run when needed",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:cand_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:subject_|<subject>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
         }
       ]
     },
@@ -304,31 +304,31 @@
           "text": "lists hosted subject snapshots",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+list\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+subjects\\s+list\\b"
         },
         {
           "text": "lists hosted snapshot files",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+files\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+subjects\\s+files\\b"
         },
         {
           "text": "previews a hosted snapshot file",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+preview\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+subjects\\s+preview\\b"
         },
         {
           "text": "pulls the hosted snapshot",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+pull\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+subjects\\s+pull\\b"
         },
         {
           "text": "opens or returns the selected hosted snapshot URL",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:cand_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:subject_|<subject>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
         },
         {
           "text": "reports export as non-mutating",

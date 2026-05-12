@@ -2,6 +2,8 @@
 
 Tasks are part of the Workbench project and are pushed to Workbench Cloud by `workbench push` when hosted execution is needed. They are frozen onto each run, but Workbench stages them with a simple trial rule: public files are copied into the subject's working directory before the subject runs, verifier files are injected only after that run, and the scorer then sees the same mutated environment.
 
+Native Workbench task directories are source input for the built-in `path` task-source adapter. The adapter parses those directories and emits `TaskBundle` data, which is the structured task representation core uses for trials. Core does not parse native task package directories directly. For native task packages, omit `benchmark.tasks`; Workbench defaults to the built-in `path` task-source adapter reading `tasks/`. Use an explicit `tasks: { use: path, with: { path: ... } }` invocation only when the native task directory is not the default `tasks/`.
+
 ## Recommended Layout
 
 ```text
@@ -14,7 +16,7 @@ tasks/
       test.sh
       golden.txt
   task-002/
-    instruction.md
+    task.yaml
     tests/
       test.sh
 ```
@@ -30,13 +32,26 @@ tasks/
 
 ## What Belongs In Tasks
 
-Task roots may contain:
+Native task roots parsed by the `path` adapter may contain:
 
-- `task.yaml` or `instruction.md` for the task instruction
+- `task.yaml` for versioned task text and explicit file paths
 - `files/` for public seed files copied into the trial workspace
 - `tests/` for verifier-only files injected at `/tests`
 - `solution/` for oracle or reference material imported from external task sets
 - `environment/` or task environment metadata when a task needs a runtime override
+
+Minimal task manifests include `version: 2` and `task`. Add explicit path objects for any sibling material the task owns:
+
+```yaml
+version: 2
+task: Create the requested output file.
+files:
+  path: files
+tests:
+  path: tests
+solution:
+  path: solution
+```
 
 `files/` contains the materials a real workflow would receive: source documents, public data, starter files, or fixtures that are not answer keys.
 
@@ -68,7 +83,7 @@ tests/
 solution/
 ```
 
-Harbor `instruction.md` becomes the task instruction. `tests/` remains verifier-only and is copied to `/tests` after the subject run. `solution/` is preserved for oracle workflows but is not part of the normal subject-visible workspace.
+The `harbor` adapter parses this source and emits equivalent `TaskBundle` data. Harbor `instruction.md` supplies the task text, `tests/` remains verifier-only and is copied to `/tests` after the subject run, and `solution/` is preserved for oracle workflows but is not part of the normal subject-visible workspace. Core does not parse Harbor directories directly.
 
 ## Task Count
 

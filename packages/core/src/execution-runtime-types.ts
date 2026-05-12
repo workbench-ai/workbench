@@ -8,6 +8,7 @@ import type {
 
 import type {
   GenericRunSpec,
+  WorkbenchTaskBundle,
 } from "./generic-spec.ts";
 import type {
   WorkbenchExecutionProgressTarget,
@@ -16,6 +17,7 @@ import type {
   WorkbenchAdapterAuthBundle,
 } from "./adapter-auth.ts";
 import type {
+  WorkbenchAdapterOperation,
   WorkbenchAdapterManifest,
 } from "@workbench-ai/workbench-protocol";
 
@@ -25,9 +27,9 @@ export interface WorkbenchExecutionRuntimeInput {
   environmentVersion?: Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "sourceHash" | "spec">;
   environmentDockerfile?: string;
   baseFiles: readonly SurfaceSnapshotFile[];
-  caseFiles: readonly SurfaceSnapshotFile[];
+  taskSourceFiles: readonly SurfaceSnapshotFile[];
+  taskBundles: readonly WorkbenchTaskBundle[];
   traceFiles?: readonly SurfaceSnapshotFile[];
-  runnerOutputFiles?: readonly SurfaceSnapshotFile[];
   now?: string;
   adapterAuthProfiles?: readonly WorkbenchAdapterAuthBundle[];
   adapterManifests?: readonly WorkbenchAdapterManifest[];
@@ -42,8 +44,9 @@ export interface WorkbenchExecutionRuntimeInput {
 }
 
 export interface WorkbenchWorkloadPhaseCommand {
-  kind: "optimizer" | "runner" | "grader";
+  kind: "optimizer" | "runner" | "scorer";
   label: string;
+  operation: WorkbenchAdapterOperation;
   adapter?: WorkbenchAdapterInvocation;
   command?: string;
   okExitCodes?: number[];

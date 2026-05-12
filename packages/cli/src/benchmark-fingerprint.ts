@@ -7,19 +7,19 @@ import type { LocalProjectSource } from "./project-source.js";
 export function localBenchmarkFingerprint(project: LocalProjectSource): string {
   return benchmarkFingerprintForFiles([
     textFile("benchmark.yaml", project.benchmarkSource),
-    ...prefixFiles(project.caseFiles.map(toSurfaceFile), project.spec.tasks.path),
+    ...prefixFiles(project.taskSourceFiles.map(toSurfaceFile), project.taskFingerprintPath),
     ...benchmarkDockerfileFiles(project),
     ...benchmarkAdapterFiles(project),
   ]);
 }
 
-export function localCandidateFingerprint(project: LocalProjectSource): string {
+export function localSubjectFingerprint(project: LocalProjectSource): string {
   const hash = createHash("sha256");
-  hash.update("workbench-candidate-v1\0");
-  hash.update(project.candidateSource);
+  hash.update("workbench-subject-v1\0");
+  hash.update(project.subjectSource);
   hash.update("\0runner\0");
   hash.update(JSON.stringify(project.spec.run));
-  hashSurfaceFiles(hash, project.candidateFiles);
+  hashSurfaceFiles(hash, project.subjectFiles);
   return hash.digest("hex");
 }
 

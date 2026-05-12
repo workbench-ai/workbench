@@ -20,14 +20,14 @@ export interface CompileExecutionGraphInput {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  candidateId: string;
+  subjectId: string;
   trialIndex: number;
   sampleIndex?: number;
   caseId?: string;
   task?: GenericTaskSpec;
   spec: GenericRunSpec;
   workflow?: "eval" | "improve";
-  candidateRef?: string;
+  subjectRef?: string;
   taskRef?: string;
   environmentRef?: string;
 }
@@ -46,10 +46,10 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const workflow = input.workflow ?? "improve";
   const sampleIndex = input.sampleIndex ?? 0;
   const caseId = input.caseId ?? "current";
-  const candidateRef = input.candidateRef ?? `workbench://benchmarks/${input.projectId}/candidates/${input.candidateId}`;
+  const subjectRef = input.subjectRef ?? `workbench://benchmarks/${input.projectId}/subjects/${input.subjectId}`;
   const taskRef = input.taskRef ?? `workbench://benchmarks/${input.projectId}/tasks/${caseId}`;
   if (!input.task) {
-    throw new Error("Execution graph compilation requires a parsed task.yaml.");
+    throw new Error("Execution graph compilation requires a task bundle.");
   }
   const task = input.task;
   const executionConfig = resolveTaskExecutionConfig({
@@ -60,7 +60,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const nodes: WorkbenchExecutionGraphNode[] = [];
   const executions: WorkbenchExecutionSpec[] = [];
   const optimizerExecutionId = executionId(input, "improve", "current", 0);
-  const optimizerOutputRef = `execution://${optimizerExecutionId}/candidate_patch`;
+  const optimizerOutputRef = `execution://${optimizerExecutionId}/subject_patch`;
   const runnerAdapter = executionConfig.run;
   const scorerAdapter = executionConfig.score;
   if (workflow === "improve") {
@@ -72,10 +72,10 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
       purpose: "improve",
       adapter: input.spec.improve,
       inputs: [
-        inputRef("candidate", candidateRef, "/workspace/input/candidate", false),
+        inputRef("subject", subjectRef, "/workspace/input/subject", false),
         inputRef("traces", `workbench://benchmarks/${input.projectId}/runs/${input.runId}/traces`, "/workspace/input/traces", false),
       ],
-      outputs: [outputContract("candidate_patch", "workbench.candidate_patch.v1")],
+      outputs: [outputContract("subject_patch", "workbench.subject_patch.v1")],
       metadata: {
         trialIndex: input.trialIndex,
         sampleIndex: 0,
@@ -88,14 +88,14 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
     }), []);
   }
 
-  const runCandidateRef = workflow === "improve" ? optimizerOutputRef : candidateRef;
+  const runSubjectRef = workflow === "improve" ? optimizerOutputRef : subjectRef;
   const trialExecutionId = executionId(input, "trial", caseId, sampleIndex);
   pushExecution(nodes, executions, createExecution({
     input,
     purpose: "trial",
     adapter: runnerAdapter,
     inputs: [
-      inputRef("candidate", runCandidateRef, "/workspace/input/candidate", false),
+      inputRef("subject", runSubjectRef, "/workspace/input/subject", false),
       inputRef("task", taskRef, "/workspace/input/task", false),
     ],
     outputs: [outputContract("scorecard", "workbench.scorecard.v1")],
@@ -103,7 +103,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
       trialIndex: input.trialIndex,
       sampleIndex,
       caseId,
-      task: executionConfig.task,
+      task: task as unknown as Json,
       scoreAdapter: scorerAdapter as unknown as Json,
       ...(executionConfig.environment.workdir ? { workdir: executionConfig.environment.workdir } : {}),
     },
@@ -146,7 +146,7 @@ function createExecution(args: {
     ),
     projectId: args.input.projectId,
     runId: args.input.runId,
-    candidateId: args.input.candidateId,
+    subjectId: args.input.subjectId,
     purpose: args.purpose,
     adapter: args.adapter,
     sandbox: args.input.environmentRef

@@ -18,7 +18,7 @@ These commands exercise the open Workbench packages: `workbench-contract`, `work
 
 Run `pnpm workbench:public-source:validate` from the monorepo root when package, docs, UI, adapter, or skill changes should be proven against the source-backed public repository layout.
 
-Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox capabilities, same-environment trials, Docker local execution, subject materialization, runs, lineage, traces, and the public sandbox adapter runner.
+Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox execution, same-environment trials, Docker local execution, subject materialization, runs, lineage, traces, and the public sandbox adapter runner.
 
 Useful manual spot checks:
 
@@ -38,7 +38,7 @@ Useful manual spot checks:
 
 ## Harbor Smoke
 
-For Harbor interop, create or select a tiny Harbor task directory containing `instruction.md`, `task.toml`, `environment/Dockerfile`, and `tests/test.sh`. Then create a Workbench project with:
+For Harbor interop, create or select a tiny Harbor task directory containing `instruction.md`, `task.toml`, `environment/Dockerfile`, and `tests/test.sh`. This smoke proves the built-in `harbor` task-source adapter parses Harbor source into `TaskBundle` data before core runs trials. Then create a Workbench project with:
 
 ```yaml
 tasks:
@@ -56,7 +56,7 @@ pnpm cli check --dir "$tmpdir" --json
 pnpm cli eval "$tmpdir/subjects/command" --samples 1 --json
 ```
 
-The score should come from `scorecard.json`, `/logs/verifier/reward.json`, or `/logs/verifier/reward.txt`.
+The score should come from the `trial.score` operation result. The built-in `tests` scorer may read Harbor reward outputs at `/logs/verifier/reward.json` or `/logs/verifier/reward.txt` internally.
 
 ## Workbench Cloud Client Checks
 
@@ -83,7 +83,7 @@ That harness starts the cloud-owned builder, host supervisor, and sandbox host. 
 
 ## Three-Statement Bench
 
-Use the real benchmark package as a local regression target after it has been migrated to subject/task v2 source:
+Use the real benchmark package as a local regression target for subject/task v2 source:
 
 ```bash
 pnpm cli check --dir ../three-statement-bench --json

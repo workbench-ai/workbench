@@ -21,7 +21,7 @@ describe.runIf(process.env.WORKBENCH_PACKAGING_TEST === "1")("packaged Workbench
     expect(result.stdout).toContain("workbench push [SOURCE] [--dir DIR]");
     expect(result.stdout).toContain("workbench improve [SOURCE] [--dir DIR]");
     expect(result.stdout).toContain("workbench open [SOURCE] [--dir DIR]");
-    expect(result.stdout).toContain("workbench cloud benchmarks|runs|candidates <command> [options]");
+    expect(result.stdout).toContain("workbench cloud benchmarks|runs|subjects <command> [options]");
   });
 
   test("built local browser assets are self-contained", () => {

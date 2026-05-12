@@ -68,7 +68,7 @@ describe("result metric helpers", () => {
 
   test("rotates scatter points through the shared categorical palette", () => {
     const results: LabeledEvaluationResultRecord[] = [
-      resultRecord("current", "Source candidate", 1, 12_000),
+      resultRecord("current", "Source subject", 1, 12_000),
       resultRecord("degraded", "Reduced radius", 0.8, 14_000),
       resultRecord("cheaper", "Cheaper run", 0.95, 13_000),
     ];
@@ -130,7 +130,7 @@ describe("result metric helpers", () => {
 
   test("classifies score as the primary result metric and criteria as secondary", () => {
     const descriptors = buildResultMetricDescriptors([
-      resultRecord("current", "Source candidate", 1, 12_000, {
+      resultRecord("current", "Source subject", 1, 12_000, {
         criterion__task_completion: stats(0.8),
       }),
     ]);
@@ -185,7 +185,7 @@ function resultRecord(
   extraMetrics: Record<string, ReturnType<typeof stats>> = {},
 ): LabeledEvaluationResultRecord {
   const evaluation = {
-    subject: { id, kind: "candidate" as const, label },
+    subject: { id, kind: "subject" as const, label },
     status: "completed" as const,
     sampleCount: 1,
     completedSampleCount: 1,
@@ -198,7 +198,7 @@ function resultRecord(
     id,
     runId: "run_test",
     benchmarkFingerprint: "3333333333333333333333333333333333333333333333333333333333333333",
-    candidateId: id,
+    subjectId: id,
     createdAt: "2026-04-27T00:00:00.000Z",
     updatedAt: "2026-04-27T00:00:00.000Z",
     label,

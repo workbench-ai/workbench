@@ -45,7 +45,7 @@ export interface AgentProviderSpec {
 }
 
 export interface WorkbenchAgentTurnRequest {
-  role: "optimizer" | "runner" | "grader";
+  role: "optimizer" | "runner" | "scorer";
   provider: AgentProviderSpec;
   adapterAuthRoot?: string;
   adapterAuthRequest?: JsonValue;
@@ -314,10 +314,10 @@ async function resolveAgentHarnessAuth(
   flowHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<Record<string, JsonValue>> {
-  const candidate =
-    adapterAuthHarnessCandidate(adapterAuth.request, providerSpec.use) ??
+  const subject =
+    adapterAuthHarnessSubject(adapterAuth.request, providerSpec.use) ??
     ((provider.manifest.defaults.auth as Record<string, JsonValue> | undefined) ?? {});
-  const parsed = provider.schemas.auth.safeParse(candidate);
+  const parsed = provider.schemas.auth.safeParse(subject);
   if (!parsed.success) {
     throw new Error(`Agent provider "${provider.manifest.id}" auth is invalid: ${formatValidationIssues(parsed.error.issues)}`);
   }
@@ -326,7 +326,7 @@ async function resolveAgentHarnessAuth(
   return { ...parsed.data };
 }
 
-function adapterAuthHarnessCandidate(
+function adapterAuthHarnessSubject(
   auth: JsonValue | undefined,
   providerName: string,
 ): Record<string, JsonValue> | null {

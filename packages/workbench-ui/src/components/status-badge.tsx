@@ -3,7 +3,7 @@ import { badgeToneProps } from "@workbench-ai/cli-web-ui/lib/badge";
 
 import { badgeToneForStatus, statusLabel } from "../lib/format";
 import type {
-  CandidateSummary,
+  SubjectSummary,
   RuntimeEvent,
 } from "../types";
 
@@ -12,7 +12,7 @@ export function StatusBadge({
   active = false,
 }: {
   status:
-    | CandidateSummary["status"]
+    | SubjectSummary["status"]
     | RuntimeEvent["status"]
     | null
     | undefined;

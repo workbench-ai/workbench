@@ -10,31 +10,18 @@ import {
 } from "./execution-graph.ts";
 import type {
   GenericRunSpec,
-  GenericTaskSpec,
-} from "./generic-spec.ts";
-import {
-  parseGenericTaskSpec,
+  WorkbenchTaskBundle,
 } from "./generic-spec.ts";
 
 export type WorkbenchRunWorkflow = "eval" | "improve";
 
 export const MAX_WORKBENCH_RUN_BUDGET = 20;
-const TASK_CONTROL_FILE = "task.yaml";
-const TASK_INSTRUCTION_FILE = "instruction.md";
-const TASK_HARBOR_CONFIG_FILE = "task.toml";
-const TASK_PUBLIC_PREFIX = "files/";
-const TASK_TESTS_PREFIX = "tests/";
-const TASK_SOLUTION_PREFIX = "solution/";
-const TASK_ENVIRONMENT_PREFIX = "environment/";
-const LEGACY_TASK_INPUT_PREFIX = "input/";
-const LEGACY_TASK_EXPECTED_PREFIX = "expected/";
 
 export function expectedWorkbenchRunJobCount(args: {
   workflow: WorkbenchRunWorkflow;
   budget: number;
   samples: number;
   caseCount: number;
-  gradeJobCount?: number;
 }): number {
   const caseCount = Math.max(1, Math.floor(args.caseCount));
   if (args.workflow === "improve") {
@@ -48,7 +35,6 @@ export function validateWorkbenchRunEnvelope(args: {
   budget: number;
   samples: number;
   caseCount: number;
-  gradeJobCount?: number;
 }): string | null {
   if (!Number.isSafeInteger(args.budget) || args.budget <= 0) {
     return "Run budget must be a positive integer.";
@@ -65,7 +51,7 @@ export function validateWorkbenchRunEnvelope(args: {
   return null;
 }
 
-export function gradeJobCountForRunSpec(_spec: GenericRunSpec): number {
+export function trialJobCountForRunSpec(_spec: GenericRunSpec): number {
   return 1;
 }
 
@@ -73,7 +59,7 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  candidateId: string;
+  subjectId: string;
   trialIndex: number;
   samples: number;
   caseIds?: readonly string[];
@@ -82,30 +68,32 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   purpose: WorkbenchExecutionSpec["purpose"];
   now: string;
   baseFiles?: readonly SurfaceSnapshotFile[];
-  caseFiles?: readonly SurfaceSnapshotFile[];
+  taskBundles: readonly WorkbenchTaskBundle[];
   traceFiles?: readonly SurfaceSnapshotFile[];
   environmentRef?: string;
   baseId?: string | null;
 }): HostedWorkbenchJob[] {
   const jobs: HostedWorkbenchJob[] = [];
+  const taskBundles = args.taskBundles;
   const caseIds = args.caseIds && args.caseIds.length > 0
     ? [...args.caseIds]
-    : caseExecutionIds(args.caseFiles ?? []);
+    : taskBundleIds(taskBundles);
   if (caseIds.length === 0) {
-    throw new Error("Run planning requires at least one task.yaml in the task snapshot.");
+    throw new Error("Run planning requires at least one task bundle.");
   }
   for (const caseId of caseIds) {
+    const taskBundle = taskBundleForCase(taskBundles, caseId);
     for (let sampleIndex = 0; sampleIndex < args.samples; sampleIndex += 1) {
       const graph = compileWorkbenchExecutionGraph({
         ownerUserId: args.ownerUserId,
         projectId: args.projectId,
         runId: args.runId,
-        candidateId: args.candidateId,
+        subjectId: args.subjectId,
         trialIndex: args.trialIndex,
         sampleIndex,
         caseId,
         spec: args.spec,
-        task: taskSpecFromCaseFiles(selectCaseFilesForExecution(args.caseFiles ?? [], caseId), caseId),
+        task: taskBundle.task,
         environmentRef: args.environmentRef,
         workflow: args.workflow === "improve" ? "improve" : "eval",
       });
@@ -116,7 +104,7 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
         jobs.push(createWorkbenchExecutionJob({
           projectId: args.projectId,
           runId: args.runId,
-          candidateId: args.candidateId,
+          subjectId: args.subjectId,
           execution: node.execution,
           dependsOn: node.dependsOn,
           now: args.now,
@@ -130,160 +118,25 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   return jobs.filter((job, index) => jobs.findIndex((entry) => entry.id === job.id) === index);
 }
 
-export function caseExecutionIds(files: readonly SurfaceSnapshotFile[]): string[] {
-  return [...new Set(files.flatMap((file) => {
-    const normalized = normalizeRelativePath(file.path);
-    if (
-      !normalized.endsWith(`/${TASK_CONTROL_FILE}`) &&
-      !normalized.endsWith(`/${TASK_INSTRUCTION_FILE}`)
-    ) {
-      return [];
-    }
-    const slash = normalized.indexOf("/");
-    return slash > 0 ? [normalized.slice(0, slash)] : [];
-  }))].sort();
+export function taskBundleIds(taskBundles: readonly WorkbenchTaskBundle[]): string[] {
+  return [...new Set(taskBundles.map((bundle) => bundle.id))].sort();
 }
 
-export function selectCaseFilesForExecution(
-  files: readonly SurfaceSnapshotFile[],
+export function taskBundleForCase(
+  taskBundles: readonly WorkbenchTaskBundle[],
   caseId: string,
-): SurfaceSnapshotFile[] {
-  if (caseId === "current") {
-    return files.map((file) => ({ ...file }));
+): WorkbenchTaskBundle {
+  const taskBundle = taskBundles.find((bundle) => bundle.id === caseId);
+  if (!taskBundle) {
+    throw new Error(`Task bundle not found for case ${caseId}.`);
   }
-  const prefix = `${normalizeRelativePath(caseId)}/`;
-  const selected = files
-    .filter((file) => normalizeRelativePath(file.path).startsWith(prefix))
-    .map((file) => ({
-      ...file,
-      path: normalizeRelativePath(file.path).slice(prefix.length),
-    }));
-  if (selected.length === 0) {
-    throw new Error(`Task ${caseId} has no files in the uploaded task snapshot.`);
-  }
-  return selected.sort((left, right) => left.path.localeCompare(right.path));
-}
-
-export function selectTaskCaseFiles(
-  files: readonly SurfaceSnapshotFile[],
-  caseId: string,
-): SurfaceSnapshotFile[] {
-  const normalized = files.map((file) => ({
-    ...file,
-    path: normalizeRelativePath(file.path),
-  }));
-  if (normalized.some((file) => isTaskCaseRootPath(file.path))) {
-    return normalized.sort((left, right) => left.path.localeCompare(right.path));
-  }
-  return selectCaseFilesForExecution(normalized, caseId);
-}
-
-export function taskSpecFromCaseFiles(
-  files: readonly SurfaceSnapshotFile[],
-  caseId: string,
-): GenericTaskSpec {
-  assertTaskCaseLayout(files, caseId);
-  const taskFile = files.find((file) =>
-    normalizeRelativePath(file.path) === TASK_CONTROL_FILE && file.encoding === "utf8"
-  );
-  if (taskFile) {
-    return parseGenericTaskSpec(taskFile.content, `${caseId}/${TASK_CONTROL_FILE}`);
-  }
-  const instructionFile = files.find((file) =>
-    normalizeRelativePath(file.path) === TASK_INSTRUCTION_FILE && file.encoding === "utf8"
-  );
-  if (!instructionFile) {
-    throw new Error(`Task ${caseId} is missing ${TASK_CONTROL_FILE} or ${TASK_INSTRUCTION_FILE}.`);
-  }
-  return {
-    task: instructionFile.content.trim(),
-  };
-}
-
-export function selectCaseFilesForRuntimePurpose(
-  files: readonly SurfaceSnapshotFile[],
-  caseId: string,
-  purpose: "run-task" | "grade-task" | "trial",
-): SurfaceSnapshotFile[] {
-  assertTaskCaseLayout(files, caseId);
-  return files
-    .filter((file) => {
-      const filePath = normalizeRelativePath(file.path);
-      if (filePath === TASK_CONTROL_FILE) {
-        return false;
-      }
-      if (filePath.startsWith(TASK_PUBLIC_PREFIX) || filePath.startsWith(LEGACY_TASK_INPUT_PREFIX)) {
-        return true;
-      }
-      return (purpose === "grade-task" || purpose === "trial") &&
-        (filePath.startsWith(TASK_TESTS_PREFIX) || filePath.startsWith(LEGACY_TASK_EXPECTED_PREFIX));
-    })
-    .map((file) => ({ ...file, path: normalizeRelativePath(file.path) }))
-    .sort((left, right) => left.path.localeCompare(right.path));
-}
-
-export function selectTaskPublicFilesForTrial(
-  files: readonly SurfaceSnapshotFile[],
-  caseId: string,
-): SurfaceSnapshotFile[] {
-  assertTaskCaseLayout(files, caseId);
-  return stripTaskPrefix(files, [TASK_PUBLIC_PREFIX, LEGACY_TASK_INPUT_PREFIX]);
-}
-
-export function selectTaskTestFilesForTrial(
-  files: readonly SurfaceSnapshotFile[],
-  caseId: string,
-): SurfaceSnapshotFile[] {
-  assertTaskCaseLayout(files, caseId);
-  return stripTaskPrefix(files, [TASK_TESTS_PREFIX, LEGACY_TASK_EXPECTED_PREFIX]);
-}
-
-function stripTaskPrefix(
-  files: readonly SurfaceSnapshotFile[],
-  prefixes: readonly string[],
-): SurfaceSnapshotFile[] {
-  return files.flatMap((file): SurfaceSnapshotFile[] => {
-    const filePath = normalizeRelativePath(file.path);
-    const prefix = prefixes.find((entry) => filePath.startsWith(entry));
-    if (!prefix) {
-      return [];
-    }
-    return [{ ...file, path: filePath.slice(prefix.length) }];
-  }).sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function assertTaskCaseLayout(
-  files: readonly SurfaceSnapshotFile[],
-  caseId: string,
-): void {
-  const invalid = files
-    .map((file) => normalizeRelativePath(file.path))
-    .filter((filePath) => !isTaskCaseRootPath(filePath));
-  if (invalid.length > 0) {
-    throw new Error(
-      `Task ${caseId} contains unsupported file${invalid.length === 1 ? "" : "s"} outside task.yaml, input/, or expected/: ${invalid.join(", ")}`,
-    );
-  }
-}
-
-function isTaskCaseRootPath(filePath: string): boolean {
-  return (
-    filePath === TASK_CONTROL_FILE ||
-    filePath === TASK_INSTRUCTION_FILE ||
-    filePath === TASK_HARBOR_CONFIG_FILE ||
-    filePath.startsWith(TASK_PUBLIC_PREFIX) ||
-    filePath.startsWith(TASK_TESTS_PREFIX) ||
-    filePath.startsWith(TASK_SOLUTION_PREFIX) ||
-    filePath.startsWith(TASK_ENVIRONMENT_PREFIX) ||
-    filePath.startsWith(LEGACY_TASK_INPUT_PREFIX) ||
-    filePath.startsWith(LEGACY_TASK_EXPECTED_PREFIX)
-  );
+  return taskBundle;
 }
 
 export function createWorkbenchExecutionJob(args: {
   projectId: string;
   runId: string;
-  candidateId: string;
+  subjectId: string;
   execution: WorkbenchExecutionSpec;
   dependsOn: readonly string[];
   now: string;
@@ -298,7 +151,7 @@ export function createWorkbenchExecutionJob(args: {
     id: workbenchExecutionJobId(args.execution.id),
     projectId: args.projectId,
     runId: args.runId,
-    candidateId: args.candidateId,
+    subjectId: args.subjectId,
     kind: "execute",
     status: "queued",
     attempt: 0,
@@ -307,7 +160,7 @@ export function createWorkbenchExecutionJob(args: {
     input: {
       execution: args.execution,
       dependsOn: args.dependsOn.map(workbenchExecutionJobId),
-      candidateId: args.candidateId,
+      subjectId: args.subjectId,
       trialIndex,
       sampleIndex,
       caseId,
@@ -322,14 +175,14 @@ export function createSyntheticProposalExecution(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  candidateId: string;
+  subjectId: string;
   trialIndex: number;
 }): WorkbenchExecutionSpec {
   return {
     id: `exec_${args.runId.replace(/[^a-z0-9_]/giu, "_")}_trial_${String(args.trialIndex).padStart(3, "0")}_case_current_sample_000_improve`,
     projectId: args.projectId,
     runId: args.runId,
-    candidateId: args.candidateId,
+    subjectId: args.subjectId,
     purpose: "improve",
     adapter: {
       use: "synthetic",
@@ -341,8 +194,8 @@ export function createSyntheticProposalExecution(args: {
     },
     inputs: [],
     outputs: [{
-      name: "candidate_patch",
-      schema: "workbench.candidate_patch.v1",
+      name: "subject_patch",
+      schema: "workbench.subject_patch.v1",
       required: true,
     }],
     policy: {
@@ -370,7 +223,7 @@ export function createSyntheticProposalJob(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  candidateId: string;
+  subjectId: string;
   files: readonly SurfaceSnapshotFile[];
   now: string;
   baseId: string | null;
@@ -381,7 +234,7 @@ export function createSyntheticProposalJob(args: {
     ownerUserId: args.ownerUserId,
     projectId: args.projectId,
     runId: args.runId,
-    candidateId: args.candidateId,
+    subjectId: args.subjectId,
     trialIndex: args.trialIndex,
   });
   const files = args.files.map((file) => ({ ...file }));
@@ -389,7 +242,7 @@ export function createSyntheticProposalJob(args: {
     id: workbenchExecutionJobId(execution.id),
     projectId: args.projectId,
     runId: args.runId,
-    candidateId: args.candidateId,
+    subjectId: args.subjectId,
     kind: "execute",
     status: "succeeded",
     attempt: 1,
@@ -400,7 +253,7 @@ export function createSyntheticProposalJob(args: {
     input: {
       execution,
       dependsOn: [],
-      candidateId: args.candidateId,
+      subjectId: args.subjectId,
       trialIndex: args.trialIndex,
       synthetic: true,
     } as unknown as Json,
@@ -408,10 +261,10 @@ export function createSyntheticProposalJob(args: {
       ok: true,
       executionId: execution.id,
       purpose: "improve",
-      candidateId: args.candidateId,
+      subjectId: args.subjectId,
       trialIndex: args.trialIndex,
       baseId: args.baseId,
-      candidatePatch: {
+      subjectPatch: {
         files,
         fileChanges: [],
       },
@@ -431,9 +284,9 @@ export function workbenchExecutionJobPurpose(job: HostedWorkbenchJob): Workbench
   if (job.kind !== "execute") {
     return null;
   }
-  const execution = asRecord(asRecord(job.input).execution);
-  const purpose = execution.purpose;
-  return purpose === "improve" || purpose === "trial" || purpose === "run-task" || purpose === "grade-task" ? purpose : null;
+	  const execution = asRecord(asRecord(job.input).execution);
+	  const purpose = execution.purpose;
+	  return purpose === "improve" || purpose === "trial" ? purpose : null;
 }
 
 function readExecutionMetadataNumber(

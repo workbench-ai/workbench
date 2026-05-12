@@ -34,8 +34,8 @@ describe("workbench execution DAG scheduler", () => {
   test("starts dependents after prerequisites finish", async () => {
     const jobs = [
       testJob("runner"),
-      testJob("grade-a", ["runner"]),
-      testJob("grade-b", ["runner"]),
+      testJob("score-a", ["runner"]),
+      testJob("score-b", ["runner"]),
     ];
     const finished = new Set<string>();
     const dependentStartedAfterRunner: boolean[] = [];
@@ -45,7 +45,7 @@ describe("workbench execution DAG scheduler", () => {
       sandboxProvider: DOCKER_SANDBOX_BACKEND,
       capacity: { cpu: 3, memoryGb: 3, diskGb: 3 },
       executeJob: async (job) => {
-        if (job.id.startsWith("grade-")) {
+        if (job.id.startsWith("score-")) {
           dependentStartedAfterRunner.push(finished.has("runner"));
         }
         await sleep(10);
@@ -85,7 +85,7 @@ describe("workbench execution DAG scheduler", () => {
   test("cancels jobs whose prerequisites fail", async () => {
     const jobs = [
       testJob("runner"),
-      testJob("grade", ["runner"]),
+      testJob("score", ["runner"]),
     ];
 
     const result = await runWorkbenchExecutionDag({
@@ -132,7 +132,7 @@ function testJob(
     id,
     projectId: "benchmark",
     runId: "run",
-    candidateId: "candidate",
+    subjectId: "subject",
     kind: "execute",
     status: "queued",
     attempt: 0,
@@ -142,7 +142,7 @@ function testJob(
       dependsOn: [...dependsOn],
       execution: {
         id: `exec_${id}`,
-        purpose: id.startsWith("grade") ? "grade-task" : "run-task",
+        purpose: id.startsWith("score") ? "trial" : "trial",
         policy: {
           resources: {
             cpu: 1,

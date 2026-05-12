@@ -1,5 +1,5 @@
 import type {
-  CandidateCaseReview,
+  SubjectCaseReview,
   HostedWorkbenchJob,
   HostedWorkbenchJobStatus,
   Json,
@@ -11,21 +11,21 @@ import type {
 
 import { mergeWorkbenchExecutionTracesByJob } from "./execution-traces.ts";
 
-export function buildCandidateCasePhaseRefs(args: {
+export function buildSubjectCasePhaseRefs(args: {
   jobs: readonly HostedWorkbenchJob[];
-  candidateId: string;
+  subjectId: string;
   caseId: string;
   sampleIndex?: number;
-}): CandidateCaseReview["phases"] {
+}): SubjectCaseReview["phases"] {
   const groups = new Map<string, HostedWorkbenchJob[]>();
   for (const job of args.jobs) {
     const phase = readWorkbenchExecutionPurpose(job);
-    const jobCandidateId =
-      job.candidateId ?? readWorkbenchExecutionMetadataString(job, "candidateId");
+    const jobSubjectId =
+      job.subjectId ?? readWorkbenchExecutionMetadataString(job, "subjectId");
     const jobCaseId = readWorkbenchExecutionMetadataString(job, "caseId");
-    if (
-      jobCandidateId === args.candidateId &&
-      (phase === "trial" || phase === "run-task" || phase === "grade-task") &&
+	    if (
+	      jobSubjectId === args.subjectId &&
+	      phase === "trial" &&
       taskReviewCaseIdsMatch(jobCaseId, args.caseId) &&
       taskReviewSampleIndicesMatch(
         readWorkbenchExecutionMetadataNumber(job, "sampleIndex"),
@@ -44,15 +44,15 @@ export function buildCandidateCasePhaseRefs(args: {
 
   const phases = [...groups.values()]
     .map((group) => group.slice().sort(compareWorkbenchPhaseJobs))
-    .flatMap((group): CandidateCaseReview["phases"] => {
+    .flatMap((group): SubjectCaseReview["phases"] => {
       const first = group[0];
       if (!first) {
         return [];
       }
-      const phase = readWorkbenchExecutionPurpose(first);
-      if (phase !== "trial" && phase !== "run-task" && phase !== "grade-task") {
-        return [];
-      }
+	      const phase = readWorkbenchExecutionPurpose(first);
+	      if (phase !== "trial") {
+	        return [];
+	      }
       const startedAt = minTimestamp(group.map((job) => job.startedAt));
       const finishedAt = maxTimestamp(group.map((job) => job.finishedAt));
       const durationMs =
@@ -60,9 +60,9 @@ export function buildCandidateCasePhaseRefs(args: {
           ? Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt))
           : null;
       return [{
-        runId: first.runId,
-        phase,
-        role: phase === "grade-task" ? "grader" : "runner",
+	        runId: first.runId,
+	        phase,
+	        role: "runner",
         status: resolveWorkbenchJobGroupStatus(group),
         jobIds: group.map((job) => job.id),
         createdAt: minTimestamp(group.map((job) => job.createdAt)) ?? first.createdAt,
@@ -72,7 +72,7 @@ export function buildCandidateCasePhaseRefs(args: {
         ...optionalNumber("sampleIndex", readWorkbenchExecutionMetadataNumber(first, "sampleIndex")),
       }];
     })
-    .sort(compareCandidateCasePhases);
+    .sort(compareSubjectCasePhases);
   return selectCurrentPhaseRun(phases);
 }
 
@@ -93,7 +93,7 @@ export function buildWorkbenchTracePhases(args: {
     const key = [
       job.runId,
       purpose,
-      job.candidateId ?? readWorkbenchExecutionMetadataString(job, "candidateId") ?? "",
+      job.subjectId ?? readWorkbenchExecutionMetadataString(job, "subjectId") ?? "",
       readWorkbenchExecutionMetadataString(job, "caseId") ?? "",
       readWorkbenchExecutionMetadataNumber(job, "sampleIndex") ?? "",
       readWorkbenchExecutionMetadataNumber(job, "trialIndex") ?? "",
@@ -118,7 +118,7 @@ export function buildWorkbenchTracePhases(args: {
         role,
         status: resolveWorkbenchJobGroupStatus(group),
         jobIds: group.map((job) => job.id),
-        ...(first.candidateId ? { candidateId: first.candidateId } : {}),
+        ...(first.subjectId ? { subjectId: first.subjectId } : {}),
         ...optionalString("caseId", readWorkbenchExecutionMetadataString(first, "caseId")),
         ...optionalNumber("sampleIndex", readWorkbenchExecutionMetadataNumber(first, "sampleIndex")),
         ...optionalNumber("trialIndex", readWorkbenchExecutionMetadataNumber(first, "trialIndex")),
@@ -141,10 +141,10 @@ export function readWorkbenchExecutionPurpose(
   if (job.kind !== "execute") {
     return null;
   }
-  const purpose = readExecutionRecord(job)?.purpose;
-  return purpose === "improve" || purpose === "trial" || purpose === "run-task" || purpose === "grade-task"
-    ? purpose
-    : null;
+	  const purpose = readExecutionRecord(job)?.purpose;
+	  return purpose === "improve" || purpose === "trial"
+	    ? purpose
+	    : null;
 }
 
 export function readWorkbenchExecutionId(job: HostedWorkbenchJob): string | null {
@@ -169,7 +169,7 @@ export function readWorkbenchExecutionMetadataNumber(
 }
 
 export function isWorkbenchPhaseActive(
-  phase: CandidateCaseReview["phases"][number],
+  phase: SubjectCaseReview["phases"][number],
 ): boolean {
   return phase.status === "queued" || phase.status === "running";
 }
@@ -223,8 +223,8 @@ function taskReviewSampleIndicesMatch(
 }
 
 function selectCurrentPhaseRun(
-  phases: CandidateCaseReview["phases"],
-): CandidateCaseReview["phases"] {
+  phases: SubjectCaseReview["phases"],
+): SubjectCaseReview["phases"] {
   if (phases.length <= 1) {
     return phases;
   }
@@ -237,9 +237,9 @@ function selectCurrentPhaseRun(
     : phases;
 }
 
-function compareCandidateCasePhases(
-  left: CandidateCaseReview["phases"][number],
-  right: CandidateCaseReview["phases"][number],
+function compareSubjectCasePhases(
+  left: SubjectCaseReview["phases"][number],
+  right: SubjectCaseReview["phases"][number],
 ): number {
   return (
     phasePurposeOrder(left.phase) - phasePurposeOrder(right.phase) ||
@@ -249,8 +249,8 @@ function compareCandidateCasePhases(
 }
 
 function comparePhaseRecency(
-  left: CandidateCaseReview["phases"][number],
-  right: CandidateCaseReview["phases"][number],
+  left: SubjectCaseReview["phases"][number],
+  right: SubjectCaseReview["phases"][number],
 ): number {
   return readPhaseRecencyMs(right) - readPhaseRecencyMs(left);
 }
@@ -303,32 +303,23 @@ function compareWorkbenchTracePhases(
 function traceRoleForPurpose(
   purpose: WorkbenchExecutionSpec["purpose"],
 ): WorkbenchExecutionEventRole {
-  if (purpose === "improve") {
-    return "optimizer";
-  }
-  if (purpose === "grade-task") {
-    return "grader";
-  }
-  return "runner";
+	  if (purpose === "improve") {
+	    return "optimizer";
+	  }
+	  return "runner";
 }
 
 function phasePurposeOrder(purpose: string | null): number {
-  if (purpose === "improve") {
-    return 0;
-  }
-  if (purpose === "run-task") {
-    return 1;
-  }
-  if (purpose === "trial") {
-    return 1;
-  }
-  if (purpose === "grade-task") {
-    return 2;
-  }
-  return 3;
+	  if (purpose === "improve") {
+	    return 0;
+	  }
+	  if (purpose === "trial") {
+	    return 1;
+	  }
+	  return 3;
 }
 
-function readPhaseRecencyMs(phase: CandidateCaseReview["phases"][number]): number {
+function readPhaseRecencyMs(phase: SubjectCaseReview["phases"][number]): number {
   return (
     parseTimestampMs(phase.finishedAt) ??
     parseTimestampMs(phase.startedAt) ??
@@ -369,14 +360,14 @@ function parseTimestampMs(value: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function optionalString<K extends keyof WorkbenchTracePhase | keyof CandidateCaseReview["phases"][number]>(
+function optionalString<K extends keyof WorkbenchTracePhase | keyof SubjectCaseReview["phases"][number]>(
   key: K,
   value: string | null | undefined,
 ): Partial<Record<K, string>> {
   return value ? { [key]: value } as Partial<Record<K, string>> : {};
 }
 
-function optionalNumber<K extends keyof WorkbenchTracePhase | keyof CandidateCaseReview["phases"][number]>(
+function optionalNumber<K extends keyof WorkbenchTracePhase | keyof SubjectCaseReview["phases"][number]>(
   key: K,
   value: number | null | undefined,
 ): Partial<Record<K, number>> {

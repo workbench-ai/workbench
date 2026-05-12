@@ -1,6 +1,6 @@
-import type { CandidateWorkspaceFileSummary } from "../types";
+import type { SubjectWorkspaceFileSummary } from "../types";
 
-const PREVIEW_KIND_RANK: Record<CandidateWorkspaceFileSummary["preview_kind"], number> = {
+const PREVIEW_KIND_RANK: Record<SubjectWorkspaceFileSummary["preview_kind"], number> = {
   pdf: 0,
   markdown: 1,
   image: 2,
@@ -10,11 +10,11 @@ const PREVIEW_KIND_RANK: Record<CandidateWorkspaceFileSummary["preview_kind"], n
   unsupported: 6,
 };
 
-export function orderCandidateFiles(
-  files: ReadonlyArray<CandidateWorkspaceFileSummary>,
-): CandidateWorkspaceFileSummary[] {
+export function orderSubjectFiles(
+  files: ReadonlyArray<SubjectWorkspaceFileSummary>,
+): SubjectWorkspaceFileSummary[] {
   return [...files].sort((left, right) => {
-    const rankDelta = rankCandidateFile(left) - rankCandidateFile(right);
+    const rankDelta = rankSubjectFile(left) - rankSubjectFile(right);
     if (rankDelta !== 0) {
       return rankDelta;
     }
@@ -22,7 +22,7 @@ export function orderCandidateFiles(
   });
 }
 
-function rankCandidateFile(file: CandidateWorkspaceFileSummary): number {
+function rankSubjectFile(file: SubjectWorkspaceFileSummary): number {
   const path = file.path.toLowerCase();
   let rank = PREVIEW_KIND_RANK[file.preview_kind];
 

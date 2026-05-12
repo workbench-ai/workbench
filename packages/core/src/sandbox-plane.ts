@@ -352,7 +352,7 @@ export function createWorkbenchExecutionCapability(
       tenantId: execution.policy.tenantId,
       projectId: execution.projectId,
       runId: execution.runId,
-      ...(execution.candidateId ? { candidateId: execution.candidateId } : {}),
+      ...(execution.subjectId ? { subjectId: execution.subjectId } : {}),
     },
     inputs: execution.inputs.map((input) => ({ ...input })),
     outputPrefix: options.outputPrefix ?? `executions/${execution.id}/outputs/`,
@@ -379,8 +379,8 @@ export function collectExecutionCapabilityScopeIssues(
   if (capability.subject.projectId !== execution.projectId || capability.subject.runId !== execution.runId) {
     issues.push(`Capability project/run scope does not match execution ${execution.id}.`);
   }
-  if ((capability.subject.candidateId ?? null) !== (execution.candidateId ?? null)) {
-    issues.push(`Capability candidate scope does not match execution ${execution.id}.`);
+  if ((capability.subject.subjectId ?? null) !== (execution.subjectId ?? null)) {
+    issues.push(`Capability subject scope does not match execution ${execution.id}.`);
   }
   if (!capability.outputPrefix.startsWith(`executions/${execution.id}/`)) {
     issues.push(`Capability output prefix must be scoped under executions/${execution.id}/.`);

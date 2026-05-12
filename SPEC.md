@@ -6,7 +6,7 @@ Workbench is a local-first benchmark workbench built on three public primitives:
 - Trial: one subject attempt on one task in one mutable environment.
 - Scorecard: the normalized score, metrics, feedback, traces, and artifacts for a trial.
 
-The core runtime is generic. Harbor enters only through adapters: `tasks.use: harbor` resolves Harbor-shaped task directories into Workbench task packages, and `score.use: tests` runs verifier tests in the same mutated environment.
+The core runtime is generic. If `benchmark.tasks` is omitted, Workbench invokes the built-in `path` adapter with `tasks.resolve` and `with.path: tasks`. Explicit task sources use the same adapter invocation shape under `tasks`, such as `tasks: { use: harbor, with: { path: ... } }`; Harbor-shaped task directories are resolved into `TaskBundle` data by the Harbor adapter, and `score.use: tests` runs verifier tests in the same mutated environment.
 
 ## Source Shape
 
@@ -18,6 +18,7 @@ optimizers/<name>.yaml        # optional
 tasks/<case>/task.yaml
 tasks/<case>/files/           # public seed files copied into the trial cwd
 tasks/<case>/tests/           # verifier-only files injected before scoring
+tasks/<case>/solution/        # optional oracle-only material
 ```
 
 `benchmark.yaml`:
@@ -26,11 +27,19 @@ tasks/<case>/tests/           # verifier-only files injected before scoring
 version: 2
 name: tiny-terminal
 description: Evaluate terminal subjects.
-tasks: tasks
 environment:
   dockerfile: environment/Dockerfile
 score:
   use: tests
+```
+
+Omitting `tasks` is the canonical native task-package shape. It is equivalent to this explicit path task-source invocation:
+
+```yaml
+tasks:
+  use: path
+  with:
+    path: tasks
 ```
 
 `subjects/<name>/subject.yaml`:
@@ -38,6 +47,8 @@ score:
 ```yaml
 version: 2
 name: command subject
+files:
+  path: files
 run:
   use: command
   with:
@@ -47,10 +58,17 @@ run:
 `tasks/<case>/task.yaml`:
 
 ```yaml
+version: 2
 task: Write the answer to answer.txt.
+files:
+  path: files
+tests:
+  path: tests
+solution:
+  path: solution
 ```
 
-Harbor task-source adapter:
+Explicit Harbor task-source adapter:
 
 ```yaml
 version: 2
@@ -64,7 +82,7 @@ score:
   use: tests
 ```
 
-The Harbor adapter maps `instruction.md`, `task.toml`, `environment/`, `tests/`, and `solution/` into normalized Workbench task packages. Workbench does not call `harbor run` in its core runtime.
+Task-source adapters run before trials and return normalized `TaskBundle` data through `workbench-result.json`. The Harbor adapter reads `instruction.md`, `task.toml`, `environment/`, `tests/`, and `solution/`, then returns the generic task shape. Workbench does not call `harbor run` in its core runtime.
 
 ## Trial Lifecycle
 
@@ -75,7 +93,7 @@ For each subject/task/sample, Workbench:
 3. Runs the subject adapter in that working directory.
 4. Injects task `tests/` at `/tests` and creates `/logs`.
 5. Runs the score adapter in the same mutated environment.
-6. Reads `scorecard.json`, `/logs/verifier/reward.json`, or `/logs/verifier/reward.txt` and records a Workbench scorecard.
+6. Reads the `trial.score` adapter result and records a Workbench scorecard.
 
 Verifier files are not present during the subject run. This keeps hidden expected data private while preserving Harbor-style same-environment verification.
 
@@ -89,5 +107,3 @@ workbench improve [SOURCE] [--dir DIR] [--from SUBJECT_ID] [--optimizer OPTIMIZE
 workbench subjects list|show|files|preview ...
 workbench open [SOURCE] [--dir DIR] [--no-open] [--json]
 ```
-
-Internal archives still preserve historical candidate ids for older local state and hosted compatibility, but the authored model and CLI guidance are subject/trial/scorecard.

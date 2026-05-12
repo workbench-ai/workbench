@@ -5,6 +5,10 @@ import type {
   WorkbenchExecutionResources,
   WorkbenchSpecValidation,
 } from "@workbench-ai/workbench-contract";
+import type {
+  WorkbenchTaskBundle,
+  WorkbenchTaskSpec,
+} from "@workbench-ai/workbench-protocol";
 import YAML from "yaml";
 
 export const BENCHMARK_SPEC_FILE = "benchmark.yaml";
@@ -21,11 +25,15 @@ export interface WorkbenchRuntimeSpec {
   network?: WorkbenchExecutionNetworkPolicy;
 }
 
+export interface WorkbenchPathRef {
+  path: string;
+}
+
 export interface AuthoredBenchmarkSpec {
   version: 2;
   name: string;
   description: string;
-  tasks: string;
+  tasks: WorkbenchPathRef;
   environment: WorkbenchRuntimeSpec;
   adapters: string[];
   score: WorkbenchAdapterInvocation;
@@ -35,16 +43,12 @@ export interface WorkbenchSubjectManifestSpec {
   version: 2;
   name: string;
   description?: string;
+  files: WorkbenchPathRef;
   adapters: string[];
   run: WorkbenchAdapterInvocation;
 }
 
-export interface ResolvedSubjectSpec extends WorkbenchSubjectManifestSpec {
-  path: string;
-}
-
-export type WorkbenchCandidateManifestSpec = WorkbenchSubjectManifestSpec;
-export type ResolvedCandidateSpec = ResolvedSubjectSpec;
+export type ResolvedSubjectSpec = WorkbenchSubjectManifestSpec;
 
 export interface AuthoredOptimizerSpec {
   version: 2;
@@ -69,47 +73,34 @@ export interface GenericRunSpec {
   benchmark: {
     name: string;
     description: string;
-    tasks: string;
+    tasks: WorkbenchPathRef;
     environment: WorkbenchRuntimeSpec;
   };
   subject: {
     name: string;
     description?: string;
-    path: string;
-  };
-  candidate: {
-    name: string;
-    description?: string;
-    path: string;
+    files: WorkbenchPathRef;
   };
   optimizer?: {
     name: string;
     description?: string;
     edits: string[];
   };
-  tasks: {
-    path: string;
-  };
   environment: WorkbenchRuntimeSpec;
   adapters: string[];
   improve?: WorkbenchAdapterInvocation;
   run: WorkbenchAdapterInvocation;
   score: WorkbenchAdapterInvocation;
-  grade: WorkbenchAdapterInvocation;
 }
 
-export interface GenericTaskSpec {
-  task: string;
-  environment?: Partial<WorkbenchRuntimeSpec>;
-  score?: WorkbenchAdapterInvocation;
-}
+export type GenericTaskSpec = WorkbenchTaskSpec;
+export type { WorkbenchTaskBundle } from "@workbench-ai/workbench-protocol";
 
 export interface ResolvedTaskExecutionConfig {
   task: string;
   environment: WorkbenchRuntimeSpec;
   run: WorkbenchAdapterInvocation;
   score: WorkbenchAdapterInvocation;
-  grade: WorkbenchAdapterInvocation;
 }
 
 interface WorkbenchAdapterEnvelopeSpec {
@@ -171,7 +162,6 @@ export function resolveWorkbenchResolvedSourceYaml(
     readRequiredRecord(parsed.subject, "resolved Workbench source.subject", errors),
     "resolved Workbench source.subject",
     errors,
-    { allowResolvedFields: true },
   );
   const optimizer = parsed.optimizer === undefined
     ? undefined
@@ -195,23 +185,18 @@ export function resolveWorkbenchSourceFiles(args: {
   benchmarkSource: string;
   subjectSource: string;
   optimizerSource?: string | null;
-  subjectPath?: string;
 }): GenericRunSpec {
   return genericSpecFromAuthoredBundle(parseWorkbenchSourceFiles({
     benchmarkSource: args.benchmarkSource,
     subjectSource: args.subjectSource,
     optimizerSource: args.optimizerSource,
-    subjectPath: args.subjectPath,
   }));
 }
 
 export function parseWorkbenchSourceFiles(args: {
   benchmarkSource: string;
   subjectSource?: string;
-  candidateSource?: string;
   optimizerSource?: string | null;
-  subjectPath?: string;
-  candidatePath?: string;
 }): WorkbenchResolvedSource {
   const errors: string[] = [];
   const benchmark = normalizeBenchmarkRecord(
@@ -220,13 +205,9 @@ export function parseWorkbenchSourceFiles(args: {
     errors,
   );
   const subject = normalizeSubjectRecord(
-    parseYamlRecord(args.subjectSource ?? args.candidateSource ?? "", "subject YAML"),
+    parseYamlRecord(args.subjectSource ?? "", "subject YAML"),
     "subject YAML",
     errors,
-    {
-      subjectPath: args.subjectPath ?? args.candidatePath,
-      allowResolvedFields: false,
-    },
   );
   const optimizer = args.optimizerSource?.trim()
     ? normalizeOptimizerRecord(
@@ -258,36 +239,6 @@ export function isWorkbenchSubjectManifestPath(filePath: string): boolean {
   );
 }
 
-export const isWorkbenchCandidateManifestPath = isWorkbenchSubjectManifestPath;
-
-export function parseGenericTaskSpec(
-  source: string,
-  label = "task.yaml",
-): GenericTaskSpec {
-  const parsed = parseYamlRecord(source, label);
-  const errors: string[] = [];
-  rejectUnknownKeys(parsed, label, ["task", "instruction", "environment", "score"], errors);
-  const task = readOptionalString(parsed.task, `${label}.task`, errors) ??
-    readOptionalString(parsed.instruction, `${label}.instruction`, errors);
-  const environment = parsed.environment === undefined
-    ? undefined
-    : normalizeRuntimeOverride(parsed.environment, `${label}.environment`, errors);
-  const score = parsed.score === undefined
-    ? undefined
-    : normalizePhaseAdapter(parsed.score, `${label}.score`, errors);
-  if (!task) {
-    errors.push(`${label}.task or ${label}.instruction must be a non-empty string.`);
-  }
-  if (errors.length > 0) {
-    throw new Error(errors.join("\n"));
-  }
-  return {
-    task: task!,
-    ...(environment ? { environment } : {}),
-    ...(score ? { score } : {}),
-  };
-}
-
 export function resolveTaskExecutionConfig(args: {
   spec: GenericRunSpec;
   task: GenericTaskSpec;
@@ -297,7 +248,6 @@ export function resolveTaskExecutionConfig(args: {
     environment: mergeRuntime(args.spec.environment, args.task.environment),
     run: args.spec.run,
     score: args.task.score ?? args.spec.score,
-    grade: args.task.score ?? args.spec.score,
   };
 }
 
@@ -342,18 +292,13 @@ function genericSpecFromAuthoredBundle(
     benchmark: {
       name: source.benchmark.name,
       description: source.benchmark.description,
-      tasks: source.benchmark.tasks,
+      tasks: cloneJson(source.benchmark.tasks),
       environment: cloneJson(source.benchmark.environment),
     },
     subject: {
       name: source.subject.name,
       ...(source.subject.description ? { description: source.subject.description } : {}),
-      path: source.subject.path,
-    },
-    candidate: {
-      name: source.subject.name,
-      ...(source.subject.description ? { description: source.subject.description } : {}),
-      path: source.subject.path,
+      files: cloneJson(source.subject.files),
     },
     ...(source.optimizer
       ? {
@@ -364,9 +309,6 @@ function genericSpecFromAuthoredBundle(
           },
         }
       : {}),
-    tasks: {
-      path: source.benchmark.tasks,
-    },
     environment: cloneJson(source.benchmark.environment),
     adapters: [
       ...new Set([
@@ -378,7 +320,6 @@ function genericSpecFromAuthoredBundle(
     ...(source.optimizer ? { improve: cloneJson(source.optimizer.improve) } : {}),
     run: cloneJson(source.subject.run),
     score: cloneJson(source.benchmark.score),
-    grade: cloneJson(source.benchmark.score),
   };
 }
 
@@ -402,7 +343,7 @@ function normalizeBenchmarkRecord(
   requireVersionTwo(record.version, label, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readRequiredString(record.description, `${label}.description`, errors);
-  const tasks = normalizeWorkspaceLiteralPath(record.tasks, `${label}.tasks`, errors);
+  const tasks = normalizePathRef(record.tasks, `${label}.tasks`, errors);
   const environment = normalizeRuntime(record.environment, `${label}.environment`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
   const score = normalizePhaseAdapter(record.score, `${label}.score`, errors);
@@ -423,10 +364,6 @@ function normalizeSubjectRecord(
   record: Record<string, unknown> | null,
   label: string,
   errors: string[],
-  options: {
-    subjectPath?: string;
-    allowResolvedFields?: boolean;
-  } = {},
 ): ResolvedSubjectSpec | null {
   if (!record) {
     return null;
@@ -435,28 +372,22 @@ function normalizeSubjectRecord(
     "version",
     "name",
     "description",
+    "files",
     "adapters",
     "run",
-    ...(options.allowResolvedFields === true ? ["path"] : []),
   ], errors);
   requireVersionTwo(record.version, label, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readOptionalString(record.description, `${label}.description`, errors);
-  const subjectPath = options.subjectPath ??
-    (options.allowResolvedFields === true
-      ? normalizeWorkspaceLiteralPath(record.path, `${label}.path`, errors)
-      : undefined);
+  const files = normalizePathRef(record.files, `${label}.files`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
   const run = normalizePhaseAdapter(record.run, `${label}.run`, errors);
-  if (!subjectPath) {
-    errors.push("Subject files path is required in resolved source.");
-  }
-  return name && subjectPath && run
+  return name && files && run
     ? {
         version: 2,
         name,
         ...(description ? { description } : {}),
-        path: subjectPath,
+        files,
         adapters,
         run,
       }
@@ -715,6 +646,20 @@ function normalizeWorkspaceLiteralPath(
     return null;
   }
   return normalizeLiteralPathString(raw, label, errors);
+}
+
+function normalizePathRef(
+  value: unknown,
+  label: string,
+  errors: string[],
+): WorkbenchPathRef | null {
+  const record = readRequiredRecord(value, label, errors);
+  if (!record) {
+    return null;
+  }
+  rejectUnknownKeys(record, label, ["path"], errors);
+  const refPath = normalizeWorkspaceLiteralPath(record.path, `${label}.path`, errors);
+  return refPath ? { path: refPath } : null;
 }
 
 function normalizeRelativePathList(

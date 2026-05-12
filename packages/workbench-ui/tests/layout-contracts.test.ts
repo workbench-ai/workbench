@@ -52,7 +52,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain('breadcrumbs={route.kind !== "benchmark" ? (');
     expect(appSource).toContain("<RuntimeBreadcrumbs");
     expect(appSource).toContain("route={route}");
-    expect(appSource).toContain("route.kind === \"candidate\"");
+    expect(appSource).toContain("route.kind === \"subject\"");
     expect(appSource).toContain("Benchmark");
     expect(appSource).toContain("createBenchmarkRoute()");
     expect(appSource).not.toContain("Project</BreadcrumbLink>\n        </BreadcrumbItem>\n        <BreadcrumbSeparator />\n        <BreadcrumbItem>\n          <BreadcrumbLink");
@@ -73,9 +73,9 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain('data-testid="benchmark-task-card"');
     expect(appSource).toContain('const excludedFields = new Set(["use", "task", "instructions", "prompt", "description"])');
     expect(appSource).toContain("formatUseBlockSummary");
-    expect(appSource).not.toContain('grade.use === "rubric"');
+    expect(appSource).not.toContain('score.use === "rubric"');
     expect(appSource).not.toContain("readRubricCriteria");
-    expect(appSource).not.toContain("formatGradeSummary");
+    expect(appSource).not.toContain("formatScoreSummary");
     expect(appSource).not.toContain("formatRunSummary");
     expect(appSource).not.toContain("formatAdapterSummary");
     expect(appSource).not.toContain("config.judge");
@@ -111,18 +111,18 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain("for (const authoredCase of specDocument?.cases ?? [])");
     expect(appSource).toContain('SurfaceSection title="Evaluation Tasks"');
     expect(appSource).not.toContain("runnerExecution");
-    expect(appSource).not.toContain("graderExecution");
+    expect(appSource).not.toContain("scorerExecution");
     expect(appSource).not.toContain("ExecutionTraceJobsPanel");
     expect(appSource).not.toContain('SurfaceSection title="Task Scorecard"');
     expect(appSource).not.toContain('className="min-h-[360px]"');
     expect(appSource).not.toContain('CardContent className="min-h-[360px] py-0"');
     expect(appSource).not.toContain("Live Progress");
     expect(appSource).not.toContain("resolveProgressDisplayEvents");
-    expect(appSource).not.toContain('value="candidate-surface"');
+    expect(appSource).not.toContain('value="subject-surface"');
     expect(appSource).not.toContain('summary={<Badge');
     expect(appSource).not.toContain('label="Discovered"');
     expect(appSource).not.toContain("function BenchmarkStringBadges");
-    expect(appSource).not.toContain('description="Runs the candidate');
+    expect(appSource).not.toContain('description="Runs the subject');
     expect(appSource).not.toContain('description="Agent that proposes');
     expect(appSource).not.toContain('className="border-border/60 bg-muted/10"');
     expect(appSource).not.toContain('defaultValue="overview"');
@@ -167,7 +167,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain('<TabsContent value="files" className="min-h-0 min-w-0">');
     expect(appSource).toContain('title="Benchmark Manifest"');
     expect(appSource).toContain('title="Mounted Task Files"');
-    expect(appSource).toContain("Task input and expected files mounted during runner and grader execution.");
+    expect(appSource).toContain("Task input and expected files mounted during runner and scorer execution.");
     expect(appSource).toContain("<FilesBrowser");
     expect(appSource).toContain('browseMode="folders"');
     expect(appSource).toContain("onSourcePreviewModeChange");
@@ -175,9 +175,9 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain("max-h-[calc(100dvh-12rem)]");
   });
 
-  test("candidate benchmark tabs stay scoped and on the low-elevation shared tone", () => {
-    const candidateListSource = readFileSync(
-      new URL("../src/components/candidate-list.tsx", import.meta.url),
+  test("subject benchmark tabs stay scoped and on the low-elevation shared tone", () => {
+    const subjectListSource = readFileSync(
+      new URL("../src/components/subject-list.tsx", import.meta.url),
       "utf8",
     );
     const appSource = readFileSync(
@@ -193,16 +193,16 @@ describe("workbench browser layout contracts", () => {
       "utf8",
     );
 
-    expect(candidateListSource).not.toContain("shadow-sm");
-    expect(candidateListSource).not.toContain("font-mono text-sm font-semibold");
+    expect(subjectListSource).not.toContain("shadow-sm");
+    expect(subjectListSource).not.toContain("font-mono text-sm font-semibold");
     expect(appSource).not.toContain("metrics?.score");
     expect(appSource).not.toContain("metrics.score");
     expect(appSource).not.toContain("usage.harness");
     expect(appSource).toContain('const fillsBody = view === "lineage" || view === "results" || view === "runs"');
-    expect(appSource).toContain('route.kind === "candidates" && (runtimeRootView === "lineage" || runtimeRootView === "results" || runtimeRootView === "runs")');
-    expect(appSource).toContain('if (route.kind !== "candidates" || runtimeRootView !== "results" || currentBenchmarkResults.length === 0)');
+    expect(appSource).toContain('route.kind === "subjects" && (runtimeRootView === "lineage" || runtimeRootView === "results" || runtimeRootView === "runs")');
+    expect(appSource).toContain('if (route.kind !== "subjects" || runtimeRootView !== "results" || currentBenchmarkResults.length === 0)');
     expect(appSource).toContain("setRuntimeRootView(nextView)");
-    expect(appSource).toContain("navigate(createCandidatesRoute())");
+    expect(appSource).toContain("navigate(createSubjectsRoute())");
     expect(appSource).toContain('<TabsList variant="line" aria-label="Benchmark version views"');
     expect(appSource).toContain('<TabsTrigger value="lineage">');
     expect(appSource).toContain('<TabsTrigger value="archive">');
@@ -218,7 +218,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("function orderRunSummaries");
     expect(appSource).toContain("function RunsSurface");
     expect(appSource).toContain("function ScrollableRuntimeSurface");
-    expect(appSource).toContain('candidateCount={route.kind === "candidates" ? currentBenchmarkSummaries.length : snapshot?.summaries.length ?? 0}');
+    expect(appSource).toContain('subjectCount={route.kind === "subjects" ? currentBenchmarkSummaries.length : snapshot?.summaries.length ?? 0}');
     expect(appSource).toContain('<Badge variant="outline">{formatRunWorkflow(run.workflow)}</Badge>');
     expect(appSource).toContain("<RunStatusBadge run={run} />");
     expect(appSource).toContain("{formatRunDuration(run, nowMs)}");
@@ -226,9 +226,9 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain('className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-1"');
     expect(appSource).toContain('"grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3"');
     expect(appSource).toContain('{ value: "manifest", label: "Manifest", icon: FileCode2Icon }');
-    expect(appSource).toContain('title="Candidate Manifest"');
-    expect(appSource).toContain('title="Mounted Candidate Files"');
-    expect(appSource).toContain("Files mounted under /workspace/input/candidate for run and improve executions.");
+    expect(appSource).toContain('title="Subject Manifest"');
+    expect(appSource).toContain('title="Mounted Subject Files"');
+    expect(appSource).toContain("Files mounted under /workspace/input/subject for run and improve executions.");
     expect(lineageSource).not.toContain("shadow-sm");
     expect(lineageSource).toContain('"elk.layered.spacing.nodeNodeBetweenLayers"');
     expect(lineageSource).toContain('"elk.spacing.nodeNode"');
@@ -311,13 +311,13 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("const specLoading = specDocument === null && specError === null");
     expect(loadingStatesSource).toContain('components/ui/skeleton');
     expect(loadingStatesSource).toContain('data-testid="benchmark-loading-state"');
-    expect(loadingStatesSource).toContain('data-testid="candidate-archive-loading"');
-    expect(loadingStatesSource).toContain('data-testid="candidate-evaluation-loading"');
+    expect(loadingStatesSource).toContain('data-testid="subject-archive-loading"');
+    expect(loadingStatesSource).toContain('data-testid="subject-evaluation-loading"');
     expect(loadingStatesSource).toContain('data-testid="case-review-loading"');
     expect(loadingStatesSource).toContain('data-testid="results-loading-state"');
     expect(loadingStatesSource).toContain('data-testid="lineage-loading-state"');
     expect(loadingStatesSource).not.toContain("results-last-run-card");
-    expect(appSource).not.toContain("Loading candidate evaluation");
+    expect(appSource).not.toContain("Loading subject evaluation");
     expect(appSource).not.toContain("Loading task review");
     expect(resultsSource).toContain("ResultsDetailSkeleton");
     expect(resultsSource).not.toContain("results-last-run-card");

@@ -34,7 +34,7 @@ const NUMERIC_USAGE_FIELDS = [
 const USAGE_ROLES = [
   "optimizer",
   "runner",
-  "grader",
+  "scorer",
 ] as const satisfies readonly ExecutionRole[];
 
 type NumericUsageField = typeof NUMERIC_USAGE_FIELDS[number];
@@ -86,18 +86,18 @@ export function completeUsageSummary(
   }
   const optimizer = usage.optimizer ? normalizeExecutionUsage(usage.optimizer) : undefined;
   const runner = usage.runner ? normalizeExecutionUsage(usage.runner) : undefined;
-  const grader = usage.grader ? normalizeExecutionUsage(usage.grader) : undefined;
+  const scorer = usage.scorer ? normalizeExecutionUsage(usage.scorer) : undefined;
   const roleTotal = mergeExecutionUsage([
     optimizer,
     runner,
-    grader,
+    scorer,
   ]);
   const total = roleTotal ?? normalizeExecutionUsage(usage.total);
   return compactUsageSummary({
     ...(total ? { total } : {}),
     ...(optimizer ? { optimizer } : {}),
     ...(runner ? { runner } : {}),
-    ...(grader ? { grader } : {}),
+    ...(scorer ? { scorer } : {}),
   });
 }
 
@@ -106,12 +106,12 @@ export function normalizeUsageSummary(value: unknown): UsageSummary | undefined 
   const total = normalizeExecutionUsage(record.total);
   const optimizer = normalizeExecutionUsage(record.optimizer);
   const runner = normalizeExecutionUsage(record.runner);
-  const grader = normalizeExecutionUsage(record.grader);
+  const scorer = normalizeExecutionUsage(record.scorer);
   return completeUsageSummary({
     ...(total ? { total } : {}),
     ...(optimizer ? { optimizer } : {}),
     ...(runner ? { runner } : {}),
-    ...(grader ? { grader } : {}),
+    ...(scorer ? { scorer } : {}),
   });
 }
 
@@ -129,7 +129,7 @@ export function mergeUsageSummaries(
     total: mergeExecutionUsage(entries.map((entry) => entry.total)),
     optimizer: mergeExecutionUsage(entries.map((entry) => entry.optimizer)),
     runner: mergeExecutionUsage(entries.map((entry) => entry.runner)),
-    grader: mergeExecutionUsage(entries.map((entry) => entry.grader)),
+    scorer: mergeExecutionUsage(entries.map((entry) => entry.scorer)),
   });
 }
 
@@ -138,11 +138,11 @@ export function mergeUsageRoles(
 ): UsageSummary | undefined {
   const optimizer = completeUsageSummary(roles.optimizer);
   const runner = completeUsageSummary(roles.runner);
-  const grader = completeUsageSummary(roles.grader);
+  const scorer = completeUsageSummary(roles.scorer);
   return completeUsageSummary({
     optimizer: optimizer?.optimizer ?? optimizer?.total,
     runner: runner?.runner ?? runner?.total,
-    grader: grader?.grader ?? grader?.total,
+    scorer: scorer?.scorer ?? scorer?.total,
   });
 }
 

@@ -10,8 +10,10 @@ import {
   builtinWorkbenchAdapterManifests,
 } from "@workbench-ai/workbench-built-in-adapters";
 import {
-  collectWorkbenchAdapterInvocations,
+  assertWorkbenchAdapterOperationSupport,
+  collectWorkbenchAdapterOperationRequirements,
   parseWorkbenchAdapterManifest,
+  type WorkbenchAdapterOperationRequirement,
   type WorkbenchAdapterManifest,
 } from "@workbench-ai/workbench-protocol";
 import type { resolveWorkbenchResolvedSourceYaml } from "@workbench-ai/workbench-core";
@@ -96,10 +98,14 @@ export async function resolveWorkbenchAdaptersForProject(
         continue;
       }
       throw new Error(
-        `Adapter ${id} is referenced by benchmark/candidate/optimizer YAML but is not installed. List its source under adapters in the YAML file that uses it.`,
+        `Adapter ${id} is referenced by benchmark/subject/optimizer YAML but is not installed. List its source under adapters in the YAML file that uses it.`,
       );
     }
   }
+  assertWorkbenchAdapterOperationSupport(
+    rootAdapterOperationRequirements(spec),
+    [...adapters.values()].map((adapter) => adapter.manifest),
+  );
   return [...adapters.values()].sort((left, right) => left.manifest.id.localeCompare(right.manifest.id));
 }
 
@@ -173,9 +179,9 @@ function resolvedBuiltinAdapter(manifest: WorkbenchAdapterManifest): ResolvedWor
     stability: "builtin",
     manifest: {
       ...manifest,
-      ...(manifest.capabilities ? { capabilities: [...manifest.capabilities] } : {}),
+      operations: JSON.parse(JSON.stringify(manifest.operations)) as WorkbenchAdapterManifest["operations"],
       setup: [...manifest.setup],
-      ...(manifest.refs ? { refs: [...manifest.refs] } : {}),
+      ...(manifest.slots ? { slots: JSON.parse(JSON.stringify(manifest.slots)) as WorkbenchAdapterManifest["slots"] } : {}),
     },
     manifestHash,
     contentHash: manifestHash,
@@ -355,20 +361,24 @@ function topLevelAdapterIds(spec: GenericSpec): string[] {
   ])];
 }
 
+function rootAdapterOperationRequirements(spec: GenericSpec): WorkbenchAdapterOperationRequirement[] {
+  return [
+    ...(spec.improve ? [{ invocation: spec.improve, operation: "subject.improve" as const }] : []),
+    { invocation: spec.run, operation: "subject.run" as const },
+    { invocation: spec.score, operation: "trial.score" as const },
+  ];
+}
+
 function requiredAdapterIds(
   spec: GenericSpec,
   manifests: readonly WorkbenchAdapterManifest[],
 ): string[] {
   const ids = new Set<string>();
-  for (const invocation of collectWorkbenchAdapterInvocations(
-    [
-      ...(spec.improve ? [spec.improve] : []),
-      spec.run,
-      spec.score,
-    ],
+  for (const requirement of collectWorkbenchAdapterOperationRequirements(
+    rootAdapterOperationRequirements(spec),
     manifests,
   )) {
-    ids.add(invocation.use);
+    ids.add(requirement.invocation.use);
   }
   return [...ids];
 }

@@ -1,8 +1,8 @@
-export type InitCandidateKind = "skill" | "pipeline" | "command";
+export type InitSubjectKind = "skill" | "pipeline" | "command";
 export type InitAgent = string;
 
 export interface WorkbenchInitScaffoldOptions {
-  kind: InitCandidateKind;
+  kind: InitSubjectKind;
   name: string;
   agent?: InitAgent;
   example: boolean;
@@ -14,9 +14,9 @@ export interface WorkbenchInitScaffoldFile {
 }
 
 export interface WorkbenchInitScaffold {
-  kind: InitCandidateKind;
+  kind: InitSubjectKind;
   name: string;
-  candidateRoot: string;
+  subjectRoot: string;
   seedFileTarget: string;
   seedDirectoryTarget: string;
   files: WorkbenchInitScaffoldFile[];
@@ -29,12 +29,12 @@ export function createWorkbenchInitScaffold(options: WorkbenchInitScaffoldOption
     return {
       kind: "skill",
       name: options.name,
-      candidateRoot: `subjects/${agent}/files`,
+      subjectRoot: `subjects/${agent}/files`,
       seedFileTarget: `subjects/${agent}/files/SKILL.md`,
       seedDirectoryTarget: `subjects/${agent}/files`,
       files: [
         { path: "benchmark.yaml", content: skillBenchmarkSpec(options.name, agent) },
-        { path: `subjects/${agent}/subject.yaml`, content: skillCandidateSpec(options.name, agent) },
+        { path: `subjects/${agent}/subject.yaml`, content: skillSubjectSpec(options.name, agent) },
         { path: `optimizers/${agent}.yaml`, content: optimizerSpec(options.name, "SKILL.md", agent) },
         { path: `subjects/${agent}/files/SKILL.md`, content: skillMarkdown(options.name, slug, options.example) },
         { path: `subjects/${agent}/files/agents/openai.yaml`, content: skillOpenAiMetadata(options.name, slug) },
@@ -53,12 +53,12 @@ export function createWorkbenchInitScaffold(options: WorkbenchInitScaffoldOption
     return {
       kind: "pipeline",
       name: options.name,
-      candidateRoot: `subjects/${agent}/files`,
+      subjectRoot: `subjects/${agent}/files`,
       seedFileTarget: `subjects/${agent}/files/pipeline.yaml`,
       seedDirectoryTarget: `subjects/${agent}/files`,
       files: [
         { path: "benchmark.yaml", content: pipelineBenchmarkSpec(options.name, agent) },
-        { path: `subjects/${agent}/subject.yaml`, content: pipelineCandidateSpec(options.name, agent) },
+        { path: `subjects/${agent}/subject.yaml`, content: pipelineSubjectSpec(options.name, agent) },
         { path: `optimizers/${agent}.yaml`, content: optimizerSpec(options.name, "pipeline.yaml", agent) },
         { path: `subjects/${agent}/files/pipeline.yaml`, content: pipelineSpec(slug, options.name) },
         { path: "environment/Dockerfile", content: agentDockerfile(agent) },
@@ -74,12 +74,12 @@ export function createWorkbenchInitScaffold(options: WorkbenchInitScaffoldOption
   return {
     kind: "command",
     name: options.name,
-    candidateRoot: "subjects/command/files",
+    subjectRoot: "subjects/command/files",
     seedFileTarget: "subjects/command/files/run.js",
     seedDirectoryTarget: "subjects/command/files",
     files: [
       { path: "benchmark.yaml", content: commandBenchmarkSpec(options.name) },
-      { path: "subjects/command/subject.yaml", content: commandCandidateSpec(options.name) },
+      { path: "subjects/command/subject.yaml", content: commandSubjectSpec(options.name) },
       { path: "optimizers/command.yaml", content: commandOptimizerSpec(options.name) },
       { path: "subjects/command/files/run.js", content: commandRunnerSource() },
       { path: "environment/Dockerfile", content: nodeDockerfile() },
@@ -113,8 +113,11 @@ function yamlString(value: string): string {
 
 function taskYaml(task: string): string {
   return [
+    "version: 2",
     "task: |-",
     ...task.trimEnd().split("\n").map((line) => `  ${line}`),
+    "tests:",
+    "  path: tests",
     "",
   ].join("\n");
 }
@@ -124,7 +127,6 @@ function skillBenchmarkSpec(name: string, agent: InitAgent): string {
     "version: 2",
     `name: ${yamlString(name)}`,
     `description: ${yamlString(`Evaluate the ${name} skill across representative tasks.`)}`,
-    "tasks: tasks",
     "environment:",
     "  dockerfile: environment/Dockerfile",
     "score:",
@@ -144,10 +146,12 @@ function skillBenchmarkSpec(name: string, agent: InitAgent): string {
   ].join("\n");
 }
 
-function skillCandidateSpec(name: string, agent: InitAgent): string {
+function skillSubjectSpec(name: string, agent: InitAgent): string {
   return [
     "version: 2",
     `name: ${yamlString(name)}`,
+    "files:",
+    "  path: files",
     "run:",
     `  use: ${agent}`,
     "  with:",
@@ -161,7 +165,6 @@ function pipelineBenchmarkSpec(name: string, agent: InitAgent): string {
     "version: 2",
     `name: ${yamlString(name)}`,
     `description: ${yamlString(`Evaluate the ${name} pipeline across representative tasks.`)}`,
-    "tasks: tasks",
     "environment:",
     "  dockerfile: environment/Dockerfile",
     "score:",
@@ -181,10 +184,12 @@ function pipelineBenchmarkSpec(name: string, agent: InitAgent): string {
   ].join("\n");
 }
 
-function pipelineCandidateSpec(name: string, agent: InitAgent): string {
+function pipelineSubjectSpec(name: string, agent: InitAgent): string {
   return [
     "version: 2",
     `name: ${yamlString(name)}`,
+    "files:",
+    "  path: files",
     "run:",
     `  use: ${agent}`,
     "  with:",
@@ -211,7 +216,6 @@ function commandBenchmarkSpec(name: string): string {
     "version: 2",
     `name: ${yamlString(name)}`,
     `description: ${yamlString(`Evaluate the ${name} command implementation across representative tasks.`)}`,
-    "tasks: tasks",
     "environment:",
     "  dockerfile: environment/Dockerfile",
     "score:",
@@ -220,11 +224,13 @@ function commandBenchmarkSpec(name: string): string {
   ].join("\n");
 }
 
-function commandCandidateSpec(name: string): string {
+function commandSubjectSpec(name: string): string {
   const runnerCommand = JSON.stringify("node run.js");
   return [
     "version: 2",
     `name: ${yamlString(name)}`,
+    "files:",
+    "  path: files",
     "run:",
     "  use: command",
     "  with:",
@@ -234,7 +240,7 @@ function commandCandidateSpec(name: string): string {
 }
 
 function commandOptimizerSpec(name: string): string {
-  const optimizerCommand = JSON.stringify("node -e \"const fs=require('fs');const file='/workspace/input/candidate/run.js';const current=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';const next=current.replace(/\\s*$/,'')+'\\n// Workbench subject revision.\\n';fs.mkdirSync('/workspace/output',{recursive:true});fs.writeFileSync('/workspace/output/candidate_patch.json',JSON.stringify({files:[{path:'run.js',encoding:'utf8',content:next,executable:false}],fileChanges:['run.js'],summary:'Updated command subject.'},null,2));\"");
+  const optimizerCommand = JSON.stringify("node -e \"const fs=require('fs');const file='run.js';const current=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';const next=current.replace(/\\s*$/,'')+'\\n// Workbench subject revision.\\n';fs.writeFileSync(file,next);\"");
   return [
     "version: 2",
     `name: ${yamlString(`${name} optimizer`)}`,

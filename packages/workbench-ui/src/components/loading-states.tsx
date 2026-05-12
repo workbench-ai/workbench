@@ -75,7 +75,7 @@ export function BenchmarkSurfaceSkeleton() {
         </div>
       </SurfaceSection>
 
-      <SurfaceSection title="Candidate">
+      <SurfaceSection title="Subject">
         <div className="grid gap-4">
           <Skeleton className="h-4 w-48" />
           <Skeleton className="h-4 w-72 max-w-full" />
@@ -86,9 +86,9 @@ export function BenchmarkSurfaceSkeleton() {
   );
 }
 
-export function CandidateArchiveSkeleton() {
+export function SubjectArchiveSkeleton() {
   return (
-    <div className="grid gap-3" aria-busy="true" data-testid="candidate-archive-loading">
+    <div className="grid gap-3" aria-busy="true" data-testid="subject-archive-loading">
       {Array.from({ length: 3 }, (_, index) => (
         <div key={index} className="grid gap-2 rounded-lg border border-border p-4">
           <div className="flex items-start justify-between gap-3">
@@ -109,13 +109,13 @@ export function CandidateArchiveSkeleton() {
   );
 }
 
-export function CandidateFilesSurfaceSkeleton() {
+export function SubjectFilesSurfaceSkeleton() {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-6">
       <SurfaceSection
-        title="Candidate Files"
+        title="Subject Files"
         icon={FolderOpenIcon}
-        description="Inspect the candidate file snapshot."
+        description="Inspect the subject file snapshot."
         className="flex min-h-0 flex-1 flex-col"
       >
         <SkeletonBadgeRow count={3} />
@@ -127,7 +127,7 @@ export function CandidateFilesSurfaceSkeleton() {
 
 export function EvaluationTasksSkeleton() {
   return (
-    <Card size="sm" aria-busy="true" data-testid="candidate-evaluation-loading">
+    <Card size="sm" aria-busy="true" data-testid="subject-evaluation-loading">
       <CardContent className="grid gap-3 py-0">
         <SkeletonBadgeRow count={4} />
         <div className="grid gap-2">
@@ -145,14 +145,14 @@ export function EvaluationTasksSkeleton() {
   );
 }
 
-export function CandidateEvaluationSkeleton() {
+export function SubjectEvaluationSkeleton() {
   return (
     <div className="grid gap-6" aria-busy="true">
       <SurfaceSection title="Evaluation Tasks" icon={ListChecksIcon}>
         <SkeletonBadgeRow count={5} />
         <EvaluationTasksSkeleton />
       </SurfaceSection>
-      <SurfaceSection title="Candidate Summary" icon={PlayIcon}>
+      <SurfaceSection title="Subject Summary" icon={PlayIcon}>
         <RunFactsSkeleton />
         <Skeleton className="h-32 w-full" />
       </SurfaceSection>

@@ -2,15 +2,27 @@ import YAML from "yaml";
 
 export interface WorkbenchAdapterManifest {
   id: string;
-  protocol: "workbench.adapter.v1";
-  capabilities?: WorkbenchAdapterCapability[];
+  protocol: "workbench.adapter.v2";
+  operations: Partial<Record<WorkbenchAdapterOperation, WorkbenchAdapterOperationManifest>>;
   setup: string[];
-  command: string;
   auth?: WorkbenchAdapterAuthManifest;
-  refs?: string[];
+  slots?: Record<string, WorkbenchAdapterSlotManifest>;
 }
 
-export type WorkbenchAdapterCapability = "task-source" | "runner" | "scorer" | "optimizer";
+export type WorkbenchAdapterOperation =
+  | "tasks.resolve"
+  | "subject.run"
+  | "trial.score"
+  | "subject.improve";
+
+export interface WorkbenchAdapterOperationManifest {
+  command: string;
+}
+
+export interface WorkbenchAdapterSlotManifest {
+  path: string;
+  operation: WorkbenchAdapterOperation;
+}
 
 export interface WorkbenchAdapterAuthManifest {
   methods?: Record<string, WorkbenchAdapterAuthMethodManifest>;
@@ -47,8 +59,31 @@ export interface WorkbenchAdapterAuthRequirement {
   profile: string;
 }
 
+export interface WorkbenchAdapterOperationRequirement {
+  invocation: WorkbenchAdapterInvocationLike;
+  operation: WorkbenchAdapterOperation;
+}
+
 export function adapterCommandName(adapterId: string): string {
   return `workbench-adapter-${adapterId}`;
+}
+
+export function workbenchAdapterManifestSupportsOperation(
+  manifest: WorkbenchAdapterManifest,
+  operation: WorkbenchAdapterOperation,
+): boolean {
+  return manifest.operations[operation] !== undefined;
+}
+
+export function workbenchAdapterOperationCommand(
+  manifest: WorkbenchAdapterManifest,
+  operation: WorkbenchAdapterOperation,
+): string {
+  const operationManifest = manifest.operations[operation];
+  if (!operationManifest) {
+    throw new Error(`Adapter ${manifest.id} does not implement ${operation}.`);
+  }
+  return operationManifest.command;
 }
 
 export function cloneWorkbenchAdapterManifest(
@@ -56,10 +91,10 @@ export function cloneWorkbenchAdapterManifest(
 ): WorkbenchAdapterManifest {
   return {
     ...manifest,
-    ...(manifest.capabilities ? { capabilities: [...manifest.capabilities] } : {}),
+    operations: cloneJson(manifest.operations),
     setup: [...manifest.setup],
     ...(manifest.auth ? { auth: cloneJson(manifest.auth) as WorkbenchAdapterAuthManifest } : {}),
-    ...(manifest.refs ? { refs: [...manifest.refs] } : {}),
+    ...(manifest.slots ? { slots: cloneJson(manifest.slots) as Record<string, WorkbenchAdapterSlotManifest> } : {}),
   };
 }
 
@@ -72,43 +107,84 @@ export function parseWorkbenchAdapterManifest(
     throw new Error(`${label} must be a YAML object.`);
   }
   const record = parsed as Record<string, unknown>;
-  rejectUnknownManifestKeys(record, label, ["id", "protocol", "capabilities", "setup", "command", "auth", "refs"]);
+  rejectUnknownManifestKeys(record, label, ["id", "protocol", "operations", "setup", "auth", "slots"]);
   const id = readAdapterId(record.id, `${label}.id`);
-  if (record.protocol !== "workbench.adapter.v1") {
-    throw new Error(`${label}.protocol must be workbench.adapter.v1.`);
+  if (record.protocol !== "workbench.adapter.v2") {
+    throw new Error(`${label}.protocol must be workbench.adapter.v2.`);
   }
-  const command = typeof record.command === "string" && record.command.trim()
-    ? record.command.trim()
-    : adapterCommandName(id);
   const setup = record.setup === undefined
     ? []
     : readStringArray(record.setup, `${label}.setup`);
-  const capabilities = record.capabilities === undefined
+  const operations = readAdapterOperations(record.operations, `${label}.operations`, id);
+  const slots = record.slots === undefined
     ? undefined
-    : readAdapterCapabilities(record.capabilities, `${label}.capabilities`);
-  const refs = record.refs === undefined
-    ? undefined
-    : readAdapterRefs(record.refs, `${label}.refs`);
+    : readAdapterSlots(record.slots, `${label}.slots`);
   const auth = readAuth(record.auth, `${label}.auth`);
   return {
     id,
-    protocol: "workbench.adapter.v1",
-    ...(capabilities ? { capabilities } : {}),
+    protocol: "workbench.adapter.v2",
+    operations,
     setup,
-    command,
     ...(auth ? { auth } : {}),
-    ...(refs ? { refs } : {}),
+    ...(slots ? { slots } : {}),
   };
 }
 
-function readAdapterCapabilities(value: unknown, label: string): WorkbenchAdapterCapability[] {
-  const allowed = new Set(["task-source", "runner", "scorer", "optimizer"]);
-  return readStringArray(value, label).map((entry, index) => {
-    if (!allowed.has(entry)) {
-      throw new Error(`${label}[${index}] must be task-source, runner, scorer, or optimizer.`);
+function readAdapterOperations(
+  value: unknown,
+  label: string,
+  adapterId: string,
+): WorkbenchAdapterManifest["operations"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  const operations: WorkbenchAdapterManifest["operations"] = {};
+  for (const [operation, rawConfig] of Object.entries(value as Record<string, unknown>).sort()) {
+    const normalizedOperation = readAdapterOperation(operation, `${label}.${operation}`);
+    if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+      throw new Error(`${label}.${operation} must be an object.`);
     }
-    return entry as WorkbenchAdapterCapability;
-  });
+    const config = rawConfig as Record<string, unknown>;
+    rejectUnknownManifestKeys(config, `${label}.${operation}`, ["command"]);
+    operations[normalizedOperation] = {
+      command: config.command === undefined
+        ? adapterCommandName(adapterId)
+        : readNonEmptyString(config.command, `${label}.${operation}.command`),
+    };
+  }
+  if (Object.keys(operations).length === 0) {
+    throw new Error(`${label} must declare at least one operation.`);
+  }
+  return operations;
+}
+
+function readAdapterSlots(
+  value: unknown,
+  label: string,
+): Record<string, WorkbenchAdapterSlotManifest> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  const slots: Record<string, WorkbenchAdapterSlotManifest> = {};
+  for (const [slot, rawConfig] of Object.entries(value as Record<string, unknown>).sort()) {
+    if (!/^[a-z][a-z0-9-]*$/u.test(slot)) {
+      throw new Error(`${label} keys must be lowercase adapter slot names.`);
+    }
+    if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+      throw new Error(`${label}.${slot} must be an object.`);
+    }
+    const config = rawConfig as Record<string, unknown>;
+    rejectUnknownManifestKeys(config, `${label}.${slot}`, ["path", "operation"]);
+    const slotPath = readJsonPointer(config.path, `${label}.${slot}.path`);
+    slots[slot] = {
+      path: slotPath,
+      operation: readAdapterOperation(config.operation, `${label}.${slot}.operation`),
+    };
+  }
+  if (Object.keys(slots).length === 0) {
+    throw new Error(`${label} must include at least one slot.`);
+  }
+  return slots;
 }
 
 export function workbenchAdapterManifestRequiresAuth(
@@ -130,6 +206,75 @@ export function collectWorkbenchAdapterInvocations(
     queue.push(...nestedWorkbenchAdapterInvocations(invocation, manifestById));
   }
   return collected;
+}
+
+export function collectWorkbenchAdapterOperationRequirements(
+  roots: readonly WorkbenchAdapterOperationRequirement[],
+  manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
+): WorkbenchAdapterOperationRequirement[] {
+  const manifestById = manifestMap(manifests);
+  const collected: WorkbenchAdapterOperationRequirement[] = [];
+  const queue = roots.flatMap((root) => {
+    const invocation = normalizeInvocationLike(root.invocation);
+    return invocation ? [{ invocation, operation: root.operation }] : [];
+  });
+  while (queue.length > 0) {
+    const requirement = queue.shift()!;
+    collected.push(requirement);
+    const manifest = manifestById.get(requirement.invocation.use);
+    const slots = manifest?.slots ? Object.values(manifest.slots) : [];
+    if (slots.length === 0) {
+      continue;
+    }
+    const config = invocationConfig(requirement.invocation);
+    for (const slot of slots) {
+      const value = readJsonPointerValue(config, slot.path);
+      if (Array.isArray(value)) {
+        for (const entry of value) {
+          const nested = normalizeInvocationLike(entry);
+          if (nested) {
+            queue.push({ invocation: nested, operation: slot.operation });
+          }
+        }
+        continue;
+      }
+      const nested = normalizeInvocationLike(value);
+      if (nested) {
+        queue.push({ invocation: nested, operation: slot.operation });
+      }
+    }
+  }
+  return collected;
+}
+
+export function collectWorkbenchAdapterOperationIssues(
+  roots: readonly WorkbenchAdapterOperationRequirement[],
+  manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
+): string[] {
+  const manifestById = manifestMap(manifests);
+  const issues = new Map<string, string>();
+  for (const requirement of collectWorkbenchAdapterOperationRequirements(roots, manifestById)) {
+    const manifest = manifestById.get(requirement.invocation.use);
+    const key = `${requirement.invocation.use}:${requirement.operation}`;
+    if (!manifest) {
+      issues.set(key, `Adapter ${requirement.invocation.use} is referenced but is not installed.`);
+      continue;
+    }
+    if (!workbenchAdapterManifestSupportsOperation(manifest, requirement.operation)) {
+      issues.set(key, `Adapter ${requirement.invocation.use} does not implement ${requirement.operation}.`);
+    }
+  }
+  return [...issues.values()];
+}
+
+export function assertWorkbenchAdapterOperationSupport(
+  roots: readonly WorkbenchAdapterOperationRequirement[],
+  manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
+): void {
+  const issues = collectWorkbenchAdapterOperationIssues(roots, manifests);
+  if (issues.length > 0) {
+    throw new Error(issues.join("\n"));
+  }
 }
 
 export function collectWorkbenchAdapterAuthRequirements(
@@ -155,7 +300,6 @@ export function withDefaultWorkbenchAdapterAuthProfiles<T extends {
   improve?: WorkbenchAdapterInvocationLike;
   run: WorkbenchAdapterInvocationLike;
   score?: WorkbenchAdapterInvocationLike;
-  grade?: WorkbenchAdapterInvocationLike;
 }>(
   spec: T,
   manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
@@ -168,9 +312,6 @@ export function withDefaultWorkbenchAdapterAuthProfiles<T extends {
   clone.run = withDefaultWorkbenchAdapterAuth(clone.run, manifestById);
   if (clone.score) {
     clone.score = withDefaultWorkbenchAdapterAuth(clone.score, manifestById);
-  }
-  if (clone.grade) {
-    clone.grade = withDefaultWorkbenchAdapterAuth(clone.grade, manifestById);
   }
   return clone;
 }
@@ -196,12 +337,13 @@ function applyDefaultWorkbenchAdapterAuth<T extends WorkbenchAdapterInvocationLi
       (invocation as WorkbenchAdapterInvocationLike).auth = defaultAuth;
     }
   }
-  if (!manifest?.refs?.length) {
+  const slots = manifest?.slots ? Object.values(manifest.slots) : [];
+  if (slots.length === 0) {
     return invocation;
   }
   const config = invocationConfig(invocation);
-  for (const pointer of manifest.refs) {
-    const value = readJsonPointer(config, pointer);
+  for (const slot of slots) {
+    const value = readJsonPointerValue(config, slot.path);
     if (Array.isArray(value)) {
       for (let index = 0; index < value.length; index += 1) {
         const nested = normalizeInvocationLike(value[index]);
@@ -213,7 +355,7 @@ function applyDefaultWorkbenchAdapterAuth<T extends WorkbenchAdapterInvocationLi
     }
     const nested = normalizeInvocationLike(value);
     if (nested) {
-      const parent = readJsonPointerParent(config, pointer);
+      const parent = readJsonPointerParent(config, slot.path);
       if (parent) {
         const withDefaults = applyDefaultWorkbenchAdapterAuth(nested, manifestById);
         if (Array.isArray(parent.container) && typeof parent.key === "number") {
@@ -232,12 +374,13 @@ function nestedWorkbenchAdapterInvocations(
   manifestById: Map<string, WorkbenchAdapterManifest>,
 ): WorkbenchAdapterInvocationLike[] {
   const manifest = manifestById.get(invocation.use);
-  if (!manifest?.refs?.length) {
+  const slots = manifest?.slots ? Object.values(manifest.slots) : [];
+  if (slots.length === 0) {
     return [];
   }
   const config = invocationConfig(invocation);
-  return manifest.refs.flatMap((pointer) => {
-    const value = readJsonPointer(config, pointer);
+  return slots.flatMap((slot) => {
+    const value = readJsonPointerValue(config, slot.path);
     if (Array.isArray(value)) {
       return value.map((entry) => normalizeInvocationLike(entry)).filter(isInvocationLike);
     }
@@ -345,7 +488,7 @@ function isInvocationLike(
   return value !== null;
 }
 
-function readJsonPointer(root: unknown, pointer: string): unknown {
+function readJsonPointerValue(root: unknown, pointer: string): unknown {
   if (pointer === "") {
     return root;
   }
@@ -380,7 +523,7 @@ function readJsonPointerParent(
   }
   const rawSegments = pointer.slice(1).split("/");
   const last = decodeJsonPointerSegment(rawSegments.pop()!);
-  const parent = readJsonPointer(
+  const parent = readJsonPointerValue(
     root,
     rawSegments.length === 0 ? "" : `/${rawSegments.join("/")}`,
   );
@@ -429,14 +572,24 @@ function readStringArray(value: unknown, label: string): string[] {
   return value.map((entry) => entry.trim());
 }
 
-function readAdapterRefs(value: unknown, label: string): string[] {
-  const refs = readStringArray(value, label);
-  for (const ref of refs) {
-    if (ref !== "" && !ref.startsWith("/")) {
-      throw new Error(`${label} entries must be JSON pointers.`);
-    }
+function readAdapterOperation(value: unknown, label: string): WorkbenchAdapterOperation {
+  if (
+    value === "tasks.resolve" ||
+    value === "subject.run" ||
+    value === "trial.score" ||
+    value === "subject.improve"
+  ) {
+    return value;
   }
-  return refs;
+  throw new Error(`${label} must be tasks.resolve, subject.run, trial.score, or subject.improve.`);
+}
+
+function readJsonPointer(value: unknown, label: string): string {
+  const pointer = readNonEmptyString(value, label);
+  if (pointer !== "" && !pointer.startsWith("/")) {
+    throw new Error(`${label} must be a JSON pointer.`);
+  }
+  return pointer;
 }
 
 function readAuth(value: unknown, label: string): WorkbenchAdapterManifest["auth"] | undefined {

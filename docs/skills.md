@@ -13,6 +13,8 @@ The canonical general public skill source lives under `skills/workbench/`. Keep 
 
 `docs/cli.md` owns the command and operator flow, `SPEC.md` owns the hosted CLI contract, `docs/evals/` owns eval authoring and file-output task guidance, and `docs/testing.md` owns validation and hosted e2e guidance. The authored skill should point to those canonical files instead of carrying its own product guide.
 
+When the authored docs or skill mention tasks, preserve the task-source boundary: task-source adapters implement `tasks.resolve` and write `workbench-result.json` with protocol `workbench.adapter-result.v1`, core runs trials over the returned bundles, native Workbench task directories are parsed by the built-in `path` adapter, and Harbor directories are parsed by the built-in `harbor` adapter.
+
 Keep this ownership at the Workbench product root. The `packages/cli` package should not own product docs or skills; it owns the binary implementation and command tests. Workbench Cloud renders the product docs through its hosted shell, but it should not fork the public docs content.
 
 ## Installable Skill Assembly

@@ -2,14 +2,16 @@ import type {
   EvalCaseResult,
   Json,
   SurfaceSnapshotFile,
-  WorkbenchCandidatePatch,
+  WorkbenchSubjectPatch,
   WorkbenchExecutionOutputContract,
   WorkbenchExecutionSpec,
   WorkbenchScorecard,
 } from "@workbench-ai/workbench-contract";
 
+import { normalizeUsageSummary } from "./execution-usage.ts";
+
 export interface WorkbenchExecutionOutputPayloads {
-  candidatePatch?: WorkbenchCandidatePatch;
+  subjectPatch?: WorkbenchSubjectPatch;
   scorecard?: WorkbenchScorecard;
 }
 
@@ -37,8 +39,8 @@ export function validateWorkbenchExecutionOutputPayloads(
       continue;
     }
     switch (contract.schema) {
-      case "workbench.candidate_patch.v1":
-        validated.candidatePatch = normalizeCandidatePatch(payload, execution, contract, issues);
+      case "workbench.subject_patch.v1":
+        validated.subjectPatch = normalizeSubjectPatch(payload, execution, contract, issues);
         break;
       case "workbench.scorecard.v1":
         validated.scorecard = normalizeScorecard(payload, execution, contract, issues);
@@ -142,28 +144,22 @@ export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExe
 
 function expectedInputsForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): ReadonlySet<string> {
   if (purpose === "improve") {
-    return new Set(["candidate", "traces"]);
-  }
-  if (purpose === "run-task") {
-    return new Set(["candidate", "task"]);
+    return new Set(["subject", "traces"]);
   }
   if (purpose === "trial") {
-    return new Set(["candidate", "task"]);
+    return new Set(["subject", "task"]);
   }
-  return new Set(["task", "runner-output"]);
+  return new Set();
 }
 
 function expectedOutputForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): string | null {
   if (purpose === "improve") {
-    return "candidate_patch";
-  }
-  if (purpose === "run-task") {
-    return null;
+    return "subject_patch";
   }
   if (purpose === "trial") {
     return "scorecard";
   }
-  return "scorecard";
+  return null;
 }
 
 export function assertWorkbenchExecutionIsolation(execution: WorkbenchExecutionSpec): void {
@@ -178,29 +174,26 @@ function outputAllowedForPurpose(
   output: WorkbenchExecutionOutputContract,
 ): boolean {
   if (purpose === "improve") {
-    return output.schema === "workbench.candidate_patch.v1";
-  }
-  if (purpose === "run-task") {
-    return false;
+    return output.schema === "workbench.subject_patch.v1";
   }
   if (purpose === "trial") {
     return output.schema === "workbench.scorecard.v1";
   }
-  return output.schema === "workbench.scorecard.v1";
+  return false;
 }
 
-function normalizeCandidatePatch(
+function normalizeSubjectPatch(
   value: Json,
   execution: WorkbenchExecutionSpec,
   contract: WorkbenchExecutionOutputContract,
   issues: string[],
-): WorkbenchCandidatePatch {
+): WorkbenchSubjectPatch {
   const record = readRecord(value, contract.name, issues);
   const files = normalizeSnapshotFiles(record?.files, `${contract.name}.files`, issues);
   const fileChanges = normalizeStringArray(record?.fileChanges, `${contract.name}.fileChanges`, issues);
   const edits = normalizeMetadataStringArray(execution.metadata.edits);
   if (edits.length === 0) {
-    issues.push(`Execution ${execution.id} candidate patch validation requires metadata.edits.`);
+    issues.push(`Execution ${execution.id} subject patch validation requires metadata.edits.`);
   }
   for (const file of files) {
     if (!isAllowedEditPath(file.path, edits)) {
@@ -231,10 +224,12 @@ function normalizeScorecard(
   void execution;
   const record = readRecord(value, contract.name, issues);
   const score = readFiniteNumber(record?.score, `${contract.name}.score`, issues);
+  const usage = normalizeUsageSummary(record?.usage);
   return {
     score: score ?? 0,
     ...(record?.metrics !== undefined ? { metrics: normalizeNumberRecord(record.metrics, `${contract.name}.metrics`, issues) } : {}),
     ...(record?.cases !== undefined ? { cases: normalizeCaseResults(record.cases, `${contract.name}.cases`, issues) } : {}),
+    ...(usage ? { usage } : {}),
     ...(typeof record?.summary === "string" ? { summary: record.summary } : {}),
     ...(isJson(record?.feedback) ? { feedback: record.feedback } : {}),
   };

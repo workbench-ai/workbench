@@ -45,19 +45,19 @@ const HIDDEN_HANDLE_STYLE = {
 
 export function LineageGraph({
   snapshot,
-  selectedCandidateId,
-  onSelectCandidate,
+  selectedSubjectId,
+  onSelectSubject,
 }: {
   snapshot: RuntimeSnapshot | null;
-  selectedCandidateId: string | null;
-  onSelectCandidate: (candidateId: string) => void;
+  selectedSubjectId: string | null;
+  onSelectSubject: (subjectId: string) => void;
 }) {
   return (
     <ReactFlowProvider>
       <LineageGraphCanvas
         snapshot={snapshot}
-        selectedCandidateId={selectedCandidateId}
-        onSelectCandidate={onSelectCandidate}
+        selectedSubjectId={selectedSubjectId}
+        onSelectSubject={onSelectSubject}
       />
     </ReactFlowProvider>
   );
@@ -65,12 +65,12 @@ export function LineageGraph({
 
 function LineageGraphCanvas({
   snapshot,
-  selectedCandidateId,
-  onSelectCandidate,
+  selectedSubjectId,
+  onSelectSubject,
 }: {
   snapshot: RuntimeSnapshot | null;
-  selectedCandidateId: string | null;
-  onSelectCandidate: (candidateId: string) => void;
+  selectedSubjectId: string | null;
+  onSelectSubject: (subjectId: string) => void;
 }) {
   const reactFlow = useReactFlow<LineageNode, LineageEdge>();
   const [flowState, setFlowState] = useState<FlowState>({
@@ -83,18 +83,18 @@ function LineageGraphCanvas({
     () =>
       flowState.nodes.map((node) => ({
         ...node,
-        selected: node.data.summary.id === selectedCandidateId,
-        className: cn(node.className, node.data.summary.id === selectedCandidateId && "ring-2 ring-primary/60"),
+        selected: node.data.summary.id === selectedSubjectId,
+        className: cn(node.className, node.data.summary.id === selectedSubjectId && "ring-2 ring-primary/60"),
         domAttributes: createLineageNodeDomAttributes({
           ...node.domAttributes,
-          "aria-selected": node.data.summary.id === selectedCandidateId ? "true" : undefined,
+          "aria-selected": node.data.summary.id === selectedSubjectId ? "true" : undefined,
         }),
       })) satisfies LineageNode[],
-    [flowState.nodes, selectedCandidateId],
+    [flowState.nodes, selectedSubjectId],
   );
 
   function handleNodeClick(_event: ReactMouseEvent, node: LineageNode) {
-    onSelectCandidate(node.data.summary.id);
+    onSelectSubject(node.data.summary.id);
   }
 
   useEffect(() => {
@@ -150,7 +150,7 @@ function LineageGraphCanvas({
         icon={GitBranchIcon}
         eyebrow="Lineage"
         title="No lineage to inspect"
-        message="Lineage appears after the first candidate exists for this benchmark version."
+        message="Lineage appears after the first subject exists for this benchmark version."
         variant="hero"
         size="sm"
       />
@@ -188,7 +188,7 @@ function LineageGraphCanvas({
   );
 }
 
-const CandidateNode = memo(function CandidateNode(props: NodeProps<LineageNode>) {
+const SubjectNode = memo(function SubjectNode(props: NodeProps<LineageNode>) {
   const flowData = props.data;
   const summary = flowData.summary;
 
@@ -200,7 +200,7 @@ const CandidateNode = memo(function CandidateNode(props: NodeProps<LineageNode>)
         <div className="flex min-w-0 items-center justify-between gap-2">
           <span className="inline-flex min-w-0 items-center gap-1.5 text-[11px] uppercase text-muted-foreground">
             <GitBranchIcon className="size-3.5" />
-            <span className="truncate">Candidate</span>
+            <span className="truncate">Subject</span>
           </span>
           {flowData.statusText ? (
             <span className="shrink-0 text-[11px] text-muted-foreground">
@@ -228,5 +228,5 @@ const CandidateNode = memo(function CandidateNode(props: NodeProps<LineageNode>)
 });
 
 const NODE_TYPES = {
-  candidate: CandidateNode,
+  subject: SubjectNode,
 };

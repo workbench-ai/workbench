@@ -5,33 +5,32 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  buildCandidateLineage,
+  buildSubjectLineage,
   buildWorkbenchProjectSourceFiles,
   createSyntheticProposalJob,
   createCaseReview,
   createProposalTraceInputFiles,
   createWorkbenchRunWorkload,
   createWorkbenchExecutionCapability,
-  caseExecutionIds,
   executeAdapterInCurrentSandboxRuntime,
   expectedWorkbenchRunJobCount,
   extractExecutionUsageFromTrace,
   findEnvironmentVersionForImage,
-  gradeJobCountForRunSpec,
   materializeWorkbenchRunResult,
   normalizeDockerImageRef,
   normalizeSurfaceFiles,
   planWorkbenchExecutionJobsForPurpose,
   resolveWorkbenchResolvedSourceYaml,
-  selectCaseFilesForExecution,
-  selectRunnerOutputFilesForGrading,
+  selectExecutionOutputFilesForInspection,
   stageWorkbenchRunWorkload,
+  trialJobCountForRunSpec,
   validateWorkbenchResolvedSourceYaml,
   workbenchTracePhaseDirectory,
   workbenchTraceRunDirectory,
   workbenchTraceRunDirectoryName,
   workloadTimeoutMs,
   type WorkbenchRunWorkload,
+  type WorkbenchTaskBundle,
   type HostedWorkbenchJob,
   type SurfaceSnapshotFile,
 } from "../src/index.ts";
@@ -45,17 +44,17 @@ import {
 } from "../src/sandbox-inputs.ts";
 
 describe("Workbench runtime generic execution", () => {
-  test("candidate lineage ignores self references", () => {
-    const lineage = buildCandidateLineage({
-      activeId: "cand_self",
+  test("subject lineage ignores self references", () => {
+    const lineage = buildSubjectLineage({
+      activeId: "subject_self",
       summaries: [{
-        id: "cand_self",
+        id: "subject_self",
         ordinal: 0,
         benchmarkFingerprint: "benchmark",
-        candidateFingerprint: "cand_self",
+        subjectFingerprint: "subject_self",
         createdAt: "2026-01-01T00:00:00.000Z",
-        baseId: "cand_self",
-        referenceIds: ["cand_self"],
+        baseId: "subject_self",
+        referenceIds: ["subject_self"],
         status: "evaluated",
         fileChanges: [],
       }],
@@ -64,38 +63,38 @@ describe("Workbench runtime generic execution", () => {
     expect(lineage.edges).toEqual([]);
   });
 
-  test("candidate lineage only links explicit improve bases", () => {
-    const lineage = buildCandidateLineage({
-      activeId: "cand_child",
+  test("subject lineage only links explicit improve bases", () => {
+    const lineage = buildSubjectLineage({
+      activeId: "subject_child",
       summaries: [
         {
-          id: "cand_base",
+          id: "subject_base",
           ordinal: 0,
           benchmarkFingerprint: "benchmark",
-          candidateFingerprint: "cand_base",
+          subjectFingerprint: "subject_base",
           createdAt: "2026-01-01T00:00:00.000Z",
           referenceIds: [],
           status: "evaluated",
           fileChanges: [],
         },
         {
-          id: "cand_reference_only",
+          id: "subject_reference_only",
           ordinal: 1,
           benchmarkFingerprint: "benchmark",
-          candidateFingerprint: "cand_reference_only",
+          subjectFingerprint: "subject_reference_only",
           createdAt: "2026-01-01T00:01:00.000Z",
-          referenceIds: ["cand_base"],
+          referenceIds: ["subject_base"],
           status: "evaluated",
           fileChanges: [],
         },
         {
-          id: "cand_child",
+          id: "subject_child",
           ordinal: 2,
           benchmarkFingerprint: "benchmark",
-          candidateFingerprint: "cand_child",
+          subjectFingerprint: "subject_child",
           createdAt: "2026-01-01T00:02:00.000Z",
-          baseId: "cand_base",
-          referenceIds: ["cand_reference_only"],
+          baseId: "subject_base",
+          referenceIds: ["subject_reference_only"],
           status: "evaluated",
           fileChanges: [],
         },
@@ -103,10 +102,10 @@ describe("Workbench runtime generic execution", () => {
     });
 
     expect(lineage.edges).toEqual([{
-      id: "anchor:cand_base:cand_child",
+      id: "anchor:subject_base:subject_child",
       kind: "anchor",
-      sourceId: "cand_base",
-      targetId: "cand_child",
+      sourceId: "subject_base",
+      targetId: "subject_child",
     }]);
   });
 
@@ -114,12 +113,12 @@ describe("Workbench runtime generic execution", () => {
     const validation = validateWorkbenchResolvedSourceYaml(runtimeSpec());
 
     expect(validation.ok).toBe(true);
-    expect(resolveWorkbenchResolvedSourceYaml(runtimeSpec()).description).toBe("Exercise the generic command runner and grader runtime path.");
+    expect(resolveWorkbenchResolvedSourceYaml(runtimeSpec()).description).toBe("Exercise the generic command runner and scorer runtime path.");
     expect(resolveWorkbenchResolvedSourceYaml(runtimeSpec()).run.with).toMatchObject({
       command: expect.stringContaining("runner-output.json"),
     });
     expect(validateWorkbenchResolvedSourceYaml(runtimeSpec().replace("version: 2", "version: 20")).ok).toBe(false);
-    expect(validateWorkbenchResolvedSourceYaml(runtimeSpec().replace("  description: Exercise the generic command runner and grader runtime path.\n", "")).errors).toContain("benchmark.yaml.description must be a non-empty string.");
+    expect(validateWorkbenchResolvedSourceYaml(runtimeSpec().replace("  description: Exercise the generic command runner and scorer runtime path.\n", "")).errors).toContain("benchmark.yaml.description must be a non-empty string.");
   });
 
   test("normalizes docker image refs and resolves workload timeouts from the runtime environment", () => {
@@ -146,12 +145,12 @@ describe("Workbench runtime generic execution", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-stage-"));
     try {
       await stageWorkbenchRunWorkload(root, stageWorkload("improve"));
-      await expect(fs.access(path.join(root, "input", "candidate", "prompt.md"))).resolves.toBeUndefined();
+      await expect(fs.access(path.join(root, "input", "subject", "prompt.md"))).resolves.toBeUndefined();
       await expect(fs.access(path.join(root, "input", "traces", "events", "prior.ndjson"))).resolves.toBeUndefined();
       await expect(fs.access(path.join(root, "input", "task", "task.yaml"))).rejects.toBeTruthy();
 
       await stageWorkbenchRunWorkload(root, stageWorkload("trial"));
-      await expect(fs.access(path.join(root, "input", "candidate", "prompt.md"))).resolves.toBeUndefined();
+      await expect(fs.access(path.join(root, "input", "subject", "prompt.md"))).resolves.toBeUndefined();
       await expect(fs.access(path.join(root, "request.md"))).resolves.toBeUndefined();
       await expect(fs.access(path.join(root, "tests", "secret.txt"))).rejects.toBeTruthy();
       await expect(fs.access(path.join(root, "input", "traces"))).rejects.toBeTruthy();
@@ -163,70 +162,63 @@ describe("Workbench runtime generic execution", () => {
   test("projects task files before sandbox materialization", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const caseFiles = normalizeSurfaceFiles([
-      { path: "case-001/task.yaml", content: "task: test\n" },
-      { path: "case-001/files/request.md", content: "public\n" },
-      { path: "case-001/tests/secret.txt", content: "hidden\n" },
-    ]);
+    const taskBundles = [taskBundle(
+      "case-001",
+      "test",
+      [{ path: "request.md", content: "public\n" }],
+      [{ path: "secret.txt", content: "hidden\n" }],
+    )];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
     const common = {
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_runtime",
-      candidateId: "cand_runtime_001",
+      subjectId: "subject_runtime_001",
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval" as const,
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     };
-    const [runJob] = planWorkbenchExecutionJobsForPurpose({ ...common, purpose: "trial" });
-    const [gradeJob] = planWorkbenchExecutionJobsForPurpose({ ...common, purpose: "trial" });
+    const [trialJob] = planWorkbenchExecutionJobsForPurpose({ ...common, purpose: "trial" });
 
-    const runInputs = await createWorkbenchSandboxFileStore({
-      job: runJob!,
+    const trialInputs = await createWorkbenchSandboxFileStore({
+      job: trialJob!,
       spec,
       baseFiles: [],
-      caseFiles,
-    }).materializeInputs(executionFromJob(runJob!));
-    expect(runInputs.find((input) => input.input.name === "task")?.files.map((file) => file.path)).toEqual([
-      "files/request.md",
-      "tests/secret.txt",
-    ]);
-
-    const gradeInputs = await createWorkbenchSandboxFileStore({
-      job: gradeJob!,
-      spec,
-      baseFiles: [],
-      caseFiles,
-    }).materializeInputs(executionFromJob(gradeJob!));
-    expect(gradeInputs.find((input) => input.input.name === "task")?.files.map((file) => file.path)).toEqual([
-      "files/request.md",
-      "tests/secret.txt",
+      taskSourceFiles,
+      taskBundles,
+    }).materializeInputs(executionFromJob(trialJob!));
+    expect(trialInputs.find((input) => input.input.name === "task")?.files.map((file) => file.path)).toEqual([
+      "request.md",
+      "secret.txt",
     ]);
   });
 
-  test("creates hosted workloads from already selected case files", () => {
+  test("creates hosted workloads from resolved task-source files", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const caseFiles = normalizeSurfaceFiles([
-      { path: "case-001/task.yaml", content: "task: test\n" },
-      { path: "case-001/files/request.md", content: "public\n" },
-      { path: "case-001/tests/secret.txt", content: "hidden\n" },
-    ]);
+    const taskBundles = [taskBundle(
+      "case-001",
+      "test",
+      [{ path: "request.md", content: "public\n" }],
+      [{ path: "secret.txt", content: "hidden\n" }],
+    )];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
     const [runJob] = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_runtime",
-      candidateId: "cand_runtime_001",
+      subjectId: "subject_runtime_001",
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
 
@@ -234,52 +226,45 @@ describe("Workbench runtime generic execution", () => {
       job: runJob!,
       spec,
       baseFiles: [],
-      caseFiles: selectCaseFilesForExecution(caseFiles, "case-001"),
+      taskSourceFiles,
+      taskBundles,
     });
 
-    expect(workload.caseFiles.map((file) => file.path)).toEqual([
-      "files/request.md",
-      "task.yaml",
-      "tests/secret.txt",
+    expect(workload.taskSourceFiles.map((file) => file.path)).toEqual([
+      "request.md",
+      "secret.txt",
     ]);
-
-    const projectedWorkload = createWorkbenchRunWorkload({
-      job: runJob!,
-      spec,
-      baseFiles: [],
-      caseFiles: normalizeSurfaceFiles([{ path: "files/request.md", content: "public\n" }]),
-    });
-    expect(projectedWorkload.task?.task).toBe("test");
-    expect(projectedWorkload.caseFiles.map((file) => file.path)).toEqual([
-      "files/request.md",
-    ]);
+    expect(workload.task?.task).toBe("test");
   });
 
-  test("selects only non-internal runner output files for grading", () => {
+  test("selects only visible trial output files for inspection", () => {
     const files = normalizeSurfaceFiles([
       { path: "runner-summary.md", content: "summary" },
       { path: "outputs/result.json", content: "{}" },
-      { path: "scorecard.json", content: "{}" },
+      { path: "workbench-result.json", content: "{}" },
       { path: ".workbench/traces/job/output.xlsx", encoding: "base64", content: "AA==" },
     ]);
 
-    expect(selectRunnerOutputFilesForGrading(files).map((file) => file.path)).toEqual([
+    expect(selectExecutionOutputFilesForInspection({
+      purpose: "trial",
+      files,
+    }).map((file) => file.path)).toEqual([
       "outputs/result.json",
       "runner-summary.md",
     ]);
   });
 
-  test("builds synced project source files with candidate and task prefixes", () => {
+  test("builds synced project source files with subject and task prefixes", () => {
     const files = buildWorkbenchProjectSourceFiles({
       specSource: "version: 2\nbenchmark:\n  version: 2\n  name: source-projection\n",
-      candidatePath: "subjects/app/files",
-      candidateFiles: normalizeSurfaceFiles([
-        { path: "prompt.md", content: "candidate\n" },
+      subjectFilesPath: "subjects/app/files",
+      subjectFiles: normalizeSurfaceFiles([
+        { path: "prompt.md", content: "subject\n" },
         { path: "subjects/app/files/already-prefixed.md", content: "already\n" },
       ]),
       tasksPath: "tasks",
       taskFiles: normalizeSurfaceFiles([
-        { path: "case-001/task.yaml", content: "task: Test\n" },
+        { path: "case-001/task.yaml", content: "version: 2\ntask: Test\n" },
       ]),
       dockerfilePath: "environment/Dockerfile",
       dockerfile: "FROM node:22\n",
@@ -300,7 +285,7 @@ describe("Workbench runtime generic execution", () => {
       id: "job_exec_run_trial_000_case_case_001_sample_000_run",
       projectId: "project_runtime",
       runId: "run_trace_history",
-      candidateId: "cand_trace_001",
+      subjectId: "subject_trace_001",
       kind: "execute",
       status: "queued",
       attempt: 0,
@@ -311,7 +296,7 @@ describe("Workbench runtime generic execution", () => {
           id: "exec_trace_run",
           projectId: "project_runtime",
           runId: "run_trace_history",
-          candidateId: "cand_trace_001",
+          subjectId: "subject_trace_001",
           purpose: "trial",
           adapter: { use: "command", with: { command: "true" } },
           sandbox: { kind: "snapshot", ref: "workbench/test" },
@@ -332,7 +317,7 @@ describe("Workbench runtime generic execution", () => {
       output: {
         ok: true,
         purpose: "trial",
-        candidateId: "cand_trace_001",
+        subjectId: "subject_trace_001",
         trialIndex: 0,
         sampleIndex: 0,
         caseId: "case-001",
@@ -380,7 +365,7 @@ describe("Workbench runtime generic execution", () => {
       sequence: 7,
       runId: "run trace/history",
       phase: "trial",
-    })).toBe(".workbench/traces/000007-run_trace_history/000009-trial");
+    })).toBe(".workbench/traces/000007-run_trace_history/000002-trial");
   });
 
   test("extracts execution usage from agent token usage events", () => {
@@ -493,64 +478,45 @@ describe("Workbench runtime generic execution", () => {
     });
   });
 
-  test("executes generic run and grade jobs through the sandbox backend and materializes the run", async () => {
+  test("executes a generic trial through the sandbox backend and materializes the run", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_runtime_001";
+    const subjectId = "subject_runtime_001";
     const baseFiles = normalizeSurfaceFiles([{
       path: "prompt.md",
-      content: "base candidate\n",
+      content: "base subject\n",
     }]);
-    const caseFiles = normalizeSurfaceFiles([{
-      path: "case-001/task.yaml",
-      content: "task: Score the candidate.\n",
-    }]);
+    const taskBundles = [taskBundle("case-001", "Score the subject.")];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_runtime",
-      candidateId,
+      subjectId,
       files: baseFiles,
       now,
       baseId: null,
       trialIndex: 0,
     });
-    const runnerJobs = planWorkbenchExecutionJobsForPurpose({
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_runtime",
-      candidateId,
+      subjectId,
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
-      ownerUserId: "user_runtime",
-      projectId: "project_runtime",
-      runId: "run_runtime",
-      candidateId,
-      trialIndex: 0,
-      samples: 1,
-      spec,
-      workflow: "eval",
-      purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
-      now,
-    });
-
-    expect(runnerJobs).toHaveLength(1);
-    expect(graderJobs).toHaveLength(1);
-    expect(runnerJobs[0]?.id).toBe(graderJobs[0]?.id);
-    expect(runnerJobs.map((job) => job.kind)).toEqual(["execute"]);
+    expect(trialJobs).toHaveLength(1);
+    expect(trialJobs.map((job) => job.kind)).toEqual(["execute"]);
 
     const commandManifest = await commandAdapterManifest();
-    const runningRunner = runningJob(runnerJobs[0]!, now);
+    const runningRunner = runningJob(trialJobs[0]!, now);
     const runnerExecution = executionFromJob(runningRunner);
     const progress = await tryCreateProgressCaptureServer();
     let completedRunner: HostedWorkbenchJob | null = null;
@@ -560,7 +526,8 @@ describe("Workbench runtime generic execution", () => {
         spec,
         adapterManifests: [commandManifest],
         baseFiles,
-        caseFiles,
+        taskSourceFiles,
+        taskBundles,
         progress: progress ? {
           url: progress.url,
           token: "progress-token",
@@ -595,13 +562,13 @@ describe("Workbench runtime generic execution", () => {
           },
           {
             source: "command",
-            role: "grader",
+            role: "scorer",
             schema: "workbench.execution.phase.v1",
             payload: { phase: "score", status: "started" },
           },
           {
             source: "command",
-            role: "grader",
+            role: "scorer",
             schema: "workbench.execution.phase.v1",
             payload: { phase: "score", status: "succeeded" },
           },
@@ -654,39 +621,39 @@ describe("Workbench runtime generic execution", () => {
       startedAt: now,
       spec,
       jobs: [proposal, completedRunner],
-      existingCandidateCount: 0,
+      existingSubjectCount: 0,
     });
 
-    expect(materialized.activeCandidateId).toBe(candidateId);
-    expect(materialized.candidates).toHaveLength(1);
-    expect(materialized.candidates[0]?.metrics?.score).toBe(0.91);
-    expect(materialized.candidates[0]?.eval?.samples[0]?.cases).toBeUndefined();
+    expect(materialized.activeSubjectId).toBe(subjectId);
+    expect(materialized.subjects).toHaveLength(1);
+    expect(materialized.subjects[0]?.metrics?.score).toBe(0.91);
+    expect(materialized.subjects[0]?.eval?.samples[0]?.cases).toBeUndefined();
     expect(materialized.completedJobCount).toBe(2);
-    expect(materialized.evaluations[0]?.evaluation.subject.id).toBe(candidateId);
+    expect(materialized.evaluations[0]?.evaluation.subject.id).toBe(subjectId);
   });
 
   test("materializes only subject source files into subject snapshots", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_runtime_001";
+    const subjectId = "subject_runtime_001";
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_runtime",
-      candidateId,
+      subjectId,
       files: normalizeSurfaceFiles([
-        { path: "prompt.md", content: "base candidate\n" },
-        { path: "reports/source-note.md", content: "candidate-authored source\n" },
+        { path: "prompt.md", content: "base subject\n" },
+        { path: "reports/source-note.md", content: "subject-authored source\n" },
       ]),
       now,
       baseId: null,
       trialIndex: 0,
     });
-    const gradeJob: HostedWorkbenchJob = {
-      id: "job_exec_run_runtime_trial_000_current_sample_000_grade",
+    const trialJob: HostedWorkbenchJob = {
+      id: "job_exec_run_runtime_trial_000_current_sample_000_score",
       projectId: "project_runtime",
       runId: "run_runtime",
-      candidateId,
+      subjectId,
       kind: "execute",
       status: "succeeded",
       attempt: 1,
@@ -695,44 +662,44 @@ describe("Workbench runtime generic execution", () => {
       finishedAt: now,
       updatedAt: now,
       input: {
-        candidateId,
+        subjectId,
         trialIndex: 0,
         sampleIndex: 0,
         execution: {
-          id: "exec_run_runtime_trial_000_current_sample_000_grade",
+          id: "exec_run_runtime_trial_000_current_sample_000_score",
           purpose: "trial",
-          adapter: { use: "command", with: { command: "node grade.js" } },
+          adapter: { use: "command", with: { command: "node score.js" } },
           inputs: [],
           outputs: [],
         },
       } as unknown as HostedWorkbenchJob["input"],
       output: {
         ok: true,
-        candidateId,
+        subjectId,
         trialIndex: 0,
         sampleIndex: 0,
         scorecard: { score: 0.9 },
-        fileChanges: ["scorecard.json"],
+        fileChanges: ["score.json"],
         files: [
           {
-            path: "scorecard.json",
+            path: "score.json",
             kind: "text",
             encoding: "utf8",
             content: "{\"score\":0.9}\n",
             executable: false,
           },
           {
-            path: ".workbench/traces/job_exec_run_runtime_trial_000_current_sample_000_grade/scorecard.json",
+            path: ".workbench/traces/job_exec_run_runtime_trial_000_current_sample_000_score/score.json",
             kind: "text",
             encoding: "utf8",
-            content: "{\"score\":0.9,\"source\":\"grader-output\"}\n",
+            content: "{\"score\":0.9,\"source\":\"scorer-output\"}\n",
             executable: false,
           },
         ],
         sample: {
           id: "sample_001",
           index: 0,
-          subject: { id: candidateId, kind: "candidate" },
+          subject: { id: subjectId, kind: "subject" },
           status: "completed",
           metrics: { score: 0.9 },
           startedAt: now,
@@ -752,25 +719,25 @@ describe("Workbench runtime generic execution", () => {
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [proposal, gradeJob],
-      existingCandidateCount: 0,
+      jobs: [proposal, trialJob],
+      existingSubjectCount: 0,
     });
 
-    expect(materialized.candidateFiles[candidateId]?.map((file) => file.path)).toEqual([
+    expect(materialized.subjectFiles[subjectId]?.map((file) => file.path)).toEqual([
       "prompt.md",
       "reports/source-note.md",
     ]);
   });
 
-  test("materialized candidate baseId comes only from explicit improve proposal output", () => {
+  test("materialized subject baseId comes only from explicit improve proposal output", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_runtime",
-      candidateId: "cand_runtime_002",
-      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "base candidate\n" }]),
+      subjectId: "subject_runtime_002",
+      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "base subject\n" }]),
       now,
       baseId: null,
       trialIndex: 0,
@@ -781,56 +748,56 @@ describe("Workbench runtime generic execution", () => {
       startedAt: now,
       spec,
       jobs: [proposal],
-      previousCandidate: {
-        id: "cand_previous",
+      previousSubject: {
+        id: "subject_previous",
         ordinal: 0,
         benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
-        candidateFingerprint: "cand_previous",
+        subjectFingerprint: "subject_previous",
         createdAt: now,
         referenceIds: [],
         status: "evaluated",
         fileChanges: [],
       },
-      existingCandidateCount: 1,
+      existingSubjectCount: 1,
     });
 
-    expect(materialized.candidates[0]?.baseId).toBeUndefined();
+    expect(materialized.subjects[0]?.baseId).toBeUndefined();
   });
 
   test("materializes invalid sample statuses as an error sample", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_invalid_status";
+    const subjectId = "subject_invalid_status";
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_invalid_status",
-      candidateId,
-      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "candidate" }]),
+      subjectId,
+      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "subject" }]),
       now,
       baseId: null,
       trialIndex: 0,
     });
-    const gradeJob: HostedWorkbenchJob = {
+    const trialJob: HostedWorkbenchJob = {
       ...runningJob({
-        id: "job_invalid_grade",
+        id: "job_invalid_score",
         projectId: "project_runtime",
         runId: "run_invalid_status",
-        candidateId,
+        subjectId,
         kind: "execute",
         status: "queued",
         attempt: 0,
         createdAt: now,
         updatedAt: now,
         input: {
-          candidateId,
+          subjectId,
           trialIndex: 0,
           sampleIndex: 0,
           caseId: "case-001",
           execution: {
-            id: "exec_invalid_grade",
+            id: "exec_invalid_score",
             purpose: "trial",
-            adapter: { use: "command", with: { command: "node grade.js" } },
+            adapter: { use: "command", with: { command: "node score.js" } },
             inputs: [],
             outputs: [],
           },
@@ -842,13 +809,13 @@ describe("Workbench runtime generic execution", () => {
       updatedAt: now,
       output: {
         ok: true,
-        candidateId,
+        subjectId,
         trialIndex: 0,
         fileChanges: [],
         sample: {
           id: "sample_001",
           index: 0,
-          subject: { id: candidateId, kind: "candidate" },
+          subject: { id: subjectId, kind: "subject" },
           status: "failed",
           metrics: { score: 0.1 },
           cases: [{
@@ -865,11 +832,11 @@ describe("Workbench runtime generic execution", () => {
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [proposal, gradeJob],
-      existingCandidateCount: 0,
+      jobs: [proposal, trialJob],
+      existingSubjectCount: 0,
     });
 
-    const evalRecord = materialized.candidates[0]?.eval;
+    const evalRecord = materialized.subjects[0]?.eval;
     const sample = evalRecord?.samples[0];
     expect(evalRecord?.sampleCount).toBe(1);
     expect(evalRecord?.errorSampleCount).toBe(1);
@@ -881,36 +848,36 @@ describe("Workbench runtime generic execution", () => {
   test("counts samples as repeats instead of task executions", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_two_cases_one_sample";
+    const subjectId = "subject_two_cases_one_sample";
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_two_cases_one_sample",
-      candidateId,
-      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "candidate" }]),
+      subjectId,
+      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "subject" }]),
       now,
       baseId: null,
       trialIndex: 0,
     });
-    const caseFiles = normalizeSurfaceFiles([
-      { path: "case-a/task.yaml", content: "task: A\n" },
-      { path: "case-b/task.yaml", content: "task: B\n" },
-    ]);
-    const gradeJobs = planWorkbenchExecutionJobsForPurpose({
+    const taskBundles = [
+      taskBundle("case-a", "A"),
+      taskBundle("case-b", "B"),
+    ];
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_two_cases_one_sample",
-      candidateId,
+      subjectId,
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const completedGrades = gradeJobs.map((job, index): HostedWorkbenchJob => {
+    const completedTrials = trialJobs.map((job, index): HostedWorkbenchJob => {
       const caseId = index === 0 ? "case-a" : "case-b";
       const score = index === 0 ? 0.9 : 0.3;
       const finishedAt = new Date(Date.parse(now) + ((index + 1) * 1000)).toISOString();
@@ -922,18 +889,18 @@ describe("Workbench runtime generic execution", () => {
         updatedAt: finishedAt,
         output: {
           ok: true,
-          candidateId,
+          subjectId,
           trialIndex: 0,
           fileChanges: [],
           files: normalizeSurfaceFiles([{
-            path: `${caseId}/scorecard.json`,
+            path: `${caseId}/score.json`,
             content: JSON.stringify({ score }),
           }]),
           traces: [],
           sample: {
             id: `${caseId}__sample_001`,
             index: 0,
-            subject: { id: candidateId, kind: "candidate" },
+            subject: { id: subjectId, kind: "subject" },
             status: "completed",
             startedAt: now,
             finishedAt,
@@ -954,11 +921,11 @@ describe("Workbench runtime generic execution", () => {
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [proposal, ...completedGrades],
-      existingCandidateCount: 0,
+      jobs: [proposal, ...completedTrials],
+      existingSubjectCount: 0,
     });
 
-    const evalRecord = materialized.candidates[0]?.eval;
+    const evalRecord = materialized.subjects[0]?.eval;
     expect(evalRecord?.sampleCount).toBe(1);
     expect(evalRecord?.completedSampleCount).toBe(1);
     expect(evalRecord?.metrics?.score.count).toBe(1);
@@ -979,17 +946,17 @@ describe("Workbench runtime generic execution", () => {
   });
 
   test("case reviews expose scoring and phases without file or log side channels", () => {
-    const candidate = {
-      id: "cand_phase_review",
+    const subject = {
+      id: "subject_phase_review",
       ordinal: 1,
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
-      candidateFingerprint: "cand_phase_review",
+      subjectFingerprint: "subject_phase_review",
       createdAt: "2026-04-27T00:00:00.000Z",
       referenceIds: [],
       status: "evaluated",
       fileChanges: [],
       eval: {
-        subject: { kind: "candidate", id: "cand_phase_review" },
+        subject: { kind: "subject", id: "subject_phase_review" },
         status: "completed",
         sampleCount: 1,
         completedSampleCount: 1,
@@ -997,7 +964,7 @@ describe("Workbench runtime generic execution", () => {
         samples: [{
           id: "sample_001",
           index: 0,
-          subject: { kind: "candidate", id: "cand_phase_review" },
+          subject: { kind: "subject", id: "subject_phase_review" },
           status: "completed",
           metrics: { score: 0.91 },
           cases: [{
@@ -1011,7 +978,7 @@ describe("Workbench runtime generic execution", () => {
     };
 
     const review = createCaseReview({
-      candidate: candidate as Parameters<typeof createCaseReview>[0]["candidate"],
+      subject: subject as Parameters<typeof createCaseReview>[0]["subject"],
       caseId: "smoke",
     });
 
@@ -1025,17 +992,17 @@ describe("Workbench runtime generic execution", () => {
   });
 
   test("case reviews use phase sample identity when materialized samples share a case id", () => {
-    const candidate = {
-      id: "cand_phase_review",
+    const subject = {
+      id: "subject_phase_review",
       ordinal: 1,
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
-      candidateFingerprint: "cand_phase_review",
+      subjectFingerprint: "subject_phase_review",
       createdAt: "2026-04-27T00:00:00.000Z",
       referenceIds: [],
       status: "evaluated",
       fileChanges: [],
       eval: {
-        subject: { kind: "candidate", id: "cand_phase_review" },
+        subject: { kind: "subject", id: "subject_phase_review" },
         status: "completed",
         sampleCount: 2,
         completedSampleCount: 2,
@@ -1044,7 +1011,7 @@ describe("Workbench runtime generic execution", () => {
           {
             id: "task-001__sample_001",
             index: 0,
-            subject: { kind: "candidate", id: "cand_phase_review" },
+            subject: { kind: "subject", id: "subject_phase_review" },
             status: "completed",
             metrics: { score: 0.25 },
             cases: [{ id: "task-001", status: "completed", metrics: { score: 0.25 } }],
@@ -1052,7 +1019,7 @@ describe("Workbench runtime generic execution", () => {
           {
             id: "task-001__sample_002",
             index: 1,
-            subject: { kind: "candidate", id: "cand_phase_review" },
+            subject: { kind: "subject", id: "subject_phase_review" },
             status: "completed",
             metrics: { score: 0.75 },
             cases: [{ id: "task-001", status: "completed", metrics: { score: 0.75 } }],
@@ -1062,7 +1029,7 @@ describe("Workbench runtime generic execution", () => {
     };
 
     const review = createCaseReview({
-      candidate: candidate as Parameters<typeof createCaseReview>[0]["candidate"],
+      subject: subject as Parameters<typeof createCaseReview>[0]["subject"],
       caseId: "task-001",
       phases: [{
         runId: "run_001",
@@ -1081,16 +1048,16 @@ describe("Workbench runtime generic execution", () => {
 
   test("case reviews expose phase-only task state through the shared helper", () => {
     const review = createCaseReview({
-      candidate: {
-        id: "cand_phase_only",
+      subject: {
+        id: "subject_phase_only",
         ordinal: 1,
         benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
-        candidateFingerprint: "cand_phase_only",
+        subjectFingerprint: "subject_phase_only",
         createdAt: "2026-04-27T00:00:00.000Z",
         referenceIds: [],
         status: "running",
         fileChanges: [],
-      } as Parameters<typeof createCaseReview>[0]["candidate"],
+      } as Parameters<typeof createCaseReview>[0]["subject"],
       caseId: "task-001",
       phases: [{
         runId: "run_001",
@@ -1119,61 +1086,37 @@ describe("Workbench runtime generic execution", () => {
   test("executes a skill runner as agent-produced output without an OCI environment", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(skillRunnerSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_skill_001";
+    const subjectId = "subject_skill_001";
     const baseFiles = normalizeSurfaceFiles([{
       path: "invoice-review/SKILL.md",
       content: "---\nname: invoice-review\ndescription: Review invoices.\n---\n\n# Invoice Review\n",
     }]);
     const largeFilingText = "large filing body\n".repeat(100_000);
-    const caseFiles = normalizeSurfaceFiles([
-      {
-        path: "case-001/task.yaml",
-        content: "task: Review this invoice fixture.\n",
-      },
-      {
-        path: "case-001/input/prompt.md",
-        content: "Review this invoice fixture.\n",
-      },
-      {
-        path: "case-001/input/filing/raw/primary_document.htm",
-        content: largeFilingText,
-      },
-    ]);
-    const runnerJobs = planWorkbenchExecutionJobsForPurpose({
+    const taskBundles = [taskBundle(
+      "case-001",
+      "Review this invoice fixture.",
+      [
+        { path: "prompt.md", content: "Review this invoice fixture.\n" },
+        { path: "filing/raw/primary_document.htm", content: largeFilingText },
+      ],
+    )];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_skill_runtime",
-      candidateId,
+      subjectId,
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
-      ownerUserId: "user_runtime",
-      projectId: "project_runtime",
-      runId: "run_skill_runtime",
-      candidateId,
-      trialIndex: 0,
-      samples: 1,
-      spec,
-      workflow: "eval",
-      purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
-      now,
-    });
-    const runningRunner = runningJob(runnerJobs[0]!, now);
+    const runningRunner = runningJob(trialJobs[0]!, now);
     const runnerExecution = executionFromJob(runningRunner);
-    const runnerTraceFiles = normalizeSurfaceFiles([{
-      path: `.workbench/traces/${runningRunner.id}/runner/session/events.ndjson`,
-      content: "{\"event\":\"done\"}\n",
-    }]);
-    let runnerAttempts = 0;
     const runnerUsage = {
       total: {
         provider: "openai/codex",
@@ -1188,19 +1131,21 @@ import fs from "node:fs";
 import path from "node:path";
 const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, "utf8"));
 const output = process.env.WORKBENCH_OUTPUT;
-const traceId = request.execution.jobId || request.execution.id;
+const traceId = request.jobId || request.id;
 fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "runner-summary.md"), "skill output from runner");
 fs.mkdirSync(path.join(output, ".workbench", "traces", traceId, "runner", "session"), { recursive: true });
 fs.writeFileSync(path.join(output, ".workbench", "traces", traceId, "runner.json"), "{}\\n");
 fs.writeFileSync(path.join(output, ".workbench", "traces", traceId, "runner", "session", "events.ndjson"), "{\\"event\\":\\"done\\"}\\n");
-fs.mkdirSync(path.join(output, ".workbench"), { recursive: true });
-fs.writeFileSync(path.join(output, ".workbench", "result.json"), JSON.stringify({
+fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
+  protocol: "workbench.adapter-result.v1",
+  operation: "subject.run",
+  ok: true,
   summary: "skill output from runner",
   usage: ${JSON.stringify(runnerUsage)}
 }, null, 2));
 `);
-    const graderUsage = {
+    const scorerUsage = {
       total: {
         provider: "openai/codex",
         model: "gpt-5.4-mini",
@@ -1215,15 +1160,20 @@ import path from "node:path";
 const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, "utf8"));
 const output = process.env.WORKBENCH_OUTPUT;
 fs.mkdirSync(output, { recursive: true });
-fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
-  score: 0.88,
-  metrics: { score: 0.88 },
-  cases: [{ id: request.execution.caseId, status: "completed", metrics: { score: 0.88 } }],
-  usage: {
-    grader: ${JSON.stringify(graderUsage.total)},
-    total: ${JSON.stringify(graderUsage.total)}
-  },
-  feedback: { metadata: {} }
+fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
+  protocol: "workbench.adapter-result.v1",
+  operation: "trial.score",
+  ok: true,
+  value: {
+    score: 0.88,
+    metrics: { score: 0.88 },
+    cases: [{ id: request.context?.trial?.caseId ?? "current", status: "completed", metrics: { score: 0.88 } }],
+    usage: {
+      scorer: ${JSON.stringify(scorerUsage.total)},
+      total: ${JSON.stringify(scorerUsage.total)}
+    },
+    feedback: { metadata: {} }
+  }
 }, null, 2));
 `);
     const completedRunner = await executeAdapterInCurrentSandboxRuntime({
@@ -1231,32 +1181,33 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
       spec,
       adapterManifests: [codexAdapter, rubricAdapter],
       baseFiles,
-      caseFiles,
+      taskSourceFiles,
+      taskBundles,
     }, runnerExecution, now, createWorkbenchExecutionCapability(runnerExecution, { now }));
 
     expect(completedRunner.error).toBeUndefined();
     expect(completedRunner.status).toBe("succeeded");
-    const runnerOutputPaths = completedOutputFiles(completedRunner).map((file) => file.path);
-    expect(runnerOutputPaths).toContain("runner-summary.md");
-    expect(runnerOutputPaths.some((filePath) => filePath.startsWith(".workbench/internal/"))).toBe(false);
+    const trialOutputPaths = completedOutputFiles(completedRunner).map((file) => file.path);
+    expect(trialOutputPaths).toContain("runner-summary.md");
+    expect(trialOutputPaths.some((filePath) => filePath.startsWith(".workbench/internal/"))).toBe(false);
     expect((completedRunner.output as { usage?: { runner?: { costUsd?: number } } }).usage?.runner?.costUsd).toBe(0.0042);
     expect((completedRunner.output as { traces?: string[] }).traces).toEqual([
-      `.workbench/traces/000001-run_skill_runtime/000009-trial/${runningRunner.id}/runner.json`,
-      `.workbench/traces/000001-run_skill_runtime/000009-trial/${runningRunner.id}/runner/session/events.ndjson`,
+      `.workbench/traces/000001-run_skill_runtime/000002-trial/${runningRunner.id}/runner.json`,
+      `.workbench/traces/000001-run_skill_runtime/000002-trial/${runningRunner.id}/runner/session/events.ndjson`,
     ]);
 
-    const completedGrader = completedRunner;
-    expect(completedGrader.error).toBeUndefined();
-    expect(completedGrader.status).toBe("succeeded");
-    expect(completedScore(completedGrader)).toBe(0.88);
-    expect((completedGrader.output as { usage?: { runner?: { costUsd?: number } } }).usage?.runner?.costUsd).toBe(0.0042);
-    expect((completedGrader.output?.scorecard as { feedback?: { metadata?: { usage?: unknown } } } | undefined)?.feedback?.metadata?.usage).toBeUndefined();
-    expect((completedGrader.output?.scorecard as { cases?: Array<{ id?: string }> } | undefined)?.cases?.[0]?.id).toBe("case-001");
+    const completedScorer = completedRunner;
+    expect(completedScorer.error).toBeUndefined();
+    expect(completedScorer.status).toBe("succeeded");
+    expect(completedScore(completedScorer)).toBe(0.88);
+    expect((completedScorer.output as { usage?: { runner?: { costUsd?: number } } }).usage?.runner?.costUsd).toBe(0.0042);
+    expect((completedScorer.output?.scorecard as { feedback?: { metadata?: { usage?: unknown } } } | undefined)?.feedback?.metadata?.usage).toBeUndefined();
+    expect((completedScorer.output?.scorecard as { cases?: Array<{ id?: string }> } | undefined)?.cases?.[0]?.id).toBe("case-001");
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_skill_runtime",
-      candidateId,
+      subjectId,
       files: baseFiles,
       now,
       baseId: null,
@@ -1290,42 +1241,40 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
       startedAt: now,
       spec,
       jobs: [proposalWithUsage, completedRunner],
-      existingCandidateCount: 0,
+      existingSubjectCount: 0,
     });
-    expect(materialized.candidates[0]?.usage?.optimizer?.costUsd).toBe(0.002);
-    expect(materialized.candidates[0]?.usage?.runner?.costUsd).toBeUndefined();
-    expect(materialized.candidates[0]?.usage?.grader?.costUsd).toBe(0.0042);
-    expect(materialized.candidates[0]?.usage?.total?.costUsd).toBe(0.0062);
-    expect(materialized.candidates[0]?.eval?.usage?.total?.costUsd?.mean).toBe(0.0042);
-    expect(materialized.candidates[0]?.eval?.usage?.total?.totalTokens?.mean).toBe(1_200);
-    expect(materialized.candidates[0]?.eval?.usage?.runner?.costUsd?.mean).toBeUndefined();
-    expect(materialized.candidates[0]?.eval?.usage?.grader?.costUsd?.mean).toBe(0.0042);
-    expect(materialized.evaluations[0]?.usage?.total?.costUsd?.mean).toBe(0.0042);
+    expect(materialized.subjects[0]?.usage?.optimizer?.costUsd).toBe(0.002);
+    expect(materialized.subjects[0]?.usage?.runner?.costUsd).toBe(0.0042);
+    expect(materialized.subjects[0]?.usage?.scorer?.costUsd).toBe(0.001);
+    expect(materialized.subjects[0]?.usage?.total?.costUsd).toBe(0.0072);
+    expect(materialized.subjects[0]?.eval?.usage?.total?.costUsd?.mean).toBe(0.0052);
+    expect(materialized.subjects[0]?.eval?.usage?.total?.totalTokens?.mean).toBe(1_500);
+    expect(materialized.subjects[0]?.eval?.usage?.runner?.costUsd?.mean).toBe(0.0042);
+    expect(materialized.subjects[0]?.eval?.usage?.scorer?.costUsd?.mean).toBe(0.001);
+    expect(materialized.evaluations[0]?.usage?.total?.costUsd?.mean).toBe(0.0052);
   });
 
   test("uses criterion scores when rubric judges return an unnormalized top-level score", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(skillRunnerSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const caseFiles = normalizeSurfaceFiles([{
-      path: "case-001/task.yaml",
-      content: "task: Review this invoice fixture.\n",
-    }]);
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
+    const taskBundles = [taskBundle("case-001", "Review this invoice fixture.")];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_rubric_normalization",
-      candidateId: "cand_skill_001",
+      subjectId: "subject_skill_001",
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const runningGrader = runningJob(graderJobs[0]!, now);
-    const graderExecution = executionFromJob(runningGrader);
+    const runningScorer = runningJob(trialJobs[0]!, now);
+    const scorerExecution = executionFromJob(runningScorer);
     const rubricAdapter = await scriptedRubricAdapter({
       score: 0.4,
       summary: "Judge used a 10-point top-level score but normalized criteria.",
@@ -1337,19 +1286,19 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
       }],
     });
     const runnerAdapter = await scriptedRunnerAdapter();
-    const completedGrader = await executeAdapterInCurrentSandboxRuntime({
-      job: runningGrader,
+    const completedScorer = await executeAdapterInCurrentSandboxRuntime({
+      job: runningScorer,
       spec,
       adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles: normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]),
-      caseFiles,
-      runnerOutputFiles: normalizeSurfaceFiles([{ path: "runner-summary.md", content: "Hidden runner file body.\n" }]),
-    }, graderExecution, now, createWorkbenchExecutionCapability(graderExecution, { now }));
+      taskSourceFiles,
+      taskBundles,
+    }, scorerExecution, now, createWorkbenchExecutionCapability(scorerExecution, { now }));
 
-    expect(completedGrader.error).toBeUndefined();
-    expect(completedGrader.status).toBe("succeeded");
-    expect(completedScore(completedGrader)).toBe(0.4);
-    const scorecard = completedGrader.output?.scorecard as { cases?: Array<{ status?: string; criteria?: Array<{ rationale?: string }> }> } | undefined;
+    expect(completedScorer.error).toBeUndefined();
+    expect(completedScorer.status).toBe("succeeded");
+    expect(completedScore(completedScorer)).toBe(0.4);
+    const scorecard = completedScorer.output?.scorecard as { cases?: Array<{ status?: string; criteria?: Array<{ rationale?: string }> }> } | undefined;
     expect(scorecard?.cases?.[0]?.status).toBe("completed");
     expect(scorecard?.cases?.[0]?.criteria?.[0]?.rationale).toBe("The runner output missed the required output.");
   });
@@ -1357,26 +1306,24 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
   test("repairs malformed rubric judge JSON with one bounded judge turn", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(skillRunnerSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const caseFiles = normalizeSurfaceFiles([{
-      path: "case-001/task.yaml",
-      content: "task: Review this invoice fixture.\n",
-    }]);
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
+    const taskBundles = [taskBundle("case-001", "Review this invoice fixture.")];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_rubric_repair",
-      candidateId: "cand_skill_001",
+      subjectId: "subject_skill_001",
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const runningGrader = runningJob(graderJobs[0]!, now);
-    const graderExecution = executionFromJob(runningGrader);
+    const runningScorer = runningJob(trialJobs[0]!, now);
+    const scorerExecution = executionFromJob(runningScorer);
     const rubricAdapter = await scriptedRubricAdapter({
       score: 0.82,
       summary: "Repaired rubric judge output.",
@@ -1396,19 +1343,19 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
       },
     });
     const runnerAdapter = await scriptedRunnerAdapter();
-    const completedGrader = await executeAdapterInCurrentSandboxRuntime({
-      job: runningGrader,
+    const completedScorer = await executeAdapterInCurrentSandboxRuntime({
+      job: runningScorer,
       spec,
       adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles: normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]),
-      caseFiles,
-      runnerOutputFiles: normalizeSurfaceFiles([{ path: "runner-summary.md", content: "Hidden runner file body.\n" }]),
-    }, graderExecution, now, createWorkbenchExecutionCapability(graderExecution, { now }));
+      taskSourceFiles,
+      taskBundles,
+    }, scorerExecution, now, createWorkbenchExecutionCapability(scorerExecution, { now }));
 
-    expect(completedGrader.error).toBeUndefined();
-    expect(completedGrader.status).toBe("succeeded");
-    expect(completedScore(completedGrader)).toBe(0.82);
-    const scorecard = completedGrader.output?.scorecard as { feedback?: { metadata?: { repair?: { attempted?: boolean; originalError?: string } } } } | undefined;
+    expect(completedScorer.error).toBeUndefined();
+    expect(completedScorer.status).toBe("succeeded");
+    expect(completedScore(completedScorer)).toBe(0.82);
+    const scorecard = completedScorer.output?.scorecard as { feedback?: { metadata?: { repair?: { attempted?: boolean; originalError?: string } } } } | undefined;
     expect(scorecard?.feedback?.metadata?.repair?.attempted).toBe(true);
     expect(scorecard?.feedback?.metadata?.repair?.originalError).toContain("must parse as a JSON object");
   });
@@ -1416,26 +1363,24 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
   test("accepts rubric repair JSON with invalid string escapes", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(skillRunnerSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const caseFiles = normalizeSurfaceFiles([{
-      path: "case-001/task.yaml",
-      content: "task: Review this invoice fixture.\n",
-    }]);
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
+    const taskBundles = [taskBundle("case-001", "Review this invoice fixture.")];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_rubric_escape_repair",
-      candidateId: "cand_skill_001",
+      subjectId: "subject_skill_001",
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const runningGrader = runningJob(graderJobs[0]!, now);
-    const graderExecution = executionFromJob(runningGrader);
+    const runningScorer = runningJob(trialJobs[0]!, now);
+    const scorerExecution = executionFromJob(runningScorer);
     const rubricAdapter = await scriptedRubricAdapter({
       score: 0.82,
       summary: "Repaired rubric judge output.",
@@ -1447,97 +1392,58 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
       }],
     });
     const runnerAdapter = await scriptedRunnerAdapter();
-    const completedGrader = await executeAdapterInCurrentSandboxRuntime({
-      job: runningGrader,
+    const completedScorer = await executeAdapterInCurrentSandboxRuntime({
+      job: runningScorer,
       spec,
       adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles: normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]),
-      caseFiles,
-      runnerOutputFiles: normalizeSurfaceFiles([{ path: "runner-summary.md", content: "Hidden runner file body.\n" }]),
-    }, graderExecution, now, createWorkbenchExecutionCapability(graderExecution, { now }));
+      taskSourceFiles,
+      taskBundles,
+    }, scorerExecution, now, createWorkbenchExecutionCapability(scorerExecution, { now }));
 
-    expect(completedGrader.error).toBeUndefined();
-    expect(completedGrader.status).toBe("succeeded");
-    expect(completedScore(completedGrader)).toBe(0.82);
-    const scorecard = completedGrader.output?.scorecard as { cases?: Array<{ criteria?: Array<{ rationale?: string }> }> } | undefined;
+    expect(completedScorer.error).toBeUndefined();
+    expect(completedScorer.status).toBe("succeeded");
+    expect(completedScore(completedScorer)).toBe(0.82);
+    const scorecard = completedScorer.output?.scorecard as { cases?: Array<{ criteria?: Array<{ rationale?: string }> }> } | undefined;
     expect(scorecard?.cases?.[0]?.criteria?.[0]?.rationale).toBe("The workbook references C:\\Temp\\model and remains usable.");
   });
 
-  test("runs one rubric grader job per sample and materializes all criteria", async () => {
+  test("runs one rubric-scored trial job per sample and materializes all criteria", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(fiveCriterionSkillRunnerSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_skill_001";
+    const subjectId = "subject_skill_001";
     const baseFiles = normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]);
-    const caseFiles = normalizeSurfaceFiles([{
-      path: "case-001/task.yaml",
-      content: "task: Review this invoice fixture.\n",
-    }]);
-    const runnerJobs = planWorkbenchExecutionJobsForPurpose({
+    const taskBundles = [taskBundle("case-001", "Review this invoice fixture.")];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
-      runId: "run_single_rubric_grade",
-      candidateId,
+      runId: "run_single_rubric_trial",
+      subjectId,
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
-      ownerUserId: "user_runtime",
-      projectId: "project_runtime",
-      runId: "run_single_rubric_grade",
-      candidateId,
-      trialIndex: 0,
-      samples: 1,
-      spec,
-      workflow: "eval",
-      purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
-      now,
-    });
-    expect(graderJobs).toHaveLength(1);
-    expect(gradeJobCountForRunSpec(spec)).toBe(1);
+    expect(trialJobs).toHaveLength(1);
+    expect(trialJobCountForRunSpec(spec)).toBe(1);
     expect(expectedWorkbenchRunJobCount({
       workflow: "eval",
       budget: 1,
       samples: 1,
-      caseCount: caseExecutionIds(caseFiles).length,
-      gradeJobCount: gradeJobCountForRunSpec(spec),
+      caseCount: taskBundles.length,
     })).toBe(2);
-    expect(Object.keys(executionFromJob(graderJobs[0]!).metadata)).toEqual([
+    expect(Object.keys(executionFromJob(trialJobs[0]!).metadata)).toEqual([
       "trialIndex",
       "sampleIndex",
       "caseId",
       "task",
       "scoreAdapter",
     ]);
-
-    const completedRunner = {
-      ...runningJob(runnerJobs[0]!, now),
-      status: "succeeded" as const,
-      attempt: 1,
-      startedAt: now,
-      finishedAt: now,
-      updatedAt: now,
-      output: {
-        ok: true,
-        purpose: "trial",
-        candidateId,
-        trialIndex: 0,
-        sampleIndex: 0,
-        caseId: "case-001",
-        fileChanges: ["runner-summary.md"],
-        files: normalizeSurfaceFiles([
-          { path: "runner-summary.md", content: "runner output\n" },
-        ]),
-        traces: [],
-      },
-    };
 
     const criterionScores = new Map([
       ["useful", 1],
@@ -1553,8 +1459,8 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
       ["accurate", "Output is accurate."],
       ["polished", "Output is polished."],
     ]);
-    const runningGrader = runningJob(graderJobs[0]!, now);
-    const graderExecution = executionFromJob(runningGrader);
+    const runningScorer = runningJob(trialJobs[0]!, now);
+    const scorerExecution = executionFromJob(runningScorer);
     const ids = [...criterionDescriptions.keys()];
     const criteria = ids.map((criterionId) => {
       const score = criterionScores.get(criterionId) ?? 0;
@@ -1572,135 +1478,100 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
       feedback: { metadata: { ids } },
     });
     const runnerAdapter = await scriptedRunnerAdapter();
-    const completedGrader = await executeAdapterInCurrentSandboxRuntime({
-      job: runningGrader,
+    const completedScorer = await executeAdapterInCurrentSandboxRuntime({
+      job: runningScorer,
       spec,
       adapterManifests: [runnerAdapter, rubricAdapter],
       baseFiles,
-      caseFiles,
-      runnerOutputFiles: completedOutputFiles(completedRunner),
-    }, graderExecution, now, createWorkbenchExecutionCapability(graderExecution, { now }));
+      taskSourceFiles,
+      taskBundles,
+    }, scorerExecution, now, createWorkbenchExecutionCapability(scorerExecution, { now }));
 
-    expect(completedGrader.status).toBe("succeeded");
-    const { files: _files, ...hostedStyleGraderOutput } =
-      completedGrader.output as Record<string, unknown>;
-    const hostedStyleCompletedGrader = {
-      ...completedGrader,
-      output: hostedStyleGraderOutput,
+    expect(completedScorer.status).toBe("succeeded");
+    const { files: _files, ...hostedStyleScorerOutput } =
+      completedScorer.output as Record<string, unknown>;
+    const hostedStyleCompletedScorer = {
+      ...completedScorer,
+      output: hostedStyleScorerOutput,
     };
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
-      runId: "run_single_rubric_grade",
-      candidateId,
+      runId: "run_single_rubric_trial",
+      subjectId,
       files: baseFiles,
       now,
       baseId: null,
       trialIndex: 0,
     });
     const materialized = materializeWorkbenchRunResult({
-      runId: "run_single_rubric_grade",
+      runId: "run_single_rubric_trial",
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [proposal, completedRunner, hostedStyleCompletedGrader],
-      existingCandidateCount: 0,
+      jobs: [proposal, hostedStyleCompletedScorer],
+      existingSubjectCount: 0,
     });
-    const sample = materialized.candidates[0]?.eval?.samples[0];
-    expect(materialized.candidates[0]?.metrics?.score).toBe(0.7);
+    const sample = materialized.subjects[0]?.eval?.samples[0];
+    expect(materialized.subjects[0]?.metrics?.score).toBe(0.7);
     expect(sample?.cases?.[0]?.criteria?.map((criterion) => criterion.criterion_id))
       .toEqual(["useful", "complete", "format", "accurate", "polished"]);
     expect(sample?.cases?.[0]?.criteria?.map((criterion) => criterion.score))
       .toEqual([1, 0.5, 0.75, 0.25, 1]);
   });
 
-  test("materializes a failed rubric grader as one error case sample", () => {
+  test("materializes a failed trial scorer as one error case sample", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(twoCriterionSkillRunnerSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_failed_rubric_grade";
+    const subjectId = "subject_failed_rubric_score";
     const baseFiles = normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the skill.\n" }]);
-    const caseFiles = normalizeSurfaceFiles([{
-      path: "case-001/task.yaml",
-      content: "task: Review this invoice fixture.\n",
-    }]);
+    const taskBundles = [taskBundle("case-001", "Review this invoice fixture.")];
     const proposal = createSyntheticProposalJob({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
-      runId: "run_failed_rubric_grade",
-      candidateId,
+      runId: "run_failed_rubric_score",
+      subjectId,
       files: baseFiles,
       now,
       baseId: null,
       trialIndex: 0,
     });
-    const runnerJobs = planWorkbenchExecutionJobsForPurpose({
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
-      runId: "run_failed_rubric_grade",
-      candidateId,
+      runId: "run_failed_rubric_score",
+      subjectId,
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
-      ownerUserId: "user_runtime",
-      projectId: "project_runtime",
-      runId: "run_failed_rubric_grade",
-      candidateId,
-      trialIndex: 0,
-      samples: 1,
-      spec,
-      workflow: "eval",
-      purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
-      now,
-    });
-    expect(graderJobs).toHaveLength(1);
-    expect(gradeJobCountForRunSpec(spec)).toBe(1);
-    const completedRunner = {
-      ...runningJob(runnerJobs[0]!, now),
-      status: "succeeded" as const,
-      attempt: 1,
-      finishedAt: now,
-      updatedAt: now,
-      output: {
-        ok: true,
-        purpose: "trial",
-        candidateId,
-        trialIndex: 0,
-        sampleIndex: 0,
-        caseId: "case-001",
-        files: normalizeSurfaceFiles([
-          { path: "runner-summary.md", content: "runner output\n" },
-        ]),
-      },
-    };
-    const failedGrader = {
-      ...runningJob(graderJobs[0]!, now),
+    expect(trialJobs).toHaveLength(1);
+    expect(trialJobCountForRunSpec(spec)).toBe(1);
+    const failedScorer = {
+      ...runningJob(trialJobs[0]!, now),
       status: "failed" as const,
       attempt: 1,
       finishedAt: now,
       updatedAt: now,
-      error: "grader failed",
+      error: "scorer failed",
       output: { ok: false },
     };
 
     const materialized = materializeWorkbenchRunResult({
-      runId: "run_failed_rubric_grade",
+      runId: "run_failed_rubric_score",
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [proposal, completedRunner, failedGrader],
-      existingCandidateCount: 0,
+      jobs: [proposal, failedScorer],
+      existingSubjectCount: 0,
     });
 
-    const evalRecord = materialized.candidates[0]?.eval;
+    const evalRecord = materialized.subjects[0]?.eval;
     const sample = evalRecord?.samples[0];
     expect(evalRecord?.sampleCount).toBe(1);
     expect(evalRecord?.errorSampleCount).toBe(1);
@@ -1708,13 +1579,13 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
     expect(sample?.status).toBe("error");
     expect(sample?.cases?.[0]?.id).toBe("case-001");
     expect(sample?.cases?.[0]?.status).toBe("error");
-    expect(sample?.error).toContain("grader failed");
+    expect(sample?.error).toContain("scorer failed");
   });
 
-  test("executes a pipeline candidate with the generic agent runner", async () => {
+  test("executes a pipeline subject with the generic agent runner", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(pipelineRunnerSpec());
     const now = "2026-04-27T00:00:00.000Z";
-    const candidateId = "cand_pipeline_001";
+    const subjectId = "subject_pipeline_001";
     const baseFiles = normalizeSurfaceFiles([{
       path: "pipeline.yaml",
       content: [
@@ -1728,39 +1599,23 @@ fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
         "",
       ].join("\n"),
     }]);
-    const caseFiles = normalizeSurfaceFiles([{
-      path: "case-001/task.yaml",
-      content: "task: Run the pipeline.\n",
-    }]);
-    const runnerJobs = planWorkbenchExecutionJobsForPurpose({
+    const taskBundles = [taskBundle("case-001", "Run the pipeline.")];
+    const taskSourceFiles = taskBundles[0]!.sourceFiles ?? [];
+    const trialJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_runtime",
       projectId: "project_runtime",
       runId: "run_pipeline_runtime",
-      candidateId,
+      subjectId,
       trialIndex: 0,
       samples: 1,
       spec,
       workflow: "eval",
       purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
+      caseIds: taskBundles.map((bundle) => bundle.id),
+      taskBundles,
       now,
     });
-    const graderJobs = planWorkbenchExecutionJobsForPurpose({
-      ownerUserId: "user_runtime",
-      projectId: "project_runtime",
-      runId: "run_pipeline_runtime",
-      candidateId,
-      trialIndex: 0,
-      samples: 1,
-      spec,
-      workflow: "eval",
-      purpose: "trial",
-      caseIds: caseExecutionIds(caseFiles),
-      caseFiles,
-      now,
-    });
-    const runningRunner = runningJob(runnerJobs[0]!, now);
+    const runningRunner = runningJob(trialJobs[0]!, now);
     const runnerExecution = executionFromJob(runningRunner);
     const codexAdapter = await scriptedAdapterManifest("codex", `
 import fs from "node:fs";
@@ -1769,37 +1624,30 @@ const output = process.env.WORKBENCH_OUTPUT;
 fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "scratch.tmp"), "scratch\\n");
 fs.writeFileSync(path.join(output, "runner-summary.md"), "pipeline agent runner completed");
+fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
+  protocol: "workbench.adapter-result.v1",
+  operation: "subject.run",
+  ok: true
+}, null, 2));
 `);
     const rubricAdapter = await scriptedRubricAdapter({ score: 0.77 });
-    const completedRunner = await executeAdapterInCurrentSandboxRuntime({
+    const completedTrial = await executeAdapterInCurrentSandboxRuntime({
       job: runningRunner,
       spec,
       adapterManifests: [codexAdapter, rubricAdapter],
       baseFiles,
-      caseFiles,
+      taskSourceFiles,
+      taskBundles,
     }, runnerExecution, now, createWorkbenchExecutionCapability(runnerExecution, { now }));
 
-    expect(completedRunner.error).toBeUndefined();
-    expect(completedRunner.status).toBe("succeeded");
-    const outputFiles = completedOutputFiles(completedRunner);
+    expect(completedTrial.error).toBeUndefined();
+    expect(completedTrial.status).toBe("succeeded");
+    expect(completedScore(completedTrial)).toBe(0.77);
+    const outputFiles = completedOutputFiles(completedTrial);
     expect(outputFiles.map((file) => file.path)).toContain("runner-summary.md");
     expect(outputFiles.some((file) => file.path.startsWith(".workbench/internal/"))).toBe(false);
     expect(outputFiles.map((file) => file.path)).toContain("scratch.tmp");
     expect(outputFiles.find((file) => file.path === "runner-summary.md")?.content).toContain("pipeline agent runner completed");
-
-    const runningGrader = runningJob(graderJobs[0]!, now);
-    const graderExecution = executionFromJob(runningGrader);
-    const completedGrader = await executeAdapterInCurrentSandboxRuntime({
-      job: runningGrader,
-      spec,
-      adapterManifests: [codexAdapter, rubricAdapter],
-      baseFiles,
-      caseFiles,
-      runnerOutputFiles: outputFiles,
-    }, graderExecution, now, createWorkbenchExecutionCapability(graderExecution, { now }));
-    expect(completedGrader.error).toBeUndefined();
-    expect(completedGrader.status).toBe("succeeded");
-    expect(completedScore(completedGrader)).toBe(0.77);
   });
 
 });
@@ -1929,14 +1777,39 @@ function completedScore(job: HostedWorkbenchJob): number | undefined {
   return typeof scorecard.score === "number" ? scorecard.score : undefined;
 }
 
-function stageWorkload(purpose: "improve" | "run-task" | "grade-task" | "trial"): WorkbenchRunWorkload {
+function taskBundle(
+  id: string,
+  task: string,
+  publicFiles: readonly { path: string; content: string }[] = [],
+  testFiles: readonly { path: string; content: string }[] = [],
+): WorkbenchTaskBundle {
+  const publicSnapshot = normalizeSurfaceFiles(publicFiles);
+  const testSnapshot = normalizeSurfaceFiles(testFiles);
+  return {
+    id,
+    task: { version: 2, task },
+    publicFiles: publicSnapshot,
+    testFiles: testSnapshot,
+    sourceFiles: [...publicSnapshot, ...testSnapshot].sort((left, right) =>
+      left.path.localeCompare(right.path)
+    ),
+  };
+}
+
+function stageWorkload(purpose: "improve" | "trial"): WorkbenchRunWorkload {
   const now = "2026-04-27T00:00:00.000Z";
+  const bundle = taskBundle(
+    "case-001",
+    "test",
+    [{ path: "request.md", content: "public request\n" }],
+    [{ path: "secret.txt", content: "hidden\n" }],
+  );
   return {
     job: {
       id: `job_${purpose}`,
       projectId: "proj_test",
       runId: "run_test",
-      candidateId: "cand_test",
+      subjectId: "subject_test",
       kind: "execute",
       status: "running",
       attempt: 1,
@@ -1955,18 +1828,14 @@ function stageWorkload(purpose: "improve" | "run-task" | "grade-task" | "trial")
       },
     },
     spec: resolveWorkbenchResolvedSourceYaml(runtimeSpec()),
-    candidateId: "cand_test",
+    subjectId: "subject_test",
     trialIndex: 0,
     sampleIndex: 0,
     caseId: "case-001",
-    candidateFiles: normalizeSurfaceFiles([{ path: "prompt.md", content: "candidate" }]),
-    caseFiles: normalizeSurfaceFiles([
-      { path: "task.yaml", content: "task: test" },
-      { path: "files/request.md", content: "public request\n" },
-      { path: "tests/secret.txt", content: "hidden\n" },
-    ]),
+    subjectFiles: normalizeSurfaceFiles([{ path: "prompt.md", content: "subject" }]),
+    taskSourceFiles: bundle.sourceFiles ?? [],
     traceFiles: normalizeSurfaceFiles([{ path: "events/prior.ndjson", content: "{\"event\":\"prior\"}\n" }]),
-    task: { id: "case-001", task: "test" },
+    ...(purpose === "trial" ? { taskBundle: bundle, task: bundle.task } : {}),
     prompt: "test",
     changedPaths: ["prompt.md"],
     baseId: null,
@@ -2011,18 +1880,19 @@ function runtimeSpec(): string {
     "fs.writeFileSync(path.join(dir,'runner-output.json'),JSON.stringify({ok:true,metrics:{checks:1}}));",
     "fs.writeFileSync(path.join('output','runner-summary.md'),'Runner output passed.\\n');",
   ].join(""))}`);
-  const graderCommand = JSON.stringify(`node -e ${JSON.stringify([
+  const scorerCommand = JSON.stringify(`node -e ${JSON.stringify([
     "const fs=require('fs');",
     "fs.mkdirSync('output',{recursive:true});",
-    "fs.writeFileSync('output/scorecard.json',JSON.stringify({score:0.91,summary:'Generic runtime path passed.'},null,2));",
+    "fs.writeFileSync('output/workbench-result.json',JSON.stringify({protocol:'workbench.adapter-result.v1',operation:'trial.score',ok:true,value:{score:0.91,summary:'Generic runtime path passed.'}},null,2));",
   ].join(""))}`);
   return [
     "version: 2",
     "benchmark:",
     "  version: 2",
     "  name: runtime-generic-execution",
-    "  description: Exercise the generic command runner and grader runtime path.",
-    "  tasks: tasks",
+    "  description: Exercise the generic command runner and scorer runtime path.",
+    "  tasks:",
+    "    path: tasks",
     "  environment:",
     "    dockerfile: environment/Dockerfile",
     "    resources:",
@@ -2034,12 +1904,13 @@ function runtimeSpec(): string {
     "  score:",
     "    use: command",
     "    with:",
-    `      command: ${graderCommand}`,
+    `      command: ${scorerCommand}`,
     "subject:",
     "  version: 2",
     "  name: runtime-generic-execution",
     "  description: Subject runner for the generic runtime benchmark.",
-    "  path: subjects/runtime-generic-execution/files",
+    "  files:",
+    "    path: subjects/runtime-generic-execution/files",
     "  run:",
     "    use: command",
     "    with:",
@@ -2073,9 +1944,13 @@ async function scriptedAdapterManifest(id: string, source: string) {
   await fs.writeFile(file, source);
   return {
     id,
-    protocol: "workbench.adapter.v1" as const,
+    protocol: "workbench.adapter.v2" as const,
     setup: [],
-    command: `node ${shellWord(file)}`,
+    operations: {
+      "subject.run": { command: `node ${shellWord(file)}` },
+      "trial.score": { command: `node ${shellWord(file)}` },
+      "subject.improve": { command: `node ${shellWord(file)}` },
+    },
   };
 }
 
@@ -2084,9 +1959,9 @@ async function commandAdapterManifest() {
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, "utf8"));
-const command = request.adapter?.with?.command;
+const command = request.invocation?.with?.command;
 if (typeof command !== "string" || command.length === 0) {
-  throw new Error("command adapter requires adapter.with.command");
+  throw new Error("command adapter requires invocation.with.command");
 }
 const result = spawnSync("sh", ["-lc", command], {
   cwd: request.paths.workspace,
@@ -2096,8 +1971,14 @@ const result = spawnSync("sh", ["-lc", command], {
 if (result.status !== 0) {
   process.exit(result.status ?? 1);
 }
-fs.mkdirSync(\`\${request.paths.output}/.workbench\`, { recursive: true });
-fs.writeFileSync(\`\${request.paths.output}/.workbench/result.json\`, JSON.stringify({ ok: true }, null, 2) + "\\n");
+const resultPath = process.env.WORKBENCH_RESULT || request.paths.result || \`\${request.paths.output}/workbench-result.json\`;
+if (!fs.existsSync(resultPath)) {
+  fs.writeFileSync(resultPath, JSON.stringify({
+    protocol: "workbench.adapter-result.v1",
+    operation: request.operation,
+    ok: true
+  }, null, 2) + "\\n");
+}
 `);
 }
 
@@ -2120,12 +2001,17 @@ const output = process.env.WORKBENCH_OUTPUT;
 const criteria = ${JSON.stringify(args.criteria ?? [])};
 const score = ${JSON.stringify(args.score)};
 fs.mkdirSync(output, { recursive: true });
-fs.writeFileSync(path.join(output, "scorecard.json"), JSON.stringify({
-  score,
-  metrics: { score },
-  ${args.summary ? `summary: ${JSON.stringify(args.summary)},` : ""}
-  cases: [{ id: request.execution.caseId, status: "completed", metrics: { score }, criteria }],
-  feedback: ${JSON.stringify(args.feedback ?? {})}
+fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
+  protocol: "workbench.adapter-result.v1",
+  operation: "trial.score",
+  ok: true,
+  value: {
+    score,
+    metrics: { score },
+    ${args.summary ? `summary: ${JSON.stringify(args.summary)},` : ""}
+    cases: [{ id: request.context?.trial?.caseId ?? "current", status: "completed", metrics: { score }, criteria }],
+    feedback: ${JSON.stringify(args.feedback ?? {})}
+  }
 }, null, 2));
 `);
 }
@@ -2137,6 +2023,11 @@ import path from "node:path";
 const output = process.env.WORKBENCH_OUTPUT;
 fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "runner-summary.md"), "runner output\\n");
+fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
+  protocol: "workbench.adapter-result.v1",
+  operation: "subject.run",
+  ok: true
+}, null, 2));
 `);
 }
 
@@ -2150,8 +2041,9 @@ function skillRunnerSpec(): string {
     "benchmark:",
     "  version: 2",
     "  name: runtime-skill-runner",
-    "  description: Exercise an agent skill runner with rubric grading.",
-    "  tasks: tasks",
+    "  description: Exercise an agent skill runner with rubric scoring.",
+    "  tasks:",
+    "    path: tasks",
     "  environment:",
     "    dockerfile: environment/Dockerfile",
     "  score:",
@@ -2167,8 +2059,9 @@ function skillRunnerSpec(): string {
     "subject:",
     "  version: 2",
     "  name: runtime-skill-runner",
-    "  description: Candidate skill runner.",
-    "  path: subjects/invoice-review/files",
+    "  description: Subject skill runner.",
+    "  files:",
+    "    path: subjects/invoice-review/files",
     "  run:",
     "    use: codex",
     "    with:",
@@ -2229,8 +2122,9 @@ function pipelineRunnerSpec(): string {
     "benchmark:",
     "  version: 2",
     "  name: runtime-pipeline-runner",
-    "  description: Exercise an agent pipeline runner with rubric grading.",
-    "  tasks: tasks",
+    "  description: Exercise an agent pipeline runner with rubric scoring.",
+    "  tasks:",
+    "    path: tasks",
     "  environment:",
     "    dockerfile: environment/Dockerfile",
     "  score:",
@@ -2246,8 +2140,9 @@ function pipelineRunnerSpec(): string {
     "subject:",
     "  version: 2",
     "  name: runtime-pipeline-runner",
-    "  description: Candidate pipeline runner.",
-    "  path: subjects/runtime-pipeline-runner/files",
+    "  description: Subject pipeline runner.",
+    "  files:",
+    "    path: subjects/runtime-pipeline-runner/files",
     "  run:",
     "    use: codex",
     "    with:",

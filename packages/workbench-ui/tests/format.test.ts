@@ -13,7 +13,7 @@ import {
 
 describe("format helpers", () => {
   test("shortId keeps the first 12 characters and tolerates nullish input", () => {
-    expect(shortId("candidate-1234567890")).toBe("candidate-12");
+    expect(shortId("subject-1234567890")).toBe("subject-1234");
     expect(shortId(null)).toBeNull();
     expect(shortId(undefined)).toBeNull();
   });
@@ -65,7 +65,7 @@ describe("format helpers", () => {
         status: "finished",
         startedAt: "2026-04-14T00:00:00.000Z",
         optimizer: "flow",
-        grade: "harbor",
+        score: "harbor",
         strategy: "greedy",
         budget: 1,
         repairBudget: 2,

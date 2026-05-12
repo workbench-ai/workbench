@@ -1,7 +1,7 @@
 const sourceDirectoryHelp = [
   "Directory:",
   "  Run from a Workbench project containing benchmark.yaml plus subjects/<name>/subject.yaml.",
-  "  Subject files live beside the subject manifest in subjects/<name>/files/ when the subject is file-backed.",
+  "  Subject manifests declare their files with files.path, usually files beside subject.yaml.",
   "  Pass --dir DIR or pass benchmark.yaml, subjects/<name>, or subjects/<name>/subject.yaml as SOURCE.",
 ];
 
@@ -79,7 +79,7 @@ const rootLines = [
   "  workbench cloud fork OWNER/BENCHMARK[@REF] [NAME] [--json]",
   "  workbench cloud star OWNER/BENCHMARK [--json]",
   "  workbench cloud unstar OWNER/BENCHMARK [--json]",
-  "  workbench cloud benchmarks|runs|candidates <command> [options]",
+  "  workbench cloud benchmarks|runs|subjects <command> [options]",
   "",
   "Auth:",
   "  workbench auth connect ADAPTER[/SLOT] [--dir DIR] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]",
@@ -134,7 +134,7 @@ const commandHelp: Record<string, string> = Object.fromEntries(Object.entries({
     "  workbench init [DIR] --pipeline NAME --agent ADAPTER [--from PATH] [--example] [--json]",
     "  workbench init [DIR] --command NAME [--from PATH] [--example] [--json]",
     "",
-    "Scaffold a local Workbench project. benchmark.yaml owns tasks, environment, and scoring. subjects/<name>/subject.yaml owns how to run the subject. subjects/<name>/files/ optionally owns subject files. optimizers/<name>.yaml owns improvement behavior.",
+    "Scaffold a local Workbench project. benchmark.yaml owns tasks, environment, and scoring. subjects/<name>/subject.yaml owns files.path and run behavior. optimizers/<name>.yaml owns improvement behavior.",
     "",
     "Examples:",
     "  workbench init --skill invoice-review --agent codex",
@@ -374,15 +374,15 @@ const commandHelp: Record<string, string> = Object.fromEntries(Object.entries({
     "Hosted Workbench Cloud execution and resource commands.",
     "",
     "Commands:",
-    "  workbench cloud eval [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--samples N] [--watch] [--dry-run] [--json]",
-    "  workbench cloud improve [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--watch] [--dry-run] [--json]",
-    "  workbench cloud open [OWNER/BENCHMARK[@REF]|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--no-open] [--json]",
+    "  workbench cloud eval [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base SUBJECT_ID] [--samples N] [--watch] [--dry-run] [--json]",
+    "  workbench cloud improve [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base SUBJECT_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--watch] [--dry-run] [--json]",
+    "  workbench cloud open [OWNER/BENCHMARK[@REF]|RUN_ID|SUBJECT_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--no-open] [--json]",
     "  workbench cloud watch RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--interval-ms N] [--timeout-ms N] [--json]",
     "  workbench cloud logs RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
     "  workbench cloud fork OWNER/BENCHMARK[@REF] [NAME] [--json]",
     "  workbench cloud star OWNER/BENCHMARK [--json]",
     "  workbench cloud unstar OWNER/BENCHMARK [--json]",
-    "  workbench cloud benchmarks|runs|candidates <command> [options]",
+    "  workbench cloud benchmarks|runs|subjects <command> [options]",
   ],
   "cloud fork": [
     "Usage:",
@@ -404,19 +404,19 @@ const commandHelp: Record<string, string> = Object.fromEntries(Object.entries({
   ],
   "cloud eval": withSourceDirectoryHelp(withLifecycleHelp([
     "Usage:",
-    "  workbench cloud eval [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--samples N] [--watch] [--dry-run] [--json]",
+    "  workbench cloud eval [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base SUBJECT_ID] [--samples N] [--watch] [--dry-run] [--json]",
     "",
     "Submit subject files to Workbench Cloud and run hosted evaluation.",
   ], hostedWatchLifecycleHelp)),
   "cloud improve": withSourceDirectoryHelp(withLifecycleHelp([
     "Usage:",
-    "  workbench cloud improve [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--watch] [--dry-run] [--json]",
+    "  workbench cloud improve [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base SUBJECT_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--watch] [--dry-run] [--json]",
     "",
     "Run hosted subject improvement.",
   ], hostedWatchLifecycleHelp)),
   "cloud open": [
     "Usage:",
-    "  workbench cloud open [OWNER/BENCHMARK[@REF]|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--no-open] [--json]",
+    "  workbench cloud open [OWNER/BENCHMARK[@REF]|RUN_ID|SUBJECT_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--no-open] [--json]",
     "",
     "Print and open the hosted Workbench URL.",
   ],
@@ -456,20 +456,20 @@ const commandHelp: Record<string, string> = Object.fromEntries(Object.entries({
     "  workbench cloud runs show RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
     "  workbench cloud runs cancel RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
   ],
-  "cloud candidates": [
+  "cloud subjects": [
     "Usage:",
-    "  workbench cloud candidates <command> [options]",
+    "  workbench cloud subjects <command> [options]",
     "",
-    "Hosted candidate resource commands.",
+    "Hosted subject resource commands.",
     "",
     "Commands:",
-    "  workbench cloud candidates list [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
-    "  workbench cloud candidates show CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
-    "  workbench cloud candidates files CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
-    "  workbench cloud candidates preview CANDIDATE_ID --path PATH [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--output PATH|-] [--json]",
-    "  workbench cloud candidates pull CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--out DIR] [--json]",
-    "  workbench cloud candidates publish CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
-    "  workbench cloud candidates unpublish CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects list [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects show SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects files SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects preview SUBJECT_ID --path PATH [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--output PATH|-] [--json]",
+    "  workbench cloud subjects pull SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--out DIR] [--json]",
+    "  workbench cloud subjects publish SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects unpublish SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
   ],
 }).map(([key, lines]) => [key, lines.join("\n")]));
 
@@ -526,47 +526,47 @@ const hostedCommandHelp: Record<string, string> = Object.fromEntries(Object.entr
     "",
     "Cancel a hosted run.",
   ],
-  "candidates list": [
+  "subjects list": [
     "Usage:",
-    "  workbench cloud candidates list [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects list [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
     "",
-    "List hosted candidates.",
+    "List hosted subjects.",
   ],
-  "candidates show": [
+  "subjects show": [
     "Usage:",
-    "  workbench cloud candidates show CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects show SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
     "",
-    "Show one hosted candidate.",
+    "Show one hosted subject.",
   ],
-  "candidates files": [
+  "subjects files": [
     "Usage:",
-    "  workbench cloud candidates files CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects files SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
     "",
-    "List files in a hosted candidate snapshot.",
+    "List files in a hosted subject snapshot.",
   ],
-  "candidates preview": [
+  "subjects preview": [
     "Usage:",
-    "  workbench cloud candidates preview CANDIDATE_ID --path PATH [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--output PATH|-] [--json]",
+    "  workbench cloud subjects preview SUBJECT_ID --path PATH [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--output PATH|-] [--json]",
     "",
-    "Preview a file from a hosted candidate snapshot.",
+    "Preview a file from a hosted subject snapshot.",
   ],
-  "candidates pull": [
+  "subjects pull": [
     "Usage:",
-    "  workbench cloud candidates pull CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--out DIR] [--json]",
+    "  workbench cloud subjects pull SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--out DIR] [--json]",
     "",
-    "Download hosted candidate files.",
+    "Download hosted subject files.",
   ],
-  "candidates publish": [
+  "subjects publish": [
     "Usage:",
-    "  workbench cloud candidates publish CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects publish SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
     "",
-    "Make a hosted candidate public.",
+    "Make a hosted subject public.",
   ],
-  "candidates unpublish": [
+  "subjects unpublish": [
     "Usage:",
-    "  workbench cloud candidates unpublish CANDIDATE_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
+    "  workbench cloud subjects unpublish SUBJECT_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]",
     "",
-    "Make a hosted candidate private.",
+    "Make a hosted subject private.",
   ],
 }).map(([key, lines]) => [key, lines.join("\n")]));
 

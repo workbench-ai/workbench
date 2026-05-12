@@ -4,7 +4,8 @@
 
 The public project model is intentionally small:
 
-- benchmark: `benchmark.yaml`, tasks, environment, score adapter, and benchmark-owned adapter sources
+- benchmark: `benchmark.yaml`, optional task-source adapter selection, environment, score adapter, and benchmark-owned adapter sources
+- task bundle: structured task data emitted by a `tasks.resolve` adapter operation before core plans trials
 - subject: `subjects/<name>/subject.yaml` plus optional files at `subjects/<name>/files/`
 - trial: one subject attempt on one task in one mutable environment
 - scorecard: normalized score, metrics, feedback, traces, and artifacts for a trial
@@ -45,14 +46,14 @@ workbench cloud star alice/invoice-review
 
 ```bash
 workbench cloud eval subjects/codex --benchmark alice/invoice-review@v1 --samples 1 --watch
-workbench cloud improve subjects/codex --base cand_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch
-workbench cloud open cand_123 --no-open --json
+workbench cloud improve subjects/codex --base SUBJECT_ID --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch
+workbench cloud open SUBJECT_ID --no-open --json
 workbench cloud runs show run_123 --json
 workbench cloud runs cancel run_123
-workbench cloud candidates publish cand_123
+workbench cloud subjects publish SUBJECT_ID
 ```
 
-Hosted resource ids still use the existing cloud `cand_...` id prefix. That is a storage/API id, not the authored source model.
+Treat hosted resource ids as opaque subject ids.
 
 Hosted watch commands are client-side polling only. Stopping the client does not cancel the hosted run; use `workbench cloud runs cancel RUN_ID`.
 
@@ -92,17 +93,19 @@ workbench push [SOURCE] [--dir DIR] [--tag TAG] [--visibility public|private] [-
 workbench cloud fork OWNER/BENCHMARK[@REF] [NAME] [--json]
 workbench cloud star OWNER/BENCHMARK [--json]
 workbench cloud unstar OWNER/BENCHMARK [--json]
-workbench cloud eval [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--samples N] [--watch] [--dry-run] [--json]
-workbench cloud improve [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--watch] [--dry-run] [--json]
-workbench cloud open [OWNER/BENCHMARK[@REF]|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--no-open] [--json]
+workbench cloud eval [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base SUBJECT_ID] [--samples N] [--watch] [--dry-run] [--json]
+workbench cloud improve [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base SUBJECT_ID] [--optimizer OPTIMIZER_YAML] [--budget N] [--samples N] [--watch] [--dry-run] [--json]
+workbench cloud open [OWNER/BENCHMARK[@REF]|RUN_ID|SUBJECT_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--no-open] [--json]
 workbench cloud watch RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--interval-ms N] [--timeout-ms N] [--json]
 workbench cloud logs RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]
-workbench cloud benchmarks|runs|candidates <command> [options]
+workbench cloud benchmarks|runs|subjects <command> [options]
 workbench auth connect ADAPTER[/SLOT] [--dir DIR] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]
 workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--json]
 ```
 
 ## Source Shape
+
+This is the native Workbench task source shape parsed by the built-in `path` task-source adapter. Omitted `benchmark.tasks` selects that adapter with `with.path: tasks`.
 
 ```text
 benchmark.yaml
@@ -122,9 +125,9 @@ environment/
   Dockerfile
 ```
 
-`subject.yaml` does not declare a benchmark or path. The project benchmark is `benchmark.yaml`, and subject files are the sibling `files/` directory.
+`subject.yaml` does not declare a benchmark. The project benchmark is `benchmark.yaml`, and subject files are declared explicitly with `files: { path: files }`.
 
-Adapter sources can be benchmark-contained paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by the adapter resolver. A declared source whose manifest id matches a built-in id overrides that built-in for the project. Use `workbench adapters test` to validate a manifest, or add `--request` to replay an adapter command locally against a `workbench.adapter.v1` fixture.
+Adapter sources can be benchmark-contained paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by the adapter resolver. A declared source whose manifest id matches a built-in id overrides that built-in for the project. Use `workbench adapters test` to validate a manifest, or add `--request` to replay an adapter operation locally against a `workbench.adapter.v2` fixture.
 
 ## Harbor Tasks
 
@@ -139,4 +142,4 @@ score:
   use: tests
 ```
 
-The Harbor task-source adapter resolves Harbor task directories into Workbench task packages. The `tests` scorer runs verifier scripts in the same mutated environment after the subject run and normalizes `scorecard.json`, `/logs/verifier/reward.json`, or `/logs/verifier/reward.txt` into a Workbench scorecard.
+The Harbor task-source adapter resolves Harbor task directories into structured `TaskBundle` data through `tasks.resolve`. Core runs trials over those bundles and does not parse Harbor directories or native Workbench task directories directly. The `tests` scorer runs verifier scripts in the same mutated environment after the subject run and publishes a `trial.score` adapter result. It may read Harbor reward outputs at `/logs/verifier/reward.json` or `/logs/verifier/reward.txt` internally.

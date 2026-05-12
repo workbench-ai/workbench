@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 
 import { buildLineageFlow } from "../src/lib/lineage";
-import { formatCandidateSelectionLabel } from "../src/lib/format";
-import type { CandidateSummary, RuntimeSnapshot } from "../src/types";
+import { formatSubjectSelectionLabel } from "../src/lib/format";
+import type { SubjectSummary, RuntimeSnapshot } from "../src/types";
 
-function candidate(id: string, overrides: Partial<CandidateSummary> = {}): CandidateSummary {
+function subject(id: string, overrides: Partial<SubjectSummary> = {}): SubjectSummary {
   return {
     id,
     ordinal: 0,
@@ -17,7 +17,7 @@ function candidate(id: string, overrides: Partial<CandidateSummary> = {}): Candi
   };
 }
 
-function snapshot(summaries: CandidateSummary[]): RuntimeSnapshot {
+function snapshot(summaries: SubjectSummary[]): RuntimeSnapshot {
   return {
     workspaceRoot: "/workspace",
     activeId: summaries[0]?.id ?? null,
@@ -30,24 +30,24 @@ function snapshot(summaries: CandidateSummary[]): RuntimeSnapshot {
   };
 }
 
-describe("candidate lineage", () => {
+describe("subject lineage", () => {
   test("ignores self references instead of rendering a self edge", async () => {
-    const summary = candidate("cand_self", {
-      baseId: "cand_self",
-      referenceIds: ["cand_self"],
+    const summary = subject("subject_self", {
+      baseId: "subject_self",
+      referenceIds: ["subject_self"],
     });
 
     const flow = await buildLineageFlow(snapshot([summary]));
 
     expect(flow.nodes).toHaveLength(1);
     expect(flow.edges).toEqual([]);
-    expect(formatCandidateSelectionLabel({ summary })).toContain("Genesis candidate");
+    expect(formatSubjectSelectionLabel({ summary })).toContain("Genesis subject");
   });
 
   test("keeps explicit improve parent edges", async () => {
     const flow = await buildLineageFlow(snapshot([
-      candidate("cand_parent"),
-      candidate("cand_child", { baseId: "cand_parent" }),
+      subject("subject_parent"),
+      subject("subject_child", { baseId: "subject_parent" }),
     ]));
 
     expect(flow.edges.map((edge) => ({
@@ -55,16 +55,16 @@ describe("candidate lineage", () => {
       target: edge.target,
     }))).toEqual([
       {
-        source: "candidate:cand_parent",
-        target: "candidate:cand_child",
+        source: "subject:subject_parent",
+        target: "subject:subject_child",
       },
     ]);
   });
 
   test("ignores benchmark references when building lineage", async () => {
     const flow = await buildLineageFlow(snapshot([
-      candidate("cand_reference"),
-      candidate("cand_child", { referenceIds: ["cand_reference"] }),
+      subject("subject_reference"),
+      subject("subject_child", { referenceIds: ["subject_reference"] }),
     ]));
 
     expect(flow.edges).toEqual([]);

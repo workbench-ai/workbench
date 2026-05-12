@@ -3,32 +3,32 @@ import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-sta
 import { Button } from "@workbench-ai/cli-web-ui/components/ui/button";
 
 import {
-  formatCandidateSelectionLabel,
+  formatSubjectSelectionLabel,
   formatMetricSummary,
   formatTimestamp,
   shortId,
 } from "../lib/format";
-import type { CandidateSummary } from "../types";
+import type { SubjectSummary } from "../types";
 import { StatusBadge } from "./status-badge";
 
-export function CandidateList({
+export function SubjectList({
   summaries,
   activeId,
   selectedId,
   onSelect,
 }: {
-  summaries: CandidateSummary[];
+  summaries: SubjectSummary[];
   activeId: string | null;
   selectedId: string | null;
-  onSelect: (candidateId: string) => void;
+  onSelect: (subjectId: string) => void;
 }) {
   if (summaries.length === 0) {
     return (
       <EmptyState
         icon={SparklesIcon}
-        eyebrow="Candidates"
-        title="No candidates for this version"
-        message="Run Workbench with this benchmark version to materialize the first candidate."
+        eyebrow="Subjects"
+        title="No subjects for this version"
+        message="Run Workbench with this benchmark version to materialize the first subject."
         variant="hero"
         size="sm"
       />
@@ -40,11 +40,11 @@ export function CandidateList({
       {summaries.map((summary) => {
         const isSelected = selectedId === summary.id;
         const isActive = activeId === summary.id;
-        const candidateLabel = shortId(summary.id) ?? summary.id;
+        const subjectLabel = shortId(summary.id) ?? summary.id;
         const baseId = summary.baseId && summary.baseId !== summary.id ? summary.baseId : null;
         const metricSummary = formatMetricSummary(summary.metrics);
         const createdAtLabel = formatTimestamp(summary.createdAt);
-        const accessibilityLabel = formatCandidateSelectionLabel({
+        const accessibilityLabel = formatSubjectSelectionLabel({
           summary,
           active: isActive,
           details: [metricSummary, createdAtLabel],
@@ -53,7 +53,7 @@ export function CandidateList({
         return (
           <Button
             key={summary.id}
-            data-testid={`candidate-row-${summary.id}`}
+            data-testid={`subject-row-${summary.id}`}
             data-active={isActive || undefined}
             aria-selected={isSelected || undefined}
             aria-label={accessibilityLabel}
@@ -68,7 +68,7 @@ export function CandidateList({
                   <span className="text-[11px] font-medium uppercase text-muted-foreground">
                     {baseId ? `from ${shortId(baseId)}` : "genesis"}
                   </span>
-                  <p className="text-sm font-semibold text-foreground">{candidateLabel}</p>
+                  <p className="text-sm font-semibold text-foreground">{subjectLabel}</p>
                 </div>
                 <StatusBadge status={summary.status} active={isActive} />
               </div>

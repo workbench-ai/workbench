@@ -2,26 +2,26 @@ import { describe, expect, test } from "vitest";
 
 import {
   buildWorkbenchLocationHref,
-  createCandidateRoute,
-  createCandidatesRoute,
+  createSubjectRoute,
+  createSubjectsRoute,
   createRunRoute,
   createBenchmarkRoute,
   parseWorkbenchLocation,
 } from "../src/lib/routes";
 
 describe("workbench location routes", () => {
-  test("parses candidate routes under a hosted benchmark mount", () => {
+  test("parses subject routes under a hosted benchmark mount", () => {
     expect(
       parseWorkbenchLocation(
         {
-          pathname: "/benchmarks/alice/demo/candidate/cand_123/evaluation",
+          pathname: "/benchmarks/alice/demo/subject/subject_123/evaluation",
           search: "",
         },
         "/benchmarks/alice/demo",
       ),
     ).toEqual({
-      kind: "candidate",
-      candidateId: "cand_123",
+      kind: "subject",
+      subjectId: "subject_123",
       view: "evaluation",
       filePath: null,
       directoryPath: null,
@@ -36,14 +36,14 @@ describe("workbench location routes", () => {
     expect(
       parseWorkbenchLocation(
         {
-          pathname: "/candidate/cand_456/files",
+          pathname: "/subject/subject_456/files",
           search: "?file=src%2Fprompt.md&dir=src&view=raw",
         },
         "/",
       ),
     ).toEqual({
-      kind: "candidate",
-      candidateId: "cand_456",
+      kind: "subject",
+      subjectId: "subject_456",
       view: "files",
       filePath: "src/prompt.md",
       directoryPath: "src",
@@ -54,18 +54,18 @@ describe("workbench location routes", () => {
     });
   });
 
-  test("parses and serializes candidate manifest routes", () => {
+  test("parses and serializes subject manifest routes", () => {
     expect(
       parseWorkbenchLocation(
         {
-          pathname: "/benchmarks/alice/demo/candidate/cand_123/manifest",
+          pathname: "/benchmarks/alice/demo/subject/subject_123/manifest",
           search: "",
         },
         "/benchmarks/alice/demo",
       ),
     ).toEqual({
-      kind: "candidate",
-      candidateId: "cand_123",
+      kind: "subject",
+      subjectId: "subject_123",
       view: "manifest",
       filePath: null,
       directoryPath: null,
@@ -77,27 +77,27 @@ describe("workbench location routes", () => {
 
     expect(
       buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "cand_123",
+        createSubjectRoute({
+          subjectId: "subject_123",
           view: "manifest",
         }),
         "/benchmarks/alice/demo",
       ),
-    ).toBe("/benchmarks/alice/demo/candidate/cand_123/manifest");
+    ).toBe("/benchmarks/alice/demo/subject/subject_123/manifest");
   });
 
-  test("parses and serializes candidate task review deep links", () => {
+  test("parses and serializes subject task review deep links", () => {
     expect(
       parseWorkbenchLocation(
         {
-          pathname: "/benchmarks/alice/demo/candidate/cand_123/evaluation",
+          pathname: "/benchmarks/alice/demo/subject/subject_123/evaluation",
           search: "?task=task-001&tab=trace&run=run_123",
         },
         "/benchmarks/alice/demo",
       ),
     ).toEqual({
-      kind: "candidate",
-      candidateId: "cand_123",
+      kind: "subject",
+      subjectId: "subject_123",
       view: "evaluation",
       filePath: null,
       directoryPath: null,
@@ -109,8 +109,8 @@ describe("workbench location routes", () => {
 
     expect(
       buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "cand_123",
+        createSubjectRoute({
+          subjectId: "subject_123",
           view: "evaluation",
           reviewCaseId: "task-001",
           reviewTab: "trace",
@@ -118,7 +118,7 @@ describe("workbench location routes", () => {
         }),
         "/benchmarks/alice/demo",
       ),
-    ).toBe("/benchmarks/alice/demo/candidate/cand_123/evaluation?task=task-001&tab=trace&run=run_123");
+    ).toBe("/benchmarks/alice/demo/subject/subject_123/evaluation?task=task-001&tab=trace&run=run_123");
   });
 
   test("parses and serializes run routes under a hosted benchmark mount", () => {
@@ -143,28 +143,28 @@ describe("workbench location routes", () => {
     ).toBe("/benchmarks/alice/demo/runs/run_123");
   });
 
-  test("serializes candidate files folder directory state", () => {
+  test("serializes subject files folder directory state", () => {
     expect(
       buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "cand_files",
+        createSubjectRoute({
+          subjectId: "subject_files",
           view: "files",
           filePath: "src/prompt.md",
           directoryPath: "src",
         }),
         "/benchmarks/alice/demo",
       ),
-    ).toBe("/benchmarks/alice/demo/candidate/cand_files/files?file=src%2Fprompt.md&dir=src");
+    ).toBe("/benchmarks/alice/demo/subject/subject_files/files?file=src%2Fprompt.md&dir=src");
   });
 
   test("builds hrefs with the configured mount path", () => {
     expect(buildWorkbenchLocationHref(createBenchmarkRoute(), "/benchmarks/alice/demo")).toBe("/benchmarks/alice/demo");
     expect(
       buildWorkbenchLocationHref(
-        createCandidatesRoute(),
+        createSubjectsRoute(),
         "benchmarks/alice/demo",
       ),
-    ).toBe("/benchmarks/alice/demo/candidates");
+    ).toBe("/benchmarks/alice/demo/subjects");
   });
 
   test("preserves shell-owned query parameters while serializing workspace route state", () => {
@@ -178,8 +178,8 @@ describe("workbench location routes", () => {
 
     expect(
       buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "cand_files",
+        createSubjectRoute({
+          subjectId: "subject_files",
           view: "files",
           filePath: "src/prompt.md",
           directoryPath: "src",
@@ -188,6 +188,6 @@ describe("workbench location routes", () => {
         "/benchmarks/alice/demo",
         { source: "cli" },
       ),
-    ).toBe("/benchmarks/alice/demo/candidate/cand_files/files?source=cli&file=src%2Fprompt.md&dir=src&view=raw");
+    ).toBe("/benchmarks/alice/demo/subject/subject_files/files?source=cli&file=src%2Fprompt.md&dir=src&view=raw");
   });
 });

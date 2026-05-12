@@ -5,7 +5,7 @@ Use for Word documents, contracts, reports, memos, and redlines.
 ## Runtime Essentials
 
 - Include a DOCX parser such as `python-docx` or an equivalent when the subject runner or scorer needs to inspect text, headings, tables, headers, footers, comments, or styles.
-- Include LibreOffice/`soffice` when page rendering, PDF conversion, or Office compatibility checks matter.
+- Include LibreOffice/`soffice` when page rendering, PDF conversion, or Office fidelity checks matter.
 - Add `poppler-utils` only when converting rendered PDFs into page images.
 
 ## Essentials

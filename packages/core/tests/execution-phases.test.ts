@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
-  buildCandidateCasePhaseRefs,
+  buildSubjectCasePhaseRefs,
   buildWorkbenchTracePhases,
   finalizeWorkbenchExecutionTraceForJob,
   type HostedWorkbenchJob,
@@ -9,42 +9,32 @@ import {
 } from "../src/index.ts";
 
 describe("workbench execution phases", () => {
-  test("groups runner and grader jobs into phases and selects the latest run", () => {
+  test("groups trial jobs into one phase and selects the latest run", () => {
     const jobs = [
-      executionJob({ id: "old_run", runId: "run_old", purpose: "run-task", minute: 0 }),
-      executionJob({ id: "old_grade", runId: "run_old", purpose: "grade-task", minute: 1 }),
-      executionJob({ id: "new_run", runId: "run_new", purpose: "run-task", minute: 2 }),
-      executionJob({ id: "new_grade", runId: "run_new", purpose: "grade-task", minute: 3 }),
+      executionJob({ id: "old_trial", runId: "run_old", minute: 0 }),
+      executionJob({ id: "new_trial", runId: "run_new", minute: 2 }),
     ];
 
-    expect(buildCandidateCasePhaseRefs({
+    expect(buildSubjectCasePhaseRefs({
       jobs,
-      candidateId: "cand_123",
+      subjectId: "subject_123",
       caseId: "astera-labs",
       sampleIndex: 0,
     })).toMatchObject([
       {
         runId: "run_new",
-        phase: "run-task",
+        phase: "trial",
         role: "runner",
-        jobIds: ["new_run"],
-        sampleIndex: 0,
-      },
-      {
-        runId: "run_new",
-        phase: "grade-task",
-        role: "grader",
-        jobIds: ["new_grade"],
+        jobIds: ["new_trial"],
         sampleIndex: 0,
       },
     ]);
   });
 
-  test("merges trace jobs behind runner and grader phases", () => {
+  test("merges trace jobs behind the trial phase", () => {
     const jobs = [
-      executionJob({ id: "run_job", purpose: "run-task", minute: 0 }),
-      executionJob({ id: "grade_job_1", purpose: "grade-task", minute: 1 }),
-      executionJob({ id: "grade_job_2", purpose: "grade-task", minute: 2 }),
+      executionJob({ id: "trial_job_1", minute: 1 }),
+      executionJob({ id: "trial_job_2", minute: 2 }),
     ];
 
     const phases = buildWorkbenchTracePhases({
@@ -53,35 +43,35 @@ describe("workbench execution phases", () => {
       traceForJob: (job, role) => traceForJob(job.id, role),
     });
 
-    expect(phases.map((phase) => phase.phase)).toEqual(["run-task", "grade-task"]);
-    expect(phases.map((phase) => phase.role)).toEqual(["runner", "grader"]);
-    expect(phases[1]?.jobIds).toEqual(["grade_job_1", "grade_job_2"]);
-    expect(phases[1]?.trace.spans.map((span) => span.attributes.job_id)).toEqual([
-      "grade_job_1",
-      "grade_job_2",
+    expect(phases.map((phase) => phase.phase)).toEqual(["trial"]);
+    expect(phases.map((phase) => phase.role)).toEqual(["runner"]);
+    expect(phases[0]?.jobIds).toEqual(["trial_job_1", "trial_job_2"]);
+    expect(phases[0]?.trace.spans.map((span) => span.attributes.job_id)).toEqual([
+      "trial_job_1",
+      "trial_job_2",
     ]);
-    expect(phases[1]?.trace.spans.map((span) => span.stage_id)).toEqual([
-      "grade-task",
-      "grade-task",
+    expect(phases[0]?.trace.spans.map((span) => span.stage_id)).toEqual([
+      "trial",
+      "trial",
     ]);
-    expect(phases[1]?.trace.spans.map((span) => span.stage_run_index)).toEqual([
+    expect(phases[0]?.trace.spans.map((span) => span.stage_run_index)).toEqual([
       null,
       null,
     ]);
   });
 
   test("finalizes terminal job traces from durable job status", () => {
-    const job = executionJob({ id: "grade_job", purpose: "grade-task", minute: 1 });
+    const job = executionJob({ id: "trial_job", minute: 1 });
     const trace = finalizeWorkbenchExecutionTraceForJob({
       job,
-      stageId: "grade-task",
+      stageId: "trial",
       trace: {
-        trace_id: "hosted-grade",
+        trace_id: "hosted-score",
         spans: [{
           id: "tool",
           parent_id: null,
           attempt_number: 1,
-          stage_id: "raw-grader",
+          stage_id: "raw-scorer",
           stage_run_index: 3,
           kind: "tool_call",
           title: "Tool call: shell",
@@ -94,7 +84,7 @@ describe("workbench execution phases", () => {
           id: "event",
           span_id: "tool",
           attempt_number: 1,
-          stage_id: "raw-grader",
+          stage_id: "raw-scorer",
           stage_run_index: 3,
           kind: "status",
           at: "2026-05-05T00:01:00.000Z",
@@ -106,18 +96,18 @@ describe("workbench execution phases", () => {
     });
 
     expect(trace.spans[0]).toMatchObject({
-      stage_id: "grade-task",
+      stage_id: "trial",
       stage_run_index: null,
       status: "completed",
       ended_at: "2026-05-05T00:01:00.000Z",
     });
     expect(trace.events[0]).toMatchObject({
-      stage_id: "grade-task",
+      stage_id: "trial",
       stage_run_index: null,
     });
     expect(trace.summaries).toHaveLength(1);
     expect(trace.summaries[0]).toMatchObject({
-      stage_id: "grade-task",
+      stage_id: "trial",
       stage_run_index: null,
       status: "completed",
       duration_ms: 0,
@@ -129,7 +119,6 @@ describe("workbench execution phases", () => {
 function executionJob(args: {
   id: string;
   runId?: string;
-  purpose: "run-task" | "grade-task";
   minute: number;
 }): HostedWorkbenchJob {
   const timestamp = `2026-05-05T00:${String(args.minute).padStart(2, "0")}:00.000Z`;
@@ -137,7 +126,7 @@ function executionJob(args: {
     id: args.id,
     projectId: "wb_test",
     runId: args.runId ?? "run_current",
-    candidateId: "cand_123",
+    subjectId: "subject_123",
     kind: "execute",
     status: "succeeded",
     attempt: 1,
@@ -148,9 +137,9 @@ function executionJob(args: {
     input: {
       execution: {
         id: `exec_${args.id}`,
-        purpose: args.purpose,
+        purpose: "trial",
         metadata: {
-          candidateId: "cand_123",
+          subjectId: "subject_123",
           caseId: "astera-labs",
           sampleIndex: 0,
         },
@@ -161,7 +150,7 @@ function executionJob(args: {
 
 function traceForJob(
   jobId: string,
-  role: "optimizer" | "runner" | "grader",
+  role: "optimizer" | "runner" | "scorer",
 ): WorkbenchExecutionTrace {
   return {
     trace_id: `trace_${jobId}`,

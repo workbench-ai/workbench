@@ -197,8 +197,8 @@ function runtimeInputsFromInputBundle(bundle) {
     }
   }
   return {
-    baseFiles: filesByName.get("candidate") || [],
-    caseFiles: filesByName.get("task") || [],
+    baseFiles: filesByName.get("subject") || [],
+    taskSourceFiles: filesByName.get("task") || [],
     runnerOutputFiles: filesByName.get("runner-output") || [],
     traceFiles: filesByName.get("traces") || [],
   };
@@ -246,7 +246,7 @@ function isJson(value) {
 
 function collectExecutionMismatchIssues(jobExecution, execution) {
   const issues = [];
-  for (const key of ["id", "projectId", "runId", "candidateId", "purpose"]) {
+  for (const key of ["id", "projectId", "runId", "subjectId", "purpose"]) {
     if ((jobExecution[key] ?? null) !== (execution[key] ?? null)) {
       issues.push(`job execution ${key} does not match request execution ${key}.`);
     }

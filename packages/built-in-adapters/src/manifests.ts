@@ -1,101 +1,118 @@
 import type {
   WorkbenchAdapterManifest,
 } from "@workbench-ai/workbench-protocol";
+import {
+  adapterSlot,
+  defineAdapter,
+  defineOptimizer,
+  defineRunner,
+  defineScorer,
+  defineTaskSource,
+  workbenchAdapterManifestFromDefinition,
+} from "@workbench-ai/workbench-protocol";
 
-export type WorkbenchBuiltInAdapterId = "codex" | "claude" | "pi" | "command" | "rubric" | "tests" | "harbor";
+export type WorkbenchBuiltInAdapterId =
+  | "codex"
+  | "claude"
+  | "pi"
+  | "command"
+  | "rubric"
+  | "tests"
+  | "path"
+  | "harbor";
 
-const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAdapterManifest> = {
-  codex: {
-    id: "codex",
-    protocol: "workbench.adapter.v1",
-    capabilities: ["runner", "optimizer"],
-    setup: [
-      builtInAdapterCommandSetup("codex"),
-      "npm install --global @openai/codex@0.125.0",
-    ],
-    command: adapterCommandName("codex"),
-    auth: {
-      methods: {
-        oauth: { files: [{ path: ".codex/auth.json" }] },
-        "api-key": { env: [{ name: "OPENAI_API_KEY" }] },
-      },
-    },
-  },
-  claude: {
-    id: "claude",
-    protocol: "workbench.adapter.v1",
-    capabilities: ["runner", "optimizer"],
-    setup: [
-      builtInAdapterCommandSetup("claude"),
-      "npm install --global @anthropic-ai/claude-code@2.1.119",
-    ],
-    command: adapterCommandName("claude"),
-    auth: {
-      methods: {
-        oauth: {
-          files: [
-            { path: ".claude.json" },
-            { path: ".claude/oauth-token", required: false },
-            { path: ".claude/.credentials.json", required: false },
-          ],
-        },
-        "api-key": { env: [{ name: "ANTHROPIC_API_KEY" }] },
-        bedrock: {
-          env: [
-            { name: "CLAUDE_CODE_USE_BEDROCK" },
-            { name: "AWS_ACCESS_KEY_ID", required: false },
-            { name: "AWS_SECRET_ACCESS_KEY", required: false },
-            { name: "AWS_SESSION_TOKEN", required: false },
-            { name: "AWS_REGION" },
-            { name: "AWS_DEFAULT_REGION", required: false },
-            { name: "AWS_BEARER_TOKEN_BEDROCK", required: false },
-            { name: "ANTHROPIC_MODEL", required: false },
-            { name: "ANTHROPIC_SMALL_FAST_MODEL", required: false },
-          ],
+const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAdapterManifest> = Object.fromEntries(
+  Object.entries({
+    codex: defineAdapter({
+      id: "codex",
+      run: defineRunner(),
+      improve: defineOptimizer(),
+      setup: [
+        builtInAdapterCommandSetup("codex"),
+        "npm install --global @openai/codex@0.125.0",
+      ],
+      auth: {
+        methods: {
+          oauth: { files: [{ path: ".codex/auth.json" }] },
+          "api-key": { env: [{ name: "OPENAI_API_KEY" }] },
         },
       },
-    },
-  },
-  pi: {
-    id: "pi",
-    protocol: "workbench.adapter.v1",
-    capabilities: ["runner", "optimizer"],
-    setup: [
-      builtInAdapterCommandSetup("pi"),
-      "npm install --global @mariozechner/pi-coding-agent@0.70.2",
-    ],
-    command: adapterCommandName("pi"),
-  },
-  command: {
-    id: "command",
-    protocol: "workbench.adapter.v1",
-    capabilities: ["runner", "scorer", "optimizer"],
-    setup: [builtInAdapterCommandSetup("command")],
-    command: adapterCommandName("command"),
-  },
-  rubric: {
-    id: "rubric",
-    protocol: "workbench.adapter.v1",
-    capabilities: ["scorer"],
-    setup: [builtInAdapterCommandSetup("rubric")],
-    command: adapterCommandName("rubric"),
-    refs: ["/judge"],
-  },
-  tests: {
-    id: "tests",
-    protocol: "workbench.adapter.v1",
-    capabilities: ["scorer"],
-    setup: [builtInAdapterCommandSetup("tests")],
-    command: adapterCommandName("tests"),
-  },
-  harbor: {
-    id: "harbor",
-    protocol: "workbench.adapter.v1",
-    capabilities: ["task-source"],
-    setup: [],
-    command: adapterCommandName("harbor"),
-  },
-};
+    }),
+    claude: defineAdapter({
+      id: "claude",
+      run: defineRunner(),
+      improve: defineOptimizer(),
+      setup: [
+        builtInAdapterCommandSetup("claude"),
+        "npm install --global @anthropic-ai/claude-code@2.1.119",
+      ],
+      auth: {
+        methods: {
+          oauth: {
+            files: [
+              { path: ".claude.json" },
+              { path: ".claude/oauth-token", required: false },
+              { path: ".claude/.credentials.json", required: false },
+            ],
+          },
+          "api-key": { env: [{ name: "ANTHROPIC_API_KEY" }] },
+          bedrock: {
+            env: [
+              { name: "CLAUDE_CODE_USE_BEDROCK" },
+              { name: "AWS_ACCESS_KEY_ID", required: false },
+              { name: "AWS_SECRET_ACCESS_KEY", required: false },
+              { name: "AWS_SESSION_TOKEN", required: false },
+              { name: "AWS_REGION" },
+              { name: "AWS_DEFAULT_REGION", required: false },
+              { name: "AWS_BEARER_TOKEN_BEDROCK", required: false },
+              { name: "ANTHROPIC_MODEL", required: false },
+              { name: "ANTHROPIC_SMALL_FAST_MODEL", required: false },
+            ],
+          },
+        },
+      },
+    }),
+    pi: defineAdapter({
+      id: "pi",
+      run: defineRunner(),
+      improve: defineOptimizer(),
+      setup: [
+        builtInAdapterCommandSetup("pi"),
+        "npm install --global @mariozechner/pi-coding-agent@0.70.2",
+      ],
+    }),
+    command: defineAdapter({
+      id: "command",
+      run: defineRunner(),
+      score: defineScorer(),
+      improve: defineOptimizer(),
+      setup: [builtInAdapterCommandSetup("command")],
+    }),
+    rubric: defineAdapter({
+      id: "rubric",
+      score: defineScorer(),
+      setup: [builtInAdapterCommandSetup("rubric")],
+      slots: {
+        judge: adapterSlot("/judge", "subject.run"),
+      },
+    }),
+    tests: defineAdapter({
+      id: "tests",
+      score: defineScorer(),
+      setup: [builtInAdapterCommandSetup("tests")],
+    }),
+    path: defineAdapter({
+      id: "path",
+      tasks: defineTaskSource(),
+      setup: [],
+    }),
+    harbor: defineAdapter({
+      id: "harbor",
+      tasks: defineTaskSource(),
+      setup: [],
+    }),
+  }).map(([id, definition]) => [id, workbenchAdapterManifestFromDefinition(definition)])
+) as Record<WorkbenchBuiltInAdapterId, WorkbenchAdapterManifest>;
 
 export function builtinWorkbenchAdapterManifest(id: string): WorkbenchAdapterManifest | null {
   return isWorkbenchBuiltInAdapterId(id)
@@ -144,9 +161,9 @@ function builtInAdapterCommandSetup(adapterId: WorkbenchBuiltInAdapterId): strin
 function cloneManifest(manifest: WorkbenchAdapterManifest): WorkbenchAdapterManifest {
   return {
     ...manifest,
-    ...(manifest.capabilities ? { capabilities: [...manifest.capabilities] } : {}),
+    operations: JSON.parse(JSON.stringify(manifest.operations)) as WorkbenchAdapterManifest["operations"],
     setup: [...manifest.setup],
     ...(manifest.auth ? { auth: JSON.parse(JSON.stringify(manifest.auth)) as WorkbenchAdapterManifest["auth"] } : {}),
-    ...(manifest.refs ? { refs: [...manifest.refs] } : {}),
+    ...(manifest.slots ? { slots: JSON.parse(JSON.stringify(manifest.slots)) as WorkbenchAdapterManifest["slots"] } : {}),
   };
 }

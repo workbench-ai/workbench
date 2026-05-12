@@ -32,12 +32,12 @@ describe("workbench contract", () => {
     });
   });
 
-  test("uses fingerprint-only candidate comparability and typed execution phases", () => {
+  test("uses fingerprint-only subject comparability and typed execution phases", () => {
     const execution = {
       id: "exec_1",
       projectId: "wb_1",
       runId: "run_1",
-      purpose: "run-task",
+      purpose: "trial",
       adapter: { use: "command", with: {} },
       sandbox: { kind: "oci", ref: "dockerfile://environment/Dockerfile" },
       inputs: [],
@@ -50,6 +50,6 @@ describe("workbench contract", () => {
       metadata: {},
     } satisfies WorkbenchExecutionSpec;
 
-    expect(execution.purpose).toBe("run-task");
+    expect(execution.purpose).toBe("trial");
   });
 });

@@ -1,6 +1,6 @@
 # From File Outputs
 
-Use this path when tasks, outputs, examples, or goldens are files such as `.docx`, `.xlsx`, `.pdf`, or `.pptx`. The subject is still only the mutable thing Workbench improves, such as a skill, pipeline, prompt, script, template, or workflow. The benchmark owns tasks, environment, and scoring; the subject manifest owns how to run the subject.
+Use this path when tasks, outputs, examples, or goldens are files such as `.docx`, `.xlsx`, `.pdf`, or `.pptx`. The subject is still only the mutable thing Workbench improves, such as a skill, pipeline, prompt, script, template, or workflow. The benchmark owns optional task-source selection, environment, and scoring; the subject manifest owns how to run the subject.
 
 ## Authoring Boundary
 
@@ -13,7 +13,7 @@ Keep the Workbench boundary simple:
 - Put improve settings in optimizer YAML; `workbench improve` uses the current subject by default.
 - Have the subject write generated files and any useful diagnostics into the trial workspace.
 - Do not write a custom scorer just because a task produces binary files.
-- Use `score: use: rubric` for judgment-heavy quality; use `score: use: tests` or `score: use: command` only for deterministic checks or an existing scorer.
+- Use `score: use: rubric` for judgment-heavy quality; use `score: use: tests` only for deterministic checks or an existing scorer.
 
 ## Task Layout
 
@@ -39,7 +39,7 @@ tasks/
       test.sh
 ```
 
-`task.yaml` contains the task instruction and is not staged as a source file. Subjects see task `files/` in the trial workspace. Scorers see the final mutated workspace plus `/tests`.
+`task.yaml` contains `version: 2`, task text, and optional explicit `files`, `tests`, and `solution` path objects for the built-in `path` task-source adapter. The adapter parses this native source into `TaskBundle` data before core plans trials. `task.yaml` is not staged as a source file. Subjects see task files from `files.path` in the trial workspace. Scorers see the final mutated workspace plus verifier files mounted at `/tests`.
 
 ## Subject Layout
 
@@ -51,6 +51,17 @@ subjects/
     subject.yaml
     files/
       SKILL.md
+```
+
+`subject.yaml` declares the sibling files directory explicitly:
+
+```yaml
+version: 2
+name: claude-file-workflow
+files:
+  path: files
+run:
+  use: claude
 ```
 
 If Workbench should improve a source file, include that file in `optimizer.edits`. If Workbench should improve a prompt, skill, pipeline, or generation script, keep examples and goldens in `tasks/` and include only the mutable subject-relative source paths under `optimizer.edits`.

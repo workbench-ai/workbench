@@ -4,7 +4,7 @@ import path from "node:path";
 import {
   finalizeWorkbenchExecutionTraceForJob,
   selectExecutionOutputFilesForInspection,
-  type CandidateRecord,
+  type SubjectRecord,
   type EvaluationResultRecord,
   type HostedWorkbenchJob,
   type RunSummary,
@@ -21,8 +21,8 @@ type WorkbenchTraceUsageSummary = NonNullable<WorkbenchTraceSummary["usage"]>;
 
 export interface LocalArchiveSnapshot {
   activeId: string | null;
-  candidates: CandidateRecord[];
-  candidateFiles: Record<string, SurfaceSnapshotFile[]>;
+  subjects: SubjectRecord[];
+  subjectFiles: Record<string, SurfaceSnapshotFile[]>;
   evaluations: EvaluationResultRecord[];
   runs: RunSummary[];
   events: RuntimeEvent[];
@@ -40,21 +40,21 @@ export function localRuntimeDir(workspace: string): string {
 
 export async function loadLocalArchive(workspace: string): Promise<LocalArchiveSnapshot> {
   const root = localRuntimeDir(workspace);
-  const [state, candidates, evaluations, runs, events] = await Promise.all([
+  const [state, subjects, evaluations, runs, events] = await Promise.all([
     readJson<LocalArchiveStateFile>(path.join(root, "state.json"), {}),
-    readRecords<CandidateRecord>(path.join(root, "candidates"), "record.json"),
+    readRecords<SubjectRecord>(path.join(root, "subjects"), "record.json"),
     readFlatRecords<EvaluationResultRecord>(path.join(root, "evaluations")),
     readFlatRecords<RunSummary>(path.join(root, "runs")),
     readJson<RuntimeEvent[]>(path.join(root, "events.json"), []),
   ]);
-  const candidateFiles: Record<string, SurfaceSnapshotFile[]> = {};
-  await Promise.all(candidates.map(async (candidate) => {
-    candidateFiles[candidate.id] = await readSurfaceFiles(path.join(root, "candidates", candidate.id, "files"));
+  const subjectFiles: Record<string, SurfaceSnapshotFile[]> = {};
+  await Promise.all(subjects.map(async (subject) => {
+    subjectFiles[subject.id] = await readSurfaceFiles(path.join(root, "subjects", subject.id, "files"));
   }));
   const snapshot: LocalArchiveSnapshot = {
     activeId: typeof state.activeId === "string" ? state.activeId : null,
-    candidates: candidates.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id)),
-    candidateFiles,
+    subjects: subjects.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id)),
+    subjectFiles,
     evaluations: evaluations.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)),
     runs: runs.sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id)),
     events: events.sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id)),
@@ -70,19 +70,19 @@ export async function saveLocalArchive(
   const root = localRuntimeDir(workspace);
   await fs.mkdir(root, { recursive: true });
   await writeJson(path.join(root, "state.json"), { activeId: snapshot.activeId });
-  await fs.rm(path.join(root, "candidates"), { force: true, recursive: true });
+  await fs.rm(path.join(root, "subjects"), { force: true, recursive: true });
   await fs.rm(path.join(root, "evaluations"), { force: true, recursive: true });
   await fs.rm(path.join(root, "runs"), { force: true, recursive: true });
   await Promise.all([
-    fs.mkdir(path.join(root, "candidates"), { recursive: true }),
+    fs.mkdir(path.join(root, "subjects"), { recursive: true }),
     fs.mkdir(path.join(root, "evaluations"), { recursive: true }),
     fs.mkdir(path.join(root, "runs"), { recursive: true }),
   ]);
-  for (const candidate of snapshot.candidates) {
-    const candidateRoot = path.join(root, "candidates", candidate.id);
-    await fs.mkdir(candidateRoot, { recursive: true });
-    await writeJson(path.join(candidateRoot, "record.json"), candidate);
-    await writeSurfaceFiles(path.join(candidateRoot, "files"), snapshot.candidateFiles[candidate.id] ?? []);
+  for (const subject of snapshot.subjects) {
+    const subjectRoot = path.join(root, "subjects", subject.id);
+    await fs.mkdir(subjectRoot, { recursive: true });
+    await writeJson(path.join(subjectRoot, "record.json"), subject);
+    await writeSurfaceFiles(path.join(subjectRoot, "files"), snapshot.subjectFiles[subject.id] ?? []);
   }
   for (const evaluation of snapshot.evaluations) {
     await writeJson(path.join(root, "evaluations", `${evaluation.id}.json`), evaluation);
@@ -134,20 +134,20 @@ export async function readLocalExecutionFiles(
   );
 }
 
-export function upsertLocalCandidate(
+export function upsertLocalSubject(
   snapshot: LocalArchiveSnapshot,
-  candidate: CandidateRecord,
+  subject: SubjectRecord,
   files: readonly SurfaceSnapshotFile[],
 ): LocalArchiveSnapshot {
   return {
     ...snapshot,
-    candidates: [
-      ...snapshot.candidates.filter((entry) => entry.id !== candidate.id),
-      candidate,
+    subjects: [
+      ...snapshot.subjects.filter((entry) => entry.id !== subject.id),
+      subject,
     ].sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id)),
-    candidateFiles: {
-      ...snapshot.candidateFiles,
-      [candidate.id]: files.map((file) => ({ ...file })),
+    subjectFiles: {
+      ...snapshot.subjectFiles,
+      [subject.id]: files.map((file) => ({ ...file })),
     },
   };
 }
@@ -190,54 +190,54 @@ export function setLocalActive(snapshot: LocalArchiveSnapshot, activeId: string 
   };
 }
 
-export function readLocalCandidate(snapshot: LocalArchiveSnapshot, candidateId: string): CandidateRecord {
-  const candidate = snapshot.candidates.find((entry) => entry.id === candidateId);
-  if (!candidate) {
-    throw new Error(`Candidate not found: ${candidateId}`);
+export function readLocalSubject(snapshot: LocalArchiveSnapshot, subjectId: string): SubjectRecord {
+  const subject = snapshot.subjects.find((entry) => entry.id === subjectId);
+  if (!subject) {
+    throw new Error(`Subject not found: ${subjectId}`);
   }
-  return candidate;
+  return subject;
 }
 
-export function readLocalCandidateFiles(snapshot: LocalArchiveSnapshot, candidateId: string): SurfaceSnapshotFile[] {
-  readLocalCandidate(snapshot, candidateId);
-  return (snapshot.candidateFiles[candidateId] ?? []).map((file) => ({ ...file }));
+export function readLocalSubjectFiles(snapshot: LocalArchiveSnapshot, subjectId: string): SurfaceSnapshotFile[] {
+  readLocalSubject(snapshot, subjectId);
+  return (snapshot.subjectFiles[subjectId] ?? []).map((file) => ({ ...file }));
 }
 
 function validateLocalArchiveSnapshot(snapshot: LocalArchiveSnapshot): void {
-  const candidateIds = new Set(snapshot.candidates.map((candidate) => candidate.id));
-  if (snapshot.activeId && !candidateIds.has(snapshot.activeId)) {
-    throw new Error(`Active candidate not found: ${snapshot.activeId}`);
+  const subjectIds = new Set(snapshot.subjects.map((subject) => subject.id));
+  if (snapshot.activeId && !subjectIds.has(snapshot.activeId)) {
+    throw new Error(`Active subject not found: ${snapshot.activeId}`);
   }
-  for (const candidate of snapshot.candidates) {
-    requireArchiveString(candidate.id, "candidate.id");
-    requireArchiveString(candidate.benchmarkFingerprint, `candidate ${candidate.id}.benchmarkFingerprint`);
-    requireArchiveString(candidate.candidateFingerprint, `candidate ${candidate.id}.candidateFingerprint`);
-    requireArchiveString(candidate.createdAt, `candidate ${candidate.id}.createdAt`);
-    if (!Array.isArray(candidate.referenceIds)) {
-      throw new Error(`candidate ${candidate.id}.referenceIds must be an array.`);
+  for (const subject of snapshot.subjects) {
+    requireArchiveString(subject.id, "subject.id");
+    requireArchiveString(subject.benchmarkFingerprint, `subject ${subject.id}.benchmarkFingerprint`);
+    requireArchiveString(subject.subjectFingerprint, `subject ${subject.id}.subjectFingerprint`);
+    requireArchiveString(subject.createdAt, `subject ${subject.id}.createdAt`);
+    if (!Array.isArray(subject.referenceIds)) {
+      throw new Error(`subject ${subject.id}.referenceIds must be an array.`);
     }
-    if (!Array.isArray(candidate.fileChanges)) {
-      throw new Error(`candidate ${candidate.id}.fileChanges must be an array.`);
+    if (!Array.isArray(subject.fileChanges)) {
+      throw new Error(`subject ${subject.id}.fileChanges must be an array.`);
     }
-    if (candidate.baseId && !candidateIds.has(candidate.baseId)) {
-      throw new Error(`candidate ${candidate.id}.baseId not found: ${candidate.baseId}`);
+    if (subject.baseId && !subjectIds.has(subject.baseId)) {
+      throw new Error(`subject ${subject.id}.baseId not found: ${subject.baseId}`);
     }
   }
   for (const evaluation of snapshot.evaluations) {
     requireArchiveString(evaluation.id, "evaluation.id");
     requireArchiveString(evaluation.runId, `evaluation ${evaluation.id}.runId`);
     requireArchiveString(evaluation.benchmarkFingerprint, `evaluation ${evaluation.id}.benchmarkFingerprint`);
-    requireArchiveString(evaluation.candidateFingerprint, `evaluation ${evaluation.id}.candidateFingerprint`);
-    requireArchiveString(evaluation.candidateId, `evaluation ${evaluation.id}.candidateId`);
-    const candidate = snapshot.candidates.find((entry) => entry.id === evaluation.candidateId);
-    if (!candidate) {
-      throw new Error(`evaluation ${evaluation.id}.candidateId not found: ${evaluation.candidateId}`);
+    requireArchiveString(evaluation.subjectFingerprint, `evaluation ${evaluation.id}.subjectFingerprint`);
+    requireArchiveString(evaluation.subjectId, `evaluation ${evaluation.id}.subjectId`);
+    const subject = snapshot.subjects.find((entry) => entry.id === evaluation.subjectId);
+    if (!subject) {
+      throw new Error(`evaluation ${evaluation.id}.subjectId not found: ${evaluation.subjectId}`);
     }
-    if (candidate.benchmarkFingerprint !== evaluation.benchmarkFingerprint) {
-      throw new Error(`evaluation ${evaluation.id}.benchmarkFingerprint does not match candidate ${candidate.id}.`);
+    if (subject.benchmarkFingerprint !== evaluation.benchmarkFingerprint) {
+      throw new Error(`evaluation ${evaluation.id}.benchmarkFingerprint does not match subject ${subject.id}.`);
     }
-    if (candidate.candidateFingerprint !== evaluation.candidateFingerprint) {
-      throw new Error(`evaluation ${evaluation.id}.candidateFingerprint does not match candidate ${candidate.id}.`);
+    if (subject.subjectFingerprint !== evaluation.subjectFingerprint) {
+      throw new Error(`evaluation ${evaluation.id}.subjectFingerprint does not match subject ${subject.id}.`);
     }
   }
   for (const run of snapshot.runs) {
@@ -287,8 +287,8 @@ function buildLocalJobTrace(
   job: HostedWorkbenchJob,
   outputFiles: readonly SurfaceSnapshotFile[],
 ): WorkbenchExecutionTrace {
-  const purpose = readExecutionPurpose(job);
-  const role = purpose === "grade-task" ? "grader" : purpose === "run-task" ? "runner" : "optimizer";
+	  const purpose = readExecutionPurpose(job);
+	  const role = purpose === "improve" ? "optimizer" : "runner";
   const stageId = purpose ?? "execution";
   const realTrace = readLastExecutionTrace(outputFiles);
   if (realTrace) {
@@ -379,7 +379,7 @@ function buildLocalJobTrace(
     attempt_number: Math.max(1, job.attempt || 1),
     stage_id: stageId,
     stage_run_index: null,
-    kind: purpose === "run-task" || purpose === "grade-task" || purpose === "improve" ? "turn" : "stage",
+	    kind: purpose === "trial" || purpose === "improve" ? "turn" : "stage",
     title: `${capitalize(role)} job ${job.id}`,
     status,
     started_at: startedAt,
@@ -575,10 +575,10 @@ function localJobOutputMessage(
   const purpose = readExecutionPurpose(job);
   const scorecard = jsonRecord(output.scorecard);
   const score = numberValue(scorecard.score);
-  if (purpose === "grade-task") {
-    const summary = stringValue(scorecard.summary) ?? stringValue(jsonRecord(scorecard.feedback).summary);
-    return `Rubric grader produced score${score !== null ? ` ${score}` : ""}.${summary ? ` ${summary}` : ""}`.trim();
-  }
+	  if (purpose === "trial" && score !== null) {
+	    const summary = stringValue(scorecard.summary) ?? stringValue(jsonRecord(scorecard.feedback).summary);
+	    return `Trial produced score ${score}.${summary ? ` ${summary}` : ""}`.trim();
+	  }
   const summary = stringValue(output.summary) ?? stringValue(agentResult.finalOutput);
   return summary ? truncateTraceMessage(summary) : null;
 }
@@ -643,8 +643,8 @@ function traceUsageSummary(value: unknown): WorkbenchTraceUsageSummary | null {
       ? jsonRecord(record.optimizer)
       : Object.keys(jsonRecord(record.runner)).length > 0
         ? jsonRecord(record.runner)
-        : Object.keys(jsonRecord(record.grader)).length > 0
-          ? jsonRecord(record.grader)
+        : Object.keys(jsonRecord(record.scorer)).length > 0
+          ? jsonRecord(record.scorer)
           : record;
   if (Object.keys(usage).length === 0) {
     return null;
@@ -763,12 +763,12 @@ function localRecordName(value: string): string {
   return value;
 }
 
-export async function materializeCandidateRoot(
+export async function materializeSubjectRoot(
   workspace: string,
-  candidateRoot: string,
+  subjectRoot: string,
   files: readonly SurfaceSnapshotFile[],
 ): Promise<string[]> {
-  const root = path.join(workspace, normalizeRelativePath(candidateRoot));
+  const root = path.join(workspace, normalizeRelativePath(subjectRoot));
   const before = new Set((await readSurfaceFiles(root)).map((file) => file.path));
   await fs.rm(root, { force: true, recursive: true });
   await writeSurfaceFiles(root, files);
