@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench-core",
-  "version": "0.0.44",
+  "version": "0.0.47",
   "type": "module",
   "repository": {
     "type": "git",
@@ -26,7 +26,6 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@workbench-ai/flow-harness-sdk": "workspace:*",
     "@workbench-ai/workbench-contract": "workspace:*",
     "@workbench-ai/workbench-protocol": "workspace:*",
     "yaml": "^2.8.2"

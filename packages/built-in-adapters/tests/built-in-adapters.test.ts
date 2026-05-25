@@ -1,8 +1,9 @@
 import { promises as fs } from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type {
   WorkbenchAgentTurnRequest,
 } from "../src/agent-turn.ts";
@@ -20,28 +21,34 @@ import {
   readWorkbenchAdapterOperationResult,
 } from "@workbench-ai/workbench-protocol";
 
-describe("built-in Workbench adapters", () => {
-  test("prefers built adapter commands before monorepo TypeScript source fallbacks", () => {
-    const manifest = builtinWorkbenchAdapterManifest("codex");
-    const setup = manifest?.setup.join("\n") ?? "";
-    const packageRunnerIndex = setup.indexOf("/workbench-runtime/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/codex.js");
-    const monorepoRunnerIndex = setup.indexOf("/workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/codex.ts");
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
-    expect(packageRunnerIndex).toBeGreaterThanOrEqual(0);
-    expect(monorepoRunnerIndex).toBeGreaterThan(packageRunnerIndex);
-    expect(setup).toContain("node --experimental-strip-types /workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/codex.ts");
+describe("built-in Workbench adapters", () => {
+  test("publishes manifest-backed built-in adapters without command shim setup", () => {
+    const manifest = builtinWorkbenchAdapterManifest("codex");
+    const workbench = builtinWorkbenchAdapterManifest("workbench");
+
+    expect(manifest?.setup.join("\n")).not.toContain("/usr/local/bin/workbench-adapter-codex");
+    expect(manifest?.operations["subject.run"]?.command).toBe("workbench-adapter-codex");
+    expect(workbench?.setup).toEqual([]);
+    expect(workbench?.operations).toMatchObject({
+      "engine.resolve": { command: "workbench-adapter-workbench" },
+      "engine.run": { command: "workbench-adapter-workbench" },
+    });
   });
 
   test("executes Codex-shaped agent adapters through an operation request", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-agent-"));
     await fs.mkdir(path.join(root, "input", "subject"), { recursive: true });
-    await fs.mkdir(path.join(root, "input", "task"), { recursive: true });
+    await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
     await fs.writeFile(path.join(root, "input", "subject", "SKILL.md"), "Do the task.\n");
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
-      protocol: "workbench.adapter.v2",
+      protocol: "workbench.adapter.v3",
       id: "exec_agent_run",
       jobId: "job_agent_run",
       operation: "subject.run",
@@ -82,13 +89,13 @@ describe("built-in Workbench adapters", () => {
         optimizer: {
           edits: ["SKILL.md"],
         },
-        trial: {
-          trialIndex: 0,
+        attempt: {
+          attemptIndex: 0,
           sampleIndex: 0,
           caseId: "task-001",
         },
-        task: {
-          text: "Produce a concise result.",
+        case: {
+          prompt: "Produce a concise result.",
         },
       },
       paths: adapterCommandPaths(root),
@@ -143,90 +150,57 @@ describe("built-in Workbench adapters", () => {
     expect(seenRequests[0]!.prompt).toContain("Write one durable output file.");
     await expect(fs.readFile(path.join(root, "output", "answer.md"), "utf8"))
       .resolves.toBe("agent output\n");
-    await expect(fs.readFile(path.join(root, "output", "runner-summary.md"), "utf8"))
+    await expect(fs.readFile(path.join(root, "output", "subject-summary.md"), "utf8"))
       .resolves.toBe("agent output");
     const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "subject.run");
     expect(result.usage.runner.provider).toBe("openai/codex");
   });
 
-  test("executes rubric through an operation request", async () => {
+  test("executes rubric criteria as bounded parallel judge turns and aggregates weighted metrics", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-rubric-"));
-    await fs.mkdir(path.join(root, "input", "task"), { recursive: true });
-    await fs.mkdir(path.join(root, "input", "runner-output"), { recursive: true });
-    await fs.mkdir(path.join(root, "output"), { recursive: true });
-    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
-    await fs.writeFile(path.join(root, "input", "runner-output", "answer.md"), "runner output\n");
-    const requestPath = path.join(root, ".workbench", "request.json");
-    await fs.writeFile(requestPath, `${JSON.stringify({
-      protocol: "workbench.adapter.v2",
-      id: "exec_rubric_grade",
-      jobId: "job_rubric_grade",
-      operation: "trial.score",
-      invocation: {
-        use: "rubric",
-        with: {
-          instructions: "Score only the runner output.",
-          judge: {
-            use: "codex",
-            with: {
-              model: "gpt-5.4-mini",
-            },
-          },
-          criteria: [{
-            id: "quality",
-            description: "The output is complete.",
-            weight: 1,
-          }],
-        },
-      },
-      auth: {
-        self: {},
-        adapters: {
-          codex: {
-            default: {
-              method: "api-key",
-              profile: "default",
-              env: { OPENAI_API_KEY: "materialized" },
-            },
-          },
-        },
-      },
-      context: {
-        benchmark: {
-          name: "rubric-smoke",
-          description: "Smoke test rubric adapter command.",
-        },
-        subject: {
-          id: "subject_123",
-        },
-        trial: {
-          trialIndex: 0,
-          sampleIndex: 0,
-          caseId: "task-001",
-        },
-        task: {
-          text: "Score the runner output.",
-        },
-      },
-      paths: adapterCommandPaths(root),
-    }, null, 2)}\n`);
+    const criteria = [{
+      id: "accuracy",
+      description: "Unique accuracy criterion: all requested facts are correct.",
+      weight: 2,
+      score: 0.25,
+    }, {
+      id: "completeness",
+      description: "Unique completeness criterion: every requested item is present.",
+      weight: 1,
+      score: 1,
+    }, {
+      id: "style",
+      description: "Unique style criterion: the answer is concise and readable.",
+      weight: 1,
+      score: 0.5,
+    }];
+    const requestPath = await writeRubricRequest(root, {
+      parallelism: 2,
+      criteria,
+    });
     const seenRequests: WorkbenchAgentTurnRequest[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
     const agentExecutor = vi.fn(async (request: WorkbenchAgentTurnRequest) => {
       seenRequests.push(request);
+      const criterion = singleCriterionFromPrompt(request.prompt, criteria);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await sleep(25);
+      inFlight -= 1;
       return {
-        output: JSON.stringify({
-          score: 1,
-          summary: "passed",
-          criteria: [{
-            criterion_id: "quality",
-            score: 1,
-            pass: true,
-            rationale: "Complete output.",
-          }],
-          feedback: { mocked: true },
-        }),
-        traceFiles: [],
-        metadata: { mocked: true },
+        output: rubricJudgeOutput(criterion.id, criterion.score, `${criterion.id} rationale`),
+        traceFiles: [
+          mockAgentTraceFile(request, criterion.id, "judge"),
+          {
+            path: `${request.tracePath!}/session/raw-events.ndjson`,
+            kind: "text" as const,
+            encoding: "utf8" as const,
+            executable: false,
+            content: "{\"private\":true}\n",
+          },
+        ],
+        metadata: { mocked: true, criterion: criterion.id },
       };
     });
 
@@ -236,9 +210,10 @@ describe("built-in Workbench adapters", () => {
       agentExecutor,
     });
 
-    expect(agentExecutor).toHaveBeenCalledTimes(1);
+    expect(agentExecutor).toHaveBeenCalledTimes(criteria.length);
+    expect(maxInFlight).toBe(2);
     expect(seenRequests[0]).toMatchObject({
-      role: "scorer",
+      role: "engine",
       provider: {
         use: "codex",
         model: "gpt-5.4-mini",
@@ -253,153 +228,529 @@ describe("built-in Workbench adapters", () => {
         },
       },
     });
-    expect(seenRequests[0]!.prompt).toContain("Score only the runner output.");
-    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "trial.score");
-    const scorecard = result.value;
-    expect(scorecard).toMatchObject({
-      score: 1,
-      summary: "passed",
-      metrics: {
-        criterion__quality: 1,
-      },
+    expect(seenRequests.map((request) => singleCriterionFromPrompt(request.prompt, criteria).id).sort())
+      .toEqual(["accuracy", "completeness", "style"]);
+    expect(seenRequests.every((request) => request.prompt.includes("Score only the runner output."))).toBe(true);
+    const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    const engineResult = adapterResult.value;
+    expect(engineResult.score).toBe(0.5);
+    expect(engineResult.metrics).toEqual({ score: 0.5 });
+    expect(engineResult.cases[0].criteria).toEqual(expect.arrayContaining([
+      expect.objectContaining({ criterion_id: "accuracy", score: 0.25 }),
+      expect.objectContaining({ criterion_id: "completeness", score: 1 }),
+      expect.objectContaining({ criterion_id: "style", score: 0.5 }),
+    ]));
+    expect(adapterResult.feedback).toMatchObject({
+      rubric: "criterion-fanout",
+      parallelism: 2,
+      aggregation: "weighted_mean",
     });
-    expect(result.feedback.rubric).toBe("judge");
+    expect(engineResult.feedback.judge).toBe("codex");
+    const evidenceScorecard = JSON.parse(
+      await fs.readFile(path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "scorecard.json"), "utf8"),
+    ) as { safeForOptimizer?: boolean; criteria?: Array<{ id?: string; rationale?: string }> };
+    expect(evidenceScorecard.safeForOptimizer).toBe(true);
+    expect(evidenceScorecard.criteria?.map((criterion) => criterion.id).sort()).toEqual(["accuracy", "completeness", "style"]);
+    await expect(fs.readFile(
+      path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "result.json"),
+      "utf8",
+    )).resolves.toContain("accuracy rationale");
+    const accuracyTrace = JSON.parse(
+      await fs.readFile(
+        path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "judge", "session", "trace.json"),
+        "utf8",
+      ),
+    ) as { spans?: Array<{ title?: string }>; events?: Array<{ message?: string }> };
+    expect(accuracyTrace.spans?.map((span) => span.title)).toContain("Judge criterion accuracy");
+    expect(accuracyTrace.events?.map((event) => event.message)).toContain("accuracy judge trace event");
+    await expect(fs.stat(
+      path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "trace.json"),
+    )).rejects.toThrow();
+    await expect(fs.stat(
+      path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "judge", "session", "raw-events.ndjson"),
+    )).rejects.toThrow();
   });
 
-  test("executes Harbor task-source requests into task bundles", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-harbor-"));
-    const harborRoot = path.join(root, "harbor");
-    const taskRoot = path.join(harborRoot, "workdir");
-    const outputRoot = path.join(root, "output");
-    await fs.mkdir(path.join(taskRoot, "environment"), { recursive: true });
-    await fs.mkdir(path.join(taskRoot, "tests"), { recursive: true });
-    await fs.writeFile(path.join(taskRoot, "instruction.md"), "Write ok to result.txt.\n");
-    await fs.writeFile(path.join(taskRoot, "task.toml"), "[environment]\nworkdir = \"/app\"\n");
-    await fs.writeFile(path.join(taskRoot, "environment", "Dockerfile"), "FROM node:22-bookworm-slim\n");
-    await fs.writeFile(path.join(taskRoot, "tests", "test.sh"), "echo 1 > /logs/verifier/reward.txt\n");
-    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
-    await fs.mkdir(outputRoot, { recursive: true });
-    const requestPath = path.join(root, ".workbench", "request.json");
-    await fs.writeFile(requestPath, `${JSON.stringify({
-      protocol: "workbench.adapter.v2",
-      id: "exec_task_source",
-      operation: "tasks.resolve",
-      invocation: {
-        use: "harbor",
-        with: {
-          path: harborRoot,
-        },
-      },
-      paths: {
-        workspace: root,
-        cwd: root,
-        output: outputRoot,
-        result: path.join(outputRoot, "workbench-result.json"),
-      },
-    }, null, 2)}\n`);
+  test("repairs malformed rubric judge output per criterion", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-rubric-repair-"));
+    const criteria = [{
+      id: "factuality",
+      description: "Unique factuality criterion: claims are supported by the output.",
+      weight: 1,
+      score: 0.5,
+    }, {
+      id: "coverage",
+      description: "Unique coverage criterion: the output addresses the whole task.",
+      weight: 1,
+      score: 1,
+    }];
+    const requestPath = await writeRubricRequest(root, {
+      parallelism: 2,
+      criteria,
+    });
+    const callsByCriterion = new Map<string, WorkbenchAgentTurnRequest[]>();
+    const repairRequests: WorkbenchAgentTurnRequest[] = [];
+    const agentExecutor = vi.fn(async (request: WorkbenchAgentTurnRequest) => {
+      const criterion = singleCriterionFromPrompt(request.prompt, criteria);
+      callsByCriterion.set(criterion.id, [
+        ...(callsByCriterion.get(criterion.id) ?? []),
+        request,
+      ]);
+      const isRepair = request.prompt.includes("rejected by the result parser")
+        || request.prompt.includes("Parser error:");
+      if (isRepair) {
+        repairRequests.push(request);
+      }
+      if (criterion.id === "factuality" && !isRepair) {
+        return {
+          output: "factuality: partial credit because the citation is malformed",
+          traceFiles: [],
+          metadata: { mocked: true, criterion: criterion.id, malformed: true },
+        };
+      }
+      return {
+        output: rubricJudgeOutput(criterion.id, criterion.score, `${criterion.id} rationale`),
+        traceFiles: [],
+        metadata: { mocked: true, criterion: criterion.id, repair: isRepair },
+      };
+    });
 
     await executeWorkbenchBuiltInAdapterCommand({
-      adapterId: "harbor",
+      adapterId: "rubric",
       requestPath,
-      outputRoot,
+      agentExecutor,
     });
 
-    const result = await readWorkbenchAdapterOperationResult(outputRoot, "tasks.resolve");
-    const taskSource = result.value;
-    expect(taskSource.environment).toMatchObject({
-      dockerfile: "harbor/workdir/environment/Dockerfile",
-      workdir: "/app",
-    });
-    expect(taskSource.tasks).toHaveLength(1);
-    expect(taskSource.tasks[0]).toMatchObject({
-      id: "workdir",
-      task: {
-        version: 2,
-        task: "Write ok to result.txt.",
-        environment: {
-          workdir: "/app",
-        },
-      },
-    });
-    expect(taskSource.tasks[0]!.testFiles.map((file) => file.path)).toEqual(["test.sh"]);
-    expect(taskSource.tasks[0]!.sourceFiles.map((file) => file.path).sort()).toEqual([
-      "environment/Dockerfile",
-      "instruction.md",
-      "task.toml",
-      "tests/test.sh",
-    ]);
-    expect(result.feedback).toMatchObject({
-      taskSource: "harbor",
-      taskCount: 1,
-    });
+    expect(agentExecutor).toHaveBeenCalledTimes(3);
+    expect(callsByCriterion.get("factuality")).toHaveLength(2);
+    expect(callsByCriterion.get("coverage")).toHaveLength(1);
+    expect(repairRequests).toHaveLength(1);
+    expect(repairRequests[0]!.prompt).toContain(criteria[0]!.description);
+    expect(repairRequests[0]!.prompt).not.toContain(criteria[1]!.description);
+    const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    expect(adapterResult.value.score).toBe(0.75);
+    expect(adapterResult.value.metrics).toEqual({ score: 0.75 });
   });
 
-  test("executes path task-source requests into task bundles", async () => {
+  test("executes Workbench engine-resolve requests into engine cases", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-path-"));
     const tasksRoot = path.join(root, "tasks");
     const outputRoot = path.join(root, "output");
     await fs.mkdir(path.join(tasksRoot, "task-001", "tests"), { recursive: true });
     await fs.writeFile(
       path.join(tasksRoot, "task-001", "task.yaml"),
-      "version: 2\ntask: Write ok.\ntests:\n  path: tests\n",
+      "version: 3\ntask: Write ok.\ntests:\n  path: tests\n",
     );
     await fs.writeFile(path.join(tasksRoot, "task-001", "tests", "test.sh"), "echo 1\n");
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
     await fs.mkdir(outputRoot, { recursive: true });
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
-      protocol: "workbench.adapter.v2",
-      id: "exec_task_source_path",
-      operation: "tasks.resolve",
+      protocol: "workbench.adapter.v3",
+      id: "exec_engine_resolve_path",
+      operation: "engine.resolve",
       invocation: {
-        use: "path",
+        use: "workbench",
         with: {
-          path: "tasks",
+          tasks: {
+            path: "tasks",
+          },
         },
       },
       paths: {
         workspace: root,
-        cwd: root,
         output: outputRoot,
         result: path.join(outputRoot, "workbench-result.json"),
       },
     }, null, 2)}\n`);
 
     await executeWorkbenchBuiltInAdapterCommand({
-      adapterId: "path",
+      adapterId: "workbench",
       requestPath,
       outputRoot,
     });
 
-    const result = await readWorkbenchAdapterOperationResult(outputRoot, "tasks.resolve");
-    const taskSource = result.value;
-    expect(taskSource.tasks).toHaveLength(1);
-    expect(taskSource.tasks[0]).toMatchObject({
+    const result = await readWorkbenchAdapterOperationResult(outputRoot, "engine.resolve");
+    const engineResolve = result.value;
+    expect(engineResolve.cases).toHaveLength(1);
+    expect(engineResolve.cases[0]).toMatchObject({
       id: "task-001",
-      task: {
-        version: 2,
-        task: "Write ok.",
+      case: {
+        version: 3,
+        prompt: "Write ok.",
       },
-      testFiles: [{
-        path: "test.sh",
-        content: "echo 1\n",
-      }],
+      files: {
+        private: [{
+          path: "test.sh",
+          content: "echo 1\n",
+        }],
+      },
     });
     expect(result.feedback).toMatchObject({
-      taskSource: "path",
+      engineResolve: "workbench",
       path: "tasks",
     });
   });
 
-  test("requires command scorers to publish a trial.score result", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-command-scorer-"));
+  test("rejects direct task.yaml roots for Workbench engine resolve", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-direct-task-root-"));
+    const tasksRoot = path.join(root, "tasks");
+    const outputRoot = path.join(root, "output");
+    await fs.mkdir(path.join(tasksRoot, "tests"), { recursive: true });
+    await fs.writeFile(
+      path.join(tasksRoot, "task.yaml"),
+      "version: 3\ntask: Write ok.\ntests:\n  path: tests\n",
+    );
+    await fs.writeFile(path.join(tasksRoot, "tests", "test.sh"), "echo 1\n");
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.mkdir(outputRoot, { recursive: true });
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_engine_resolve_direct_task_root",
+      operation: "engine.resolve",
+      invocation: {
+        use: "workbench",
+        with: {
+          tasks: {
+            path: "tasks",
+          },
+        },
+      },
+      paths: {
+        workspace: root,
+        output: outputRoot,
+        result: path.join(outputRoot, "workbench-result.json"),
+      },
+    }, null, 2)}\n`);
+
+    await expect(executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "workbench",
+      requestPath,
+      outputRoot,
+    })).rejects.toThrow("Workbench engine tasks root must contain task directories");
+  });
+
+  test("delegates shared Workbench engine grading through one runtime-control sandbox", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-shared-"));
+    await fs.mkdir(path.join(root, "input", "subject"), { recursive: true });
+    await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
+    await fs.mkdir(path.join(root, "private", "engine"), { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(path.join(root, "input", "subject", "SKILL.md"), "Do the shared work.\n");
+    await fs.writeFile(path.join(root, "input", "case", "prompt.md"), "Public shared task.\n");
+    await fs.writeFile(path.join(root, "private", "engine", "secret.txt"), "shared hidden\n");
+    const calls: unknown[] = [];
+    const token = "runtime-token";
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      expect(request.headers.authorization).toBe(`Bearer ${token}`);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      calls.push(body);
+      expect(body.prepare).toBe(true);
+      expect(body.collectWorkspace).toBeUndefined();
+      expect(body).toMatchObject({
+        operations: [
+          { label: "subject", operation: "subject.run" },
+          { label: "score", operation: "engine.run" },
+        ],
+      });
+      const inputs = body.inputs as {
+        subject?: Array<{ path: string; content: string }>;
+        case?: Array<{ path: string; content: string }>;
+        enginePrivate?: Array<{ path: string; content: string }>;
+        output?: unknown[];
+        workspace?: unknown[];
+      };
+      expect(inputs.subject).toEqual([
+        expect.objectContaining({ path: "SKILL.md", content: "Do the shared work.\n" }),
+      ]);
+      expect(inputs.case).toEqual([
+        expect.objectContaining({ path: "prompt.md", content: "Public shared task.\n" }),
+      ]);
+      expect(inputs.enginePrivate).toEqual([
+        expect.objectContaining({ path: "secret.txt", content: "shared hidden\n" }),
+      ]);
+      expect(inputs.output).toBeUndefined();
+      expect(inputs.workspace).toBeUndefined();
+      response.setHeader("content-type", "application/json");
+      response.end(`${JSON.stringify({
+        ok: true,
+        files: [{
+          path: "shared-score.txt",
+          kind: "text",
+          encoding: "utf8",
+          executable: false,
+          content: "shared score\n",
+        }],
+        fileChanges: ["shared-score.txt"],
+        operationResults: [{
+          protocol: "workbench.adapter-result.v1",
+          operation: "subject.run",
+          ok: true,
+          usage: {
+            total: {
+              provider: "test",
+              totalTokens: 2,
+              costUsd: 0.02,
+              costSource: "provider",
+            },
+          },
+        }, {
+          protocol: "workbench.adapter-result.v1",
+          operation: "engine.run",
+          ok: true,
+          value: { score: 1 },
+          usage: {
+            total: {
+              provider: "test",
+              totalTokens: 3,
+              costUsd: 0.03,
+              costSource: "provider",
+            },
+          },
+        }],
+        result: { score: 1 },
+      })}\n`);
+    });
+    const url = await listenOnLocalhost(server);
+    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_URL", url);
+    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_TOKEN", token);
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_workbench_engine_shared",
+      operation: "engine.run",
+      invocation: {
+        use: "workbench",
+        with: {
+          score: {
+            use: "inline-score",
+            command: "score-command",
+          },
+        },
+      },
+      context: {
+        subject: {
+          run: {
+            use: "inline-subject",
+            command: "subject-command",
+          },
+        },
+        attempt: {
+          caseId: "task-001",
+        },
+        case: {
+          prompt: "Run subject and score in one sandbox.",
+        },
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    try {
+      await executeWorkbenchBuiltInAdapterCommand({
+        adapterId: "workbench",
+        requestPath,
+      });
+    } finally {
+      await closeServer(server);
+    }
+
+    expect(calls).toHaveLength(1);
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    expect(result.value.score).toBe(1);
+    expect(result.usage?.runner?.costUsd).toBe(0.02);
+    expect(result.usage?.engine?.costUsd).toBe(0.03);
+    await expect(fs.readFile(path.join(root, "output", "shared-score.txt"), "utf8"))
+      .resolves.toBe("shared score\n");
+  });
+
+  test("delegates separate Workbench engine runner and grader sandboxes through runtime-control", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-private-"));
+    await fs.mkdir(path.join(root, "input", "subject"), { recursive: true });
+    await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
+    await fs.mkdir(path.join(root, "private", "engine"), { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(path.join(root, "input", "subject", "SKILL.md"), "Do the work.\n");
+    await fs.writeFile(path.join(root, "input", "case", "prompt.md"), "Public task.\n");
+    await fs.writeFile(path.join(root, "private", "engine", "secret.txt"), "hidden\n");
+    const calls: unknown[] = [];
+    const token = "runtime-token";
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      expect(request.headers.authorization).toBe(`Bearer ${token}`);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      calls.push(body);
+      response.setHeader("content-type", "application/json");
+      if (calls.length === 1) {
+        expect(body.prepare).toBe(true);
+        expect(body.collectWorkspace).toBe(true);
+        expect(body).toMatchObject({
+          operations: [{ operation: "subject.run" }],
+        });
+        expect((body.inputs as { enginePrivate?: unknown[] }).enginePrivate).toBeUndefined();
+        response.end(`${JSON.stringify({
+          ok: true,
+          files: [{
+            path: "subject-artifact.txt",
+            kind: "text",
+            encoding: "utf8",
+            executable: false,
+            content: "subject\n",
+          }, {
+            path: ".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json",
+            kind: "text",
+            encoding: "utf8",
+            executable: false,
+            content: "{\"trace\":true}\n",
+          }],
+          fileChanges: ["subject-artifact.txt", ".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json"],
+          workspaceFiles: [{
+            path: "answer.txt",
+            kind: "text",
+            encoding: "utf8",
+            executable: false,
+            content: "workspace\n",
+          }],
+          operationResults: [{
+            protocol: "workbench.adapter-result.v1",
+            operation: "subject.run",
+            ok: true,
+          }],
+          usage: {
+            runner: {
+              provider: "test",
+              totalTokens: 4,
+              costUsd: 0.04,
+              costSource: "provider",
+            },
+          },
+        })}\n`);
+        return;
+      }
+      expect(body.prepare).toBe(false);
+      expect(body).toMatchObject({
+        operations: [{ operation: "engine.run" }],
+      });
+      const inputs = body.inputs as {
+        workspace?: Array<{ path: string; content: string }>;
+        output?: Array<{ path: string; content: string }>;
+        enginePrivate?: Array<{ path: string; content: string }>;
+      };
+      expect(inputs.workspace).toEqual([
+        expect.objectContaining({ path: "answer.txt", content: "workspace\n" }),
+      ]);
+      expect(inputs.output).toEqual([
+        expect.objectContaining({ path: "subject-artifact.txt", content: "subject\n" }),
+      ]);
+      expect(inputs.output?.map((file) => file.path)).not.toContain(".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json");
+      expect(inputs.enginePrivate).toEqual([
+        expect.objectContaining({ path: "secret.txt", content: "hidden\n" }),
+      ]);
+      response.end(`${JSON.stringify({
+        ok: true,
+        files: [{
+          path: "score-artifact.txt",
+          kind: "text",
+          encoding: "utf8",
+          executable: false,
+          content: "score\n",
+        }],
+        fileChanges: ["score-artifact.txt"],
+        operationResults: [{
+          protocol: "workbench.adapter-result.v1",
+          operation: "engine.run",
+          ok: true,
+          value: { score: 1 },
+        }],
+        usage: {
+          engine: {
+            provider: "test",
+            totalTokens: 6,
+            costUsd: 0.06,
+            costSource: "provider",
+          },
+        },
+        result: { score: 1 },
+      })}\n`);
+    });
+    const url = await listenOnLocalhost(server);
+    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_URL", url);
+    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_TOKEN", token);
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_workbench_engine_private",
+      operation: "engine.run",
+      invocation: {
+        use: "workbench",
+        with: {
+          grading: {
+            isolation: "separate",
+          },
+          score: {
+            use: "inline-score",
+            command: "score-command",
+          },
+        },
+      },
+      context: {
+        subject: {
+          run: {
+            use: "inline-subject",
+            command: "subject-command",
+          },
+        },
+        attempt: {
+          caseId: "task-001",
+        },
+        case: {
+          prompt: "Run subject and score.",
+        },
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    try {
+      await executeWorkbenchBuiltInAdapterCommand({
+        adapterId: "workbench",
+        requestPath,
+      });
+    } finally {
+      await closeServer(server);
+    }
+
+    expect(calls).toHaveLength(2);
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    expect(result.value.score).toBe(1);
+    expect(result.usage?.runner?.costUsd).toBe(0.04);
+    expect(result.usage?.engine?.costUsd).toBe(0.06);
+    expect((result.value as { usage?: unknown }).usage).toBeUndefined();
+    await expect(fs.readFile(path.join(root, "output", "subject-artifact.txt"), "utf8"))
+      .resolves.toBe("subject\n");
+    await expect(fs.readFile(path.join(root, "output", "score-artifact.txt"), "utf8"))
+      .resolves.toBe("score\n");
+    await expect(fs.readFile(path.join(root, "output", ".workbench", "traces", "exec_workbench_engine_private", "runner", "trace.json"), "utf8"))
+      .resolves.toBe("{\"trace\":true}\n");
+  });
+
+  test("requires command engines to publish an engine.run result", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-command-engine-"));
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
-      protocol: "workbench.adapter.v2",
+      protocol: "workbench.adapter.v3",
       id: "exec_command_score",
-      operation: "trial.score",
+      operation: "engine.run",
       invocation: {
         use: "command",
         with: {
@@ -412,7 +763,7 @@ describe("built-in Workbench adapters", () => {
     await expect(executeWorkbenchBuiltInAdapterCommand({
       adapterId: "command",
       requestPath,
-    })).rejects.toThrow("Command scorer must write workbench-result.json for trial.score.");
+    })).rejects.toThrow("Command engine must write workbench-result.json for engine.run.");
   });
 
   test("retries Claude agent turns that exit with a transient SIGTERM", async () => {
@@ -449,16 +800,188 @@ describe("built-in Workbench adapters", () => {
   });
 });
 
+function listenOnLocalhost(server: ReturnType<typeof createServer>): Promise<string> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("Test server did not bind to a TCP address."));
+        return;
+      }
+      resolve(`http://127.0.0.1:${address.port}`);
+    });
+  });
+}
+
+function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
+}
+
 function adapterCommandPaths(root: string) {
   return {
     workspace: root,
-    cwd: root,
-    input: path.join(root, "input"),
     output: path.join(root, "output"),
     result: path.join(root, "output", "workbench-result.json"),
     subject: path.join(root, "input", "subject"),
-    task: path.join(root, "input", "task"),
-    runnerOutput: path.join(root, "input", "runner-output"),
+    case: path.join(root, "input", "case"),
     traces: path.join(root, "input", "traces"),
+    enginePrivate: path.join(root, "private", "engine"),
   };
+}
+
+interface RubricTestCriterion {
+  id: string;
+  description: string;
+  weight: number;
+  score: number;
+}
+
+async function writeRubricRequest(
+  root: string,
+  options: {
+    parallelism: number;
+    criteria: RubricTestCriterion[];
+  },
+): Promise<string> {
+  await fs.mkdir(path.join(root, "input", "task"), { recursive: true });
+  await fs.mkdir(path.join(root, "output"), { recursive: true });
+  await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+  const requestPath = path.join(root, ".workbench", "request.json");
+  await fs.writeFile(requestPath, `${JSON.stringify({
+    protocol: "workbench.adapter.v3",
+    id: "exec_rubric_grade",
+    jobId: "job_rubric_grade",
+    operation: "engine.run",
+    invocation: {
+      use: "rubric",
+      with: {
+        instructions: "Score only the runner output.",
+        parallelism: options.parallelism,
+        judge: {
+          use: "codex",
+          with: {
+            model: "gpt-5.4-mini",
+          },
+        },
+        criteria: options.criteria.map((criterion) => ({
+          id: criterion.id,
+          description: criterion.description,
+          weight: criterion.weight,
+        })),
+      },
+    },
+    auth: {
+      self: {},
+      adapters: {
+        codex: {
+          default: {
+            method: "api-key",
+            profile: "default",
+            env: { OPENAI_API_KEY: "materialized" },
+          },
+        },
+      },
+    },
+    context: {
+      benchmark: {
+        name: "rubric-smoke",
+        description: "Smoke test rubric adapter command.",
+      },
+      subject: {
+        id: "subject_123",
+      },
+      attempt: {
+        attemptIndex: 0,
+        sampleIndex: 0,
+        caseId: "task-001",
+      },
+      case: {
+        prompt: "Score the runner output.",
+      },
+    },
+    paths: adapterCommandPaths(root),
+  }, null, 2)}\n`);
+  return requestPath;
+}
+
+function singleCriterionFromPrompt(
+  prompt: string,
+  criteria: readonly RubricTestCriterion[],
+): RubricTestCriterion {
+  const matches = criteria.filter((criterion) => prompt.includes(criterion.description));
+  expect(matches.map((criterion) => criterion.id)).toHaveLength(1);
+  return matches[0]!;
+}
+
+function rubricJudgeOutput(criterionId: string, score: number, rationale: string): string {
+  return JSON.stringify({
+    criterion_id: criterionId,
+    score,
+    pass: score >= 0.5,
+    rationale,
+    summary: `${criterionId} graded`,
+    feedback: { mocked: true },
+  });
+}
+
+function mockAgentTraceFile(
+  request: WorkbenchAgentTurnRequest,
+  criterionId: string,
+  turn: "judge" | "repair",
+) {
+  const tracePath = request.tracePath ?? `.workbench/traces/${request.jobId}/${request.role}`;
+  return {
+    path: `${tracePath}/session/trace.json`,
+    kind: "text" as const,
+    encoding: "utf8" as const,
+    executable: false,
+    content: `${JSON.stringify({
+      trace_id: `${criterionId}-${turn}`,
+      spans: [{
+        id: `${criterionId}-${turn}`,
+        parent_id: null,
+        attempt_number: 1,
+        stage_id: "workbench-engine",
+        stage_run_index: 1,
+        kind: "turn",
+        title: `${turn === "judge" ? "Judge" : "Repair"} criterion ${criterionId}`,
+        status: "completed",
+        started_at: "2026-05-14T00:00:00.000Z",
+        ended_at: "2026-05-14T00:00:01.000Z",
+        attributes: {},
+      }],
+      events: [{
+        id: `${criterionId}-${turn}-event`,
+        span_id: `${criterionId}-${turn}`,
+        attempt_number: 1,
+        stage_id: "workbench-engine",
+        stage_run_index: 1,
+        kind: "message",
+        at: "2026-05-14T00:00:00.500Z",
+        message: `${criterionId} ${turn} trace event`,
+        attributes: {},
+      }],
+      summaries: [{
+        attempt_number: 1,
+        stage_id: "workbench-engine",
+        stage_run_index: 1,
+        status: "completed",
+        started_at: "2026-05-14T00:00:00.000Z",
+        ended_at: "2026-05-14T00:00:01.000Z",
+        duration_ms: 1000,
+        tool_call_count: 0,
+        input_tokens: null,
+        output_tokens: null,
+        usage: null,
+        final_output_present: true,
+        error_message: null,
+      }],
+    }, null, 2)}\n`,
+  };
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }

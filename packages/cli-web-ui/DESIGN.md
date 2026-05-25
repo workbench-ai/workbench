@@ -337,7 +337,7 @@ components:
 
 ## Overview
 
-This is the canonical design-system document for the shared web surfaces in this monorepo: `products/cli-web-ui`, `products/agent-ui`, Flow web, hosted Workbench Cloud and Workbench, legacy `chat-web`, and the embedded `@workbench-internal/flow-panel` surface.
+This is the canonical design-system document for the shared web surfaces in this monorepo: `products/cli-web-ui`, `products/agent-ui`, hosted Workbench Cloud and Workbench, and legacy `chat-web`.
 
 The system is preset-first and shadcn-native. The primitive layer comes from the checked-in shadcn project defined by `products/cli-web-ui/shadcn.foundation.json` and materialized through the local shadcn sync flow. The current live foundation is preset `b2BVC6PHE`, which resolves to the `radix-nova` project. Product surfaces compose those primitives through thin shared wrappers and product-owned route shells.
 
@@ -389,7 +389,7 @@ The shape language comes from the shadcn radius scale in `styles/preset.css`: co
 - **Foundation**: `components/ui/*` plus `hooks/use-mobile.ts` are the generated shadcn foundation. Buttons, cards, inputs, dialogs, sheets, tabs, toggles, tooltips, sidebars, charts, and related controls come from this layer and stay as close to generated source as possible.
 - **Shared compositions**: `components/shared/*` adds behavior-heavy but product-neutral wrappers such as `FilesBrowser`, `PreviewPanel`, `RouteToolbar`, `ViewSwitch`, `WorkspaceRoot`, `WorkspacePane`, `DesktopWorkspaceSplit`, `SourceEditorDialogShell`, markdown and code rendering, and preview surfaces. `ViewSwitch` is the route-state wrapper for sibling-view navigation, but it should visually reuse the stock shadcn line-tabs treatment instead of inventing a second control style. `WorkspaceRoot`, `WorkspacePane`, and `DesktopWorkspaceSplit` are the shared shell contract for full-height operator workspaces; product routes should compose them instead of rebuilding pane headers, split dividers, or viewport roots locally.
 - **Chat composition**: `products/agent-ui` composes the shared primitives into thread lists, conversation layouts, composer shells, and lightweight activity renderers.
-- **Product composition**: Flow, Workbench Cloud/Workbench, legacy `chat-web`, and `@workbench-internal/flow-panel` own route composition, runtime-backed views, and product semantics while importing their foundation and shared wrappers from `@workbench-ai/cli-web-ui`.
+- **Product composition**: Workbench Cloud/Workbench and legacy `chat-web` own route composition, runtime-backed views, and product semantics while importing their foundation and shared wrappers from `@workbench-ai/cli-web-ui`.
 
 Use built-in variants, semantic tokens, and stock shadcn composition first. Higher layers should add behavior, information architecture, or product semantics, not a second primitive system.
 
@@ -455,9 +455,9 @@ The verifier rejects drift in `components.json`, `styles/preset.css`, `component
 
 ## Surface Mapping
 
-`products/cli-web-ui/styles.css` is the shared stylesheet for Flow web, Workbench Cloud, hosted Workbench, and the embedded `@workbench-internal/flow-panel` surface. It imports `styles/preset.css`, `styles/extensions.css`, and `styles/base.css`, then adds the consumer-specific `@source` declarations for the shared package tree.
+`products/cli-web-ui/styles.css` is the shared stylesheet for Workbench Cloud and hosted Workbench. It imports `styles/preset.css`, `styles/extensions.css`, and `styles/base.css`, then adds the consumer-specific `@source` declarations for the shared package tree.
 
-`products/cli-web-ui/chat-web.css` exists only for legacy `chat-web`, which needs widened Tailwind source scanning across both `products/chat-web` and `products/agent-ui`. It imports the same preset, extension, and base layers, then widens the `@source` surface for that app and the shared chat package. `chat-web` imports `@workbench-ai/cli-web-ui/chat-web.css`, while Flow web, Workbench Cloud, hosted Workbench, and `flow-panel` import `@workbench-ai/cli-web-ui/styles.css`.
+`products/cli-web-ui/chat-web.css` exists only for legacy `chat-web`, which needs widened Tailwind source scanning across both `products/chat-web` and `products/agent-ui`. It imports the same preset, extension, and base layers, then widens the `@source` surface for that app and the shared chat package. `chat-web` imports `@workbench-ai/cli-web-ui/chat-web.css`, while Workbench Cloud and hosted Workbench import `@workbench-ai/cli-web-ui/styles.css`.
 
 `products/agent-ui` sits on top of the same primitive and token system. It contributes chat-specific composition, but its rendered styles are still part of the shared `cli-web-ui` design system rather than a second visual foundation.
 
@@ -467,4 +467,4 @@ The verifier rejects drift in `components.json`, `styles/preset.css`, `component
 
 `products/agent-ui` owns chat-specific composition on top of that base.
 
-`products/flow`, `products/workbench-cloud`, `products/workbench`, legacy `products/chat-web`, and `products/flow/packages/flow-panel` own routing, runtime-backed data, and product semantics. If a component exists only to restyle a primitive, it belongs back in the shared system or should be deleted.
+`products/workbench-cloud`, `products/workbench`, and legacy `products/chat-web` own routing, runtime-backed data, and product semantics. If a component exists only to restyle a primitive, it belongs back in the shared system or should be deleted.

@@ -20,9 +20,7 @@ describe("workbench contract", () => {
       activeId: null,
       currentBenchmarkFingerprint: null,
       summaries: [],
-      results: [],
-      events: [],
-      latestRun: null,
+      evaluations: [],
       runs: [],
     } satisfies RuntimeSnapshot;
 
@@ -32,12 +30,12 @@ describe("workbench contract", () => {
     });
   });
 
-  test("uses fingerprint-only subject comparability and typed execution phases", () => {
+  test("uses fingerprint-only subject comparability and typed execution specs", () => {
     const execution = {
       id: "exec_1",
       projectId: "wb_1",
       runId: "run_1",
-      purpose: "trial",
+      purpose: "attempt",
       adapter: { use: "command", with: {} },
       sandbox: { kind: "oci", ref: "dockerfile://environment/Dockerfile" },
       inputs: [],
@@ -50,6 +48,6 @@ describe("workbench contract", () => {
       metadata: {},
     } satisfies WorkbenchExecutionSpec;
 
-    expect(execution.purpose).toBe("trial");
+    expect(execution.purpose).toBe("attempt");
   });
 });

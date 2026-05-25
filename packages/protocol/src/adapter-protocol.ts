@@ -4,19 +4,22 @@ import path from "node:path";
 import type {
   Json,
   UsageSummary,
-  WorkbenchScorecard,
+  WorkbenchResult,
   WorkbenchSubjectPatch,
 } from "@workbench-ai/workbench-contract";
 
 import {
-  normalizeWorkbenchTaskSourceResult,
-  type WorkbenchTaskSourceResult,
-} from "./task-source-result.ts";
+  normalizeWorkbenchEngineResolveResult,
+  type WorkbenchEngineResolveResult,
+} from "./engine-resolve-result.ts";
 import type {
   WorkbenchAdapterOperation,
 } from "./adapter-manifest.ts";
+import {
+  normalizeWorkbenchAdapterOperation,
+} from "./adapter-manifest.ts";
 
-export const WORKBENCH_ADAPTER_PROTOCOL = "workbench.adapter.v2";
+export const WORKBENCH_ADAPTER_PROTOCOL = "workbench.adapter.v3";
 export const WORKBENCH_ADAPTER_RESULT_PROTOCOL = "workbench.adapter-result.v1";
 export const WORKBENCH_ADAPTER_RESULT_FILE = "workbench-result.json";
 
@@ -39,37 +42,43 @@ export interface WorkbenchAdapterOperationRequest {
     subject?: {
       id?: string;
       path?: string;
+      prepare?: {
+        command: string;
+      };
+      run?: {
+        use: string;
+        with?: Json;
+        auth?: Json;
+        command?: string;
+      };
     };
     optimizer?: {
       edits?: string[];
     };
-    trial?: {
-      trialIndex?: number;
+    attempt?: {
+      attemptIndex?: number;
       sampleIndex?: number;
       caseId?: string;
     };
-    task?: {
-      text?: string;
+    case?: {
+      id?: string;
+      prompt?: string;
     };
   };
   paths: {
     workspace: string;
     output: string;
     result: string;
-    input?: string;
-    task?: string;
+    case?: string;
     traces?: string;
-    cwd?: string;
     subject?: string;
-    tests?: string;
-    logs?: string;
-    artifacts?: string;
+    enginePrivate?: string;
   };
 }
 
 export type WorkbenchAdapterOperationResultValue =
-  | WorkbenchTaskSourceResult
-  | WorkbenchScorecard
+  | WorkbenchEngineResolveResult
+  | WorkbenchResult
   | WorkbenchSubjectPatch
   | Json
   | null;
@@ -104,6 +113,15 @@ export function normalizeWorkbenchAdapterOperationRequest(
   }
   const invocation = requiredJsonRecord(record.invocation, "adapter request invocation");
   const paths = requiredJsonRecord(record.paths, "adapter request paths");
+  rejectUnknownJsonKeys(paths, "adapter request paths", [
+    "workspace",
+    "output",
+    "result",
+    "subject",
+    "case",
+    "traces",
+    "enginePrivate",
+  ]);
   const operation = requiredOperation(record.operation, "adapter request operation");
   const use = requiredString(invocation.use, "adapter request invocation.use");
   return {
@@ -122,14 +140,10 @@ export function normalizeWorkbenchAdapterOperationRequest(
       workspace: requiredString(paths.workspace, "adapter request paths.workspace"),
       output: requiredString(paths.output, "adapter request paths.output"),
       result: requiredString(paths.result, "adapter request paths.result"),
-      ...(typeof paths.input === "string" ? { input: paths.input } : {}),
-      ...(typeof paths.task === "string" ? { task: paths.task } : {}),
+      ...(typeof paths.case === "string" ? { case: paths.case } : {}),
       ...(typeof paths.traces === "string" ? { traces: paths.traces } : {}),
-      ...(typeof paths.cwd === "string" ? { cwd: paths.cwd } : {}),
       ...(typeof paths.subject === "string" ? { subject: paths.subject } : {}),
-      ...(typeof paths.tests === "string" ? { tests: paths.tests } : {}),
-      ...(typeof paths.logs === "string" ? { logs: paths.logs } : {}),
-      ...(typeof paths.artifacts === "string" ? { artifacts: paths.artifacts } : {}),
+      ...(typeof paths.enginePrivate === "string" ? { enginePrivate: paths.enginePrivate } : {}),
     },
   };
 }
@@ -173,8 +187,11 @@ export function normalizeWorkbenchAdapterOperationResult(
     throw new Error(`${WORKBENCH_ADAPTER_RESULT_FILE}.protocol must be ${WORKBENCH_ADAPTER_RESULT_PROTOCOL}.`);
   }
   const resultOperation = requiredOperation(record.operation, `${WORKBENCH_ADAPTER_RESULT_FILE}.operation`);
-  if (operation && resultOperation !== operation) {
-    throw new Error(`${WORKBENCH_ADAPTER_RESULT_FILE}.operation must be ${operation}.`);
+  const expectedOperation = operation
+    ? normalizeWorkbenchAdapterOperation(operation, "expected adapter result operation")
+    : undefined;
+  if (expectedOperation && resultOperation !== expectedOperation) {
+    throw new Error(`${WORKBENCH_ADAPTER_RESULT_FILE}.operation must be ${expectedOperation}.`);
   }
   return {
     protocol: WORKBENCH_ADAPTER_RESULT_PROTOCOL,
@@ -205,13 +222,13 @@ function normalizeOperationResultValue(
   operation: WorkbenchAdapterOperation,
   value: unknown,
 ): WorkbenchAdapterOperationResultValue {
-  if (operation === "tasks.resolve") {
-    return normalizeWorkbenchTaskSourceResult(value);
+  if (operation === "engine.resolve") {
+    return normalizeWorkbenchEngineResolveResult(value);
   }
-  if (operation === "trial.score") {
-    return normalizeScorecard(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
+  if (operation === "engine.run") {
+    return normalizeResult(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
   }
-  if (operation === "subject.improve") {
+  if (operation === "optimizer.improve") {
     return normalizeSubjectPatch(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
   }
   if (value === undefined || value === null) {
@@ -228,8 +245,8 @@ function normalizeAdapterRequestContext(
     ...(record.benchmark !== undefined ? { benchmark: normalizeBenchmarkContext(record.benchmark) } : {}),
     ...(record.subject !== undefined ? { subject: normalizeSubjectContext(record.subject) } : {}),
     ...(record.optimizer !== undefined ? { optimizer: normalizeOptimizerContext(record.optimizer) } : {}),
-    ...(record.trial !== undefined ? { trial: normalizeTrialContext(record.trial) } : {}),
-    ...(record.task !== undefined ? { task: normalizeTaskContext(record.task) } : {}),
+    ...(record.attempt !== undefined ? { attempt: normalizeAttemptContext(record.attempt) } : {}),
+    ...(record.case !== undefined ? { case: normalizeCaseContext(record.case) } : {}),
   };
 }
 
@@ -246,6 +263,31 @@ function normalizeSubjectContext(value: unknown): NonNullable<NonNullable<Workbe
   return {
     ...(typeof record.id === "string" ? { id: record.id } : {}),
     ...(typeof record.path === "string" ? { path: record.path } : {}),
+    ...(record.prepare !== undefined ? { prepare: normalizeSubjectPrepareContext(record.prepare) } : {}),
+    ...(record.run !== undefined ? { run: normalizeContextInvocation(record.run, "adapter request context.subject.run") } : {}),
+  };
+}
+
+function normalizeSubjectPrepareContext(
+  value: unknown,
+): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["subject"]>["prepare"]> {
+  const record = requiredJsonRecord(value, "adapter request context.subject.prepare");
+  return {
+    command: requiredString(record.command, "adapter request context.subject.prepare.command"),
+  };
+}
+
+function normalizeContextInvocation(
+  value: unknown,
+  label: string,
+): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["subject"]>["run"]> {
+  const record = requiredJsonRecord(value, label);
+  const use = requiredString(record.use, `${label}.use`);
+  return {
+    use,
+    with: record.with !== undefined ? record.with as Json : {},
+    ...(record.auth !== undefined ? { auth: record.auth as Json } : {}),
+    ...(typeof record.command === "string" && record.command.trim() ? { command: record.command } : {}),
   };
 }
 
@@ -258,23 +300,24 @@ function normalizeOptimizerContext(value: unknown): NonNullable<NonNullable<Work
   };
 }
 
-function normalizeTrialContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["trial"]> {
-  const record = requiredJsonRecord(value, "adapter request context.trial");
+function normalizeAttemptContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["attempt"]> {
+  const record = requiredJsonRecord(value, "adapter request context.attempt");
   return {
-    ...(typeof record.trialIndex === "number" ? { trialIndex: record.trialIndex } : {}),
+    ...(typeof record.attemptIndex === "number" ? { attemptIndex: record.attemptIndex } : {}),
     ...(typeof record.sampleIndex === "number" ? { sampleIndex: record.sampleIndex } : {}),
     ...(typeof record.caseId === "string" ? { caseId: record.caseId } : {}),
   };
 }
 
-function normalizeTaskContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["task"]> {
-  const record = requiredJsonRecord(value, "adapter request context.task");
+function normalizeCaseContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["case"]> {
+  const record = requiredJsonRecord(value, "adapter request context.case");
   return {
-    ...(typeof record.text === "string" ? { text: record.text } : {}),
+    ...(typeof record.id === "string" ? { id: record.id } : {}),
+    ...(typeof record.prompt === "string" ? { prompt: record.prompt } : {}),
   };
 }
 
-function normalizeScorecard(value: unknown, label: string): WorkbenchScorecard {
+function normalizeResult(value: unknown, label: string): WorkbenchResult {
   const record = requiredJsonRecord(value, label);
   if (typeof record.score !== "number" || !Number.isFinite(record.score)) {
     throw new Error(`${label}.score must be a finite number.`);
@@ -282,7 +325,7 @@ function normalizeScorecard(value: unknown, label: string): WorkbenchScorecard {
   return {
     score: record.score,
     ...(isNumberRecord(record.metrics) ? { metrics: record.metrics } : {}),
-    ...(Array.isArray(record.cases) ? { cases: record.cases as unknown as WorkbenchScorecard["cases"] } : {}),
+    ...(Array.isArray(record.cases) ? { cases: record.cases as unknown as WorkbenchResult["cases"] } : {}),
     ...(record.usage !== undefined ? { usage: normalizeUsageSummary(record.usage) } : {}),
     ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
     ...(record.feedback !== undefined ? { feedback: record.feedback as Json } : {}),
@@ -328,19 +371,23 @@ function requiredJsonRecord(
   return value as Record<string, Json>;
 }
 
+function rejectUnknownJsonKeys(
+  record: Record<string, unknown>,
+  label: string,
+  allowed: readonly string[],
+): void {
+  const allowedSet = new Set(allowed);
+  const unknown = Object.keys(record).filter((key) => !allowedSet.has(key));
+  if (unknown.length > 0) {
+    throw new Error(`${label} includes unsupported fields: ${unknown.join(", ")}.`);
+  }
+}
+
 function requiredOperation(
   value: unknown,
   label: string,
 ): WorkbenchAdapterOperation {
-  if (
-    value === "tasks.resolve" ||
-    value === "subject.run" ||
-    value === "trial.score" ||
-    value === "subject.improve"
-  ) {
-    return value;
-  }
-  throw new Error(`${label} must be tasks.resolve, subject.run, trial.score, or subject.improve.`);
+  return normalizeWorkbenchAdapterOperation(value, label);
 }
 
 function requiredString(value: unknown, label: string): string {

@@ -4,31 +4,42 @@ import type {
 import {
   adapterSlot,
   defineAdapter,
+  defineEngineResolver,
+  defineSubject,
   defineOptimizer,
-  defineRunner,
-  defineScorer,
-  defineTaskSource,
+  defineEngineRunner,
   workbenchAdapterManifestFromDefinition,
 } from "@workbench-ai/workbench-protocol";
 
-export type WorkbenchBuiltInAdapterId =
+export type WorkbenchPublicBuiltInAdapterId =
+  | "workbench"
   | "codex"
   | "claude"
-  | "pi"
-  | "command"
+  | "command";
+
+export type WorkbenchEngineHelperAdapterId =
   | "rubric"
-  | "tests"
-  | "path"
-  | "harbor";
+  | "tests";
+
+export type WorkbenchBuiltInAdapterId =
+  | WorkbenchPublicBuiltInAdapterId
+  | WorkbenchEngineHelperAdapterId;
 
 const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAdapterManifest> = Object.fromEntries(
   Object.entries({
+    workbench: defineAdapter({
+      id: "workbench",
+      engineResolve: defineEngineResolver(),
+      engineRun: defineEngineRunner({ executor: "host" }),
+      slots: {
+        score: adapterSlot("/score", "engine.run"),
+      },
+    }),
     codex: defineAdapter({
       id: "codex",
-      run: defineRunner(),
+      subject: defineSubject(),
       improve: defineOptimizer(),
       setup: [
-        builtInAdapterCommandSetup("codex"),
         "npm install --global @openai/codex@0.125.0",
       ],
       auth: {
@@ -40,10 +51,9 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
     }),
     claude: defineAdapter({
       id: "claude",
-      run: defineRunner(),
+      subject: defineSubject(),
       improve: defineOptimizer(),
       setup: [
-        builtInAdapterCommandSetup("claude"),
         "npm install --global @anthropic-ai/claude-code@2.1.119",
       ],
       auth: {
@@ -72,44 +82,22 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
         },
       },
     }),
-    pi: defineAdapter({
-      id: "pi",
-      run: defineRunner(),
-      improve: defineOptimizer(),
-      setup: [
-        builtInAdapterCommandSetup("pi"),
-        "npm install --global @mariozechner/pi-coding-agent@0.70.2",
-      ],
-    }),
     command: defineAdapter({
       id: "command",
-      run: defineRunner(),
-      score: defineScorer(),
+      subject: defineSubject(),
+      engineRun: defineEngineRunner(),
       improve: defineOptimizer(),
-      setup: [builtInAdapterCommandSetup("command")],
     }),
     rubric: defineAdapter({
       id: "rubric",
-      score: defineScorer(),
-      setup: [builtInAdapterCommandSetup("rubric")],
+      engineRun: defineEngineRunner(),
       slots: {
         judge: adapterSlot("/judge", "subject.run"),
       },
     }),
     tests: defineAdapter({
       id: "tests",
-      score: defineScorer(),
-      setup: [builtInAdapterCommandSetup("tests")],
-    }),
-    path: defineAdapter({
-      id: "path",
-      tasks: defineTaskSource(),
-      setup: [],
-    }),
-    harbor: defineAdapter({
-      id: "harbor",
-      tasks: defineTaskSource(),
-      setup: [],
+      engineRun: defineEngineRunner(),
     }),
   }).map(([id, definition]) => [id, workbenchAdapterManifestFromDefinition(definition)])
 ) as Record<WorkbenchBuiltInAdapterId, WorkbenchAdapterManifest>;
@@ -132,30 +120,6 @@ export function isWorkbenchBuiltInAdapterId(id: string): id is WorkbenchBuiltInA
 
 export function adapterCommandName(adapterId: string): string {
   return `workbench-adapter-${adapterId}`;
-}
-
-function builtInAdapterCommandSetup(adapterId: WorkbenchBuiltInAdapterId): string {
-  const command = adapterCommandName(adapterId);
-  const workbenchRuntimePackageRunner = `/workbench-runtime/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
-  const workbenchRuntimeSourceRunner = `/workbench-runtime/products/workbench/packages/built-in-adapters/src/bin/${adapterId}.ts`;
-  const cloudRuntimePackageRunner = `/app/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
-  const cloudRuntimeDistRunner = `/app/products/workbench/packages/built-in-adapters/dist/bin/${adapterId}.js`;
-  const cloudRuntimeSourceRunner = `/app/products/workbench/packages/built-in-adapters/src/bin/${adapterId}.ts`;
-  const globalRunner = `/usr/local/lib/node_modules/@workbench-ai/workbench-built-in-adapters/dist/bin/${adapterId}.js`;
-  return [
-    `printf '%s\\n'`,
-    "'#!/bin/sh'",
-    `'if [ -f ${workbenchRuntimePackageRunner} ]; then exec node ${workbenchRuntimePackageRunner} "$@"; fi'`,
-    `'if [ -f ${cloudRuntimePackageRunner} ]; then exec node ${cloudRuntimePackageRunner} "$@"; fi'`,
-    `'if [ -f ${cloudRuntimeDistRunner} ]; then exec node ${cloudRuntimeDistRunner} "$@"; fi'`,
-    `'if [ -f ${globalRunner} ]; then exec node ${globalRunner} "$@"; fi'`,
-    `'if [ -f ${workbenchRuntimeSourceRunner} ]; then exec node --experimental-strip-types ${workbenchRuntimeSourceRunner} "$@"; fi'`,
-    `'if [ -f ${cloudRuntimeSourceRunner} ]; then exec node --experimental-strip-types ${cloudRuntimeSourceRunner} "$@"; fi'`,
-    `'echo "Workbench built-in adapter ${adapterId} is unavailable." >&2'`,
-    "'exit 127'",
-    `> /usr/local/bin/${command}`,
-    `&& chmod 755 /usr/local/bin/${command}`,
-  ].join(" ");
 }
 
 function cloneManifest(manifest: WorkbenchAdapterManifest): WorkbenchAdapterManifest {

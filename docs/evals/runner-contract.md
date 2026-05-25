@@ -1,50 +1,54 @@
 # Execution Contract
 
-Workbench resolves `benchmark.yaml`, a subject manifest, optional subject files, task-source adapter output, and optional optimizer YAML into generic executions. Eval runs create one `trial` per subject/task/sample. Improve runs call `subject.improve` to patch subject files, then evaluate the improved subject with trials.
+Workbench resolves `benchmark.yaml`, a subject manifest, optional subject files, the selected engine config, and optional optimizer YAML into generic executions. Eval runs ask the selected engine to evaluate one subject. Improve runs call the optimizer's improve adapter to patch subject files, then evaluate the improved subject with the same engine.
 
-A trial has one runtime environment. Workbench stages public task files from resolved `TaskBundle` data and subject files, runs the `subject.run` adapter, injects verifier tests, runs the `trial.score` adapter in the same mutated environment, and normalizes the scorecard. This is the single runtime model for both Workbench-native tasks and Harbor-shaped tasks.
+For the built-in `workbench` engine, each attempt is one top-level `engine.run` job owned by a host controller. The default child topology is shared: the engine asks runtime-control to run optional `subject.prepare.command`, the subject adapter, and engine-owned scoring in one child sandbox. With `engine.with.grading.isolation: separate`, the engine runs the subject in one child sandbox, collects the mutable workspace and `/workspace/output` artifacts, then scores them in a second child sandbox with verifier files mounted under `/workspace/private/engine`. Harbor uses an external Harbor engine adapter; Harbor `task.toml` and the Harbor runtime decide whether its verifier uses the same sandbox or a separate sandbox, while the adapter only bridges Harbor's sandbox requests to Workbench runtime-control when needed.
 
-Built-in `path` and `harbor` adapters implement `tasks.resolve`. Built-in `codex`, `claude`, and `pi` adapters implement `subject.run` and `subject.improve`. Built-in `tests` and `rubric` adapters implement `trial.score`. External adapters, including project-declared overrides for built-in ids, run through the same `workbench.adapter.v2` request and `workbench.adapter-result.v1` result contract inside the composed Dockerfile environment declared by `benchmark.environment.dockerfile` plus adapter setup.
+Default catalog adapters such as `codex` and `claude` implement subject run and optimizer improve behavior. The built-in `workbench` engine owns native task loading plus `tests` and `rubric` scoring helpers. The rubric helper runs one judge agent turn per criterion and owns `parallelism` as the only configurable throttle for those criterion turns; core runtime remains generic and records the normalized engine result. Harbor is an external engine adapter. External adapters, including project-declared overrides for default catalog ids, run through the same `workbench.adapter.v3` request and `workbench.adapter-result.v1` result contract inside the composed environment declared by the engine plus adapter setup.
 
 During hosted execution, agent adapters may publish live `job_progress` event batches before the terminal job output exists. These batches are best-effort UI progress and trace deltas. The completed adapter result remains authoritative.
 
 Adapters may report execution usage on the completed result. Provider-reported cost is authoritative. When the provider does not report cost, Workbench estimates from its checked-in LiteLLM price snapshot using the exact model string emitted by the adapter.
 
-## TaskBundle Boundary
+## Engine Boundary
 
-A `TaskBundle` is the resolved representation of one task. It contains task text, task id, public files, verifier-only files, optional oracle files, and optional task environment defaults. Native Workbench task directories and Harbor task directories are source formats, not core runtime formats.
+The selected engine is the boundary for case parsing, environment setup, scoring, and result normalization. Core chooses an engine from `benchmark.yaml`, gives it the selected subject, and records the engine's normalized output.
 
-The built-in `path` task-source adapter parses native Workbench task directories such as `tasks/<case>/task.yaml`. The built-in `harbor` task-source adapter parses Harbor directories such as `instruction.md`, `task.toml`, `environment/`, `tests/`, and `solution/`. After `tasks.resolve`, core receives `TaskBundle` data from `workbench-result.json` and runs trials from that data. Core does not walk native Workbench task package directories or Harbor directories to decide what a trial means.
+The built-in `workbench` engine parses native Workbench task directories such as `tasks/<case>/task.yaml`. Harbor directories such as `instruction.md`, `task.toml`, `environment/`, `tests/`, MCP server config, health checks, and `solution/` are parsed by Harbor itself behind the Harbor engine adapter. Core does not walk native Workbench task package directories or Harbor directories to decide what an eval means.
 
 ## Staged Filesystem
 
-Every trial receives a minimal filesystem:
+Every built-in Workbench engine attempt receives a minimal filesystem:
 
-- `/workspace`: the mutable working directory used by the subject and scorer.
-- `/tests`: verifier-only files, injected after the subject run.
-- `/logs`: shared log root used by test-based scorers and Harbor-style reward files.
-- `/workspace/output`: adapter output directory for `workbench-result.json` and inspectable metadata.
+- `/workspace`: the mutable working directory. It starts without an implicit subject copy; optional `subject.prepare.command` may copy or install files here.
+- `/workspace/input/subject`: immutable subject baseline.
+- `/workspace/input/case`: public case files from the selected task.
+- `/workspace/input/traces`: prior traces for optimizer runs.
+- `/workspace/private/engine`: engine-only verifier and private files, hidden from subject adapters and available only while scoring.
+- `/workspace/output`: the only durable output directory for adapter results, inspectable artifacts, and traces.
 
-Adapter commands receive `WORKBENCH_ADAPTER_REQUEST`, which points to the operation request JSON, `WORKBENCH_OUTPUT`, which points to `/workspace/output`, and `WORKBENCH_RESULT`, which points to the expected `workbench-result.json` path.
+Adapter commands receive `WORKBENCH_ADAPTER_REQUEST`, which points to the operation request JSON, `WORKBENCH_OUTPUT`, which points to `/workspace/output`, and `WORKBENCH_RESULT`, which points to the expected `workbench-result.json` path. Adapters must use the request's `paths` object instead of assuming hard-coded mounts. `subject.prepare.command` is not an adapter operation; it runs from `/workspace`, sees the fixed input folders, and receives `WORKBENCH_OUTPUT` for logs if needed.
 
-Operation visibility is exact:
+Operation visibility for built-in Workbench engine helpers is exact:
 
 | Operation | Visible paths | Required result value |
 | --- | --- | --- |
-| `subject.improve` | subject files plus traces | subject patch |
-| `subject.run` | mutable working directory with subject files and task `files/` | `null` or omitted value |
-| `trial.score` | same mutated working directory plus `/tests` and `/logs` | Workbench scorecard |
+| `engine.resolve` | project source paths available during source resolution | resolved engine cases and optional environment defaults |
+| `optimizer.improve` | mutable subject workspace, immutable subject baseline, prior traces, and output | subject patch |
+| `subject.run` | mutable subject workspace, immutable subject baseline, public case files, and output | `null` or omitted value |
+| `engine.run` | mutable subject workspace, public case files, engine-private verifier files, and output | Workbench result record |
 
-Verifier files are not present during the subject run. This preserves the hidden-data boundary while allowing the scorer to inspect the real final filesystem state.
+Verifier files are not present in the subject adapter request. The built-in Workbench engine passes `paths.case` to nested subject adapters and does not pass `paths.enginePrivate`. This preserves the hidden-data boundary while allowing the engine-owned scoring helper to inspect the real final filesystem state.
 
 No runtime operation receives benchmark/subject/optimizer YAML as source files. Adapter commands receive only the standard request JSON through `WORKBENCH_ADAPTER_REQUEST`. Auth material is scoped to the adapter invocation being executed.
 
 Source references are resolved before staging:
 
-- Omitted `benchmark.tasks` reads the default `tasks/` directory through the built-in `path` adapter's `tasks.resolve` operation. Explicit task-source `with.path` values, `benchmark.environment.dockerfile`, and adapter sources are literal paths relative to the YAML file that declares them.
-- Subject files are declared with `files.path`, normally `files` next to the selected `subject.yaml`.
+- Omitted `engine.with.tasks` reads the default `tasks/` directory through the built-in `workbench` engine. Explicit engine paths, `engine.with.environment.dockerfile`, and adapter sources are literal paths relative to the YAML file that declares them.
+- Subject files are declared with `files.path`, normally `files` next to the selected `subject.yaml`, and are staged at `/workspace/input/subject`.
+- Optional `subject.prepare.command` runs from `/workspace` before subject execution and before engine-private files are staged. Use it to copy or install subject files into the mutable workspace.
 - `optimizer.edits[]` entries are literal paths inside that subject `files/` directory.
-- Workbench uses the whole subject files directory and the whole resolved `TaskBundle`. At runtime, bundle public files are subject-visible, verifier files are scorer-only, and solution files are oracle-only.
+- Workbench uses the whole subject files directory and the selected engine's resolved case data. For the built-in `workbench` engine, public files are staged at `paths.case`, verifier files are scoring-only under `paths.enginePrivate`, and solution files are oracle-only.
 - `improve`, `run`, and `score` identify adapters by `use`; all adapter-specific settings, including optional first-party `instructions`, live under `with`.
 - Adapter manifest `slots` point at nested adapter-shaped values under `with` and declare the required operation so Workbench can include sources, collect/default auth, and validate nested adapter support. They do not automatically execute nested adapters; the parent adapter owns any delegation behavior.
 
@@ -55,20 +59,28 @@ Every adapter operation writes `/workspace/output/workbench-result.json` with pr
 ```json
 {
   "protocol": "workbench.adapter-result.v1",
-  "operation": "trial.score",
+  "operation": "engine.run",
   "ok": true,
   "value": {
     "score": 0.82,
     "metrics": {
-      "format_similarity": 0.82,
-      "criterion__required_tables": 1
+      "format_similarity": 0.82
     },
     "summary": "Matched required tables and headings; missed footer formatting.",
     "cases": [
       {
         "id": "task",
         "status": "completed",
-        "metrics": { "format_similarity": 0.82 }
+        "metrics": { "format_similarity": 0.82 },
+        "criteria": [
+          {
+            "criterion_id": "required_tables",
+            "label": "Required tables",
+            "score": 1,
+            "pass": true,
+            "rationale": "All required tables were present."
+          }
+        ]
       }
     ],
     "feedback": {
@@ -89,54 +101,58 @@ Every adapter operation writes `/workspace/output/workbench-result.json` with pr
 }
 ```
 
-Result values are operation-specific:
+Result values are operation-specific protocol details:
 
-- `tasks.resolve`: `{ "tasks": [...] }` plus optional task environment defaults.
 - `subject.run`: `null` or omitted `value`.
-- `trial.score`: a Workbench scorecard. `score` is required and must be finite.
-- `subject.improve`: a subject patch with `files`, required `fileChanges`, and optional `summary`.
+- `engine.run`: a Workbench result record. `score` is required and must be finite.
+- `optimizer.improve`: a subject patch with `files`, required `fileChanges`, and optional `summary`.
 
-Scorecard fields:
+Result record fields:
 
 - `score`: required numeric metric.
-- `metrics`: optional additional numeric metrics. Keys prefixed with `criterion__` render as criteria metrics.
+- `metrics`: optional additional numeric metrics. Metrics remain generic; checks that should appear as criteria are emitted in case `criteria`.
 - `summary`: optional short human-readable result.
-- `cases`: optional task-level results, feedback, and criterion scores. Case status is operational: use `completed` for a valid scorecard and `error` only for scorer/runtime errors.
+- `cases`: optional case-level results, feedback, and criterion scores. Case status is operational: use `completed` for a valid result record and `error` only for scoring/runtime errors.
 - `feedback`: optional structured JSON for diagnostics.
 
-The built-in `tests` scorer may read Harbor-style reward files under `/logs/verifier` internally before publishing the standard adapter result:
+The built-in `workbench` engine's `tests` helper reads reward files from its adapter-owned verifier output directory before publishing the standard adapter result. The helper sets `WORKBENCH_TESTS_VERIFIER_DIR`; if needed, scripts can derive the same path from `paths.output/.workbench/internal/verifier`.
 
-- `/logs/verifier/reward.json`, preferably with `reward` or `score`
-- `/logs/verifier/reward.txt`, containing a finite numeric reward
+The built-in `workbench` engine's `rubric` helper runs one judge turn per criterion and may use verifier-private files while scoring. Those criterion turns are not core jobs. The helper publishes each selected judge `trace.json` as a trace session plus criterion result files and an aggregate scorecard under the parent attempt job's trace/artifact bundle. It does not publish raw event logs, request files, or `.workbench/internal` state.
 
-If an operation command exits non-zero, Workbench marks the execution failed. Scoring also fails when no valid `trial.score` result value is present. The built-in `command` scorer is strict: a successful shell command must still publish `workbench-result.json` for `trial.score`.
+- `$WORKBENCH_TESTS_VERIFIER_DIR/reward.json`, preferably with `reward` or `score`
+- `$WORKBENCH_TESTS_VERIFIER_DIR/reward.txt`, containing a finite numeric reward
+
+If an operation command exits non-zero, Workbench marks the execution failed. Engine scoring also fails when no valid result value is present. Command-based scoring helpers used by the built-in `workbench` engine must still publish `workbench-result.json`.
 
 ## Inspectable Artifacts
 
-If a generated report, normalized text dump, screenshot, workbook, or debug file should be inspectable after the trial, write it into the working directory or adapter output during the subject run. The scorer sees the same mutated environment, and Workbench records visible artifacts with the trial evidence.
+If a generated report, normalized text dump, screenshot, workbook, trace, or debug file should be inspectable after the attempt, copy it into `/workspace/output` during the subject run or engine run. The engine-owned scoring helper sees those output artifacts in both shared and separate grading modes, and Workbench records durable artifacts from output.
 
 A practical pattern is:
 
-1. Subject creates the primary output and any supporting summaries in the working directory.
-2. Tests or rubric scorer compares the final state against `/tests` and task criteria.
-3. Scorer writes `workbench-result.json` with a scorecard value.
+1. Subject creates the primary output in `/workspace` and copies durable summaries or artifacts into `/workspace/output`.
+2. The built-in `workbench` engine's tests helper compares the final state against deterministic verifier files, or its rubric helper runs one judge turn per criterion against the final state and engine-private verifier files.
+3. The scoring helper writes `workbench-result.json` with a result value.
 
 ## Command Shape
 
-Prefer checked-in subject scripts and Dockerfile-pinned tools. Operation commands execute from the operation working directory. Put task dependencies in the environment Dockerfile instead of installing them during every evaluation job; adapter runtime dependencies belong in adapter `setup` commands.
+Prefer checked-in subject scripts and Dockerfile-pinned tools. Operation commands execute from the operation working directory. Put case dependencies in the environment Dockerfile instead of installing them during every evaluation job; adapter runtime dependencies belong in adapter `setup` commands.
 
 ```yaml
 # subjects/codex/subject.yaml
 run:
   use: codex
   with:
-    instructions: Run python run.py in the staged workspace.
+    model: gpt-5.4-mini
 ```
 
 ```yaml
 # benchmark.yaml
-score:
-  use: tests
+engine:
+  use: workbench
+  with:
+    score:
+      use: tests
 ```
 
 Use shell glue only inside adapter-owned operation commands when it genuinely clarifies the operation.
@@ -147,32 +163,32 @@ External adapter commands read a single request file:
 
 ```json
 {
-  "protocol": "workbench.adapter.v2",
+  "protocol": "workbench.adapter.v3",
   "id": "exec_run_case_sample",
   "jobId": "job_exec_run_case_sample",
-  "operation": "subject.run",
+  "operation": "engine.run",
   "invocation": {
-    "use": "my-agent",
+    "use": "my-engine",
     "with": { "mode": "strict" }
   },
   "context": {
     "benchmark": { "name": "example", "description": "Example benchmark" },
     "subject": { "id": "subject_current", "path": "subjects/my-agent/files" },
-    "trial": { "trialIndex": 0, "sampleIndex": 0, "caseId": "task-001" },
-    "task": { "text": "Task text from task.yaml" }
+    "attempt": { "attemptIndex": 0, "sampleIndex": 0, "caseId": "task-001" },
+    "case": { "prompt": "Case prompt from task.yaml" }
   },
   "paths": {
     "workspace": "/workspace",
-    "cwd": "/workspace",
     "output": "/workspace/output",
     "result": "/workspace/output/workbench-result.json",
     "subject": "/workspace/input/subject",
-    "tests": "/tests",
-    "logs": "/logs"
+    "case": "/workspace/input/case",
+    "traces": "/workspace/input/traces",
+    "enginePrivate": "/workspace/private/engine"
   }
 }
 ```
 
-The request carries adapter-specific `with` data and optional resolved auth, but the output rules do not change. A single adapter implementation may support multiple operations by branching on `operation`.
+The request carries adapter-specific `with` data and optional resolved auth, but the output rules do not change. A single adapter implementation may support multiple operations by branching on `operation`. The built-in Workbench engine omits `paths.enginePrivate` from nested subject adapter requests; subject adapters should treat absent paths as unavailable, not infer them from the filesystem.
 
 Env-backed auth is injected as the manifest-declared environment variables for the matching operation. File-backed auth is materialized under a private per-execution root and listed in the request `auth` object with `filesRoot` plus the declared relative file names. The executing adapter keeps the short `auth.default` or `auth.<slot>` convenience shape; every materialized bundle is also namespaced under `auth.adapters[adapterId][slot]` so adapter slots cannot collide. Adapters should read only the env vars or files declared by their own manifest.

@@ -2,16 +2,17 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import {
-  finalizeWorkbenchExecutionTraceForJob,
+  buildWorkbenchTraceSessionsFromFiles,
   selectExecutionOutputFilesForInspection,
   type SubjectRecord,
-  type EvaluationResultRecord,
+  type EvaluationScorecard,
   type HostedWorkbenchJob,
   type RunSummary,
   type RuntimeEvent,
   type Json,
   type SurfaceSnapshotFile,
   type WorkbenchExecutionTrace,
+  type WorkbenchTraceSession,
 } from "@workbench-ai/workbench-core";
 
 type WorkbenchTraceSpan = WorkbenchExecutionTrace["spans"][number];
@@ -23,10 +24,23 @@ export interface LocalArchiveSnapshot {
   activeId: string | null;
   subjects: SubjectRecord[];
   subjectFiles: Record<string, SurfaceSnapshotFile[]>;
-  evaluations: EvaluationResultRecord[];
+  evaluations: EvaluationScorecard[];
   runs: RunSummary[];
   events: RuntimeEvent[];
 }
+
+export interface LocalArchiveIndex {
+  activeId: string | null;
+  subjects: SubjectRecord[];
+  evaluations: EvaluationScorecard[];
+  runs: RunSummary[];
+  events: RuntimeEvent[];
+}
+
+export type LocalArchivedJob = HostedWorkbenchJob & {
+  trace?: WorkbenchExecutionTrace;
+  traceSessions?: WorkbenchTraceSession[];
+};
 
 interface LocalArchiveStateFile {
   activeId?: string | null;
@@ -39,28 +53,38 @@ export function localRuntimeDir(workspace: string): string {
 }
 
 export async function loadLocalArchive(workspace: string): Promise<LocalArchiveSnapshot> {
+  const index = await loadLocalArchiveIndex(workspace);
+  const root = localRuntimeDir(workspace);
+  const subjectFiles: Record<string, SurfaceSnapshotFile[]> = {};
+  await Promise.all(index.subjects.map(async (subject) => {
+    subjectFiles[subject.id] = await readSurfaceFiles(path.join(root, "subjects", localRecordName(subject.id), "files"));
+  }));
+  const snapshot: LocalArchiveSnapshot = {
+    ...index,
+    subjectFiles,
+  };
+  validateLocalArchiveSnapshot(snapshot);
+  return snapshot;
+}
+
+export async function loadLocalArchiveIndex(workspace: string): Promise<LocalArchiveIndex> {
   const root = localRuntimeDir(workspace);
   const [state, subjects, evaluations, runs, events] = await Promise.all([
     readJson<LocalArchiveStateFile>(path.join(root, "state.json"), {}),
     readRecords<SubjectRecord>(path.join(root, "subjects"), "record.json"),
-    readFlatRecords<EvaluationResultRecord>(path.join(root, "evaluations")),
+    readFlatRecords<EvaluationScorecard>(path.join(root, "evaluations")),
     readFlatRecords<RunSummary>(path.join(root, "runs")),
     readJson<RuntimeEvent[]>(path.join(root, "events.json"), []),
   ]);
-  const subjectFiles: Record<string, SurfaceSnapshotFile[]> = {};
-  await Promise.all(subjects.map(async (subject) => {
-    subjectFiles[subject.id] = await readSurfaceFiles(path.join(root, "subjects", subject.id, "files"));
-  }));
-  const snapshot: LocalArchiveSnapshot = {
+  const index: LocalArchiveIndex = {
     activeId: typeof state.activeId === "string" ? state.activeId : null,
     subjects: subjects.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id)),
-    subjectFiles,
     evaluations: evaluations.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)),
     runs: runs.sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id)),
     events: events.sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id)),
   };
-  validateLocalArchiveSnapshot(snapshot);
-  return snapshot;
+  validateLocalArchiveIndex(index);
+  return index;
 }
 
 export async function saveLocalArchive(
@@ -134,6 +158,86 @@ export async function readLocalExecutionFiles(
   );
 }
 
+export async function readLocalSubjectRecord(
+  workspace: string,
+  subjectId: string,
+): Promise<SubjectRecord> {
+  const subject = await readJson<SubjectRecord | null>(
+    path.join(localRuntimeDir(workspace), "subjects", localRecordName(subjectId), "record.json"),
+    null,
+  );
+  if (!subject) {
+    throw new Error(`Subject not found: ${subjectId}`);
+  }
+  validateSubjectRecord(subject);
+  return subject;
+}
+
+export async function readLocalSubjectFilesForId(
+  workspace: string,
+  subjectId: string,
+): Promise<SurfaceSnapshotFile[]> {
+  await readLocalSubjectRecord(workspace, subjectId);
+  return await readSurfaceFiles(
+    path.join(localRuntimeDir(workspace), "subjects", localRecordName(subjectId), "files"),
+  );
+}
+
+export async function readLocalEvaluationRecord(
+  workspace: string,
+  evaluationId: string,
+): Promise<EvaluationScorecard> {
+  const evaluation = await readJson<EvaluationScorecard | null>(
+    path.join(localRuntimeDir(workspace), "evaluations", `${localRecordName(evaluationId)}.json`),
+    null,
+  );
+  if (!evaluation) {
+    throw new Error(`Evaluation not found: ${evaluationId}`);
+  }
+  validateEvaluationRecord(evaluation);
+  return evaluation;
+}
+
+export async function readLocalRunRecord(
+  workspace: string,
+  runId: string,
+): Promise<RunSummary> {
+  const run = await readJson<RunSummary | null>(
+    path.join(localRuntimeDir(workspace), "runs", `${localRecordName(runId)}.json`),
+    null,
+  );
+  if (!run) {
+    throw new Error(`Run not found: ${runId}`);
+  }
+  validateRunRecord(run);
+  return run;
+}
+
+export async function readLocalJobs(
+  workspace: string,
+): Promise<LocalArchivedJob[]> {
+  const jobs = await readFlatRecords<LocalArchivedJob>(path.join(localRuntimeDir(workspace), "jobs"));
+  return jobs.sort((left, right) =>
+    (left.startedAt ?? left.createdAt).localeCompare(right.startedAt ?? right.createdAt) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+export async function readLocalRunJobs(
+  workspace: string,
+  runId: string,
+): Promise<LocalArchivedJob[]> {
+  return (await readLocalJobs(workspace)).filter((job) => job.runId === runId);
+}
+
+export async function readLocalJobInRun(
+  workspace: string,
+  runId: string,
+  jobId: string,
+): Promise<LocalArchivedJob | null> {
+  return (await readLocalRunJobs(workspace, runId)).find((job) => job.id === jobId) ?? null;
+}
+
 export function upsertLocalSubject(
   snapshot: LocalArchiveSnapshot,
   subject: SubjectRecord,
@@ -154,7 +258,7 @@ export function upsertLocalSubject(
 
 export function upsertLocalEvaluation(
   snapshot: LocalArchiveSnapshot,
-  evaluation: EvaluationResultRecord,
+  evaluation: EvaluationScorecard,
 ): LocalArchiveSnapshot {
   return {
     ...snapshot,
@@ -204,15 +308,16 @@ export function readLocalSubjectFiles(snapshot: LocalArchiveSnapshot, subjectId:
 }
 
 function validateLocalArchiveSnapshot(snapshot: LocalArchiveSnapshot): void {
+  validateLocalArchiveIndex(snapshot);
+}
+
+function validateLocalArchiveIndex(snapshot: LocalArchiveIndex): void {
   const subjectIds = new Set(snapshot.subjects.map((subject) => subject.id));
   if (snapshot.activeId && !subjectIds.has(snapshot.activeId)) {
     throw new Error(`Active subject not found: ${snapshot.activeId}`);
   }
   for (const subject of snapshot.subjects) {
-    requireArchiveString(subject.id, "subject.id");
-    requireArchiveString(subject.benchmarkFingerprint, `subject ${subject.id}.benchmarkFingerprint`);
-    requireArchiveString(subject.subjectFingerprint, `subject ${subject.id}.subjectFingerprint`);
-    requireArchiveString(subject.createdAt, `subject ${subject.id}.createdAt`);
+    validateSubjectRecord(subject);
     if (!Array.isArray(subject.referenceIds)) {
       throw new Error(`subject ${subject.id}.referenceIds must be an array.`);
     }
@@ -224,11 +329,7 @@ function validateLocalArchiveSnapshot(snapshot: LocalArchiveSnapshot): void {
     }
   }
   for (const evaluation of snapshot.evaluations) {
-    requireArchiveString(evaluation.id, "evaluation.id");
-    requireArchiveString(evaluation.runId, `evaluation ${evaluation.id}.runId`);
-    requireArchiveString(evaluation.benchmarkFingerprint, `evaluation ${evaluation.id}.benchmarkFingerprint`);
-    requireArchiveString(evaluation.subjectFingerprint, `evaluation ${evaluation.id}.subjectFingerprint`);
-    requireArchiveString(evaluation.subjectId, `evaluation ${evaluation.id}.subjectId`);
+    validateEvaluationRecord(evaluation);
     const subject = snapshot.subjects.find((entry) => entry.id === evaluation.subjectId);
     if (!subject) {
       throw new Error(`evaluation ${evaluation.id}.subjectId not found: ${evaluation.subjectId}`);
@@ -241,12 +342,31 @@ function validateLocalArchiveSnapshot(snapshot: LocalArchiveSnapshot): void {
     }
   }
   for (const run of snapshot.runs) {
-    requireArchiveString(run.id, "run.id");
-    requireArchiveString(run.workflow, `run ${run.id}.workflow`);
-    requireArchiveString(run.benchmarkFingerprint, `run ${run.id}.benchmarkFingerprint`);
-    requireArchiveString(run.status, `run ${run.id}.status`);
-    requireArchiveString(run.startedAt, `run ${run.id}.startedAt`);
+    validateRunRecord(run);
   }
+}
+
+function validateSubjectRecord(subject: SubjectRecord): void {
+  requireArchiveString(subject.id, "subject.id");
+  requireArchiveString(subject.benchmarkFingerprint, `subject ${subject.id}.benchmarkFingerprint`);
+  requireArchiveString(subject.subjectFingerprint, `subject ${subject.id}.subjectFingerprint`);
+  requireArchiveString(subject.createdAt, `subject ${subject.id}.createdAt`);
+}
+
+function validateEvaluationRecord(evaluation: EvaluationScorecard): void {
+  requireArchiveString(evaluation.id, "evaluation.id");
+  requireArchiveString(evaluation.runId, `evaluation ${evaluation.id}.runId`);
+  requireArchiveString(evaluation.benchmarkFingerprint, `evaluation ${evaluation.id}.benchmarkFingerprint`);
+  requireArchiveString(evaluation.subjectFingerprint, `evaluation ${evaluation.id}.subjectFingerprint`);
+  requireArchiveString(evaluation.subjectId, `evaluation ${evaluation.id}.subjectId`);
+}
+
+function validateRunRecord(run: RunSummary): void {
+  requireArchiveString(run.id, "run.id");
+  requireArchiveString(run.workflow, `run ${run.id}.workflow`);
+  requireArchiveString(run.benchmarkFingerprint, `run ${run.id}.benchmarkFingerprint`);
+  requireArchiveString(run.status, `run ${run.id}.status`);
+  requireArchiveString(run.startedAt, `run ${run.id}.startedAt`);
 }
 
 function requireArchiveString(value: unknown, label: string): void {
@@ -259,14 +379,16 @@ function archivedLocalJob(
   job: HostedWorkbenchJob,
   outputFiles: readonly SurfaceSnapshotFile[],
   traceSourceFiles: readonly SurfaceSnapshotFile[],
-): HostedWorkbenchJob & { trace: WorkbenchExecutionTrace } {
+): HostedWorkbenchJob & { trace: WorkbenchExecutionTrace; traceSessions: WorkbenchTraceSession[] } {
   const output = jsonRecord(job.output);
+  const traceSessions = buildLocalJobTraceSessions(job, traceSourceFiles);
   return {
     ...job,
     ...(Object.keys(output).length > 0
       ? { output: { ...output, files: outputFiles } as unknown as Json }
       : {}),
-    trace: buildLocalJobTrace(job, traceSourceFiles),
+    trace: buildLocalJobTrace(job),
+    traceSessions,
   };
 }
 
@@ -283,26 +405,16 @@ function isWorkbenchReservedArchivePath(filePath: string): boolean {
   return filePath === ".workbench" || filePath.startsWith(".workbench/");
 }
 
-function buildLocalJobTrace(
-  job: HostedWorkbenchJob,
-  outputFiles: readonly SurfaceSnapshotFile[],
-): WorkbenchExecutionTrace {
-	  const purpose = readExecutionPurpose(job);
-	  const role = purpose === "improve" ? "optimizer" : "runner";
+function buildLocalJobTrace(job: HostedWorkbenchJob): WorkbenchExecutionTrace {
+  const purpose = readExecutionPurpose(job);
+  const role = purpose === "improve" ? "optimizer" : "engine";
   const stageId = purpose ?? "execution";
-  const realTrace = readLastExecutionTrace(outputFiles);
-  if (realTrace) {
-    return normalizeLocalExecutionTrace(realTrace, job, stageId);
-  }
   const status = traceStatusForJob(job.status);
   const startedAt = job.startedAt ?? job.createdAt;
   const endedAt = job.finishedAt ?? null;
   const spanId = "job";
-  const agentResult = readLastTraceJson(outputFiles, "/agent-result.json");
-  const eventCount = numberValue(agentResult.eventCount);
-  const sessionId = stringValue(agentResult.sessionId);
   const output = jsonRecord(job.output);
-  const usage = traceUsageSummary(output.usage ?? agentResult.usage);
+  const usage = traceUsageSummary(output.usage);
   const events: WorkbenchTraceEvent[] = [
     traceEvent({
       index: 1,
@@ -317,22 +429,7 @@ function buildLocalJobTrace(
       },
     }),
   ];
-  if (sessionId || eventCount !== null) {
-    events.push(traceEvent({
-      index: events.length + 1,
-      spanId,
-      stageId,
-      kind: "note",
-      at: endedAt ?? startedAt,
-      message: `Agent session${sessionId ? ` ${sessionId}` : ""}${eventCount !== null ? ` recorded ${eventCount} event(s)` : ""}.`,
-      attributes: {
-        job_id: job.id,
-        ...(sessionId ? { session_id: sessionId } : {}),
-        ...(eventCount !== null ? { event_count: eventCount } : {}),
-      },
-    }));
-  }
-  const outputMessage = localJobOutputMessage(job, output, agentResult);
+  const outputMessage = localJobOutputMessage(job, output);
   if (outputMessage) {
     events.push(traceEvent({
       index: events.length + 1,
@@ -379,7 +476,7 @@ function buildLocalJobTrace(
     attempt_number: Math.max(1, job.attempt || 1),
     stage_id: stageId,
     stage_run_index: null,
-	    kind: purpose === "trial" || purpose === "improve" ? "turn" : "stage",
+    kind: purpose === "attempt" || purpose === "improve" ? "turn" : "stage",
     title: `${capitalize(role)} job ${job.id}`,
     status,
     started_at: startedAt,
@@ -393,146 +490,21 @@ function buildLocalJobTrace(
     trace_id: `local-${job.id}`,
     spans: [span],
     events,
-    summaries: [traceSummary(job, stageId, status, startedAt, endedAt, usage, outputMessage, eventCount)],
+    summaries: [traceSummary(job, stageId, status, startedAt, endedAt, usage, outputMessage, null)],
   };
 }
 
-function readLastExecutionTrace(
-  files: readonly SurfaceSnapshotFile[],
-): WorkbenchExecutionTrace | null {
-  const traceRecord = files
-    .filter((file) => file.encoding === "utf8" && file.path.endsWith("/trace.json"))
-    .map((file) => parseJsonObject(file.content))
-    .filter((record) => Object.keys(record).length > 0)
-    .at(-1);
-  if (!traceRecord) {
-    return null;
-  }
-  const spans = Array.isArray(traceRecord.spans)
-    ? traceRecord.spans.map(readTraceSpan).filter((span): span is WorkbenchTraceSpan => span !== null)
-    : [];
-  const events = Array.isArray(traceRecord.events)
-    ? traceRecord.events.map(readTraceEvent).filter((event): event is WorkbenchTraceEvent => event !== null)
-    : [];
-  const summaries = Array.isArray(traceRecord.summaries)
-    ? traceRecord.summaries.map(readTraceSummary).filter((summary): summary is WorkbenchTraceSummary => summary !== null)
-    : [];
-  if (spans.length === 0 && events.length === 0 && summaries.length === 0) {
-    return null;
-  }
-  return {
-    trace_id: stringValue(traceRecord.trace_id) ?? "agent-trace",
-    spans,
-    events,
-    summaries,
-  };
-}
-
-function normalizeLocalExecutionTrace(
-  trace: WorkbenchExecutionTrace,
+function buildLocalJobTraceSessions(
   job: HostedWorkbenchJob,
-  stageId: string,
-): WorkbenchExecutionTrace {
-  return finalizeWorkbenchExecutionTraceForJob({
+  outputFiles: readonly SurfaceSnapshotFile[],
+): WorkbenchTraceSession[] {
+  const purpose = readExecutionPurpose(job);
+  return buildWorkbenchTraceSessionsFromFiles({
     job,
-    stageId,
-    trace: {
-      trace_id: `local-${job.id}`,
-      spans: trace.spans.map((span: WorkbenchTraceSpan) => ({
-        ...span,
-        stage_id: stageId,
-        stage_run_index: null,
-        attributes: {
-          ...span.attributes,
-          job_id: job.id,
-        },
-      })),
-      events: trace.events.map((event: WorkbenchTraceEvent) => ({
-        ...event,
-        stage_id: stageId,
-        stage_run_index: null,
-        attributes: {
-          ...event.attributes,
-          job_id: job.id,
-        },
-      })),
-      summaries: trace.summaries.map((summary: WorkbenchTraceSummary) => ({
-        ...summary,
-        stage_id: stageId,
-        stage_run_index: null,
-      })),
-    },
+    files: outputFiles,
+    purpose,
+    fallbackRole: purpose === "improve" ? "optimizer" : "engine",
   });
-}
-
-function readTraceSpan(value: unknown): WorkbenchTraceSpan | null {
-  const record = jsonRecord(value);
-  const id = stringValue(record.id);
-  const kind = traceSpanKind(record.kind);
-  const status = traceStatus(record.status);
-  const startedAt = stringValue(record.started_at);
-  if (!id || !kind || !status || !startedAt) {
-    return null;
-  }
-  return {
-    id,
-    parent_id: stringValue(record.parent_id),
-    attempt_number: positiveInteger(record.attempt_number) ?? 1,
-    stage_id: stringValue(record.stage_id),
-    stage_run_index: integerValue(record.stage_run_index),
-    kind,
-    title: stringValue(record.title) ?? id,
-    status,
-    started_at: startedAt,
-    ended_at: stringValue(record.ended_at),
-    attributes: jsonRecord(record.attributes) as Record<string, Json>,
-  };
-}
-
-function readTraceEvent(value: unknown): WorkbenchTraceEvent | null {
-  const record = jsonRecord(value);
-  const id = stringValue(record.id);
-  const spanId = stringValue(record.span_id);
-  const kind = traceEventKind(record.kind);
-  const at = stringValue(record.at);
-  if (!id || !spanId || !kind || !at) {
-    return null;
-  }
-  return {
-    id,
-    span_id: spanId,
-    attempt_number: positiveInteger(record.attempt_number) ?? 1,
-    stage_id: stringValue(record.stage_id),
-    stage_run_index: integerValue(record.stage_run_index),
-    kind,
-    at,
-    message: stringValue(record.message) ?? kind,
-    attributes: jsonRecord(record.attributes) as Record<string, Json>,
-  };
-}
-
-function readTraceSummary(value: unknown): WorkbenchTraceSummary | null {
-  const record = jsonRecord(value);
-  const status = traceStatus(record.status);
-  const startedAt = stringValue(record.started_at);
-  if (!status || !startedAt) {
-    return null;
-  }
-  return {
-    attempt_number: positiveInteger(record.attempt_number) ?? 1,
-    stage_id: stringValue(record.stage_id),
-    stage_run_index: integerValue(record.stage_run_index),
-    status,
-    started_at: startedAt,
-    ended_at: stringValue(record.ended_at),
-    duration_ms: nonNegativeInteger(record.duration_ms) ?? 0,
-    tool_call_count: nonNegativeInteger(record.tool_call_count) ?? 0,
-    input_tokens: nonNegativeInteger(record.input_tokens),
-    output_tokens: nonNegativeInteger(record.output_tokens),
-    usage: traceUsageSummary(record.usage),
-    final_output_present: record.final_output_present === true,
-    error_message: stringValue(record.error_message),
-  };
 }
 
 function completedJobOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[] {
@@ -570,16 +542,15 @@ function traceStatusForJob(status: HostedWorkbenchJob["status"]): WorkbenchTrace
 function localJobOutputMessage(
   job: HostedWorkbenchJob,
   output: Record<string, unknown>,
-  agentResult: Record<string, unknown>,
 ): string | null {
   const purpose = readExecutionPurpose(job);
-  const scorecard = jsonRecord(output.scorecard);
-  const score = numberValue(scorecard.score);
-	  if (purpose === "trial" && score !== null) {
-	    const summary = stringValue(scorecard.summary) ?? stringValue(jsonRecord(scorecard.feedback).summary);
-	    return `Trial produced score ${score}.${summary ? ` ${summary}` : ""}`.trim();
-	  }
-  const summary = stringValue(output.summary) ?? stringValue(agentResult.finalOutput);
+  const result = jsonRecord(output.result);
+  const score = numberValue(result.score);
+  if (purpose === "attempt" && score !== null) {
+    const summary = stringValue(result.summary) ?? stringValue(jsonRecord(result.feedback).summary);
+    return `Attempt produced score ${score}.${summary ? ` ${summary}` : ""}`.trim();
+  }
+  const summary = stringValue(output.summary);
   return summary ? truncateTraceMessage(summary) : null;
 }
 
@@ -643,8 +614,8 @@ function traceUsageSummary(value: unknown): WorkbenchTraceUsageSummary | null {
       ? jsonRecord(record.optimizer)
       : Object.keys(jsonRecord(record.runner)).length > 0
         ? jsonRecord(record.runner)
-        : Object.keys(jsonRecord(record.scorer)).length > 0
-          ? jsonRecord(record.scorer)
+        : Object.keys(jsonRecord(record.engine)).length > 0
+          ? jsonRecord(record.engine)
           : record;
   if (Object.keys(usage).length === 0) {
     return null;
@@ -666,25 +637,6 @@ function traceUsageSummary(value: unknown): WorkbenchTraceUsageSummary | null {
   };
 }
 
-function readLastTraceJson(
-  files: readonly SurfaceSnapshotFile[],
-  suffix: string,
-): Record<string, unknown> {
-  return files
-    .filter((file) => file.encoding === "utf8" && file.path.endsWith(suffix))
-    .map((file) => parseJsonObject(file.content))
-    .filter((record) => Object.keys(record).length > 0)
-    .at(-1) ?? {};
-}
-
-function parseJsonObject(source: string): Record<string, unknown> {
-  try {
-    return jsonRecord(JSON.parse(source));
-  } catch {
-    return {};
-  }
-}
-
 function jsonRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -697,55 +649,6 @@ function stringValue(value: unknown): string | null {
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function integerValue(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) ? value : null;
-}
-
-function positiveInteger(value: unknown): number | null {
-  const integer = integerValue(value);
-  return integer !== null && integer > 0 ? integer : null;
-}
-
-function nonNegativeInteger(value: unknown): number | null {
-  const integer = integerValue(value);
-  return integer !== null && integer >= 0 ? integer : null;
-}
-
-function traceSpanKind(value: unknown): WorkbenchTraceSpan["kind"] | null {
-  return value === "hook" ||
-    value === "stage" ||
-    value === "turn" ||
-    value === "tool_call" ||
-    value === "assistant_output" ||
-    value === "usage" ||
-    value === "gate" ||
-    value === "action" ||
-    value === "error"
-    ? value
-    : null;
-}
-
-function traceEventKind(value: unknown): WorkbenchTraceEvent["kind"] | null {
-  return value === "status" ||
-    value === "message" ||
-    value === "output" ||
-    value === "usage" ||
-    value === "error" ||
-    value === "note"
-    ? value
-    : null;
-}
-
-function traceStatus(value: unknown): WorkbenchTraceSpan["status"] | null {
-  return value === "running" ||
-    value === "completed" ||
-    value === "failed" ||
-    value === "canceled" ||
-    value === "warning"
-    ? value
-    : null;
 }
 
 function capitalize(value: string): string {

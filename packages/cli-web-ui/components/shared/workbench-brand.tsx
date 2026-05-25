@@ -11,7 +11,7 @@ export function WorkbenchBrand({
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center gap-2 text-lg font-medium tracking-tight text-foreground",
+        "flex h-8 shrink-0 items-center gap-2 text-lg font-medium leading-none tracking-tight text-foreground",
         className,
       )}
     >

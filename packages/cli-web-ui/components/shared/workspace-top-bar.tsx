@@ -23,7 +23,7 @@ export function WorkspaceTopBar({
       )}
       data-testid="workspace-top-bar"
     >
-      <div className={cn("min-w-0", contentClassName)}>{brand}</div>
+      <div className={cn("flex min-w-0 items-center", contentClassName)}>{brand}</div>
       {actions ? (
         <div className="flex shrink-0 items-center gap-2">{actions}</div>
       ) : null}

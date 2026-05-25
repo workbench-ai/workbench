@@ -7,30 +7,31 @@ import type {
   Json,
   SurfaceSnapshotFile,
   UsageSummary,
-  WorkbenchScorecard,
+  WorkbenchResult,
   WorkbenchSubjectPatch,
 } from "@workbench-ai/workbench-contract";
 import {
   ensureWorkbenchAdapterOutputDir,
   readWorkbenchAdapterOperationResult,
   readWorkbenchAdapterOperationRequest,
+  runWorkbenchRuntimeOperationSequence,
   writeWorkbenchAdapterOperationResult,
   workbenchAdapterOperationResultPath,
   type WorkbenchAdapterOperationRequest,
-  type WorkbenchTaskBundle,
-  type WorkbenchTaskSourceResult,
+  type WorkbenchRuntimeControlOperationSequenceResult,
+  type WorkbenchEngineCase,
 } from "@workbench-ai/workbench-protocol";
 import YAML from "yaml";
 
-import {
-  defaultWorkbenchAgentTurnExecutor,
-  executeWorkbenchAgentTurn,
-  type AgentProviderSpec,
-  type WorkbenchAgentTurnExecutor,
-  type WorkbenchAgentTurnResult,
+import type {
+  AgentProviderSpec,
+  WorkbenchAgentTurnExecutor,
+  WorkbenchAgentTurnRequest,
+  WorkbenchAgentTurnResult,
 } from "./agent-turn.ts";
 import {
   isWorkbenchBuiltInAdapterId,
+  adapterCommandName,
   type WorkbenchBuiltInAdapterId,
 } from "./manifests.ts";
 import { importWorkbenchRuntime } from "./runtime.ts";
@@ -53,6 +54,7 @@ interface BuiltInAgentAdapterSpec {
 interface BuiltInRubricAdapterSpec {
   judge: AgentProviderSpec;
   instructions?: string;
+  parallelism: number;
   criteria: RubricCriterionSpec[];
 }
 
@@ -63,6 +65,7 @@ interface RubricCriterionSpec {
 }
 
 const TASK_CONTROL_FILE = "task.yaml";
+const DEFAULT_RUBRIC_PARALLELISM = 4;
 
 interface AdapterWorkload {
   job: { id: string };
@@ -77,11 +80,11 @@ interface AdapterWorkload {
     edits: string[];
   };
   subjectId: string;
-  trialIndex: number;
+  attemptIndex: number;
   sampleIndex: number;
   caseId: string;
-  task?: {
-    task: string;
+  case?: {
+    prompt: string;
   };
 }
 
@@ -100,27 +103,23 @@ export async function executeWorkbenchBuiltInAdapterCommand(
     request.paths.output = args.outputRoot;
   }
   await ensureWorkbenchAdapterOutputDir(request);
+  if (adapterId === "workbench") {
+    await executeWorkbenchEngineRequest(request);
+    return;
+  }
   if (adapterId === "command") {
     await executeCommandAdapterRequest(request);
     return;
   }
   if (adapterId === "tests") {
-    await executeTestsScorerRequest(request);
-    return;
-  }
-  if (adapterId === "path") {
-    await executePathTaskSourceRequest(request);
-    return;
-  }
-  if (adapterId === "harbor") {
-    await executeHarborTaskSourceRequest(request);
+    await executeTestsEngineRequest(request);
     return;
   }
   if (adapterId === "rubric") {
-    if (request.operation !== "trial.score") {
+    if (request.operation !== "engine.run") {
       throw new Error(`Rubric adapter cannot handle ${request.operation}.`);
     }
-    await writeRubricJudgeScorecard(
+    await writeRubricJudgeResult(
       request,
       workloadFromAdapterOperationRequest(request),
       builtInRubricSpecFromRequest(request),
@@ -136,8 +135,8 @@ export async function executeWorkbenchBuiltInAdapterCommand(
   if (isBuiltInAgentAdapterId(adapterId)) {
     const workload = workloadFromAdapterOperationRequest(request);
     const agent = builtInAgentSpecFromRequest(request);
-    if (request.operation === "subject.improve") {
-      await writeAgentProposalOutput(request, workload, agent, {
+    if (request.operation === "optimizer.improve") {
+      await writeAgentSubjectRevisionOutput(request, workload, agent, {
         agentExecutor: args.agentExecutor,
         adapterAuthRoot: args.adapterAuthRoot,
         adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
@@ -146,7 +145,7 @@ export async function executeWorkbenchBuiltInAdapterCommand(
       return;
     }
     if (request.operation === "subject.run") {
-      await writeAgentRunnerOutput(request, workload, agent, {
+      await writeAgentSubjectOutput(request, workload, agent, {
         agentExecutor: args.agentExecutor,
         adapterAuthRoot: args.adapterAuthRoot,
         adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
@@ -158,89 +157,303 @@ export async function executeWorkbenchBuiltInAdapterCommand(
   }
 }
 
-async function executePathTaskSourceRequest(
+async function executeWorkbenchEngineRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
-  if (request.operation !== "tasks.resolve") {
-    throw new Error("Path adapter can only handle tasks.resolve.");
+  if (request.operation === "engine.resolve") {
+    await executeWorkbenchEngineResolveRequest(request);
+    return;
   }
-  const configuredPath = requiredAdapterCommandString(request, "path");
-  const sourcePath = path.resolve(request.paths.cwd ?? request.paths.workspace, configuredPath);
+  if (request.operation === "engine.run") {
+    await executeWorkbenchEngineRunRequest(request);
+    return;
+  }
+  throw new Error(`Workbench engine adapter cannot handle ${request.operation}.`);
+}
+
+async function executeWorkbenchEngineResolveRequest(
+  request: WorkbenchAdapterOperationRequest,
+): Promise<void> {
+  const configuredPath = workbenchEngineTasksPath(request);
+  const sourcePath = path.resolve(request.paths.workspace, configuredPath);
   const stat = await fs.stat(sourcePath).catch(() => null);
   if (!stat?.isDirectory()) {
-    throw new Error(`Path task source is not a directory: ${sourcePath}`);
+    throw new Error(`Workbench engine tasks path is not a directory: ${sourcePath}`);
   }
-  const tasks = await readTaskBundlesFromWorkbenchTaskRoot(sourcePath);
+  const cases = await readEngineCasesFromWorkbenchTaskRoot(sourcePath);
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "tasks.resolve",
+    operation: "engine.resolve",
     ok: true,
-    value: { tasks },
-    summary: `Resolved Workbench task bundles from ${configuredPath}.`,
+    value: { cases },
+    summary: `Resolved Workbench engine cases from ${configuredPath}.`,
     feedback: {
-      taskSource: "path",
+      engineResolve: "workbench",
       path: configuredPath,
     },
   });
 }
 
-async function executeHarborTaskSourceRequest(
+async function executeWorkbenchEngineRunRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
-  if (request.operation !== "tasks.resolve") {
-    throw new Error("Harbor adapter can only handle tasks.resolve.");
+  const outcome = workbenchEngineGradingIsolation(request) === "separate"
+    ? await runWorkbenchEngineSeparateGrading(request)
+    : await runWorkbenchEngineSharedGrading(request);
+  if (!outcome.result) {
+    throw new Error("Workbench engine scoring completed without an engine result.");
   }
-  const configuredPath = requiredAdapterCommandString(request, "path");
-  const sourcePath = path.resolve(request.paths.cwd ?? request.paths.workspace, configuredPath);
-  const stat = await fs.stat(sourcePath).catch(() => null);
-  if (!stat?.isDirectory()) {
-    throw new Error(`Harbor task source path is not a directory: ${sourcePath}`);
-  }
-  const childTasks = await listHarborTaskDirectories(sourcePath);
-  if (childTasks.length === 0) {
-    throw new Error(`Harbor task source has no task directories: ${sourcePath}`);
-  }
-  const tasks: WorkbenchTaskBundle[] = [];
-  let environment: WorkbenchTaskSourceResult["environment"];
-  for (const taskDir of childTasks) {
-    const taskId = path.basename(taskDir);
-    const taskToml = await fs.readFile(path.join(taskDir, "task.toml"), "utf8");
-    const workdir = readHarborWorkdir(taskToml);
-    tasks.push(await readHarborTaskBundle({
-      taskDir,
-      id: taskId,
-      workdir,
-    }));
-    const dockerfile = path.join(taskDir, "environment", "Dockerfile");
-    if (!environment && await fileExists(dockerfile)) {
-      environment = {
-        dockerfile: workspaceRelativeOrAbsolute(request.paths.workspace, dockerfile),
-        ...(workdir ? { workdir } : {}),
-      };
-    }
-  }
+  await writeSurfaceFiles(
+    request.paths.output,
+    outcome.files.map((file) => remapRuntimeControlTraceFile(request, file)),
+  );
+  const usage = await workbenchEngineOutcomeUsage(outcome);
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "tasks.resolve",
+    operation: "engine.run",
     ok: true,
-    value: {
-      tasks,
-      ...(environment ? { environment } : {}),
-    },
-    summary: `Resolved ${childTasks.length} Harbor task${childTasks.length === 1 ? "" : "s"}.`,
-    feedback: {
-      taskSource: "harbor",
-      taskCount: childTasks.length,
-    },
+    value: outcome.result,
+    ...(usage ? { usage } : {}),
+    ...(outcome.summary !== undefined ? { summary: outcome.summary } : {}),
+    ...(outcome.feedback !== undefined ? { feedback: outcome.feedback } : {}),
   });
+}
+
+async function workbenchEngineOutcomeUsage(
+  outcome: WorkbenchRuntimeControlOperationSequenceResult,
+): Promise<UsageSummary | undefined> {
+  const runtime = await importWorkbenchRuntime();
+  const operationUsage = outcome.usage
+    ? undefined
+    : runtime.mergeUsageSummaries(
+      outcome.operationResults.map((result) => {
+        if (result.operation === "subject.run") {
+          return runtime.assignUsageRole("runner", result.usage);
+        }
+        if (result.operation === "engine.run") {
+          return runtime.assignUsageRole("engine", result.usage);
+        }
+        return result.usage;
+      }),
+    );
+  const runtimeUsage = runtime.mergeUsageSummaries([outcome.usage, operationUsage]);
+  const resultUsage = runtimeUsage?.engine
+    ? undefined
+    : runtime.assignUsageRole("engine", outcome.result?.usage);
+  return runtime.mergeUsageSummaries([runtimeUsage, resultUsage]);
+}
+
+function workbenchEngineTasksPath(request: WorkbenchAdapterOperationRequest): string {
+  const config = adapterCommandConfigRecord(request);
+  const tasks = config.tasks;
+  if (tasks === undefined) {
+    return "tasks";
+  }
+  const taskConfig = jsonRecord(tasks);
+  if (typeof taskConfig.path === "string" && taskConfig.path.trim().length > 0) {
+    return taskConfig.path;
+  }
+  throw new Error("Workbench engine tasks must be an object with path.");
+}
+
+interface NestedAdapterInvocation {
+  use: string;
+  with: Json;
+  auth?: Json;
+  command: string;
+}
+
+function workbenchEngineScoreInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
+  const score = jsonRecord(adapterCommandConfigRecord(request).score);
+  if (!score || typeof score.use !== "string" || score.use.length === 0) {
+    throw new Error("Workbench engine requires invocation.with.score.use.");
+  }
+  return {
+    use: score.use,
+    with: (score.with ?? {}) as Json,
+    ...(score.auth !== undefined ? { auth: score.auth as Json } : {}),
+    command: typeof score.command === "string" && score.command.length > 0
+      ? score.command
+      : adapterCommandName(score.use),
+  };
+}
+
+function workbenchEngineSubjectInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
+  const subject = request.context?.subject?.run;
+  if (!subject?.use || !subject.command) {
+    throw new Error("Workbench engine requires context.subject.run.use and context.subject.run.command.");
+  }
+  return {
+    use: subject.use,
+    with: (subject.with ?? {}) as Json,
+    ...(subject.auth !== undefined ? { auth: subject.auth as Json } : {}),
+    command: subject.command,
+  };
+}
+
+type WorkbenchEngineGradingIsolation = "shared" | "separate";
+
+function workbenchEngineGradingIsolation(
+  request: WorkbenchAdapterOperationRequest,
+): WorkbenchEngineGradingIsolation {
+  const grading = jsonRecord(adapterCommandConfigRecord(request).grading);
+  const isolation = grading?.isolation;
+  if (isolation === undefined) {
+    return "shared";
+  }
+  if (isolation === "shared" || isolation === "separate") {
+    return isolation;
+  }
+  throw new Error("Workbench engine grading.isolation must be shared or separate.");
+}
+
+async function runWorkbenchEngineSharedGrading(
+  request: WorkbenchAdapterOperationRequest,
+): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
+  const inputs = await workbenchEngineRuntimeInputs(request);
+  const subject = workbenchEngineSubjectInvocation(request);
+  const score = workbenchEngineScoreInvocation(request);
+  const result = await runWorkbenchRuntimeOperationSequence({
+    inputs,
+    prepare: true,
+    operations: [
+      { label: "subject", operation: "subject.run", invocation: subject },
+      { label: "score", operation: "engine.run", invocation: score },
+    ],
+  });
+  assertRuntimeControlResultOk(result, "Workbench shared grading");
+  return result;
+}
+
+async function runWorkbenchEngineSeparateGrading(
+  request: WorkbenchAdapterOperationRequest,
+): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
+  const inputs = await workbenchEngineRuntimeInputs(request);
+  const subject = workbenchEngineSubjectInvocation(request);
+  const score = workbenchEngineScoreInvocation(request);
+  const runtime = await importWorkbenchRuntime();
+  const runner = await runWorkbenchRuntimeOperationSequence({
+    inputs: {
+      subject: inputs.subject,
+      case: inputs.case,
+      traces: inputs.traces,
+    },
+    prepare: true,
+    collectWorkspace: true,
+    operations: [
+      { label: "subject", operation: "subject.run", invocation: subject },
+    ],
+  });
+  assertRuntimeControlResultOk(runner, "Workbench separate runner");
+  const grader = await runWorkbenchRuntimeOperationSequence({
+    inputs: {
+      subject: inputs.subject,
+      case: inputs.case,
+      enginePrivate: inputs.enginePrivate,
+      traces: inputs.traces,
+      workspace: runner.workspaceFiles ?? [],
+      output: runner.files.filter((file) => !runtime.isWorkbenchInternalOutputPath(file.path)),
+    },
+    prepare: false,
+    operations: [
+      { label: "score", operation: "engine.run", invocation: score },
+    ],
+  });
+  assertRuntimeControlResultOk(grader, "Workbench separate grader");
+  return {
+    ...grader,
+    files: dedupeSurfaceFiles([...runner.files, ...grader.files]),
+    fileChanges: [...new Set([...runner.fileChanges, ...grader.fileChanges])].sort(),
+    usage: runtime.mergeUsageSummaries([runner.usage, grader.usage]),
+    operationResults: [...runner.operationResults, ...grader.operationResults],
+  };
+}
+
+async function workbenchEngineRuntimeInputs(
+  request: WorkbenchAdapterOperationRequest,
+): Promise<NonNullable<Parameters<typeof runWorkbenchRuntimeOperationSequence>[0]["inputs"]>> {
+  const [subject, caseFiles, enginePrivate, traces] = await Promise.all([
+    readOptionalSurfaceFiles(request.paths.subject),
+    readOptionalSurfaceFiles(request.paths.case),
+    readOptionalSurfaceFiles(request.paths.enginePrivate),
+    readOptionalSurfaceFiles(request.paths.traces),
+  ]);
+  return {
+    subject,
+    case: caseFiles,
+    enginePrivate,
+    traces,
+  };
+}
+
+async function readOptionalSurfaceFiles(root: string | undefined): Promise<SurfaceSnapshotFile[]> {
+  if (!root) {
+    return [];
+  }
+  return await readSurfaceFilesRecursive(root).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  });
+}
+
+function assertRuntimeControlResultOk(
+  result: WorkbenchRuntimeControlOperationSequenceResult,
+  label: string,
+): void {
+  if (result.ok) {
+    return;
+  }
+  throw new Error(`${label} failed${result.error ? `: ${result.error}` : "."}`);
+}
+
+function dedupeSurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
+  const byPath = new Map<string, SurfaceSnapshotFile>();
+  for (const file of files) {
+    const normalized = normalizeRelativePath(file.path);
+    byPath.set(normalized, {
+      ...file,
+      path: normalized,
+    });
+  }
+  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function remapRuntimeControlTraceFile(
+  request: WorkbenchAdapterOperationRequest,
+  file: SurfaceSnapshotFile,
+): SurfaceSnapshotFile {
+  const normalized = normalizeRelativePath(file.path);
+  if (!normalized.startsWith(".workbench/traces/")) {
+    return { ...file, path: normalized };
+  }
+  const segments = normalized.split("/");
+  const rest = segments.length >= 6
+    ? segments.slice(5)
+    : segments.length >= 3
+      ? segments.slice(3)
+      : [];
+  if (rest.length === 0) {
+    return { ...file, path: normalized };
+  }
+  return {
+    ...file,
+    path: `.workbench/traces/${request.jobId ?? request.id}/${rest.join("/")}`,
+  };
+}
+
+function safeInternalPathSegment(value: string): string {
+  const safe = value.replace(/[^a-z0-9._-]+/giu, "_").replace(/^_+|_+$/gu, "");
+  return safe || "nested";
 }
 
 async function executeCommandAdapterRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   const command = requiredAdapterCommandString(request, "command");
-  await runAdapterShellCommand(command, request.paths.cwd ?? request.paths.workspace);
-  if (request.operation === "trial.score") {
+  await runAdapterShellCommand(command, request.paths.workspace);
+  if (request.operation === "engine.run") {
     await requireCommandScoreResult(request);
     return;
   }
@@ -251,56 +464,65 @@ async function requireCommandScoreResult(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   if (!await fileExists(workbenchAdapterOperationResultPath(request.paths.output))) {
-    throw new Error("Command scorer must write workbench-result.json for trial.score.");
+    throw new Error("Command engine must write workbench-result.json for engine.run.");
   }
-  await readWorkbenchAdapterOperationResult(request.paths.output, "trial.score").catch((error: unknown) => {
+  await readWorkbenchAdapterOperationResult(request.paths.output, "engine.run").catch((error: unknown) => {
     throw new Error(
-      `Command scorer wrote an invalid workbench-result.json for trial.score: ${
+      `Command engine wrote an invalid workbench-result.json for engine.run: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
   });
 }
 
-async function executeTestsScorerRequest(
+async function executeTestsEngineRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
-  if (request.operation !== "trial.score") {
+  if (request.operation !== "engine.run") {
     throw new Error(`Tests adapter cannot handle ${request.operation}.`);
   }
-  const testsRoot = request.paths.tests ?? path.join(request.paths.workspace, "tests");
-  const logsRoot = request.paths.logs ?? path.join(request.paths.workspace, "logs");
-  const verifierLogs = path.join(logsRoot, "verifier");
-  await fs.mkdir(verifierLogs, { recursive: true });
+  const testsRoot = requiredRequestPath(request.paths.enginePrivate, "paths.enginePrivate");
+  const verifierRoot = testsVerifierOutputDir(request.paths.output);
+  await fs.rm(verifierRoot, { recursive: true, force: true }).catch(() => undefined);
+  await fs.mkdir(verifierRoot, { recursive: true });
   const script = await firstExistingFile([
     path.join(testsRoot, "test.sh"),
     path.join(testsRoot, "run.sh"),
   ]);
   if (!script) {
-    throw new Error(`Tests scorer requires ${path.join(testsRoot, "test.sh")}.`);
+    throw new Error(`Tests engine requires ${path.join(testsRoot, "test.sh")}.`);
   }
-  await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.cwd ?? request.paths.workspace);
-  const scorecard = await readTestsScorecard({
-    logsRoot,
-    caseId: request.context?.trial?.caseId ?? "current",
+  await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.workspace, {
+    WORKBENCH_TESTS_VERIFIER_DIR: verifierRoot,
+  });
+  const result = await readTestsResult({
+    verifierRoot,
+    caseId: request.context?.attempt?.caseId ?? "current",
   });
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "trial.score",
+    operation: "engine.run",
     ok: true,
-    value: scorecard,
-    ...(typeof scorecard.summary === "string" ? { summary: scorecard.summary } : {}),
+    value: result,
+    ...(typeof result.summary === "string" ? { summary: result.summary } : {}),
     feedback: {
-      scorer: "tests",
+      engine: "tests",
     },
   });
 }
 
-async function runAdapterShellCommand(command: string, cwd: string): Promise<void> {
+async function runAdapterShellCommand(
+  command: string,
+  cwd: string,
+  env: Record<string, string> = {},
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("sh", ["-lc", command], {
+    const child = spawn("sh", ["-c", command], {
       cwd,
-      env: process.env,
+      env: {
+        ...process.env,
+        ...env,
+      },
       stdio: "inherit",
     });
     child.on("error", reject);
@@ -324,10 +546,10 @@ async function writeOperationOkUnlessPresent(
   if (await fileExists(workbenchAdapterOperationResultPath(request.paths.output))) {
     return;
   }
-  if (request.operation === "subject.improve") {
+  if (request.operation === "optimizer.improve") {
     const patch = await createSubjectPatchFromWorkspace({
-      beforeRoot: request.paths.subject ?? path.join(request.paths.input ?? request.paths.workspace, "subject"),
-      afterRoot: request.paths.cwd ?? request.paths.workspace,
+      beforeRoot: requiredRequestPath(request.paths.subject, "paths.subject"),
+      afterRoot: request.paths.workspace,
       edits: request.context?.optimizer?.edits ?? [],
     });
     await writeWorkbenchAdapterOperationResult(request.paths.output, {
@@ -355,33 +577,22 @@ async function firstExistingFile(files: readonly string[]): Promise<string | nul
   return null;
 }
 
-async function listHarborTaskDirectories(root: string): Promise<string[]> {
-  if (await isHarborTaskDirectory(root)) {
-    return [root];
+function requiredRequestPath(value: string | undefined, label: string): string {
+  if (!value) {
+    throw new Error(`Adapter request ${label} is required.`);
   }
-  const entries = await fs.readdir(root, { withFileTypes: true });
-  const tasks: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    const subject = path.join(root, entry.name);
-    if (await isHarborTaskDirectory(subject)) {
-      tasks.push(subject);
-    }
-  }
-  return tasks.sort((left, right) => left.localeCompare(right));
+  return value;
 }
 
-async function readTaskBundlesFromWorkbenchTaskRoot(
+async function readEngineCasesFromWorkbenchTaskRoot(
   tasksRoot: string,
-): Promise<WorkbenchTaskBundle[]> {
+): Promise<WorkbenchEngineCase[]> {
   const taskDirs = await listWorkbenchTaskDirectories(tasksRoot);
   if (taskDirs.length === 0) {
-    throw new Error(`Task source has no Workbench task packages: ${tasksRoot}`);
+    throw new Error(`Engine resolve has no Workbench task packages: ${tasksRoot}`);
   }
   return await Promise.all(taskDirs.map(async (taskDir) =>
-    readWorkbenchTaskBundle({
+    readWorkbenchEngineCase({
       taskDir,
       id: path.basename(taskDir),
     })
@@ -390,7 +601,7 @@ async function readTaskBundlesFromWorkbenchTaskRoot(
 
 async function listWorkbenchTaskDirectories(root: string): Promise<string[]> {
   if (await fileExists(path.join(root, TASK_CONTROL_FILE))) {
-    return [root];
+    throw new Error(`Workbench engine tasks root must contain task directories, not a direct ${TASK_CONTROL_FILE}: ${root}`);
   }
   const entries = await fs.readdir(root, { withFileTypes: true });
   const tasks: string[] = [];
@@ -406,10 +617,10 @@ async function listWorkbenchTaskDirectories(root: string): Promise<string[]> {
   return tasks.sort((left, right) => left.localeCompare(right));
 }
 
-async function readWorkbenchTaskBundle(args: {
+async function readWorkbenchEngineCase(args: {
   taskDir: string;
   id: string;
-}): Promise<WorkbenchTaskBundle> {
+}): Promise<WorkbenchEngineCase> {
   const sourceFiles = await readSurfaceFilesRecursive(args.taskDir);
   const taskFile = sourceFiles.find((file) =>
     normalizeRelativePath(file.path) === TASK_CONTROL_FILE && file.encoding === "utf8"
@@ -419,16 +630,27 @@ async function readWorkbenchTaskBundle(args: {
   }
   const parsed = YAML.parse(taskFile.content) as unknown;
   const taskRecord = jsonRecord(parsed);
-  if (taskRecord.version !== 2) {
-    throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} version must be 2.`);
+  if (taskRecord.version !== 3) {
+    throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} version must be 3.`);
   }
   if (typeof taskRecord.task !== "string" || taskRecord.task.trim().length === 0) {
     throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} must include a task string.`);
   }
+  const unsupportedTaskFields = Object.keys(taskRecord)
+    .filter((key) => !["version", "task", "files", "tests", "solution", "environment"].includes(key));
+  if (unsupportedTaskFields.length > 0) {
+    throw new Error(
+      `Task ${args.id} ${TASK_CONTROL_FILE} has unsupported field${unsupportedTaskFields.length === 1 ? "" : "s"}: ${unsupportedTaskFields.join(", ")}.`,
+    );
+  }
   const publicPrefix = taskDirectoryPrefix(taskRecord.files, "files", args.id);
   const testsPrefix = taskDirectoryPrefix(taskRecord.tests, "tests", args.id);
   const solutionPrefix = taskDirectoryPrefix(taskRecord.solution, "solution", args.id);
-  const solutionFiles = stripTaskDirectory(sourceFiles, solutionPrefix);
+  const publicFiles = stripTaskDirectory(sourceFiles, publicPrefix);
+  const privateFiles = [
+    ...stripTaskDirectory(sourceFiles, testsPrefix),
+    ...stripTaskDirectory(sourceFiles, solutionPrefix),
+  ].sort((left, right) => left.path.localeCompare(right.path));
   assertWorkbenchTaskPackageLayout(args.id, sourceFiles, [
     publicPrefix,
     testsPrefix,
@@ -437,44 +659,18 @@ async function readWorkbenchTaskBundle(args: {
   ]);
   return {
     id: normalizeRelativePath(args.id),
-    task: {
-      version: 2,
-      task: taskRecord.task,
+    case: {
+      version: 3,
+      prompt: taskRecord.task,
       ...(taskRecord.environment !== undefined
-        ? { environment: taskRecord.environment as WorkbenchTaskBundle["task"]["environment"] }
-        : {}),
-      ...(taskRecord.score !== undefined
-        ? { score: taskRecord.score as unknown as WorkbenchTaskBundle["task"]["score"] }
+        ? { environment: taskRecord.environment as WorkbenchEngineCase["case"]["environment"] }
         : {}),
     },
-    publicFiles: stripTaskDirectory(sourceFiles, publicPrefix),
-    testFiles: stripTaskDirectory(sourceFiles, testsPrefix),
-    ...(solutionFiles.length > 0 ? { solutionFiles } : {}),
-    sourceFiles,
-  };
-}
-
-async function readHarborTaskBundle(args: {
-  taskDir: string;
-  id: string;
-  workdir?: string;
-}): Promise<WorkbenchTaskBundle> {
-  const instruction = await fs.readFile(path.join(args.taskDir, "instruction.md"), "utf8");
-  const publicFiles = await readSurfaceFilesIfDirectory(path.join(args.taskDir, "files"));
-  const testFiles = await readSurfaceFilesIfDirectory(path.join(args.taskDir, "tests"));
-  const solutionFiles = await readSurfaceFilesIfDirectory(path.join(args.taskDir, "solution"));
-  const sourceFiles = await readSurfaceFilesRecursive(args.taskDir);
-  return {
-    id: normalizeRelativePath(args.id),
-    task: {
-      version: 2,
-      task: instruction.trim() || args.id,
-      ...(args.workdir ? { environment: { workdir: args.workdir } } : {}),
+    files: {
+      public: publicFiles,
+      private: privateFiles,
+      source: sourceFiles,
     },
-    publicFiles,
-    testFiles,
-    ...(solutionFiles.length > 0 ? { solutionFiles } : {}),
-    sourceFiles,
   };
 }
 
@@ -526,10 +722,6 @@ async function readSurfaceFilesRecursive(root: string): Promise<SurfaceSnapshotF
   return result.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-async function readSurfaceFilesIfDirectory(root: string): Promise<SurfaceSnapshotFile[]> {
-  return await directoryExists(root) ? readSurfaceFilesRecursive(root) : [];
-}
-
 async function readSurfaceFilesInto(
   root: string,
   relativeDir: string,
@@ -562,60 +754,19 @@ async function readSurfaceFilesInto(
   }
 }
 
-async function isHarborTaskDirectory(dir: string): Promise<boolean> {
-  const [instruction, taskToml, tests] = await Promise.all([
-    fileExists(path.join(dir, "instruction.md")),
-    fileExists(path.join(dir, "task.toml")),
-    fs.stat(path.join(dir, "tests")).then((stat) => stat.isDirectory(), () => false),
-  ]);
-  return instruction && taskToml && tests;
-}
-
 async function fileExists(filePath: string): Promise<boolean> {
   return fs.stat(filePath).then((stat) => stat.isFile(), () => false);
 }
 
-async function directoryExists(filePath: string): Promise<boolean> {
-  return fs.stat(filePath).then((stat) => stat.isDirectory(), () => false);
-}
-
-function readHarborWorkdir(taskToml: string): string | undefined {
-  let section = "";
-  for (const rawLine of taskToml.split(/\r?\n/u)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) {
-      continue;
-    }
-    const sectionMatch = /^\[([^\]]+)\]$/u.exec(line);
-    if (sectionMatch) {
-      section = sectionMatch[1]!.trim();
-      continue;
-    }
-    const workdirMatch = /^workdir\s*=\s*"([^"]+)"\s*$/u.exec(line);
-    if (workdirMatch && (!section || section === "environment")) {
-      return workdirMatch[1];
-    }
-  }
-  return undefined;
-}
-
-function workspaceRelativeOrAbsolute(workspace: string, absolutePath: string): string {
-  const relative = path.relative(workspace, absolutePath);
-  if (!relative || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-    return normalizeRelativePath(relative || path.basename(absolutePath));
-  }
-  return absolutePath;
-}
-
-async function readTestsScorecard(args: {
-  logsRoot: string;
+async function readTestsResult(args: {
+  verifierRoot: string;
   caseId: string;
-}): Promise<WorkbenchScorecard> {
-  const rewardJson = await readOptionalJson(path.join(args.logsRoot, "verifier", "reward.json"));
+}): Promise<WorkbenchResult> {
+  const rewardJson = await readOptionalJson(path.join(args.verifierRoot, "reward.json"));
   if (rewardJson) {
-    return normalizeTestsScorecard(rewardJson, args.caseId);
+    return normalizeTestsResult(rewardJson, args.caseId);
   }
-  const rewardText = await fs.readFile(path.join(args.logsRoot, "verifier", "reward.txt"), "utf8").catch((error: unknown) => {
+  const rewardText = await fs.readFile(path.join(args.verifierRoot, "reward.txt"), "utf8").catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return null;
     }
@@ -624,11 +775,15 @@ async function readTestsScorecard(args: {
   if (rewardText !== null) {
     const score = Number.parseFloat(rewardText.trim());
     if (!Number.isFinite(score)) {
-      throw new Error("Tests scorer reward.txt must contain a finite numeric reward.");
+      throw new Error("Tests engine reward.txt must contain a finite numeric reward.");
     }
-    return normalizeTestsScorecard({ reward: score }, args.caseId);
+    return normalizeTestsResult({ reward: score }, args.caseId);
   }
-  throw new Error("Tests scorer did not find /logs/verifier/reward.json or /logs/verifier/reward.txt.");
+  throw new Error("Tests engine did not find reward.json or reward.txt under its verifier output directory.");
+}
+
+function testsVerifierOutputDir(outputRoot: string): string {
+  return path.join(outputRoot, ".workbench", "internal", "verifier");
 }
 
 async function readOptionalJson(filePath: string): Promise<Record<string, unknown> | null> {
@@ -648,17 +803,17 @@ async function readOptionalJson(filePath: string): Promise<Record<string, unknow
   return parsed as Record<string, unknown>;
 }
 
-function normalizeTestsScorecard(
+function normalizeTestsResult(
   record: Record<string, unknown>,
   caseId: string,
-): WorkbenchScorecard {
+): WorkbenchResult {
   const rawScore = typeof record.score === "number"
     ? record.score
     : typeof record.reward === "number"
       ? record.reward
       : undefined;
   if (rawScore === undefined || !Number.isFinite(rawScore)) {
-    throw new Error("Tests scorer reward must include a finite numeric score or reward.");
+    throw new Error("Tests engine reward must include a finite numeric score or reward.");
   }
   const metrics = normalizeTestsMetrics(record, rawScore);
   return {
@@ -697,7 +852,7 @@ function workloadFromAdapterOperationRequest(
   request: WorkbenchAdapterOperationRequest,
 ): AdapterWorkload {
   const context = request.context ?? {};
-  const trial = context.trial ?? {};
+  const attempt = context.attempt ?? {};
   return {
     job: { id: request.jobId ?? request.id },
     benchmark: {
@@ -711,17 +866,17 @@ function workloadFromAdapterOperationRequest(
       edits: context.optimizer?.edits ?? [],
     },
     subjectId: context.subject?.id ?? "",
-    trialIndex: trial.trialIndex ?? 0,
-    sampleIndex: trial.sampleIndex ?? 0,
-    caseId: trial.caseId ?? "",
-    ...(context.task?.text ? { task: { task: context.task.text } } : {}),
+    attemptIndex: attempt.attemptIndex ?? 0,
+    sampleIndex: attempt.sampleIndex ?? 0,
+    caseId: attempt.caseId ?? "",
+    ...(context.case?.prompt ? { case: { prompt: context.case.prompt } } : {}),
   };
 }
 
 function isBuiltInAgentAdapterId(
   value: string,
-): value is Extract<WorkbenchBuiltInAdapterId, "codex" | "claude" | "pi"> {
-  return value === "codex" || value === "claude" || value === "pi";
+): value is Extract<WorkbenchBuiltInAdapterId, "codex" | "claude"> {
+  return value === "codex" || value === "claude";
 }
 
 function builtInAgentSpecFromRequest(
@@ -740,12 +895,14 @@ function builtInRubricSpecFromRequest(
   request: WorkbenchAdapterOperationRequest,
 ): BuiltInRubricAdapterSpec {
   const config = adapterCommandConfigRecord(request);
+  const criteria = rubricCriteria(config.criteria, "adapter.with.criteria");
   return {
     judge: rubricJudgeProviderFromAdapterCommandRequest(request),
     ...(typeof config.instructions === "string" && config.instructions.length > 0
       ? { instructions: config.instructions }
       : {}),
-    criteria: rubricCriteria(config.criteria, "adapter.with.criteria"),
+    parallelism: rubricParallelism(config.parallelism, criteria.length),
+    criteria,
   };
 }
 
@@ -803,10 +960,21 @@ function requiredAdapterCommandString(
   return value;
 }
 
-async function writeAgentRunnerOutput(
+async function executeBuiltInAgentTurn(
+  executor: WorkbenchAgentTurnExecutor | undefined,
+  request: WorkbenchAgentTurnRequest,
+): Promise<WorkbenchAgentTurnResult> {
+  const {
+    defaultWorkbenchAgentTurnExecutor,
+    executeWorkbenchAgentTurn,
+  } = await import("./agent-turn.ts");
+  return await executeWorkbenchAgentTurn(executor ?? defaultWorkbenchAgentTurnExecutor, request);
+}
+
+async function writeAgentSubjectOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
-  runner: BuiltInAgentAdapterSpec,
+  subject: BuiltInAgentAdapterSpec,
   options: {
     agentExecutor?: WorkbenchAgentTurnExecutor;
     adapterAuthRoot?: string;
@@ -815,37 +983,34 @@ async function writeAgentRunnerOutput(
   } = {},
 ): Promise<void> {
   if (request.operation !== "subject.run") {
-    throw new Error("Agent runner results can only complete subject.run operations.");
+    throw new Error("Agent subject results can only complete subject.run operations.");
   }
-  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-runner");
-  const agentResult = await executeWorkbenchAgentTurn(
-    options.agentExecutor ?? defaultWorkbenchAgentTurnExecutor,
-    {
-      role: "runner",
-      provider: runner.agent,
-      adapterAuthRoot: options.adapterAuthRoot,
-      adapterAuthRequest: options.adapterAuthRequest,
-      adapterAuthEnv: options.adapterAuthEnv,
-      workspaceRoot: request.paths.workspace,
-      cwd: request.paths.cwd ?? request.paths.workspace,
-      prompt: buildAgentRunnerPrompt(workload, runner),
-      traceRoot,
-      jobId: workload.job.id,
-    },
-  );
-  const outputPath = path.join(request.paths.output, "runner-summary.md");
+  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-subject");
+  const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
+    role: "runner",
+    provider: subject.agent,
+    adapterAuthRoot: options.adapterAuthRoot,
+    adapterAuthRequest: options.adapterAuthRequest,
+    adapterAuthEnv: options.adapterAuthEnv,
+    workspaceRoot: request.paths.workspace,
+    cwd: request.paths.workspace,
+    prompt: buildAgentSubjectPrompt(workload, subject),
+    traceRoot,
+    jobId: workload.job.id,
+  });
+  const outputPath = path.join(request.paths.output, "subject-summary.md");
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, agentResult.output);
   const trace: SurfaceSnapshotFile = {
-    path: `.workbench/traces/${workload.job.id}/runner.json`,
+    path: `.workbench/traces/${workload.job.id}/subject.json`,
     kind: "text",
     encoding: "utf8",
     executable: false,
     content: `${JSON.stringify({
-      kind: "agent_runner",
-      provider: runner.agent.use,
+      kind: "agent_subject",
+      provider: subject.agent.use,
       subjectId: workload.subjectId,
-      trialIndex: workload.trialIndex,
+      attemptIndex: workload.attemptIndex,
       sampleIndex: workload.sampleIndex,
       summary: agentResult.output,
       metadata: agentResult.metadata,
@@ -860,32 +1025,34 @@ async function writeAgentRunnerOutput(
     ok: true,
     ...(agentResult.output ? { summary: agentResult.output } : {}),
     feedback: {
-      runner: "agent",
-      agent: runner.agent.use,
+      subject: "agent",
+      agent: subject.agent.use,
       metadata: agentResult.metadata,
     },
     ...(usage ? { usage } : {}),
   });
 }
 
-function buildAgentRunnerPrompt(
+function buildAgentSubjectPrompt(
   workload: AdapterWorkload,
-  runner: BuiltInAgentAdapterSpec,
+  subject: BuiltInAgentAdapterSpec,
 ): string {
   return [
-    ...(runner.instructions ? ["Instructions:", runner.instructions, ""] : []),
+    ...(subject.instructions ? ["Instructions:", subject.instructions, ""] : []),
     "Context:",
-    "- Subject files are mounted at /workspace/input/subject.",
-    "- Subject files are also present in the task working directory.",
-    ...(workload.task?.task ? ["Task:", workload.task.task, ""] : []),
-    "- Public task files are already copied into the current working directory.",
+    "- Subject source files are mounted at /workspace/input/subject.",
+    "- Follow any subject guidance, skill files, scripts, or configuration under /workspace/input/subject.",
+    "- The mutable working directory is /workspace.",
+    "- If the subject declares prepare.command, it has already run and may have copied files into /workspace.",
+    ...(workload.case?.prompt ? ["Case:", workload.case.prompt, ""] : []),
+    "- Public case files are mounted at /workspace/input/case.",
     "- Verifier tests are not present while you run.",
     "- Mutate the current working directory to complete the task.",
     "- You may write inspection artifacts under /workspace/output.",
   ].join("\n");
 }
 
-async function writeAgentProposalOutput(
+async function writeAgentSubjectRevisionOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
   optimizer: BuiltInAgentAdapterSpec,
@@ -896,28 +1063,25 @@ async function writeAgentProposalOutput(
     adapterAuthEnv?: Record<string, string>;
   },
 ): Promise<void> {
-  if (request.operation !== "subject.improve") {
-    throw new Error("Agent proposal results can only complete subject.improve operations.");
+  if (request.operation !== "optimizer.improve") {
+    throw new Error("Agent subject revision results can only complete optimizer.improve operations.");
   }
   const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-optimizer");
-  const agentResult = await executeWorkbenchAgentTurn(
-    options.agentExecutor ?? defaultWorkbenchAgentTurnExecutor,
-    {
-      role: "optimizer",
-      provider: optimizer.agent,
-      adapterAuthRoot: options.adapterAuthRoot,
-      adapterAuthRequest: options.adapterAuthRequest,
-      adapterAuthEnv: options.adapterAuthEnv,
-      workspaceRoot: request.paths.workspace,
-      cwd: request.paths.cwd ?? request.paths.workspace,
-      prompt: buildAgentOptimizerPrompt(workload),
-      traceRoot,
-      jobId: workload.job.id,
-    },
-  );
+  const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
+    role: "optimizer",
+    provider: optimizer.agent,
+    adapterAuthRoot: options.adapterAuthRoot,
+    adapterAuthRequest: options.adapterAuthRequest,
+    adapterAuthEnv: options.adapterAuthEnv,
+    workspaceRoot: request.paths.workspace,
+    cwd: request.paths.workspace,
+    prompt: buildAgentOptimizerPrompt(workload),
+    traceRoot,
+    jobId: workload.job.id,
+  });
   const subjectPatch = await createSubjectPatchFromWorkspace({
-    beforeRoot: request.paths.subject ?? path.join(request.paths.input ?? request.paths.workspace, "subject"),
-    afterRoot: request.paths.cwd ?? request.paths.workspace,
+    beforeRoot: requiredRequestPath(request.paths.subject, "paths.subject"),
+    afterRoot: request.paths.workspace,
     edits: workload.optimizer.edits,
   });
   const changedSubjectPaths = subjectPatch.fileChanges.filter((filePath) =>
@@ -935,7 +1099,7 @@ async function writeAgentProposalOutput(
       kind: "agent_optimizer",
       provider: optimizer.agent.use,
       subjectId: workload.subjectId,
-      trialIndex: workload.trialIndex,
+      attemptIndex: workload.attemptIndex,
       changedPaths: changedSubjectPaths,
       summary: agentResult.output,
       metadata: agentResult.metadata,
@@ -946,7 +1110,7 @@ async function writeAgentProposalOutput(
   const usage = runtime.assignUsageRole("optimizer", agentResult.usage);
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "subject.improve",
+    operation: "optimizer.improve",
     ok: true,
     value: {
       ...subjectPatch,
@@ -968,8 +1132,10 @@ function buildAgentOptimizerPrompt(workload: AdapterWorkload): string {
     workload.benchmark.description || workload.benchmark.name,
     "",
     "Context:",
-    "- Subject files are mounted at /workspace/input/subject.",
-    "- Subject files are also present in the current working directory.",
+    "- Subject source files are mounted at /workspace/input/subject.",
+    "- Follow any subject guidance, skill files, scripts, or configuration under /workspace/input/subject.",
+    "- The mutable working directory is /workspace.",
+    "- If the subject declares prepare.command, it has already run and may have copied files into /workspace.",
     "- Prior run traces are mounted at /workspace/input/traces.",
     "- Use /workspace/input/traces as the source of truth for what happened in prior attempts.",
     "- Do not mutate /workspace/input.",
@@ -978,15 +1144,15 @@ function buildAgentOptimizerPrompt(workload: AdapterWorkload): string {
     workload.optimizer.edits.map((entry) => `- ${entry}`).join("\n"),
     "",
     "Output:",
-    "- Mutate the editable subject files directly in the current working directory.",
+    "- Create or mutate editable subject files directly in the current working directory.",
     "- Include at least one changed subject file covered by the optimizer edits list.",
   ].join("\n");
 }
 
-async function writeRubricJudgeScorecard(
+async function writeRubricJudgeResult(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
-  scorer: BuiltInRubricAdapterSpec,
+  engine: BuiltInRubricAdapterSpec,
   options: {
     agentExecutor?: WorkbenchAgentTurnExecutor;
     adapterAuthRoot?: string;
@@ -994,51 +1160,217 @@ async function writeRubricJudgeScorecard(
     adapterAuthEnv?: Record<string, string>;
   } = {},
 ): Promise<void> {
-  const agentExecutor = options.agentExecutor ?? defaultWorkbenchAgentTurnExecutor;
-  const agentResult = await executeWorkbenchAgentTurn(agentExecutor, {
-    role: "scorer",
-    provider: scorer.judge,
-    adapterAuthRoot: options.adapterAuthRoot,
-    adapterAuthRequest: options.adapterAuthRequest,
-    adapterAuthEnv: options.adapterAuthEnv,
-    workspaceRoot: request.paths.workspace,
-    cwd: request.paths.cwd ?? request.paths.workspace,
-    prompt: buildRubricJudgePrompt(workload, scorer),
-    traceRoot: path.join(request.paths.output, ".workbench", "internal", "rubric-scorer"),
-    jobId: workload.job.id,
-  });
+  const agentExecutor = options.agentExecutor;
   const runtime = await importWorkbenchRuntime();
-  let usage = runtime.assignUsageRole("scorer", agentResult.usage);
-  let scorecardAgentResult = agentResult;
-  let scorecard: WorkbenchScorecard;
-  try {
-    scorecard = normalizeRubricJudgeScorecard(agentResult.output, workload, scorer, agentResult);
-  } catch (error) {
-    const repairError = error instanceof Error ? error.message : String(error);
-    const repairResult = await executeWorkbenchAgentTurn(agentExecutor, {
-      role: "scorer",
-      provider: scorer.judge,
+  const criterionRuns = await mapWithConcurrency(
+    engine.criteria,
+    engine.parallelism,
+    async (criterion) => runRubricCriterionJudge({
+      request,
+      workload,
+      engine,
+      criterion,
+      agentExecutor,
       adapterAuthRoot: options.adapterAuthRoot,
       adapterAuthRequest: options.adapterAuthRequest,
       adapterAuthEnv: options.adapterAuthEnv,
-      workspaceRoot: request.paths.workspace,
-      cwd: request.paths.workspace,
-      prompt: buildRubricJudgeRepairPrompt({
+      runtime,
+    }),
+  );
+  const usage = runtime.mergeUsageSummaries(criterionRuns.map((run) => run.usage));
+  const result = rubricJudgeResultFromCriteria({
+    workload,
+    engine,
+    criterionRuns,
+  });
+  await writeRubricEvidenceFiles({
+    request,
+    workload,
+    engine,
+    result,
+    criterionRuns,
+    usage,
+  });
+  await writeWorkbenchAdapterOperationResult(request.paths.output, {
+    protocol: "workbench.adapter-result.v1",
+    operation: "engine.run",
+    ok: true,
+    value: result,
+    ...(typeof result.summary === "string" ? { summary: result.summary } : {}),
+    feedback: {
+      rubric: "criterion-fanout",
+      judge: engine.judge.use,
+      parallelism: engine.parallelism,
+      aggregation: "weighted_mean",
+      criteria: criterionRuns.map((run) => ({
+        id: run.result.criterion_id,
+        traceFiles: run.traceFiles.map((file) => file.path),
+        metadata: run.metadata as Json,
+        ...(run.repair ? { repair: run.repair } : {}),
+      })),
+    },
+    ...(usage ? { usage } : {}),
+  });
+}
+
+interface RubricCriterionJudgeRun {
+  result: NonNullable<EvalCaseResult["criteria"]>[number];
+  summary?: string;
+  feedback?: Json;
+  metadata: WorkbenchAgentTurnResult["metadata"];
+  traceFiles: SurfaceSnapshotFile[];
+  repair?: {
+    attempted: true;
+    originalError: string;
+  };
+  usage?: UsageSummary;
+}
+
+async function writeRubricEvidenceFiles(args: {
+  request: WorkbenchAdapterOperationRequest;
+  workload: AdapterWorkload;
+  engine: BuiltInRubricAdapterSpec;
+  result: WorkbenchResult;
+  criterionRuns: readonly RubricCriterionJudgeRun[];
+  usage?: UsageSummary;
+}): Promise<void> {
+  const root = `.workbench/traces/${args.workload.job.id}/engine/rubric`;
+  const scorecard = {
+    schema: "workbench.engine.rubric.evidence.v1",
+    safeForOptimizer: true,
+    jobId: args.workload.job.id,
+    subjectId: args.workload.subjectId,
+    attemptIndex: args.workload.attemptIndex,
+    sampleIndex: args.workload.sampleIndex,
+    caseId: args.workload.caseId,
+    judge: args.engine.judge.use,
+    parallelism: args.engine.parallelism,
+    aggregation: "weighted_mean",
+    score: args.result.score,
+    metrics: args.result.metrics ?? {},
+    summary: args.result.summary ?? null,
+    criteria: args.criterionRuns.map((run) => ({
+      id: run.result.criterion_id,
+      label: run.result.label,
+      score: run.result.score,
+      pass: run.result.pass,
+      rationale: run.result.rationale ?? null,
+      errors: run.result.errors ?? [],
+      summary: run.summary ?? null,
+      metadata: safeRubricEvidenceMetadata(run.metadata),
+      repair: run.repair ?? null,
+    })),
+    ...(args.usage ? { usage: args.usage } : {}),
+  };
+  await writeSurfaceFiles(args.request.paths.output, [
+    jsonSurfaceFile(`${root}/scorecard.json`, scorecard),
+    ...args.criterionRuns.map((run) =>
+      jsonSurfaceFile(`${root}/criteria/${safeInternalPathSegment(run.result.criterion_id)}/result.json`, {
+        schema: "workbench.engine.rubric.criterion-evidence.v1",
+        safeForOptimizer: true,
+        criterion: args.engine.criteria.find((criterion) => criterion.id === run.result.criterion_id) ?? {
+          id: run.result.criterion_id,
+        },
+        result: run.result,
+        summary: run.summary ?? null,
+        metadata: safeRubricEvidenceMetadata(run.metadata),
+        repair: run.repair ?? null,
+      })
+    ),
+    ...args.criterionRuns.flatMap((run) => run.traceFiles),
+  ]);
+}
+
+function safeRubricEvidenceMetadata(metadata: WorkbenchAgentTurnResult["metadata"]): Json | null {
+  const record = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? metadata as Record<string, unknown>
+    : {};
+  const safe: Record<string, Json> = {};
+  for (const key of ["providerId", "sessionId", "eventCount", "model"] as const) {
+    const value = record[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
+      safe[key] = value;
+    }
+  }
+  return Object.keys(safe).length > 0 ? safe as Json : null;
+}
+
+function jsonSurfaceFile(pathname: string, value: unknown): SurfaceSnapshotFile {
+  return {
+    path: pathname,
+    kind: "text",
+    encoding: "utf8",
+    executable: false,
+    content: `${JSON.stringify(value, null, 2)}\n`,
+  };
+}
+
+async function runRubricCriterionJudge(args: {
+  request: WorkbenchAdapterOperationRequest;
+  workload: AdapterWorkload;
+  engine: BuiltInRubricAdapterSpec;
+  criterion: RubricCriterionSpec;
+  agentExecutor?: WorkbenchAgentTurnExecutor;
+  adapterAuthRoot?: string;
+  adapterAuthRequest?: Json;
+  adapterAuthEnv?: Record<string, string>;
+  runtime: Awaited<ReturnType<typeof importWorkbenchRuntime>>;
+}): Promise<RubricCriterionJudgeRun> {
+  const traceRoot = path.join(
+    args.request.paths.output,
+    ".workbench",
+    "internal",
+    "rubric",
+    safeInternalPathSegment(args.criterion.id),
+  );
+  const tracePath = rubricCriterionTracePath(args.workload.job.id, args.criterion.id, "judge");
+  const agentResult = await executeBuiltInAgentTurn(args.agentExecutor, {
+    role: "engine",
+    provider: args.engine.judge,
+    adapterAuthRoot: args.adapterAuthRoot,
+    adapterAuthRequest: args.adapterAuthRequest,
+    adapterAuthEnv: args.adapterAuthEnv,
+    workspaceRoot: args.request.paths.workspace,
+    cwd: args.request.paths.workspace,
+    prompt: buildRubricCriterionJudgePrompt(args.workload, args.engine, args.criterion),
+    traceRoot: path.join(traceRoot, "judge"),
+    tracePath,
+    jobId: args.workload.job.id,
+  });
+  let usage = args.runtime.assignUsageRole("engine", agentResult.usage);
+  try {
+    return {
+      ...normalizeRubricCriterionJudgeResult(agentResult.output, args.criterion),
+      metadata: agentResult.metadata,
+      traceFiles: publicRubricAgentTraceFiles(agentResult.traceFiles),
+      ...(usage ? { usage } : {}),
+    };
+  } catch (error) {
+    const repairError = error instanceof Error ? error.message : String(error);
+    const repairTracePath = rubricCriterionTracePath(args.workload.job.id, args.criterion.id, "repair");
+    const repairResult = await executeBuiltInAgentTurn(args.agentExecutor, {
+      role: "engine",
+      provider: args.engine.judge,
+      adapterAuthRoot: args.adapterAuthRoot,
+      adapterAuthRequest: args.adapterAuthRequest,
+      adapterAuthEnv: args.adapterAuthEnv,
+      workspaceRoot: args.request.paths.workspace,
+      cwd: args.request.paths.workspace,
+      prompt: buildRubricCriterionRepairPrompt({
         output: agentResult.output,
         error: repairError,
-        workload,
-        scorer,
+        criterion: args.criterion,
       }),
-      traceRoot: path.join(request.paths.output, ".workbench", "internal", "rubric-scorer-repair"),
-      jobId: workload.job.id,
+      traceRoot: path.join(traceRoot, "repair"),
+      tracePath: repairTracePath,
+      jobId: args.workload.job.id,
     });
-    usage = runtime.mergeUsageSummaries([
+    usage = args.runtime.mergeUsageSummaries([
       usage,
-      runtime.assignUsageRole("scorer", repairResult.usage),
+      args.runtime.assignUsageRole("engine", repairResult.usage),
     ]);
-    scorecardAgentResult = {
-      ...repairResult,
-      ...(usage ? { usage } : {}),
+    return {
+      ...normalizeRubricCriterionJudgeResult(repairResult.output, args.criterion),
       metadata: {
         ...repairResult.metadata,
         repair: {
@@ -1047,137 +1379,159 @@ async function writeRubricJudgeScorecard(
           originalMetadata: agentResult.metadata,
         },
       },
+      traceFiles: publicRubricAgentTraceFiles([
+        ...agentResult.traceFiles,
+        ...repairResult.traceFiles,
+      ]),
+      repair: {
+        attempted: true,
+        originalError: repairError,
+      },
+      ...(usage ? { usage } : {}),
     };
-    scorecard = normalizeRubricJudgeScorecard(repairResult.output, workload, scorer, scorecardAgentResult);
   }
-  await writeWorkbenchAdapterOperationResult(request.paths.output, {
-    protocol: "workbench.adapter-result.v1",
-    operation: "trial.score",
-    ok: true,
-    value: scorecard,
-    ...(typeof scorecard.summary === "string" ? { summary: scorecard.summary } : {}),
-    feedback: {
-      rubric: "judge",
-      judge: scorer.judge.use,
-      metadata: scorecardAgentResult.metadata,
-    },
-    ...(usage ? { usage } : {}),
-  });
 }
 
-function buildRubricJudgePrompt(
+function publicRubricAgentTraceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
+  return files
+    .filter((file) => file.encoding === "utf8" && file.path.endsWith("/trace.json"))
+    .map((file) => ({ ...file }));
+}
+
+function rubricCriterionTracePath(
+  jobId: string,
+  criterionId: string,
+  turn: "judge" | "repair",
+): string {
+  return `.workbench/traces/${jobId}/engine/rubric/criteria/${safeInternalPathSegment(criterionId)}/${turn}`;
+}
+
+function buildRubricCriterionJudgePrompt(
   workload: AdapterWorkload,
-  scorer: BuiltInRubricAdapterSpec,
+  engine: BuiltInRubricAdapterSpec,
+  criterion: RubricCriterionSpec,
 ): string {
   requireWorkloadTask(workload, "Rubric judge");
   return [
-    ...(scorer.instructions ? ["Instructions:", scorer.instructions, ""] : []),
-    ...(workload.task?.task ? ["Task:", workload.task.task, ""] : []),
-    "Criteria:",
-    JSON.stringify(scorer.criteria, null, 2),
+    ...(engine.instructions ? ["Instructions:", engine.instructions, ""] : []),
+    ...(workload.case?.prompt ? ["Case:", workload.case.prompt, ""] : []),
+    "Criterion:",
+    JSON.stringify(criterion, null, 2),
     "",
     "Context:",
     "- The subject already ran in this same working directory.",
-    "- Public task files and subject outputs are available in the current working directory.",
-    "- Verifier-only files are mounted at /tests when the task provides them.",
-    "- Score only from the current working directory, /tests, and the criteria above.",
+    "- Subject outputs are available in the current working directory.",
+    "- Public case files are mounted at /workspace/input/case.",
+    "- Verifier-private files are mounted at /workspace/private/engine when the task provides them.",
+    "- Score only from the current working directory, public case files, verifier-private files, and the criterion above.",
     "",
     "Output:",
     "Return only a JSON object. Do not wrap it in Markdown.",
-    "The JSON object must include a finite numeric score and one result for every criterion id. Use this shape:",
+    "The JSON object must score exactly this one criterion. Use this shape:",
     JSON.stringify({
+      criterion_id: criterion.id,
       score: 0.0,
-      summary: "short grading summary",
-      criteria: [{
-        criterion_id: "criterion id",
-        score: 0.0,
-        pass: false,
-        rationale: "why this criterion received this score",
-      }],
+      pass: false,
+      rationale: "why this criterion received this score",
+      summary: "short scoring summary",
       feedback: {},
     }, null, 2),
-    "Allowed criterion ids:",
-    scorer.criteria.map((criterion) => `- ${criterion.id}`).join("\n"),
-    "Every criterion object must use one allowed criterion_id exactly and include a non-empty rationale string.",
+    `The only allowed criterion_id is ${criterion.id}.`,
+    "The rationale must be non-empty and specific to this criterion.",
   ].join("\n");
 }
 
-function buildRubricJudgeRepairPrompt(input: {
+function buildRubricCriterionRepairPrompt(input: {
   output: string;
   error: string;
-  workload: AdapterWorkload;
-  scorer: BuiltInRubricAdapterSpec;
+  criterion: RubricCriterionSpec;
 }): string {
   return [
-    "The previous Workbench rubric judge response was rejected by the scorecard parser.",
+    "The previous Workbench rubric criterion judge response was rejected by the result parser.",
     "",
     `Parser error: ${input.error}`,
     "",
     "Convert the previous response into one valid JSON object. Return only JSON, with no Markdown.",
-    "Preserve the prior scores, criteria, rationales, and feedback whenever they are present.",
+    "Preserve the prior score, rationale, and feedback whenever they are present.",
     "If the previous response uses clear qualitative scoring, convert only these terms: perfect/full pass/pass = 1, fail/no credit = 0, partial = 0.5.",
-    "If a required criterion is still not recoverable from the previous response, include that criterion with score 0, pass false, and rationale \"The judge response did not provide a recoverable score and rationale for this criterion.\"",
+    "If the required score is still not recoverable from the previous response, use score 0, pass false, and rationale \"The judge response did not provide a recoverable score and rationale for this criterion.\"",
     "Do not invent file paths, log paths, or extra criterion ids.",
+    "",
+    "Criterion:",
+    JSON.stringify(input.criterion, null, 2),
     "",
     "Required JSON shape:",
     JSON.stringify({
+      criterion_id: input.criterion.id,
       score: 0.0,
-      summary: "short grading summary",
-      criteria: [{
-        criterion_id: "criterion id",
-        score: 0.0,
-        pass: false,
-        rationale: "why this criterion received this score",
-      }],
+      pass: false,
+      rationale: "why this criterion received this score",
+      summary: "short scoring summary",
       feedback: {},
     }, null, 2),
     "",
-    "Allowed criterion ids:",
-    input.scorer.criteria.map((criterion) => `- ${criterion.id}`).join("\n"),
+    `The only allowed criterion_id is ${input.criterion.id}.`,
     "",
     "Previous response:",
     input.output,
   ].join("\n");
 }
 
-function normalizeRubricJudgeScorecard(
-  output: string,
-  workload: AdapterWorkload,
-  scorer: BuiltInRubricAdapterSpec,
-  agentResult: WorkbenchAgentTurnResult,
-): WorkbenchScorecard {
-  const parsed = parseAgentJsonObject(output, "Rubric judge");
-  const parsedCriteria = normalizeRubricJudgeCriteria(
-    parsed.criteria ?? parsed.criteria_results,
-    scorer.criteria,
-  );
-  assertCompleteRubricCriteria(parsedCriteria, scorer.criteria);
-  const explicitScore = isBoundedScore(parsed.score) ? parsed.score : undefined;
-  const criteria = parsedCriteria;
-  const score = explicitScore ?? weightedCriteriaScore(criteria, scorer.criteria);
+function rubricJudgeResultFromCriteria(args: {
+  workload: AdapterWorkload;
+  engine: BuiltInRubricAdapterSpec;
+  criterionRuns: readonly RubricCriterionJudgeRun[];
+}): WorkbenchResult {
+  const criteria = args.criterionRuns.map((run) => run.result);
+  const score = weightedCriteriaScore(criteria, args.engine.criteria);
   if (!isBoundedScore(score)) {
-    throw new Error("Rubric judge output must include a score or criterion scores in the 0..1 range.");
+    throw new Error("Rubric criterion scores must aggregate to a score in the 0..1 range.");
   }
   const metrics: Record<string, number> = { score };
-  for (const criterion of criteria) {
-    metrics[`criterion__${criterion.criterion_id}`] = criterion.score;
-  }
-  const summary = typeof parsed.summary === "string" ? parsed.summary : undefined;
   const caseResult = rubricJudgeCaseResult({
-    workload,
+    workload: args.workload,
     score,
     criteria,
   });
+  const passed = criteria.filter((criterion) => criterion.pass).length;
   return {
     score,
     metrics,
-    ...(summary ? { summary } : {}),
+    summary: `Rubric judged ${criteria.length} criteria (${passed} passed).`,
     cases: [caseResult],
     feedback: {
-      judge: scorer.judge.use,
-      ...(parsed.feedback !== undefined ? { detail: parsed.feedback as Json } : {}),
-      metadata: agentResult.metadata,
+      judge: args.engine.judge.use,
+      rubric: {
+        parallelism: args.engine.parallelism,
+        aggregation: "weighted_mean",
+        criteria: args.criterionRuns.map((run) => ({
+          id: run.result.criterion_id,
+          score: run.result.score,
+          pass: run.result.pass,
+          ...(run.summary ? { summary: run.summary } : {}),
+          ...(run.feedback !== undefined ? { feedback: run.feedback } : {}),
+          metadata: run.metadata as Json,
+          ...(run.repair ? { repair: run.repair } : {}),
+        })),
+      },
     },
+  };
+}
+
+function normalizeRubricCriterionJudgeResult(
+  output: string,
+  criterion: RubricCriterionSpec,
+): Omit<RubricCriterionJudgeRun, "metadata" | "traceFiles" | "repair" | "usage"> {
+  const parsed = parseAgentJsonObject(output, "Rubric judge");
+  const result = normalizeRubricCriterionObject(parsed, criterion);
+  const score = result.score;
+  if (!isBoundedScore(score)) {
+    throw new Error("Rubric criterion judge output must include a score in the 0..1 range.");
+  }
+  return {
+    result,
+    ...(typeof parsed.summary === "string" ? { summary: parsed.summary } : {}),
+    ...(parsed.feedback !== undefined ? { feedback: parsed.feedback as Json } : {}),
   };
 }
 
@@ -1194,60 +1548,6 @@ function rubricJudgeCaseResult(args: {
   };
 }
 
-function normalizeRubricJudgeCriteria(
-  value: unknown,
-  specCriteria: readonly RubricCriterionSpec[],
-): NonNullable<EvalCaseResult["criteria"]> {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const knownIds = new Set(specCriteria.map((criterion) => criterion.id));
-  return value.flatMap((entry): NonNullable<EvalCaseResult["criteria"]> => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      return [];
-    }
-    const record = entry as Record<string, unknown>;
-    const criterionId =
-      typeof record.criterion_id === "string"
-        ? record.criterion_id
-        : typeof record.id === "string"
-          ? record.id
-          : "";
-    if (!criterionId || (knownIds.size > 0 && !knownIds.has(criterionId))) {
-      return [];
-    }
-    const score = isBoundedScore(record.score) ? record.score : undefined;
-    if (score === undefined) {
-      return [];
-    }
-    const pass = typeof record.pass === "boolean" ? record.pass : score >= 0.5;
-    const rationale = readCriterionRationale(record);
-    if (!rationale) {
-      return [];
-    }
-    return [{
-      criterion_id: criterionId,
-      label: typeof record.label === "string" ? record.label : criterionId,
-      score,
-      pass,
-      rationale,
-    }];
-  });
-}
-
-function assertCompleteRubricCriteria(
-  criteria: readonly NonNullable<EvalCaseResult["criteria"]>[number][],
-  specCriteria: readonly RubricCriterionSpec[],
-): void {
-  const scoredIds = new Set(criteria.map((criterion) => criterion.criterion_id));
-  const missing = specCriteria
-    .map((criterion) => criterion.id)
-    .filter((criterionId) => !scoredIds.has(criterionId));
-  if (missing.length > 0) {
-    throw new Error(`Rubric judge output must include a score and rationale for every criterion id. Missing: ${missing.join(", ")}.`);
-  }
-}
-
 function readCriterionRationale(record: Record<string, unknown>): string | undefined {
   for (const key of ["rationale", "feedback", "reason", "explanation"]) {
     const value = record[key];
@@ -1256,6 +1556,32 @@ function readCriterionRationale(record: Record<string, unknown>): string | undef
     }
   }
   return undefined;
+}
+
+function normalizeRubricCriterionObject(
+  record: Record<string, unknown>,
+  criterion: RubricCriterionSpec,
+): NonNullable<EvalCaseResult["criteria"]>[number] {
+  const criterionId = typeof record.criterion_id === "string"
+    ? record.criterion_id
+    : "";
+  if (criterionId !== criterion.id) {
+    throw new Error(`Rubric criterion judge output must use criterion_id ${criterion.id}.`);
+  }
+  if (!isBoundedScore(record.score)) {
+    throw new Error(`Rubric criterion ${criterion.id} output must include a score in the 0..1 range.`);
+  }
+  const rationale = readCriterionRationale(record);
+  if (!rationale) {
+    throw new Error(`Rubric criterion ${criterion.id} output must include a non-empty rationale.`);
+  }
+  return {
+    criterion_id: criterion.id,
+    label: typeof record.label === "string" && record.label.length > 0 ? record.label : criterion.id,
+    score: record.score,
+    pass: typeof record.pass === "boolean" ? record.pass : record.score >= 0.5,
+    rationale,
+  };
 }
 
 function rubricCriteria(value: unknown, label: string): RubricCriterionSpec[] {
@@ -1285,9 +1611,43 @@ function rubricCriteria(value: unknown, label: string): RubricCriterionSpec[] {
   });
 }
 
+function rubricParallelism(value: unknown, criterionCount: number): number {
+  if (criterionCount <= 0) {
+    return 1;
+  }
+  if (value === undefined) {
+    return Math.min(DEFAULT_RUBRIC_PARALLELISM, criterionCount);
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error("adapter.with.parallelism must be a positive integer.");
+  }
+  return Math.min(value, criterionCount);
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  inputs: readonly TInput[],
+  concurrency: number,
+  mapper: (input: TInput, index: number) => Promise<TOutput>,
+): Promise<TOutput[]> {
+  const limit = Math.max(1, Math.min(concurrency, inputs.length || 1));
+  const results = new Array<TOutput>(inputs.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    while (nextIndex < inputs.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(inputs[index]!, index);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: limit }, async () => worker()),
+  );
+  return results;
+}
+
 function requireWorkloadTask(workload: AdapterWorkload, label: string): void {
-  if (!workload.task) {
-    throw new Error(`${label} workload is missing task text.`);
+  if (!workload.case) {
+    throw new Error(`${label} workload is missing case text.`);
   }
 }
 
@@ -1333,10 +1693,8 @@ function isRuntimeWorkspacePath(filePath: string): boolean {
     normalized.startsWith("input/") ||
     normalized === "output" ||
     normalized.startsWith("output/") ||
-    normalized === "logs" ||
-    normalized.startsWith("logs/") ||
-    normalized === "tests" ||
-    normalized.startsWith("tests/");
+    normalized === "private" ||
+    normalized.startsWith("private/");
 }
 
 async function writeSurfaceFiles(

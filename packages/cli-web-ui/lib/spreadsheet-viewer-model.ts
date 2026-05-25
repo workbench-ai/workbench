@@ -519,11 +519,9 @@ export function expandSheetExtentToIncludeCell(
   };
 }
 
-export function expandSheetExtentToCoverViewport(
+export function expandSheetExtentToFitViewport(
   extent: SheetViewportExtent,
   metrics: {
-    scrollLeft: number;
-    scrollTop: number;
     clientWidth: number;
     clientHeight: number;
     rowHeaderWidth: number;
@@ -539,7 +537,6 @@ export function expandSheetExtentToCoverViewport(
   const nextEndRow = growAxisToCoverViewport({
     currentEnd: extent.endRow,
     maxIndex: MAX_SHEET_ROW_INDEX,
-    scrollOffset: metrics.scrollTop,
     clientSize: metrics.clientHeight,
     headerSize: metrics.columnHeaderHeight,
     getSize: geometry.getRowHeight,
@@ -548,7 +545,6 @@ export function expandSheetExtentToCoverViewport(
   const nextEndCol = growAxisToCoverViewport({
     currentEnd: extent.endCol,
     maxIndex: MAX_SHEET_COL_INDEX,
-    scrollOffset: metrics.scrollLeft,
     clientSize: metrics.clientWidth,
     headerSize: metrics.rowHeaderWidth,
     getSize: geometry.getColumnWidth,
@@ -568,7 +564,6 @@ export function expandSheetExtentToCoverViewport(
 function growAxisToCoverViewport(options: {
   currentEnd: number;
   maxIndex: number;
-  scrollOffset: number;
   clientSize: number;
   headerSize: number;
   getSize: (index: number) => number;
@@ -576,7 +571,7 @@ function growAxisToCoverViewport(options: {
 }): number {
   const targetSize = Math.max(
     0,
-    Math.max(0, options.scrollOffset) + Math.max(0, options.clientSize - options.headerSize),
+    Math.max(0, options.clientSize - options.headerSize),
   );
 
   if (targetSize <= 0) {

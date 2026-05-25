@@ -7,11 +7,11 @@
 Workbench is the open, local-first product surface:
 
 - `packages/cli`: the published `workbench` command, command registry, local project commands, Workbench Cloud client commands, API client, config handling, output formatting, and CLI tests.
-- `packages/protocol`: the public adapter protocol. It owns adapter manifests, operation request and result parsing, adapter definition helpers, typed slots, and auth-requirement discovery for `workbench.adapter.v2`.
+- `packages/protocol`: the public adapter protocol. It owns adapter manifests, operation request and result parsing, adapter definition helpers, typed slots, and auth-requirement discovery for `workbench.adapter.v3`. Engine, subject, and optimizer adapters use this protocol; individual protocol operations are not public authored primitives.
 - `packages/contract`: serializable DTOs shared by the CLI, Workbench Cloud API, reusable UI, and execution helpers.
-- `packages/core`: the public execution core. It owns split YAML validation, source resolution, benchmark fingerprints, subject file snapshots, execution graph planning, Docker-backed local execution, sandbox capability validation, trial staging, subject/evaluation materialization, runs, lineage, file previews, and trace DTO helpers.
+- `packages/core`: the public execution core. It owns split YAML validation, source resolution, benchmark fingerprints, subject file snapshots, engine execution graph planning, Docker-backed local execution, sandbox capability validation, subject/evaluation materialization, runs, lineage, file previews, and generic trace DTO helpers.
 - `packages/core/worker/sandbox-adapter-runner.cjs`: the small public runner copied into local Docker sandboxes. It validates scoped execution capability input and calls the core adapter runtime.
-- `packages/built-in-adapters`: first-party adapter manifests and commands for `codex`, `claude`, `pi`, `command`, `rubric`, `tests`, `harbor`, and the built-in task-source adapter `path`.
+- `packages/built-in-adapters`: first-party adapter manifests and commands for the native `workbench` engine plus `codex`, `claude`, `command`, `rubric`, and `tests`. Harbor is packaged as an external engine adapter.
 - `packages/workbench-ui`: the browser Workbench UX used by local `workbench open` and Workbench Cloud.
 - `environments/`: Dockerfiles for built-in local execution images.
 - `skills/workbench/`: canonical authored agent skill source.
@@ -25,11 +25,11 @@ The `packages/cli` package owns the `workbench` binary implementation, command r
 ## Ownership Boundaries
 
 - The CLI owns local project lifecycle commands and the open Cloud client surface: `login`, `clone`, `fetch`, `pull`, `push`, and `workbench cloud ...`.
-- The protocol package owns the stable adapter contract. Adapter authors should not need to import Web or cloud-runtime code.
-- The core package owns portable Workbench semantics and local Docker execution. It must not depend on Next.js, AWS SDKs, Stripe, Cognito, Daytona, E2B, Firecracker implementation code, Terraform, or hosted worker entrypoints.
-- Built-in adapters are normal adapter packages. Core can execute adapters, but it does not special-case built-in adapter ids. A project-declared adapter source with a built-in id intentionally overrides that built-in for the project; wrapping is implemented by that replacement adapter delegating however it chooses.
+- The protocol package owns the stable adapter contract. Engine, subject, and optimizer adapter authors should not need to import Web or cloud-runtime code.
+- The core package owns portable Workbench semantics and local Docker execution. Its authored source model is engine, subject, and optimizer. It must not depend on Next.js, AWS SDKs, Stripe, Cognito, Daytona, E2B, Firecracker implementation code, Terraform, or hosted worker entrypoints.
+- The CLI ships a default adapter catalog as ordinary adapter manifests. Core can execute adapters, but it does not special-case default adapter ids. A project-declared adapter source with the same id as a default adapter intentionally overrides that default for the project; wrapping is implemented by that replacement adapter delegating however it chooses.
 - Workbench Cloud owns hosted persistence, billing, auth, Web routes, production infrastructure, queue workers, remote provider admission, and hosted sandbox providers.
-- Shared UI stays presentation-only. It renders benchmark, subject, run, result, lineage, file, and trace DTOs without owning execution rules.
+- Shared UI stays presentation-only. It renders benchmark, subject, run, evaluation, lineage, file, and trace DTOs without owning execution rules.
 
 This is a git/GitHub-style split: `workbench` is the open client and local engine; Workbench Cloud is an optional hosted service implemented by cloud-owned private packages.
 
@@ -43,25 +43,26 @@ The source export is maintained by the root command `pnpm workbench:public-sourc
 
 ## Core Execution Model
 
-Runnable source uses version-2 split YAML:
+Runnable source uses version-3 split YAML. The target design does not expose top-level `environment`, `tasks`, or `score` as core source primitives:
 
-- `benchmark.yaml` owns environment, adapters, scoring, and optional task-source selection. If `tasks` is omitted, Workbench reads `tasks/` through the built-in `path` task-source adapter.
-- `subjects/<name>/subject.yaml` owns how to run one subject.
-- `subjects/<name>/files/` is the optional subject file tree copied into the trial workspace.
+- `benchmark.yaml` owns benchmark metadata and `engine`. The engine is the benchmark runtime and measurement contract.
+- `engine.use: workbench` selects the built-in Workbench-native engine. Its `engine.with` config owns `environment`, optional task path selection, and `score`.
+- `subjects/<name>/subject.yaml` owns how to prepare and run one subject.
+- `subjects/<name>/files/` is the subject source package staged at `/workspace/input/subject`; optional `subject.prepare.command` can copy or install those files into the mutable `/workspace`.
 - `optimizers/<name>.yaml` owns subject-relative edit paths and improve behavior.
-- `tasks/<case>/files/` is subject-visible task material copied before the run.
-- `tasks/<case>/tests/` is verifier-only material injected before scoring.
+- `tasks/<case>/files/` is public case material staged by the built-in `workbench` engine at `/workspace/input/case`.
+- `tasks/<case>/tests/` is verifier-private material staged at `/workspace/private/engine` and exposed only to scoring by the built-in `workbench` engine.
 
 The benchmark fingerprint is the comparability boundary. Subjects from different benchmark fingerprints are not compared as peers.
 
 Core compiles eval and improve requests into generic executions:
 
-- `improve` reads subject files and ancestor traces, runs a `subject.improve` adapter operation, and validates the returned subject patch against optimizer edit paths.
-- `trial` creates one mutable environment, runs `subject.run`, late-injects verifier files at `/tests`, runs `trial.score` in the same environment, and validates the returned scorecard.
+- `improve` reads subject files and ancestor traces, runs an `optimizer.improve` adapter operation, and validates the returned subject patch against optimizer edit paths.
+- `eval` invokes the selected engine with the selected subject. For `engine.use: workbench`, the engine runs as a host controller and uses runtime-control to allocate child sandbox operation sequences. The default shared topology runs prepare, subject, and scoring in one child sandbox; `engine.with.grading.isolation: separate` runs subject and scoring in separate child sandboxes while passing only runner workspace/output artifacts to the grader.
 
-Harbor is not a core runtime mode. `tasks: { use: harbor, with: ... }` is a host-time adapter invocation that resolves Harbor task directories into `TaskBundle` data through `tasks.resolve` before trials are planned, and `score.use: tests` is a scorer adapter that may read Harbor reward files internally before returning a `trial.score` result.
+Workbench-native task loading and `tests`/`rubric` scoring behavior belongs to the built-in `workbench` engine. Scoring helpers may be implemented through the adapter protocol, but they are not core adapter categories. Rubric scoring fans out to one judge agent turn per criterion and owns `parallelism` as the only configurable throttle for those criterion turns; the helper publishes each criterion judge as a trace session plus scorecard/result files under the parent attempt job, while the core runtime records one generic engine job result, trace-session set, trace-file set, and artifact bundle. Harbor is not a core runtime mode; `engine.use: harbor` selects an external engine adapter, declared from a local path, npm package, or git ref, that bridges Workbench to Harbor. Harbor itself owns Harbor task parsing, MCP server config, health checks, environment interpretation, subject invocation, artifact handoff, verifier topology, verifier/reward behavior, result semantics, and criteria semantics through its `task.toml` and runtime. Engines that need a trusted controller declare `operations.engine.run.executor: host`; Workbench runs that adapter controller in the trusted local or Cloud worker process through the same request/result protocol and the same runtime-control capability, without a Harbor-specific branch.
 
-Local execution uses the public Docker sandbox backend in `packages/core/src/sandbox-backends/docker.ts`. The same sandbox-plane interface validates input scope, output scope, allocation metadata, handles, and execution capabilities before any adapter command runs. Remote provider implementations are private cloud-runtime code that wrap the public core execution function with hosted provider factories.
+Local execution uses the public Docker sandbox backend in `packages/core/src/sandbox-backends/docker.ts` for sandbox-executor operations and runtime-control child operation sequences. The same sandbox-plane interface validates input scope, output scope, allocation metadata, handles, and execution capabilities before any sandboxed adapter command runs. Host-executor operations bypass Workbench sandbox allocation for the controller itself, but the controller can request child sandboxes through runtime-control. Remote provider implementations are private cloud-runtime code that wrap the public core execution function with hosted provider factories.
 
 ## Stores
 
@@ -80,5 +81,5 @@ Workbench Cloud stores hosted state separately. Production storage, queueing, bi
 - `workbench --help`, `docs/cli.md`, `SPEC.md`, tests, and the authored `workbench` skill must describe the same command surface.
 - The CLI must work outside git repositories.
 - The CLI must remain automation-friendly: stable JSON with `--json`, explicit flags, useful non-zero failures, and no hidden interactive prompts.
-- Adapter commands receive the standard `WORKBENCH_ADAPTER_REQUEST` file and staged filesystem paths. They do not receive source YAML files, job claim tokens, worker tokens, queue credentials, hosted billing state, or sandbox control request internals.
-- `workbench.adapter.v2` is the adapter manifest and request protocol. Adapter operations return one `workbench.adapter-result.v1` file, and operation-specific result values belong to that protocol boundary.
+- Adapter commands receive the standard `WORKBENCH_ADAPTER_REQUEST` file and must rely only on its `paths` object for staged filesystem locations. They do not receive source YAML files, job claim tokens, worker tokens, queue credentials, hosted billing state, or sandbox control request internals.
+- `workbench.adapter.v3` is the adapter manifest and request protocol. Adapter operations return one `workbench.adapter-result.v1` file, and operation-specific result values belong to that protocol boundary. Public authoring docs should expose engine, subject, and optimizer first; operation names are adapter-implementation details.

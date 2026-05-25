@@ -1,12 +1,12 @@
 # File Output Essentials
 
-Use these notes to choose runtime prerequisites for file-output evals. They are intentionally short: install the tools a subject runner or scorer needs, then keep the eval contract in [../from-file-outputs.md](../from-file-outputs.md).
+Use these notes to choose runtime prerequisites for file-output evals. They are intentionally short: install the tools a subject runner or scoring helper needs, then keep the eval contract in [../from-file-outputs.md](../from-file-outputs.md).
 
 ## Shared Rules
 
 - Avoid byte-for-byte scoring for generated Office and PDF files.
 - Put generated files and diagnostics under `/workspace/output`.
-- Put format tools in `benchmark.environment.dockerfile`.
+- Put format tools in `engine.with.environment.dockerfile`.
 - Use the smallest toolchain that can open, inspect, convert, or render the file types the eval actually depends on.
 - When LibreOffice is available, `soffice --headless` is often useful for Office files: it can open, save, convert, and render `.xlsx`, `.docx`, and `.pptx` files. Treat it as a useful runtime capability, not a required scoring method.
 

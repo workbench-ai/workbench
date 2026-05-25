@@ -23,6 +23,10 @@ type SpreadsheetPreviewState =
 
 const workbookPreviewCache = new Map<string, Promise<ParsedSpreadsheetWorkbook>>();
 
+export function clearSpreadsheetFilePreviewCache(): void {
+  workbookPreviewCache.clear();
+}
+
 export function SpreadsheetFilePreview({
   preview,
   fillHeight = false,

@@ -23,22 +23,31 @@ async function main() {
     markStage("request-removed");
     const runtimeImport = process.env.WORKBENCH_RUNTIME_IMPORT || "../src/index.ts";
     const {
-      executeAdapterInCurrentSandboxRuntime,
+      executeAdapterInCurrentRuntime,
+      executeRuntimeControlOperationSequenceInCurrentRuntime,
     } = await import(runtimeImport);
     markStage("runtime-imported");
     const startedAt = typeof request.startedAt === "string" ? request.startedAt : new Date().toISOString();
-    const completedJob = await executeAdapterInCurrentSandboxRuntime(
-      {
-        ...validated.jobInput,
-        now: startedAt,
-        workspaceRoot: workspaceRootFromEnvironment(),
-        pullImages: false,
-        runtimeRegistry: "",
-      },
-      validated.execution,
-      startedAt,
-      validated.capability,
-    );
+    const runtimeInput = {
+      ...validated.jobInput,
+      now: startedAt,
+      workspaceRoot: workspaceRootFromEnvironment(),
+      pullImages: false,
+      runtimeRegistry: "",
+    };
+    const completedJob = validated.jobInput.runtimeControlOperation
+      ? await executeRuntimeControlOperationSequenceInCurrentRuntime(
+          runtimeInput,
+          validated.execution,
+          startedAt,
+          validated.capability,
+        )
+      : await executeAdapterInCurrentRuntime(
+          runtimeInput,
+          validated.execution,
+          startedAt,
+          validated.capability,
+        );
     markStage("adapter-completed");
     fs.writeFileSync(responsePath, `${JSON.stringify({ ok: true, job: completedJob }, null, 2)}\n`);
   } catch (error) {
@@ -63,8 +72,6 @@ function isSafeWorkspaceRoot(value) {
     && value !== "/"
     && !value.startsWith("/workbench-runtime")
     && !value.startsWith("/workbench-execution")
-    && value !== "/tests"
-    && value !== "/logs"
     && !/[\0\r\n:]/u.test(value);
 }
 
@@ -198,8 +205,7 @@ function runtimeInputsFromInputBundle(bundle) {
   }
   return {
     baseFiles: filesByName.get("subject") || [],
-    taskSourceFiles: filesByName.get("task") || [],
-    runnerOutputFiles: filesByName.get("runner-output") || [],
+    engineResolveFiles: filesByName.get("case") || [],
     traceFiles: filesByName.get("traces") || [],
   };
 }

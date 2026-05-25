@@ -1,22 +1,25 @@
 import { Badge } from "@workbench-ai/cli-web-ui/components/ui/badge";
 import { badgeToneProps } from "@workbench-ai/cli-web-ui/lib/badge";
+import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
 import { badgeToneForStatus, statusLabel } from "../lib/format";
 import type {
+  HostedWorkbenchJob,
   SubjectSummary,
-  RuntimeEvent,
 } from "../types";
 
 export function StatusBadge({
   status,
   active = false,
+  className,
 }: {
   status:
     | SubjectSummary["status"]
-    | RuntimeEvent["status"]
+    | HostedWorkbenchJob["status"]
     | null
     | undefined;
   active?: boolean;
+  className?: string;
 }) {
   const statusTone = badgeToneForStatus(status);
   const tone = badgeToneProps(
@@ -24,7 +27,7 @@ export function StatusBadge({
   );
 
   return (
-    <Badge variant={tone.variant} className={tone.className}>
+    <Badge variant={tone.variant} className={cn(tone.className, className)}>
       {statusLabel(status)}
     </Badge>
   );

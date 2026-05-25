@@ -13,9 +13,9 @@ The canonical general public skill source lives under `skills/workbench/`. Keep 
 
 `docs/cli.md` owns the command and operator flow, `SPEC.md` owns the hosted CLI contract, `docs/evals/` owns eval authoring and file-output task guidance, and `docs/testing.md` owns validation and hosted e2e guidance. The authored skill should point to those canonical files instead of carrying its own product guide.
 
-When the authored docs or skill mention tasks, preserve the task-source boundary: task-source adapters implement `tasks.resolve` and write `workbench-result.json` with protocol `workbench.adapter-result.v1`, core runs trials over the returned bundles, native Workbench task directories are parsed by the built-in `path` adapter, and Harbor directories are parsed by the built-in `harbor` adapter.
+When the authored docs or skill mention tasks, preserve the engine boundary: `version: 3` `benchmark.yaml` selects an engine, the built-in `workbench` engine owns native task directories through its own `engine.with.tasks` path setting, and Harbor directories are parsed by the external `harbor` engine adapter.
 
-Keep this ownership at the Workbench product root. The `packages/cli` package should not own product docs or skills; it owns the binary implementation and command tests. Workbench Cloud renders the product docs through its hosted shell, but it should not fork the public docs content.
+Keep this ownership at the Workbench product root. The `packages/cli` package should not own product docs or skills; it owns the binary implementation and command tests. Workbench Cloud renders the product docs through its hosted shell, but it should not duplicate the public docs content.
 
 ## Installable Skill Assembly
 
@@ -41,9 +41,9 @@ Do not edit installed user-home skills directly. After changing authored source 
 
 ## Public Source Export
 
-Maintainers run these commands from the private monorepo root after changing Workbench source, shared `cli-web-ui`, first-party harness packages, or the authored Workbench skill:
+Maintainers run these commands from the private monorepo root after changing Workbench source, shared `cli-web-ui`, first-party agent driver packages, or the authored Workbench skill:
 
 - `pnpm workbench:public-source:build`
 - `pnpm workbench:public-source:validate`
 
-The generated source snapshot lives under `out/public-source/workbench`. It includes Workbench packages, `packages/cli-web-ui`, first-party harness packages, docs, environments, and `skills/workbench`. It intentionally excludes Workbench Cloud, hosted auth, Terraform, generated output, `node_modules`, and root `SKILL.md`.
+The generated source snapshot lives under `out/public-source/workbench`. It includes Workbench packages, `packages/cli-web-ui`, first-party agent driver packages, docs, environments, and `skills/workbench`. It intentionally excludes Workbench Cloud, hosted auth, Terraform, generated output, `node_modules`, and root `SKILL.md`.

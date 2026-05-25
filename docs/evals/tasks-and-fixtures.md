@@ -1,8 +1,8 @@
 # Tasks And Fixtures
 
-Tasks are part of the Workbench project and are pushed to Workbench Cloud by `workbench push` when hosted execution is needed. They are frozen onto each run, but Workbench stages them with a simple trial rule: public files are copied into the subject's working directory before the subject runs, verifier files are injected only after that run, and the scorer then sees the same mutated environment.
+Tasks are part of the Workbench project and are pushed to Workbench Cloud by `workbench push` when hosted execution is needed. They are frozen onto each run. For the built-in `workbench` engine, public files are staged under `/workspace/input/case` before the subject runs, verifier files are staged under `/workspace/private/engine` only for scoring, and subject adapters never receive `paths.enginePrivate`. The default shared grading mode scores the runner-mutated child sandbox; `engine.with.grading.isolation: separate` scores a second child sandbox seeded with runner workspace/output artifacts.
 
-Native Workbench task directories are source input for the built-in `path` task-source adapter. The adapter parses those directories and emits `TaskBundle` data, which is the structured task representation core uses for trials. Core does not parse native task package directories directly. For native task packages, omit `benchmark.tasks`; Workbench defaults to the built-in `path` task-source adapter reading `tasks/`. Use an explicit `tasks: { use: path, with: { path: ... } }` invocation only when the native task directory is not the default `tasks/`.
+Native Workbench task directories are source input for the built-in `workbench` engine. The engine owns native task parsing. For native task packages, omit `engine.with.tasks` to use the default `tasks/` directory. Use explicit `engine.with.tasks.path` only when the native task directory is not the default.
 
 ## Recommended Layout
 
@@ -32,18 +32,18 @@ tasks/
 
 ## What Belongs In Tasks
 
-Native task roots parsed by the `path` adapter may contain:
+Native task roots parsed by the built-in `workbench` engine may contain:
 
 - `task.yaml` for versioned task text and explicit file paths
-- `files/` for public seed files copied into the trial workspace
-- `tests/` for verifier-only files injected at `/tests`
+- `files/` for public case files staged at `/workspace/input/case`
+- `tests/` for verifier-private files exposed only while the engine scores the final workspace
 - `solution/` for oracle or reference material imported from external task sets
 - `environment/` or task environment metadata when a task needs a runtime override
 
-Minimal task manifests include `version: 2` and `task`. Add explicit path objects for any sibling material the task owns:
+Minimal task manifests include `version: 3` and `task`. Add explicit path objects for any sibling material the task owns:
 
 ```yaml
-version: 2
+version: 3
 task: Create the requested output file.
 files:
   path: files
@@ -65,15 +65,15 @@ solution:
 
 Keep answer keys, extracted goldens, private rubrics, tolerances, and scoring scripts out of `files/`. If a subject can read the file and directly copy the target answer, the eval is measuring lookup behavior rather than task performance.
 
-Do not put mutable prompts, templates, or scripts in tasks when Workbench should improve them. Put those files under the subject root instead.
+Do not put mutable prompts, templates, or scripts in tasks when Workbench should improve them. Put those files under the subject root instead; subjects can copy or install them into `/workspace` with `prepare.command`. Do not depend on case files appearing in the workspace root.
 
-Every smoke task should contain a verifier that produces a scorecard or Harbor-style reward file. Empty `tests/` folders are placeholders only; they should not be treated as passing tasks.
+Every smoke task should contain verifier material that lets the engine produce a numeric result. Empty `tests/` folders are placeholders only; they should not be treated as passing tasks.
 
 Hosted benchmark publication uploads binary files as base64 automatically, so tasks may contain real `.docx`, `.xlsx`, `.pdf`, or `.pptx` files alongside text, JSON, or verifier scripts.
 
 ## Harbor Layout
 
-The built-in Harbor task-source adapter accepts Harbor task directories with:
+The external Harbor engine adapter accepts Harbor task directories with:
 
 ```text
 instruction.md
@@ -83,8 +83,8 @@ tests/
 solution/
 ```
 
-The `harbor` adapter parses this source and emits equivalent `TaskBundle` data. Harbor `instruction.md` supplies the task text, `tests/` remains verifier-only and is copied to `/tests` after the subject run, and `solution/` is preserved for oracle workflows but is not part of the normal subject-visible workspace. Core does not parse Harbor directories directly.
+The `harbor` engine adapter is only the Workbench bridge. Harbor itself parses this source and owns how Harbor tasks become attempts, including subject invocation, artifact handoff, verifier/reward behavior, health checks, MCP server config, and same-sandbox versus separate-sandbox verification from `task.toml`. Harbor `instruction.md` supplies the task text, `tests/` remains verifier-private, and `solution/` is preserved for oracle workflows but is not part of the normal public case input. The adapter should call Harbor inspect/export and run APIs, expose Workbench runtime-control as a sandbox provider when Harbor asks for sandboxes, and normalize the final Harbor result; core does not infer criteria from metrics or parse Harbor directories directly.
 
 ## Task Count
 
-Start with one or two smoke tasks. Add broader task coverage after the subject runner and scorer are stable. A small task set that catches the most important failure modes is better than a large set that is slow, flaky, or hard to explain.
+Start with one or two smoke tasks. Add broader task coverage after the subject runner and scoring helper are stable. A small task set that catches the most important failure modes is better than a large set that is slow, flaky, or hard to explain.

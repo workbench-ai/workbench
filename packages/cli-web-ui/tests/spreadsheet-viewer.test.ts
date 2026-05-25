@@ -5,7 +5,7 @@ import { JSDOM } from "jsdom";
 import { describe, expect, test } from "vitest";
 
 import {
-  expandSheetExtentToCoverViewport,
+  expandSheetExtentToFitViewport,
   expandSheetExtentToIncludeCell,
   getBaseSheetExtent,
 } from "../lib/spreadsheet-viewer-model";
@@ -14,11 +14,9 @@ import { parseOoxmlWorkbook } from "../lib/spreadsheet-viewer-ooxml";
 describe("spreadsheet viewer contracts", () => {
   test("expands the initial extent to cover the visible viewport width", () => {
     expect(
-      expandSheetExtentToCoverViewport(
+      expandSheetExtentToFitViewport(
         { endRow: 45, endCol: 2 },
         {
-          scrollLeft: 0,
-          scrollTop: 0,
           clientWidth: 1280,
           clientHeight: 634,
           rowHeaderWidth: 40,
@@ -32,13 +30,11 @@ describe("spreadsheet viewer contracts", () => {
     ).toEqual({ endRow: 45, endCol: 9 });
   });
 
-  test("covers the scrolled viewport instead of waiting for keyboard navigation", () => {
+  test("scroll offsets do not create blank spreadsheet extent", () => {
     expect(
-      expandSheetExtentToCoverViewport(
+      expandSheetExtentToFitViewport(
         { endRow: 45, endCol: 2 },
         {
-          scrollLeft: 120,
-          scrollTop: 680,
           clientWidth: 640,
           clientHeight: 400,
           rowHeaderWidth: 40,
@@ -49,16 +45,14 @@ describe("spreadsheet viewer contracts", () => {
           getRowHeight: () => 22,
         },
       ),
-    ).toEqual({ endRow: 48, endCol: 4 });
+    ).toEqual({ endRow: 45, endCol: 2 });
   });
 
   test("does not grow once the viewport is already covered", () => {
     expect(
-      expandSheetExtentToCoverViewport(
+      expandSheetExtentToFitViewport(
         { endRow: 48, endCol: 4 },
         {
-          scrollLeft: 120,
-          scrollTop: 680,
           clientWidth: 640,
           clientHeight: 400,
           rowHeaderWidth: 40,

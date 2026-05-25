@@ -381,7 +381,7 @@ function PdfPreviewFallback({
   return (
     <PreviewRendererLoadingState
       expanded={expanded}
-      label={`Loading PDF renderer for ${filePath}...`}
+      label={`PDF renderer for ${filePath}`}
       testId="pdf-preview-loading"
     />
   );

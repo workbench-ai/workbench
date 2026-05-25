@@ -4,13 +4,6 @@ import type {
   WorkbenchExecutionEventBatch,
   WorkbenchExecutionEventSource,
 } from "@workbench-ai/workbench-contract";
-import type {
-  HarnessTurnLivePersistence,
-} from "@workbench-ai/flow-harness-sdk";
-
-import {
-  isJsonPayload,
-} from "./runtime-utils.ts";
 
 export interface WorkbenchExecutionProgressTarget {
   url: string;
@@ -88,38 +81,10 @@ export function createWorkbenchExecutionEventPublisher(
   };
 }
 
-export function executionTracePersistenceForPublisher(
-  publisher: WorkbenchExecutionEventPublisher | undefined,
-  role: WorkbenchExecutionEvent["role"],
-): HarnessTurnLivePersistence | undefined {
-  if (!publisher?.enabled) {
-    return undefined;
-  }
-  return {
-    ...(publisher.flushWindowMs ? { flushWindowMs: publisher.flushWindowMs } : {}),
-    async onFlush(batch) {
-      const events: WorkbenchExecutionEventInput[] = [];
-      if (
-        batch.traceBundle.spans.length > 0 ||
-        batch.traceBundle.events.length > 0 ||
-        batch.traceBundle.summaries.length > 0
-      ) {
-        events.push({
-          source: "adapter",
-          role,
-          schema: "workbench.trace.delta.v1",
-          payload: toJsonPayload(batch.traceBundle),
-        });
-      }
-      await publisher.publish(events).catch(() => undefined);
-    },
-  };
-}
-
-export async function publishCommandPhaseEvent(
+export async function publishCommandStepEvent(
   publisher: WorkbenchExecutionEventPublisher | undefined,
   args: {
-    phase: string;
+    step: string;
     status: "started" | "succeeded" | "failed";
     role?: WorkbenchExecutionEvent["role"];
     exitCode?: number;
@@ -132,9 +97,9 @@ export async function publishCommandPhaseEvent(
   await publisher.publish([{
     source: "command",
     ...(args.role ? { role: args.role } : {}),
-    schema: "workbench.execution.phase.v1",
+    schema: "workbench.execution.step.v1",
     payload: {
-      phase: args.phase,
+      step: args.step,
       status: args.status,
       ...(typeof args.exitCode === "number" ? { exitCode: args.exitCode } : {}),
       ...(args.error ? { error: args.error } : {}),
@@ -310,9 +275,4 @@ function isProgressStdoutEnvelope(value: unknown): value is WorkbenchProgressStd
   return bodyRecord.type === "workbench.job.progress"
     && typeof bodyRecord.progressToken === "string"
     && Boolean(bodyRecord.batch);
-}
-
-function toJsonPayload(value: unknown): Json {
-  const normalized = JSON.parse(JSON.stringify(value ?? null)) as unknown;
-  return isJsonPayload(normalized) ? normalized : null;
 }

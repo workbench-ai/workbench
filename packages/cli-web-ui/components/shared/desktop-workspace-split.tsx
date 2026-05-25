@@ -125,7 +125,13 @@ export function DesktopWorkspaceSplit({
   return (
     <ResizablePanelGroup
       orientation="horizontal"
-      className={cn("h-full min-h-0 min-w-0 overflow-hidden", className)}
+      data-state={paneOpen ? "open" : "closed"}
+      className={cn(
+        "h-full min-h-0 min-w-0 overflow-hidden",
+        "[&_[data-workspace-split-panel]]:transition-[flex-grow] [&_[data-workspace-split-panel]]:duration-200 [&_[data-workspace-split-panel]]:ease-linear",
+        "motion-reduce:[&_[data-workspace-split-panel]]:transition-none",
+        className,
+      )}
       onLayoutChanged={(layout) => {
         if (!paneOpen) {
           return;
@@ -146,6 +152,7 @@ export function DesktopWorkspaceSplit({
     >
       <ResizablePanel
         id={PRIMARY_PANEL_ID}
+        data-workspace-split-panel="primary"
         panelRef={primaryPanelRef}
         defaultSize={paneOpen ? asPercent(resolvedPrimaryPercent) : "100%"}
         minSize={paneOpen ? asPercent(minPrimaryPercent) : "100%"}
@@ -162,12 +169,13 @@ export function DesktopWorkspaceSplit({
         disableDoubleClick
         withHandle={paneOpen}
         className={cn(
-          "motion-reduce:transition-none",
+          "transition-opacity duration-200 ease-linear motion-reduce:transition-none",
           paneOpen ? "opacity-100" : "pointer-events-none opacity-0",
         )}
       />
       <ResizablePanel
         id={secondaryPaneId}
+        data-workspace-split-panel="secondary"
         panelRef={secondaryPanelRef}
         defaultSize={paneOpen ? asPercent(resolvedSecondaryPercent) : "0%"}
         minSize={asPercent(100 - maxPrimaryPercent)}
@@ -177,21 +185,15 @@ export function DesktopWorkspaceSplit({
         className="min-h-0 min-w-0 overflow-hidden"
       >
         <div
+          data-state={paneOpen ? "open" : "closed"}
           aria-hidden={!paneOpen}
           inert={!paneOpen ? true : undefined}
           className={cn(
-            "h-full min-h-0 min-w-0 overflow-hidden transition-[opacity,transform] duration-200 ease-linear motion-reduce:transition-none",
+            "h-full min-h-0 min-w-0 overflow-hidden transition-opacity duration-150 ease-linear motion-reduce:transition-none",
             paneOpen ? "opacity-100" : "pointer-events-none opacity-0",
           )}
         >
-          <div
-            className={cn(
-              "h-full min-h-0 min-w-0 transition-[transform] duration-200 ease-linear motion-reduce:transition-none",
-              paneOpen ? "translate-x-0" : "translate-x-4",
-            )}
-          >
-            {secondaryPane}
-          </div>
+          {secondaryPane}
         </div>
       </ResizablePanel>
     </ResizablePanelGroup>

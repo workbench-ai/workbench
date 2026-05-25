@@ -7,7 +7,7 @@ import type { LocalProjectSource } from "./project-source.js";
 export function localBenchmarkFingerprint(project: LocalProjectSource): string {
   return benchmarkFingerprintForFiles([
     textFile("benchmark.yaml", project.benchmarkSource),
-    ...prefixFiles(project.taskSourceFiles.map(toSurfaceFile), project.taskFingerprintPath),
+    ...prefixFiles(project.engineResolveFiles.map(toSurfaceFile), project.engineResolveFingerprintPath),
     ...benchmarkDockerfileFiles(project),
     ...benchmarkAdapterFiles(project),
   ]);

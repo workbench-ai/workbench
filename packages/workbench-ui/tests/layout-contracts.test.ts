@@ -8,7 +8,7 @@ describe("workbench browser layout contracts", () => {
       "utf8",
     );
 
-    expect(appSource).toContain("Workbench Home");
+    expect(appSource).toContain("Workbench home");
     expect(appSource).toContain("<WorkbenchBrand />");
     expect(appSource).not.toContain('product="Workbench"');
     expect(appSource).toContain('data-testid="app-brand-link"');
@@ -28,10 +28,11 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("const workspaceHeader = (");
     expect(appSource).toContain("{headerControls}");
     expect(appSource).toContain("header={workspaceHeader}");
-    expect(appSource).toContain('COMPACT_RUNTIME_LAYOUT_MEDIA_QUERY = "(max-width: 1535px)"');
+    expect(appSource).toContain('headerClassName="px-0 py-0 sm:px-0"');
+    expect(appSource).toContain('COMPACT_WORKSPACE_LAYOUT_MEDIA_QUERY = "(max-width: 1535px)"');
   });
 
-  test("workspace navigation uses the shared view switch", () => {
+  test("benchmark navigation lives in a muted secondary bar with button links", () => {
     const appSource = readFileSync(
       new URL("../src/app.tsx", import.meta.url),
       "utf8",
@@ -39,26 +40,55 @@ describe("workbench browser layout contracts", () => {
 
     expect(appSource).toContain('components/shared/view-switch');
     expect(appSource).toContain("<ViewSwitch");
+    expect(appSource).toContain("const benchmarkNavigation = (");
+    expect(appSource).toContain("<WorkbenchBenchmarkNavigation");
+    expect(appSource).toContain("bg-muted/30");
+    expect(appSource).toContain('<nav aria-label="Benchmark navigation"');
+    expect(appSource).toContain("<Button");
+    expect(appSource).toContain("asChild");
+    expect(appSource).toContain('variant={active ? "secondary" : "ghost"}');
+    expect(appSource).toContain("items-center gap-1 overflow-x-auto md:justify-end");
+    expect(appSource).toContain('aria-current={active ? "page" : undefined}');
+    expect(appSource).toContain("const targetRoute = active ? createBenchmarkRoute() : item.route");
+    expect(appSource).toContain("href={routeHref(targetRoute)}");
+    expect(appSource).toContain("onNavigate(targetRoute)");
+    expect(appSource).toContain("actions={objectPaneCollapseAction}");
+    expect(appSource).toContain("actions={headerControls}");
+    expect(appSource).toContain("{benchmarkNavigation}");
+    expect(appSource).not.toContain("{objectNavigation}\n          {headerControls}");
+    expect(appSource).toContain("const objectPaneCollapseAction = desktopObjectPaneOpen ? (");
+    expect(appSource).toContain("<PanelRightCloseIcon />");
+    expect(appSource).toContain('aria-label="Collapse details pane"');
+    expect(appSource).toContain('data-testid="object-pane-collapse"');
+    expect(appSource).toContain("onClick={() => navigate(createBenchmarkRoute())}");
+    expect(appSource).not.toContain("const Icon = item.icon");
+    expect(appSource).not.toContain('<Icon aria-hidden="true" data-icon="inline-start" />');
+    expect(appSource).not.toContain('label: "Benchmark"');
     expect(appSource).not.toContain('label: "Executions"');
     expect(appSource).not.toContain('value: "executions"');
+    expect(appSource).not.toContain('value: "benchmark"');
+    expect(appSource).not.toContain("hideHeader={!prefersCompactWorkspaceLayout}");
+    expect(appSource).not.toContain('ariaLabel="Workbench sections"');
   });
 
-  test("workbench breadcrumbs stay shallow and link back to the benchmark screen", () => {
+  test("workbench breadcrumbs live in the secondary nav and link back to the benchmark screen", () => {
     const appSource = readFileSync(
       new URL("../src/app.tsx", import.meta.url),
       "utf8",
     );
 
-    expect(appSource).toContain('breadcrumbs={route.kind !== "benchmark" ? (');
-    expect(appSource).toContain("<RuntimeBreadcrumbs");
+    expect(appSource).not.toContain('breadcrumbs={route.kind !== "benchmark" ? (');
+    expect(appSource).toContain("bg-muted/30");
+    expect(appSource).toContain("<WorkbenchBreadcrumbs");
     expect(appSource).toContain("route={route}");
     expect(appSource).toContain("route.kind === \"subject\"");
+    expect(appSource).toContain('route.kind === "benchmark"');
     expect(appSource).toContain("Benchmark");
     expect(appSource).toContain("createBenchmarkRoute()");
     expect(appSource).not.toContain("Project</BreadcrumbLink>\n        </BreadcrumbItem>\n        <BreadcrumbSeparator />\n        <BreadcrumbItem>\n          <BreadcrumbLink");
   });
 
-  test("benchmark pane keeps shadcn-native progressive disclosure and task review skips a summary-only landing tab", () => {
+  test("benchmark pane keeps shadcn-native progressive disclosure and detail pages stay object-owned", () => {
     const appSource = readFileSync(
       new URL("../src/app.tsx", import.meta.url),
       "utf8",
@@ -70,7 +100,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("flex min-w-0 flex-wrap items-center justify-start gap-2 sm:justify-end");
     expect(appSource).toContain("grid min-w-0 flex-1 gap-1 text-left");
     expect(appSource).not.toContain("sm:flex-row sm:items-center sm:justify-between");
-    expect(appSource).toContain('data-testid="benchmark-task-card"');
+    expect(appSource).toContain('data-testid="benchmark-engine-cases-card"');
     expect(appSource).toContain('const excludedFields = new Set(["use", "task", "instructions", "prompt", "description"])');
     expect(appSource).toContain("formatUseBlockSummary");
     expect(appSource).not.toContain('score.use === "rubric"');
@@ -90,30 +120,109 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain("<CardDescription>eval.task</CardDescription>");
     expect(appSource).not.toContain('value="eval-task"');
     expect(appSource).not.toContain('value="logs"');
-    expect(appSource).toContain("TaskExecutionFilesTab");
-    expect(appSource).toContain("TaskExecutionTraceTab");
+    expect(appSource).toContain("EvaluationCaseDetailSurface");
+    expect(appSource).toContain("InspectorDialogShell");
+    expect(appSource).toContain("ExecutionFilesSurface");
+    expect(appSource).toContain("CaseFeedbackCard");
+    expect(appSource).toContain("formatEvaluationDisplayName");
+    expect(appSource).toContain("formatSubjectDisplayName");
+    expect(appSource).not.toContain('SurfaceSection title="Subject Overview"');
+    expect(appSource).not.toContain('SurfaceSection title="Run" icon={ActivityIcon}');
+    expect(appSource).not.toContain('SurfaceSection title="Scorecard"');
+    expect(appSource).not.toContain('SurfaceSection title="Trace"');
+    expect(appSource).not.toContain('<CardTitle>Provenance</CardTitle>');
+    expect(appSource).not.toContain('SurfaceSection title="Raw Case Data"');
+    expect(appSource).toContain("function EvaluationCasesTable");
+    expect(appSource).toContain("onSelectCase(selected ? null : row.id)");
+    expect(appSource).toContain("renderSelectedCase");
+    expect(appSource).toContain("<TableCell colSpan={5}");
+    expect(appSource).toContain('TabsTrigger value="score"');
+    expect(appSource).toContain('TabsTrigger value="attempts"');
+    expect(appSource).toContain('TabsTrigger value="files"');
+    expect(appSource).toContain('className="flex-none h-[clamp(28rem,calc(100dvh-28rem),42rem)] overflow-hidden pt-2"');
+    expect(appSource).not.toContain('className="min-h-[28rem] overflow-hidden pt-2"');
+    expect(appSource).not.toContain('style={{ flex: "none", height: "min(70dvh, 44rem)" }}');
+    expect(appSource).toContain('className="flex h-full min-h-0 min-w-0 flex-col"');
+    expect(appSource).not.toContain("selectedJobId");
+    expect(appSource).not.toContain('dialog: { kind: "job", jobId }');
+    expect(appSource).toContain("EvaluationDetailDialog");
+    expect(appSource).toContain('testId="context-evaluation-dialog"');
+    expect(appSource).not.toContain('testId="context-run-dialog"');
+    expect(appSource).toContain("function AttemptTraceContent");
+    expect(appSource).not.toContain("function TraceSessionTimeline");
+    expect(appSource).toContain("<AttemptTraceContent");
+    expect(appSource).toContain('className="grid min-w-0 gap-4"');
+    expect(appSource).not.toContain('aria-label={`Open ${row.label}`}');
+    expect(appSource).not.toContain("<TableHead>Attempt</TableHead>");
+    expect(appSource).not.toContain("traceSessions.length === 1");
+    expect(appSource).not.toContain("onSelectJob(selected ? null");
+    expect(appSource).not.toContain("defaultValue={traceSessions[0]");
+    expect(appSource).not.toContain(">Open Subject<");
+    expect(appSource).not.toContain(">Open Run<");
     expect(appSource).not.toContain("caseReviewShouldPoll");
-    expect(appSource).toContain("useRunDetail");
-    expect(appSource).toContain("useRunTrace");
+    expect(appSource).toContain("useExecutionTrace");
+    expect(appSource).toContain("const params = new URLSearchParams({ run: runId, job: jobId });");
+    expect(appSource).toContain("if (!runId || !jobId)");
     expect(appSource).not.toContain("shouldPollTrace");
     expect(appSource).not.toContain("POLL_INTERVAL_MS");
     expect(appSource).not.toContain("window.setInterval");
-    expect(appSource).toContain('value="scoring"');
-    expect(appSource).toContain('value="trace"');
-    expect(appSource).toContain("ToggleGroup");
     expect(appSource).toContain("ExecutionTraceTimeline");
     expect(appSource).toContain('layout="content"');
-    expect(appSource).toContain("review.phases");
-    expect(appSource).toContain("resolveEvaluationTaskRows");
-    expect(appSource).toContain("groupExecutionJobsByCase");
-    expect(appSource).toContain('apiPath(`/api/run?${params.toString()}`)');
-    expect(appSource).toContain("for (const caseStats of evalRecord?.cases ?? [])");
+    expect(appSource).toContain("review.executions");
+    expect(appSource).toContain("resolveScorecardCaseRows");
+    expect(appSource).toContain("scorecard.evaluation.cases ?? []");
+    expect(appSource).not.toContain("for (const sample of scorecard.evaluation.samples)");
+    expect(appSource).not.toContain("sample.cases ?? []");
+    expect(appSource).not.toContain("readCaseDurationMs");
+    expect(appSource).not.toContain("firstMetricValue");
     expect(appSource).not.toContain("for (const authoredCase of specDocument?.cases ?? [])");
-    expect(appSource).toContain('SurfaceSection title="Evaluation Tasks"');
+    expect(appSource).not.toContain("sampleLevelCase");
+    expect(appSource).not.toContain("__sample_\\d");
+    expect(appSource).toContain('SurfaceSection title="Cases"');
+    expect(appSource).not.toContain('SurfaceSection title="Case Result"');
+    expect(appSource).toContain('SurfaceSection title="Evaluations"');
+    expect(appSource).not.toContain('SurfaceSection title="Tasks"');
+    expect(appSource).toContain("function CaseAttemptTable");
+    expect(appSource).not.toContain('SurfaceSection title="Executions"');
+    expect(appSource).toContain("function EvaluationSummaryTable");
+    expect(appSource).toContain("const latestEvaluation = subjectEvaluations[0] ?? null;");
+    expect(appSource).not.toContain("const latestEvaluation = subjectEvaluations.at(-1)");
+    expect(appSource).not.toContain("function RunSummaryTable");
+    expect(appSource).toContain('<TableHead>{showSubject ? "Subject" : "Evaluation"}</TableHead>');
+    expect(appSource).not.toContain("<TableHead>Run</TableHead>");
+    expect(appSource).not.toContain("<TableHead>Workflow</TableHead>");
+    expect(appSource).not.toContain("<TableHead>Outcome</TableHead>");
+    expect(appSource).toContain("<TableHead>Status</TableHead>");
+    expect(appSource).toContain('<TableHead className="text-right">Score</TableHead>');
+    expect(appSource).not.toContain("testId=\"run-job-dialog\"");
+    expect(appSource).not.toContain("bodyTestId=\"run-job-dialog-body\"");
+    expect(appSource).toContain('className="h-[min(94vh,calc(100dvh-1rem))]"');
+    expect(appSource).toContain('bodyClassName="overflow-y-auto"');
+    expect(appSource).not.toContain("Execution events recorded for this run job.");
+    expect(appSource).not.toContain("traceDescription");
+    expect(appSource).not.toContain("describePhaseTrace");
+    expect(appSource).not.toContain('<h3 className="text-sm font-medium text-foreground">Trace</h3>');
+    expect(appSource).toContain("function DetailAccordionSection");
+    expect(appSource).not.toContain('variant?: "line" | "bordered";');
+    expect(appSource).not.toContain('"rounded-xl border border-border/60 bg-card px-3"');
+    expect(appSource).toContain('contentClassName="h-auto pb-3"');
+    expect(appSource).toContain("bordered && \"rounded-lg border border-border/60 px-3 not-last:border-b\"");
+    expect(appSource).toContain('className="gap-2"');
+    expect(appSource).toContain("bordered");
+    expect(appSource).not.toContain('variant="bordered"');
+    expect(appSource).toContain('className="min-w-0"');
+    expect(appSource).toContain("function FactGrid");
+    expect(appSource).not.toContain("function ActionRowList");
+    expect(appSource).not.toContain("actionRowClassName");
+    expect(appSource).not.toContain('CardContent className="grid min-w-0 gap-0 py-0"');
+    expect(appSource).not.toContain('CardContent className="grid gap-3 md:grid-cols');
+    expect(appSource).not.toContain('CardContent className="grid gap-2 py-3');
+    expect(appSource).not.toContain('CardContent className="grid gap-3 md:grid-cols-4');
+    expect(appSource).not.toContain('className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-border/60 bg-card p-4"');
+    expect(appSource).not.toContain('open={selectedJobId !== null}');
     expect(appSource).not.toContain("runnerExecution");
-    expect(appSource).not.toContain("scorerExecution");
+    expect(appSource).not.toContain("engineExecution");
     expect(appSource).not.toContain("ExecutionTraceJobsPanel");
-    expect(appSource).not.toContain('SurfaceSection title="Task Scorecard"');
     expect(appSource).not.toContain('className="min-h-[360px]"');
     expect(appSource).not.toContain('CardContent className="min-h-[360px] py-0"');
     expect(appSource).not.toContain("Live Progress");
@@ -123,10 +232,57 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain('label="Discovered"');
     expect(appSource).not.toContain("function BenchmarkStringBadges");
     expect(appSource).not.toContain('description="Runs the subject');
-    expect(appSource).not.toContain('description="Agent that proposes');
     expect(appSource).not.toContain('className="border-border/60 bg-muted/10"');
     expect(appSource).not.toContain('defaultValue="overview"');
-    expect(appSource).not.toContain("RunFact title=\"Environment\"");
+    expect(appSource).toContain('className="min-w-0 rounded-xl bg-muted/35 px-4 py-3"');
+    expect(appSource).toContain("[overflow-wrap:anywhere]");
+    expect(appSource).not.toContain("showCharts");
+  });
+
+  test("reusable benchmark workspace stays fixture and adapter agnostic", () => {
+    const appSource = readFileSync(
+      new URL("../src/app.tsx", import.meta.url),
+      "utf8",
+    );
+    const loadingStatesSource = readFileSync(
+      new URL("../src/components/loading-states.tsx", import.meta.url),
+      "utf8",
+    );
+    const subjectListSource = readFileSync(
+      new URL("../src/components/subject-list.tsx", import.meta.url),
+      "utf8",
+    );
+    const combinedSource = [
+      appSource,
+      loadingStatesSource,
+      subjectListSource,
+    ].join("\n");
+
+    for (const forbidden of [
+      "local-benchmark-ux-fixture",
+      "local-inspect",
+      "subject_local_seed",
+      "eval_local_seed",
+      "run_local_seed",
+      "Figma",
+      "Reddit",
+      "Harbor",
+      "formula_integrity",
+      "traceability",
+      "codex",
+      "claude",
+      "openai",
+      "anthropic",
+    ]) {
+      expect(combinedSource).not.toContain(forbidden);
+    }
+
+    expect(appSource).not.toContain("adapter");
+    expect(appSource).not.toContain("baseline");
+    expect(appSource).not.toContain("metadata.baseline");
+    expect(appSource).not.toContain("input.baseline");
+    expect(appSource).not.toContain("engine-defined");
+    expect(appSource).not.toContain("local workspace");
   });
 
   test("queued execution rows do not accrue runtime duration before they start", () => {
@@ -143,7 +299,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain("isActiveExecutionStatus(record.status) ? record.createdAt : null");
   });
 
-  test("benchmark manifest and mounted execution files are separate surfaces", () => {
+  test("benchmark manifest and source files are separate surfaces", () => {
     const appSource = readFileSync(
       new URL("../src/app.tsx", import.meta.url),
       "utf8",
@@ -166,8 +322,8 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain('<TabsContent value="manifest" className="min-w-0">');
     expect(appSource).toContain('<TabsContent value="files" className="min-h-0 min-w-0">');
     expect(appSource).toContain('title="Benchmark Manifest"');
-    expect(appSource).toContain('title="Mounted Task Files"');
-    expect(appSource).toContain("Task input and expected files mounted during runner and scorer execution.");
+    expect(appSource).toContain('title="Engine Case Files"');
+    expect(appSource).toContain("Public, private, and source files exposed by the engine.");
     expect(appSource).toContain("<FilesBrowser");
     expect(appSource).toContain('browseMode="folders"');
     expect(appSource).toContain("onSourcePreviewModeChange");
@@ -175,7 +331,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain("max-h-[calc(100dvh-12rem)]");
   });
 
-  test("subject benchmark tabs stay scoped and on the low-elevation shared tone", () => {
+  test("benchmark object indexes are route-backed sibling pages", () => {
     const subjectListSource = readFileSync(
       new URL("../src/components/subject-list.tsx", import.meta.url),
       "utf8",
@@ -195,20 +351,25 @@ describe("workbench browser layout contracts", () => {
 
     expect(subjectListSource).not.toContain("shadow-sm");
     expect(subjectListSource).not.toContain("font-mono text-sm font-semibold");
-    expect(appSource).not.toContain("metrics?.score");
-    expect(appSource).not.toContain("metrics.score");
-    expect(appSource).not.toContain("usage.harness");
-    expect(appSource).toContain('const fillsBody = view === "lineage" || view === "results" || view === "runs"');
-    expect(appSource).toContain('route.kind === "subjects" && (runtimeRootView === "lineage" || runtimeRootView === "results" || runtimeRootView === "runs")');
-    expect(appSource).toContain('if (route.kind !== "subjects" || runtimeRootView !== "results" || currentBenchmarkResults.length === 0)');
-    expect(appSource).toContain("setRuntimeRootView(nextView)");
-    expect(appSource).toContain("navigate(createSubjectsRoute())");
-    expect(appSource).toContain('<TabsList variant="line" aria-label="Benchmark version views"');
-    expect(appSource).toContain('<TabsTrigger value="lineage">');
-    expect(appSource).toContain('<TabsTrigger value="archive">');
-    expect(appSource).toContain('<TabsTrigger value="results">');
-    expect(appSource).toContain('<TabsTrigger value="runs">');
-    expect(appSource).toContain("normalizeBenchmarkFingerprint(result.benchmarkFingerprint) === scopedBenchmarkFingerprint");
+    expect(appSource).toContain("evaluation.metrics?.score");
+    expect(appSource).not.toContain(["usage", "har" + "ness"].join("."));
+    expect(appSource).toContain('route.kind === "subjects"');
+    expect(appSource).toContain('route.kind === "evaluations"');
+    expect(appSource).toContain('if (evaluationIdsToLoad.length === 0)');
+    expect(appSource).toContain("function WorkbenchBenchmarkNavigation");
+    expect(appSource).toContain('<nav aria-label="Benchmark navigation"');
+    expect(appSource).not.toContain('value: "benchmark"');
+    expect(appSource).toContain('value: "subjects"');
+    expect(appSource).toContain("route: createSubjectsRoute()");
+    expect(appSource).not.toContain('value: "runs"');
+    expect(appSource).toContain('value: "evaluations"');
+    expect(appSource).toContain("route: createEvaluationsRoute()");
+    expect(appSource).toContain('href={routeHref(targetRoute)}');
+    expect(appSource).not.toContain("DesktopWorkspaceSplitToggle");
+    expect(appSource).not.toContain("runtime-pane-toggle");
+    expect(appSource).toContain("createEvaluationsRoute()");
+    expect(appSource).not.toContain('aria-label="Benchmark version views"');
+    expect(appSource).toContain("normalizeBenchmarkFingerprint(evaluation.benchmarkFingerprint) === scopedBenchmarkFingerprint");
     expect(appSource).toContain("normalizeBenchmarkFingerprint(run.benchmarkFingerprint) === scopedBenchmarkFingerprint");
     expect(appSource).toContain("function buildBenchmarkFingerprintOptions");
     expect(appSource).toContain("function BenchmarkFingerprintSelector");
@@ -216,19 +377,25 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("onBenchmarkFingerprintChange={setSelectedBenchmarkFingerprint}");
     expect(appSource).not.toContain("onBenchmarkFingerprintChange={onBenchmarkFingerprintChange}");
     expect(appSource).toContain("function orderRunSummaries");
-    expect(appSource).toContain("function RunsSurface");
-    expect(appSource).toContain("function ScrollableRuntimeSurface");
-    expect(appSource).toContain('subjectCount={route.kind === "subjects" ? currentBenchmarkSummaries.length : snapshot?.summaries.length ?? 0}');
-    expect(appSource).toContain('<Badge variant="outline">{formatRunWorkflow(run.workflow)}</Badge>');
-    expect(appSource).toContain("<RunStatusBadge run={run} />");
-    expect(appSource).toContain("{formatRunDuration(run, nowMs)}");
-    expect(appSource).toContain('contentClassName={runtimeSurfaceFillsBody ? "flex h-full min-h-0 flex-col" : undefined}');
+    expect(appSource).not.toContain("function RunsSurface");
+    expect(appSource).toContain("function SubjectsIndexSurface");
+    expect(appSource).toContain("function ScrollableObjectSurface");
+    expect(appSource).toContain("subjectCount={currentBenchmarkSummaries.length}");
+    expect(appSource).toContain("currentBenchmarkRuns={currentBenchmarkRuns}");
+    expect(appSource).not.toContain("currentBenchmarkStandaloneRuns");
+    expect(appSource).not.toContain("currentBenchmarkRuns.filter(isStandaloneRun)");
+    expect(appSource).not.toContain("function isStandaloneRunForSubject");
+    expect(appSource).toContain("evaluationCount={currentBenchmarkEvaluations.length}");
+    expect(appSource).not.toContain('<Badge variant="outline">{formatRunWorkflow(run.workflow)}</Badge>');
+    expect(appSource).not.toContain("<RunStatusBadge run={run} />");
+    expect(appSource).not.toContain("{formatRunDuration(run, nowMs)}");
+    expect(appSource).toContain('contentClassName={objectSurfaceFillsBody ? "flex h-full min-h-0 flex-col" : undefined}');
     expect(appSource).toContain('className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-1"');
     expect(appSource).toContain('"grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3"');
     expect(appSource).toContain('{ value: "manifest", label: "Manifest", icon: FileCode2Icon }');
     expect(appSource).toContain('title="Subject Manifest"');
-    expect(appSource).toContain('title="Mounted Subject Files"');
-    expect(appSource).toContain("Files mounted under /workspace/input/subject for run and improve executions.");
+    expect(appSource).toContain('title="Subject Files"');
+    expect(appSource).toContain("Files that make up this subject version.");
     expect(lineageSource).not.toContain("shadow-sm");
     expect(lineageSource).toContain('"elk.layered.spacing.nodeNodeBetweenLayers"');
     expect(lineageSource).toContain('"elk.spacing.nodeNode"');
@@ -239,27 +406,31 @@ describe("workbench browser layout contracts", () => {
     expect(graphSource).toContain("truncate");
   });
 
-  test("results chart cards use native chart labeling without custom tick chrome", () => {
+  test("evaluation chart cards use native chart labeling without custom tick chrome", () => {
+    const appSource = readFileSync(
+      new URL("../src/app.tsx", import.meta.url),
+      "utf8",
+    );
     const chartSource = readFileSync(
-      new URL("../src/components/result-charts.tsx", import.meta.url),
+      new URL("../src/components/evaluation-charts.tsx", import.meta.url),
       "utf8",
     );
     const detailSource = readFileSync(
-      new URL("../src/components/results-detail.tsx", import.meta.url),
+      new URL("../src/components/evaluations-detail.tsx", import.meta.url),
       "utf8",
     );
 
     expect(chartSource).toContain('interval="preserveStartEnd"');
     expect(chartSource).toContain("minTickGap={16}");
-    expect(chartSource).toContain("tickFormatter={formatResultAxisTickLabel}");
-    expect(chartSource).toContain("function formatResultAxisTickLabel");
+    expect(chartSource).toContain("tickFormatter={formatEvaluationAxisTickLabel}");
+    expect(chartSource).toContain("function formatEvaluationAxisTickLabel");
     expect(chartSource).toContain("padding={{ left: 24, right: 24 }}");
     expect(chartSource).toContain('CardContent className="w-full min-w-0 max-w-full"');
     expect(chartSource).toContain('barCategoryGap="20%"');
     expect(chartSource).toContain("VERTICAL_BAR_CHART_THRESHOLD");
     expect(chartSource).toContain('layout="vertical"');
     expect(chartSource).toContain("data.length * VERTICAL_BAR_ROW_HEIGHT + 72");
-    expect(chartSource).toContain("function resultMetricAxisDomain");
+    expect(chartSource).toContain("function evaluationMetricAxisDomain");
     expect(chartSource).toContain("entry.value >= 0 && entry.value <= 1");
     expect(chartSource).toContain("!aspect-auto");
     expect(chartSource).toContain("grid-cols-1 gap-3");
@@ -274,15 +445,17 @@ describe("workbench browser layout contracts", () => {
     expect(detailSource).toContain("grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3");
     expect(detailSource).not.toContain("grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3 overflow-hidden");
     expect(detailSource).toContain('CardContent className="overflow-x-auto py-0"');
+    expect(detailSource).not.toContain("showCharts");
+    expect(appSource).not.toContain("showCharts");
     expect(chartSource).not.toContain('className="h-72 w-full min-w-0 overflow-hidden"');
     expect(chartSource).not.toContain('className="h-80 w-full min-w-0 overflow-hidden"');
     expect(chartSource).not.toContain("overflow-x-auto overflow-y-visible");
     expect(chartSource).not.toContain("lg:grid-cols-3");
-    expect(chartSource).not.toContain("function ResultAxisTick");
-    expect(chartSource).not.toContain("<ResultAxisTick");
-    expect(chartSource).not.toContain("shouldShowResultAxisLabels");
+    expect(chartSource).not.toContain("function EvaluationAxisTick");
+    expect(chartSource).not.toContain("<EvaluationAxisTick");
+    expect(chartSource).not.toContain("shouldShowEvaluationAxisLabels");
     expect(chartSource).not.toContain("BAR_CHART_LABEL_VIEWPORT_QUERY");
-    expect(chartSource).not.toContain("wrapResultAxisLabel");
+    expect(chartSource).not.toContain("wrapEvaluationAxisLabel");
     expect(chartSource).not.toContain("VariantAxisTick");
     expect(chartSource).not.toContain("wrapVariantAxisLabel");
   });
@@ -296,8 +469,8 @@ describe("workbench browser layout contracts", () => {
       new URL("../src/components/loading-states.tsx", import.meta.url),
       "utf8",
     );
-    const resultsSource = readFileSync(
-      new URL("../src/components/results-detail.tsx", import.meta.url),
+    const evaluationsSource = readFileSync(
+      new URL("../src/components/evaluations-detail.tsx", import.meta.url),
       "utf8",
     );
     const lineageSource = readFileSync(
@@ -305,27 +478,40 @@ describe("workbench browser layout contracts", () => {
       "utf8",
     );
 
-    expect(appSource).toContain('components/ui/spinner');
+    expect(appSource).not.toContain('components/ui/spinner');
     expect(appSource).toContain('./components/loading-states');
     expect(appSource).toContain("const snapshotLoading = snapshot === null && snapshotError === null");
     expect(appSource).toContain("const specLoading = specDocument === null && specError === null");
     expect(loadingStatesSource).toContain('components/ui/skeleton');
     expect(loadingStatesSource).toContain('data-testid="benchmark-loading-state"');
+    expect(loadingStatesSource).toContain('data-testid="source-yaml-loading"');
+    expect(loadingStatesSource).toContain('data-testid="subject-manifest-loading"');
+    expect(loadingStatesSource).not.toContain('data-testid="run-detail-loading"');
+    expect(loadingStatesSource).not.toContain('data-testid="run-job-loading"');
+    expect(loadingStatesSource).toContain('data-testid="execution-trace-loading"');
+    expect(loadingStatesSource).toContain('data-testid="evaluation-detail-loading"');
     expect(loadingStatesSource).toContain('data-testid="subject-archive-loading"');
-    expect(loadingStatesSource).toContain('data-testid="subject-evaluation-loading"');
-    expect(loadingStatesSource).toContain('data-testid="case-review-loading"');
-    expect(loadingStatesSource).toContain('data-testid="results-loading-state"');
+    expect(loadingStatesSource).toContain('data-testid="subject-overview-loading"');
+    expect(loadingStatesSource).toContain('data-testid="evaluation-case-loading"');
+    expect(loadingStatesSource).toContain('data-testid="evaluations-loading-state"');
     expect(loadingStatesSource).toContain('data-testid="lineage-loading-state"');
-    expect(loadingStatesSource).not.toContain("results-last-run-card");
+    expect(loadingStatesSource).not.toContain("evaluations-last-run-card");
+    expect(loadingStatesSource).not.toContain('h-full min-h-0 flex-1 rounded-lg border border-border/60 bg-background');
+    expect(appSource).not.toContain("Loading manifest");
+    expect(appSource).not.toContain("Loading subject");
+    expect(appSource).not.toContain("Loading run");
+    expect(appSource).not.toContain("Loading execution trace");
+    expect(appSource).not.toContain("Loading evaluation");
+    expect(appSource).not.toContain("Loading cases");
     expect(appSource).not.toContain("Loading subject evaluation");
-    expect(appSource).not.toContain("Loading task review");
-    expect(resultsSource).toContain("ResultsDetailSkeleton");
-    expect(resultsSource).not.toContain("results-last-run-card");
-    expect(resultsSource).not.toContain("result-version-select");
-    expect(resultsSource).not.toContain("results-case-variance-card");
-    expect(resultsSource).not.toContain("Case Variance");
-    expect(resultsSource).not.toContain("All Metrics");
-    expect(resultsSource).not.toContain("Loading result set");
+    expect(appSource).not.toContain("Loading case review");
+    expect(appSource).toContain("EvaluationsDetailSkeleton");
+    expect(evaluationsSource).not.toContain("evaluations-last-run-card");
+    expect(evaluationsSource).not.toContain("evaluation-version-select");
+    expect(evaluationsSource).not.toContain("evaluations-case-variance-card");
+    expect(evaluationsSource).not.toContain("Case Variance");
+    expect(evaluationsSource).not.toContain("All Metrics");
+    expect(evaluationsSource).not.toContain("Loading evaluation set");
     expect(lineageSource).toContain("LineageSurfaceSkeleton");
     expect(lineageSource).not.toContain("Loading lineage");
   });

@@ -1,26 +1,25 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import {
-  DEFAULT_HARNESS_CANCEL,
-  DEFAULT_HARNESS_RETRY,
-  type JsonValue,
-  type WorkflowHarness,
-} from "@workbench-ai/flow-contracts";
 import type {
+  Json,
   SurfaceSnapshotFile,
   UsageSummary,
 } from "@workbench-ai/workbench-contract";
 import {
-  createId,
-  ensureDir,
-  resolveFlowHome,
+  DEFAULT_HARNESS_CANCEL,
+  DEFAULT_HARNESS_RETRY,
+  resolveRuntimeHome,
   type ActiveHarnessSession,
   type HarnessExecutionPlan,
   type HarnessProvider,
-} from "@workbench-ai/flow-harness-sdk";
+  type HarnessTurnLivePersistence,
+  type JsonValue,
+  type WorkflowHarness,
+} from "@workbench-ai/agent-driver";
 import type {
   WorkbenchExecutionEventPublisher,
 } from "@workbench-ai/workbench-core";
@@ -31,7 +30,7 @@ const DEFAULT_AGENT_TURN_MAX_ATTEMPTS = 3;
 const DEFAULT_AGENT_TURN_RETRY_BASE_MS = 5_000;
 const DEFAULT_AGENT_TURN_RETRY_MAX_MS = 30_000;
 
-interface AgentHarnessRegistration {
+interface AgentProviderRegistration {
   executable: string;
   installHint: string;
   defaultConfig?: Record<string, JsonValue>;
@@ -45,7 +44,7 @@ export interface AgentProviderSpec {
 }
 
 export interface WorkbenchAgentTurnRequest {
-  role: "optimizer" | "runner" | "scorer";
+  role: "optimizer" | "runner" | "engine";
   provider: AgentProviderSpec;
   adapterAuthRoot?: string;
   adapterAuthRequest?: JsonValue;
@@ -54,6 +53,7 @@ export interface WorkbenchAgentTurnRequest {
   cwd: string;
   prompt: string;
   traceRoot: string;
+  tracePath?: string;
   jobId: string;
   eventPublisher?: WorkbenchExecutionEventPublisher;
 }
@@ -67,7 +67,7 @@ export interface WorkbenchAgentTurnResult {
 
 export type WorkbenchAgentTurnExecutor = (request: WorkbenchAgentTurnRequest) => Promise<WorkbenchAgentTurnResult>;
 
-const AGENT_HARNESS_REGISTRY: Record<string, AgentHarnessRegistration> = {
+const AGENT_PROVIDER_REGISTRY: Record<string, AgentProviderRegistration> = {
   codex: {
     executable: "codex",
     installHint: "@openai/codex",
@@ -75,7 +75,7 @@ const AGENT_HARNESS_REGISTRY: Record<string, AgentHarnessRegistration> = {
       sandbox_mode: "danger-full-access",
     },
     async load() {
-      const module = await import("@workbench-ai/flow-harness-openai-codex");
+      const module = await import("@workbench-ai/agent-driver-openai-codex");
       return module.codexHarness();
     },
   },
@@ -87,16 +87,8 @@ const AGENT_HARNESS_REGISTRY: Record<string, AgentHarnessRegistration> = {
       permission_mode: "bypassPermissions",
     },
     async load() {
-      const module = await import("@workbench-ai/flow-harness-anthropic-claude-code");
+      const module = await import("@workbench-ai/agent-driver-anthropic-claude-code");
       return module.claudeCodeHarness();
-    },
-  },
-  pi: {
-    executable: "pi",
-    installHint: "@mariozechner/pi-coding-agent",
-    async load() {
-      const module = await import("@workbench-ai/flow-harness-badlogic-pi-coding-agent");
-      return module.piCodingAgentHarness();
     },
   },
 };
@@ -126,19 +118,19 @@ export async function defaultWorkbenchAgentTurnExecutor(
 ): Promise<WorkbenchAgentTurnResult> {
   const execFileAsync = promisify(execFile);
   await ensureAgentExecutableOnPath(request.provider.use, execFileAsync);
-  const provider = await loadAgentHarnessProvider(request.provider.use);
-  const flowHome = resolveFlowHome();
+  const provider = await loadAgentProvider(request.provider.use);
+  const agentHome = resolveRuntimeHome();
   const stageSessionPath = path.join(request.traceRoot, "session");
-  await ensureDir(stageSessionPath);
+  await fs.mkdir(stageSessionPath, { recursive: true });
   const restoreEnv = applyAdapterAuthEnv(request.adapterAuthEnv);
   try {
-    const plan = await buildAgentHarnessExecutionPlan(provider, request.provider, request.workspaceRoot, flowHome, {
+    const plan = await buildAgentExecutionPlan(provider, request.provider, request.workspaceRoot, agentHome, {
       root: request.adapterAuthRoot,
       request: request.adapterAuthRequest,
     });
     const readiness = await provider.checkReadiness?.({
       repoRoot: request.workspaceRoot,
-      flowHome,
+      runtimeHome: agentHome,
       plan,
     });
     const readinessErrors = readiness?.availability_errors ?? [];
@@ -158,10 +150,10 @@ export async function defaultWorkbenchAgentTurnExecutor(
       }, null, 2)}\n`);
       activeSession = await adapter.startSession({
         repoRoot: request.workspaceRoot,
-        flowHome,
+        runtimeHome: agentHome,
         plan,
         ownerId: "workbench",
-        executionId: createId("workbench_exec"),
+        executionId: createWorkbenchAgentTurnId("workbench_exec"),
         attemptNumber: 1,
         stageId,
         stageRunIndex: 1,
@@ -178,9 +170,9 @@ export async function defaultWorkbenchAgentTurnExecutor(
         prompt: request.prompt,
         eventsFile,
         rawEventsFile,
-        stageSpanId: createId("workbench_span"),
+        stageSpanId: createWorkbenchAgentTurnId("workbench_span"),
         plan,
-        livePersistence: runtime.executionTracePersistenceForPublisher(request.eventPublisher, request.role),
+        livePersistence: agentLivePersistenceForPublisher(request.eventPublisher, request.role),
       });
       const usage = runtime.extractExecutionUsageFromTrace(
         turnResult.trace,
@@ -190,17 +182,14 @@ export async function defaultWorkbenchAgentTurnExecutor(
       );
       const eventCount = Math.max(turnResult.events.length, traceEventCount(turnResult.trace));
       await writeAgentTraceFile(path.join(stageSessionPath, "trace.json"), turnResult.trace);
-      await fs.writeFile(path.join(stageSessionPath, "agent-result.json"), `${JSON.stringify({
-        sessionId: turnResult.sessionId,
-        finalOutput: turnResult.finalOutput,
-        eventCount,
-        ...(usage ? { usage } : {}),
-      }, null, 2)}\n`);
       return {
         output: turnResult.finalOutput,
-        traceFiles: await runtime.readOutputTraceFiles(request.traceRoot, `.workbench/traces/${request.jobId}/${request.role}`),
+        traceFiles: await runtime.readOutputTraceFiles(
+          request.traceRoot,
+          request.tracePath ?? `.workbench/traces/${request.jobId}/${request.role}`,
+        ),
         metadata: {
-          harnessId: provider.manifest.id,
+          providerId: provider.manifest.id,
           sessionId: turnResult.sessionId,
           eventCount,
         },
@@ -214,6 +203,38 @@ export async function defaultWorkbenchAgentTurnExecutor(
   } finally {
     restoreEnv();
   }
+}
+
+function agentLivePersistenceForPublisher(
+  publisher: WorkbenchExecutionEventPublisher | undefined,
+  role: WorkbenchAgentTurnRequest["role"],
+): HarnessTurnLivePersistence | undefined {
+  if (!publisher?.enabled) {
+    return undefined;
+  }
+  return {
+    ...(publisher.flushWindowMs ? { flushWindowMs: publisher.flushWindowMs } : {}),
+    async onFlush(batch) {
+      const traceBundle = batch.traceBundle;
+      if (
+        traceBundle.spans.length === 0 &&
+        traceBundle.events.length === 0 &&
+        traceBundle.summaries.length === 0
+      ) {
+        return;
+      }
+      await publisher.publish([{
+        source: "adapter",
+        role,
+        schema: "workbench.trace.delta.v1",
+        payload: toJsonPayload(traceBundle),
+      }]).catch(() => undefined);
+    },
+  };
+}
+
+function createWorkbenchAgentTurnId(prefix: string): string {
+  return `${prefix}_${randomUUID().replace(/-/gu, "")}`;
 }
 
 async function writeAgentTraceFile(filePath: string, trace: unknown): Promise<void> {
@@ -231,8 +252,8 @@ function traceEventCount(trace: unknown): number {
   return Array.isArray(traceRecord.events) ? traceRecord.events.length : 0;
 }
 
-async function loadAgentHarnessProvider(providerName: AgentProviderSpec["use"]): Promise<HarnessProvider<unknown>> {
-  return await agentHarnessRegistration(providerName).load();
+async function loadAgentProvider(providerName: AgentProviderSpec["use"]): Promise<HarnessProvider<unknown>> {
+  return await agentProviderRegistration(providerName).load();
 }
 
 async function ensureAgentExecutableOnPath(
@@ -241,7 +262,7 @@ async function ensureAgentExecutableOnPath(
 ): Promise<void> {
   const executable = agentExecutableName(providerName);
   try {
-    await execFileAsync("sh", ["-lc", `command -v ${quoteShellArg(executable)} >/dev/null 2>&1`], {
+    await execFileAsync("sh", ["-c", `command -v ${quoteShellArg(executable)} >/dev/null 2>&1`], {
       maxBuffer: 1024 * 1024,
       timeout: 5_000,
     });
@@ -253,37 +274,37 @@ async function ensureAgentExecutableOnPath(
 }
 
 function agentExecutableName(providerName: AgentProviderSpec["use"]): string {
-  return agentHarnessRegistration(providerName).executable;
+  return agentProviderRegistration(providerName).executable;
 }
 
 function agentExecutableInstallHint(providerName: AgentProviderSpec["use"]): string {
-  return agentHarnessRegistration(providerName).installHint;
+  return agentProviderRegistration(providerName).installHint;
 }
 
-function agentHarnessRegistration(providerName: AgentProviderSpec["use"]): AgentHarnessRegistration {
-  const registration = AGENT_HARNESS_REGISTRY[providerName];
+function agentProviderRegistration(providerName: AgentProviderSpec["use"]): AgentProviderRegistration {
+  const registration = AGENT_PROVIDER_REGISTRY[providerName];
   if (!registration) {
     throw new Error(`Unsupported first-party agent adapter: ${providerName}`);
   }
   return registration;
 }
 
-async function buildAgentHarnessExecutionPlan(
+async function buildAgentExecutionPlan(
   provider: HarnessProvider<unknown>,
   providerSpec: AgentProviderSpec,
   workspaceRoot: string,
-  flowHome: string,
+  agentHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<HarnessExecutionPlan> {
   const turnTimeoutMs = provider.manifest.defaults.turn_timeout_ms ?? 3_600_000;
   const harness: WorkflowHarness = {
     id: provider.manifest.id,
-    auth: await resolveAgentHarnessAuth(provider, providerSpec, workspaceRoot, flowHome, adapterAuth),
+    auth: await resolveAgentAuth(provider, providerSpec, workspaceRoot, agentHome, adapterAuth),
     ...(firstNonEmpty(providerSpec.model, provider.manifest.defaults.model) ? { model: firstNonEmpty(providerSpec.model, provider.manifest.defaults.model) } : {}),
     ...(firstNonEmpty(providerSpec.effort, provider.manifest.defaults.effort) ? { effort: firstNonEmpty(providerSpec.effort, provider.manifest.defaults.effort) } : {}),
     turn_timeout_ms: turnTimeoutMs,
     stall_timeout_ms: Math.max(provider.manifest.defaults.stall_timeout_ms ?? 0, turnTimeoutMs),
-    config: resolveAgentHarnessConfig(provider, defaultWorkbenchAgentHarnessConfig(provider, providerSpec.use)),
+    config: resolveAgentConfig(provider, defaultWorkbenchAgentConfig(provider, providerSpec.use)),
     retry: DEFAULT_HARNESS_RETRY,
     cancel: DEFAULT_HARNESS_CANCEL,
   };
@@ -296,37 +317,37 @@ async function buildAgentHarnessExecutionPlan(
   };
 }
 
-function defaultWorkbenchAgentHarnessConfig(
+function defaultWorkbenchAgentConfig(
   provider: HarnessProvider<unknown>,
   providerName: AgentProviderSpec["use"],
 ): Record<string, JsonValue> {
   const fallback = (provider.manifest.defaults.config ?? {}) as Record<string, JsonValue>;
   return {
     ...fallback,
-    ...(AGENT_HARNESS_REGISTRY[providerName]?.defaultConfig ?? {}),
+    ...(AGENT_PROVIDER_REGISTRY[providerName]?.defaultConfig ?? {}),
   };
 }
 
-async function resolveAgentHarnessAuth(
+async function resolveAgentAuth(
   provider: HarnessProvider<unknown>,
   providerSpec: AgentProviderSpec,
   workspaceRoot: string,
-  flowHome: string,
+  agentHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<Record<string, JsonValue>> {
   const subject =
-    adapterAuthHarnessSubject(adapterAuth.request, providerSpec.use) ??
+    adapterAuthProviderSubject(adapterAuth.request, providerSpec.use) ??
     ((provider.manifest.defaults.auth as Record<string, JsonValue> | undefined) ?? {});
   const parsed = provider.schemas.auth.safeParse(subject);
   if (!parsed.success) {
     throw new Error(`Agent provider "${provider.manifest.id}" auth is invalid: ${formatValidationIssues(parsed.error.issues)}`);
   }
   void workspaceRoot;
-  void flowHome;
+  void agentHome;
   return { ...parsed.data };
 }
 
-function adapterAuthHarnessSubject(
+function adapterAuthProviderSubject(
   auth: JsonValue | undefined,
   providerName: string,
 ): Record<string, JsonValue> | null {
@@ -363,7 +384,7 @@ function adapterAuthHarnessSubject(
   return null;
 }
 
-function resolveAgentHarnessConfig(
+function resolveAgentConfig(
   provider: HarnessProvider<unknown>,
   fallback: Record<string, JsonValue>,
 ): Record<string, JsonValue> {
@@ -398,6 +419,28 @@ function jsonRecord(value: unknown): Record<string, JsonValue> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, JsonValue>
     : null;
+}
+
+function toJsonPayload(value: unknown): Json {
+  const normalized = JSON.parse(JSON.stringify(value ?? null)) as unknown;
+  return isJsonValue(normalized) ? normalized : null;
+}
+
+function isJsonValue(value: unknown): value is Json {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    return value.every(isJsonValue);
+  }
+  return value !== null &&
+    typeof value === "object" &&
+    Object.values(value as Record<string, unknown>).every(isJsonValue);
 }
 
 function workbenchAgentTurnMaxAttempts(): number {

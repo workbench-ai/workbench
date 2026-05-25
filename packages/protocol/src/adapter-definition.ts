@@ -9,11 +9,14 @@ import type {
   WorkbenchAdapterInvocationLike,
   WorkbenchAdapterManifest,
   WorkbenchAdapterOperation,
+  WorkbenchAdapterOperationExecutor,
   WorkbenchAdapterOperationManifest,
   WorkbenchAdapterSlotManifest,
 } from "./adapter-manifest.ts";
 import {
+  WORKBENCH_ADAPTER_MANIFEST_PROTOCOL,
   adapterCommandName,
+  normalizeWorkbenchAdapterOperation,
 } from "./adapter-manifest.ts";
 import {
   WORKBENCH_ADAPTER_RESULT_PROTOCOL,
@@ -30,15 +33,16 @@ export interface WorkbenchAdapterDefinition<TContext = unknown> {
   id: string;
   setup?: string[];
   auth?: WorkbenchAdapterAuthManifest;
-  tasks?: WorkbenchAdapterOperationDefinition<TContext>;
-  run?: WorkbenchAdapterOperationDefinition<TContext>;
-  score?: WorkbenchAdapterOperationDefinition<TContext>;
+  engineResolve?: WorkbenchAdapterOperationDefinition<TContext>;
+  engineRun?: WorkbenchAdapterOperationDefinition<TContext>;
+  subject?: WorkbenchAdapterOperationDefinition<TContext>;
   improve?: WorkbenchAdapterOperationDefinition<TContext>;
   slots?: Record<string, WorkbenchAdapterSlotManifest>;
 }
 
 export interface WorkbenchAdapterOperationDefinition<TContext = unknown> {
   command?: string;
+  executor?: WorkbenchAdapterOperationExecutor;
   handle?: WorkbenchAdapterOperationHandler<TContext>;
 }
 
@@ -78,19 +82,19 @@ export function defineAdapter<TContext = unknown>(
   return definition;
 }
 
-export function defineTaskSource<TContext = unknown>(
+export function defineEngineResolver<TContext = unknown>(
   definition: WorkbenchAdapterOperationDefinition<TContext> = {},
 ): WorkbenchAdapterOperationDefinition<TContext> {
   return definition;
 }
 
-export function defineRunner<TContext = unknown>(
+export function defineSubject<TContext = unknown>(
   definition: WorkbenchAdapterOperationDefinition<TContext> = {},
 ): WorkbenchAdapterOperationDefinition<TContext> {
   return definition;
 }
 
-export function defineScorer<TContext = unknown>(
+export function defineEngineRunner<TContext = unknown>(
   definition: WorkbenchAdapterOperationDefinition<TContext> = {},
 ): WorkbenchAdapterOperationDefinition<TContext> {
   return definition;
@@ -106,23 +110,23 @@ export function adapterSlot(
   path: string,
   operation: WorkbenchAdapterOperation,
 ): WorkbenchAdapterSlotManifest {
-  return { path, operation };
+  return { path, operation: normalizeWorkbenchAdapterOperation(operation, "adapter slot operation") };
 }
 
 export function workbenchAdapterManifestFromDefinition(
   definition: WorkbenchAdapterDefinition,
 ): WorkbenchAdapterManifest {
   const operations: WorkbenchAdapterManifest["operations"] = {};
-  addOperation(operations, definition.id, "tasks.resolve", definition.tasks);
-  addOperation(operations, definition.id, "subject.run", definition.run);
-  addOperation(operations, definition.id, "trial.score", definition.score);
-  addOperation(operations, definition.id, "subject.improve", definition.improve);
+  addOperation(operations, definition.id, "engine.resolve", definition.engineResolve);
+  addOperation(operations, definition.id, "engine.run", definition.engineRun);
+  addOperation(operations, definition.id, "subject.run", definition.subject);
+  addOperation(operations, definition.id, "optimizer.improve", definition.improve);
   if (Object.keys(operations).length === 0) {
     throw new Error(`Adapter ${definition.id} must define at least one operation.`);
   }
   return {
     id: definition.id,
-    protocol: "workbench.adapter.v2",
+    protocol: WORKBENCH_ADAPTER_MANIFEST_PROTOCOL,
     operations,
     setup: definition.setup ? [...definition.setup] : [],
     ...(definition.auth ? { auth: cloneJson(definition.auth) } : {}),
@@ -173,16 +177,16 @@ export function operationDefinitionForRequest<TContext = unknown>(
   definition: WorkbenchAdapterDefinition<TContext>,
   operation: WorkbenchAdapterOperation,
 ): WorkbenchAdapterOperationDefinition<TContext> | undefined {
-  if (operation === "tasks.resolve") {
-    return definition.tasks;
+  if (operation === "engine.resolve") {
+    return definition.engineResolve;
+  }
+  if (operation === "engine.run") {
+    return definition.engineRun;
   }
   if (operation === "subject.run") {
-    return definition.run;
+    return definition.subject;
   }
-  if (operation === "trial.score") {
-    return definition.score;
-  }
-  if (operation === "subject.improve") {
+  if (operation === "optimizer.improve") {
     return definition.improve;
   }
   return undefined;
@@ -195,7 +199,7 @@ export function adapterResult<TValue extends WorkbenchAdapterOperationResultValu
 ): WorkbenchAdapterOperationResult<TValue> {
   return {
     protocol: WORKBENCH_ADAPTER_RESULT_PROTOCOL,
-    operation,
+    operation: normalizeWorkbenchAdapterOperation(operation, "adapter result operation"),
     ok: true,
     ...metadata,
     value,
@@ -226,6 +230,7 @@ function addOperation(
   }
   operations[operation] = {
     command: definition.command ?? adapterCommandName(adapterId),
+    executor: definition.executor ?? "sandbox",
   };
 }
 

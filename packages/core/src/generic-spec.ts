@@ -1,13 +1,17 @@
-import type {
-  Json,
-  WorkbenchAdapterInvocation,
-  WorkbenchExecutionNetworkPolicy,
-  WorkbenchExecutionResources,
-  WorkbenchSpecValidation,
+import { createHash } from "node:crypto";
+import {
+  isWorkbenchExecutionNetworkEgress,
+  type EngineResolveBinding,
+  type Json,
+  type SurfaceSnapshotFile,
+  type WorkbenchAdapterInvocation,
+  type WorkbenchExecutionNetworkPolicy,
+  type WorkbenchExecutionResources,
+  type WorkbenchSpecValidation,
 } from "@workbench-ai/workbench-contract";
 import type {
-  WorkbenchTaskBundle,
-  WorkbenchTaskSpec,
+  WorkbenchEngineCase,
+  WorkbenchEngineCaseSpec,
 } from "@workbench-ai/workbench-protocol";
 import YAML from "yaml";
 
@@ -29,21 +33,24 @@ export interface WorkbenchPathRef {
   path: string;
 }
 
+export interface WorkbenchSubjectPrepareSpec {
+  command: string;
+}
+
 export interface AuthoredBenchmarkSpec {
-  version: 2;
+  version: 3;
   name: string;
   description: string;
-  tasks: WorkbenchPathRef;
-  environment: WorkbenchRuntimeSpec;
   adapters: string[];
-  score: WorkbenchAdapterInvocation;
+  engine: WorkbenchAdapterInvocation;
 }
 
 export interface WorkbenchSubjectManifestSpec {
-  version: 2;
+  version: 3;
   name: string;
   description?: string;
   files: WorkbenchPathRef;
+  prepare?: WorkbenchSubjectPrepareSpec;
   adapters: string[];
   run: WorkbenchAdapterInvocation;
 }
@@ -51,7 +58,7 @@ export interface WorkbenchSubjectManifestSpec {
 export type ResolvedSubjectSpec = WorkbenchSubjectManifestSpec;
 
 export interface AuthoredOptimizerSpec {
-  version: 2;
+  version: 3;
   name: string;
   description?: string;
   edits: string[];
@@ -60,26 +67,26 @@ export interface AuthoredOptimizerSpec {
 }
 
 export interface WorkbenchResolvedSource {
-  version: 2;
+  version: 3;
   benchmark: AuthoredBenchmarkSpec;
   subject: ResolvedSubjectSpec;
   optimizer?: AuthoredOptimizerSpec;
 }
 
 export interface GenericRunSpec {
-  version: 2;
+  version: 3;
   name: string;
   description: string;
   benchmark: {
     name: string;
     description: string;
-    tasks: WorkbenchPathRef;
-    environment: WorkbenchRuntimeSpec;
+    engine: WorkbenchAdapterInvocation;
   };
   subject: {
     name: string;
     description?: string;
     files: WorkbenchPathRef;
+    prepare?: WorkbenchSubjectPrepareSpec;
   };
   optimizer?: {
     name: string;
@@ -88,19 +95,20 @@ export interface GenericRunSpec {
   };
   environment: WorkbenchRuntimeSpec;
   adapters: string[];
+  engine: WorkbenchAdapterInvocation;
+  engineResolve: WorkbenchAdapterInvocation;
   improve?: WorkbenchAdapterInvocation;
   run: WorkbenchAdapterInvocation;
-  score: WorkbenchAdapterInvocation;
+  engineRun: WorkbenchAdapterInvocation;
 }
 
-export type GenericTaskSpec = WorkbenchTaskSpec;
-export type { WorkbenchTaskBundle } from "@workbench-ai/workbench-protocol";
+export type GenericEngineCaseSpec = WorkbenchEngineCaseSpec;
+export type { WorkbenchEngineCase } from "@workbench-ai/workbench-protocol";
 
-export interface ResolvedTaskExecutionConfig {
-  task: string;
+export interface ResolvedEngineCaseExecutionConfig {
+  prompt: string;
   environment: WorkbenchRuntimeSpec;
   run: WorkbenchAdapterInvocation;
-  score: WorkbenchAdapterInvocation;
 }
 
 interface WorkbenchAdapterEnvelopeSpec {
@@ -150,8 +158,8 @@ export function resolveWorkbenchResolvedSourceYaml(
     "subject",
     "optimizer",
   ], errors);
-  if (parsed.version !== 2) {
-    throw new Error("Resolved Workbench source version must be 2.");
+  if (parsed.version !== 3) {
+    throw new Error("Resolved Workbench source version must be 3.");
   }
   const benchmark = normalizeBenchmarkRecord(
     readRequiredRecord(parsed.benchmark, "resolved Workbench source.benchmark", errors),
@@ -174,11 +182,30 @@ export function resolveWorkbenchResolvedSourceYaml(
     throw new Error(errors.join("\n"));
   }
   return genericSpecFromAuthoredBundle({
-    version: 2,
+    version: 3,
     benchmark: benchmark!,
     subject: subject!,
     ...(optimizer ? { optimizer } : {}),
   });
+}
+
+export function engineResolveBindingForSourceYaml(
+  source: string,
+): EngineResolveBinding {
+  return engineResolveBindingForSpec(resolveWorkbenchResolvedSourceYaml(source));
+}
+
+export function engineResolveBindingForSpec(
+  spec: GenericRunSpec,
+): EngineResolveBinding {
+  const resolver = engineResolveInvocationForSpec(spec);
+  return {
+    engine: spec.benchmark.engine.use,
+    resolver: {
+      use: resolver.use,
+      withFingerprint: fingerprintJson(resolver.with ?? {}),
+    },
+  };
 }
 
 export function resolveWorkbenchSourceFiles(args: {
@@ -220,7 +247,7 @@ export function parseWorkbenchSourceFiles(args: {
     throw new Error(errors.join("\n"));
   }
   return {
-    version: 2,
+    version: 3,
     benchmark: benchmark!,
     subject: subject!,
     ...(optimizer ? { optimizer } : {}),
@@ -239,16 +266,43 @@ export function isWorkbenchSubjectManifestPath(filePath: string): boolean {
   );
 }
 
-export function resolveTaskExecutionConfig(args: {
+export function resolveEngineCaseExecutionConfig(args: {
   spec: GenericRunSpec;
-  task: GenericTaskSpec;
-}): ResolvedTaskExecutionConfig {
+  engineCase: GenericEngineCaseSpec;
+}): ResolvedEngineCaseExecutionConfig {
   return {
-    task: args.task.task,
-    environment: mergeRuntime(args.spec.environment, args.task.environment),
+    prompt: args.engineCase.prompt,
+    environment: mergeRuntime(args.spec.environment, args.engineCase.environment),
     run: args.spec.run,
-    score: args.task.score ?? args.spec.score,
   };
+}
+
+export function engineResolveInvocationForSpec(spec: GenericRunSpec): WorkbenchAdapterInvocation {
+  return spec.engineResolve;
+}
+
+export function engineCaseFilesForRuntimeInput(args: {
+  spec: GenericRunSpec;
+  engineCase: WorkbenchEngineCase;
+}): SurfaceSnapshotFile[] {
+  void args.spec;
+  return engineCasePublicFiles(args.engineCase);
+}
+
+export function engineCasePublicFiles(
+  engineCase: WorkbenchEngineCase,
+): SurfaceSnapshotFile[] {
+  return (engineCase.files.public ?? [])
+    .map((file) => ({ ...file }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function engineCasePrivateFiles(
+  engineCase: WorkbenchEngineCase,
+): SurfaceSnapshotFile[] {
+  return (engineCase.files.private ?? [])
+    .map((file) => ({ ...file }))
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
 export function runtimeResources(
@@ -285,20 +339,23 @@ export function runtimeSandboxRef(runtime: WorkbenchRuntimeSpec): string {
 function genericSpecFromAuthoredBundle(
   source: WorkbenchResolvedSource,
 ): GenericRunSpec {
+  const engineRuntime = engineRuntimeFromConfig(source.benchmark.engine);
+  const engineRun = cloneEngineInvocation(source.benchmark.engine);
+  const engineResolve = cloneEngineInvocation(source.benchmark.engine);
   return {
-    version: 2,
+    version: 3,
     name: source.benchmark.name,
     description: source.benchmark.description,
     benchmark: {
       name: source.benchmark.name,
       description: source.benchmark.description,
-      tasks: cloneJson(source.benchmark.tasks),
-      environment: cloneJson(source.benchmark.environment),
+      engine: cloneJson(source.benchmark.engine),
     },
     subject: {
       name: source.subject.name,
       ...(source.subject.description ? { description: source.subject.description } : {}),
       files: cloneJson(source.subject.files),
+      ...(source.subject.prepare ? { prepare: cloneJson(source.subject.prepare) } : {}),
     },
     ...(source.optimizer
       ? {
@@ -309,7 +366,7 @@ function genericSpecFromAuthoredBundle(
           },
         }
       : {}),
-    environment: cloneJson(source.benchmark.environment),
+    environment: cloneJson(engineRuntime),
     adapters: [
       ...new Set([
         ...source.benchmark.adapters,
@@ -317,9 +374,11 @@ function genericSpecFromAuthoredBundle(
         ...(source.optimizer?.adapters ?? []),
       ]),
     ],
+    engine: cloneJson(source.benchmark.engine),
+    engineResolve: cloneJson(engineResolve),
     ...(source.optimizer ? { improve: cloneJson(source.optimizer.improve) } : {}),
     run: cloneJson(source.subject.run),
-    score: cloneJson(source.benchmark.score),
+    engineRun: cloneJson(engineRun),
   };
 }
 
@@ -335,29 +394,43 @@ function normalizeBenchmarkRecord(
     "version",
     "name",
     "description",
-    "tasks",
-    "environment",
     "adapters",
-    "score",
+    "engine",
   ], errors);
-  requireVersionTwo(record.version, label, errors);
+  requireVersionThree(record.version, label, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readRequiredString(record.description, `${label}.description`, errors);
-  const tasks = normalizePathRef(record.tasks, `${label}.tasks`, errors);
-  const environment = normalizeRuntime(record.environment, `${label}.environment`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
-  const score = normalizePhaseAdapter(record.score, `${label}.score`, errors);
-  return name && description && tasks && environment && score
+  const engine = normalizePhaseAdapter(record.engine, `${label}.engine`, errors);
+  if (engine) {
+    normalizeEngineRuntimeConfig(engine, `${label}.engine.with`, errors);
+  }
+  return name && description && engine
     ? {
-        version: 2,
+        version: 3,
         name,
         description,
-        tasks,
-        environment,
         adapters,
-        score,
+        engine,
       }
     : null;
+}
+
+function normalizeEngineRuntimeConfig(
+  engine: WorkbenchAdapterInvocation,
+  label: string,
+  errors: string[],
+): void {
+  const config = engine.with && typeof engine.with === "object" && !Array.isArray(engine.with)
+    ? engine.with as Record<string, Json>
+    : {};
+  if (config.environment !== undefined) {
+    const environment = normalizeRuntime(config.environment, `${label}.environment`, errors);
+    if (environment) {
+      config.environment = environment as unknown as Json;
+      engine.with = config;
+    }
+  }
 }
 
 function normalizeSubjectRecord(
@@ -373,25 +446,45 @@ function normalizeSubjectRecord(
     "name",
     "description",
     "files",
+    "prepare",
     "adapters",
     "run",
   ], errors);
-  requireVersionTwo(record.version, label, errors);
+  requireVersionThree(record.version, label, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readOptionalString(record.description, `${label}.description`, errors);
   const files = normalizePathRef(record.files, `${label}.files`, errors);
+  const prepare = normalizeSubjectPrepare(record.prepare, `${label}.prepare`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
   const run = normalizePhaseAdapter(record.run, `${label}.run`, errors);
   return name && files && run
     ? {
-        version: 2,
+        version: 3,
         name,
         ...(description ? { description } : {}),
         files,
+        ...(prepare ? { prepare } : {}),
         adapters,
         run,
       }
     : null;
+}
+
+function normalizeSubjectPrepare(
+  value: unknown,
+  label: string,
+  errors: string[],
+): WorkbenchSubjectPrepareSpec | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = readRequiredRecord(value, label, errors);
+  if (!record) {
+    return undefined;
+  }
+  rejectUnknownKeys(record, label, ["command"], errors);
+  const command = readRequiredString(record.command, `${label}.command`, errors);
+  return command ? { command } : undefined;
 }
 
 function normalizeOptimizerRecord(
@@ -410,7 +503,7 @@ function normalizeOptimizerRecord(
     "adapters",
     "improve",
   ], errors);
-  requireVersionTwo(record.version, label, errors);
+  requireVersionThree(record.version, label, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readOptionalString(record.description, `${label}.description`, errors);
   const edits = normalizeRelativePathList(record.edits, `${label}.edits`, errors);
@@ -418,7 +511,7 @@ function normalizeOptimizerRecord(
   const improve = normalizePhaseAdapter(record.improve, `${label}.improve`, errors);
   return name && edits.length > 0 && improve
     ? {
-        version: 2,
+        version: 3,
         name,
         ...(description ? { description } : {}),
         edits,
@@ -428,9 +521,9 @@ function normalizeOptimizerRecord(
     : null;
 }
 
-function requireVersionTwo(value: unknown, label: string, errors: string[]): void {
-  if (value !== 2) {
-    errors.push(`${label}.version must be 2.`);
+function requireVersionThree(value: unknown, label: string, errors: string[]): void {
+  if (value !== 3) {
+    errors.push(`${label}.version must be 3.`);
   }
 }
 
@@ -533,6 +626,46 @@ function normalizeRuntimeOverride(
   return Object.keys(runtime).length > 0 ? runtime : null;
 }
 
+function engineRuntimeFromConfig(engine: WorkbenchAdapterInvocation): WorkbenchRuntimeSpec {
+  const config = engine.with && typeof engine.with === "object" && !Array.isArray(engine.with)
+    ? engine.with as Record<string, Json>
+    : {};
+  const environment = config.environment;
+  if (environment && typeof environment === "object" && !Array.isArray(environment)) {
+    const record = environment as Record<string, Json>;
+    return {
+      dockerfile: typeof record.dockerfile === "string" && record.dockerfile.trim()
+        ? record.dockerfile
+        : "environment/Dockerfile",
+      ...(typeof record.workdir === "string" && record.workdir.trim() ? { workdir: record.workdir } : {}),
+      ...(record.resources && typeof record.resources === "object" && !Array.isArray(record.resources)
+        ? { resources: record.resources as WorkbenchRuntimeSpec["resources"] }
+        : {}),
+      ...(record.network && typeof record.network === "object" && !Array.isArray(record.network)
+        ? { network: record.network as unknown as WorkbenchRuntimeSpec["network"] }
+        : {}),
+    };
+  }
+  return {
+    dockerfile: "environment/Dockerfile",
+    network: { egress: "open" },
+    resources: {
+      cpu: DEFAULT_EXECUTION_RESOURCES.cpu,
+      memoryGb: DEFAULT_EXECUTION_RESOURCES.memoryGb,
+      diskGb: DEFAULT_EXECUTION_RESOURCES.diskGb,
+      timeoutMinutes: DEFAULT_EXECUTION_RESOURCES.timeoutMinutes,
+    },
+  };
+}
+
+function cloneEngineInvocation(engine: WorkbenchAdapterInvocation): WorkbenchAdapterInvocation {
+  return {
+    use: engine.use,
+    with: cloneJson(engine.with ?? {}),
+    ...(engine.auth !== undefined ? { auth: cloneJson(engine.auth) } : {}),
+  };
+}
+
 function mergeRuntime(
   base: WorkbenchRuntimeSpec,
   override: Partial<WorkbenchRuntimeSpec> | undefined,
@@ -578,46 +711,13 @@ function normalizeNetworkConfig(
   label: string,
   errors: string[],
 ): WorkbenchExecutionNetworkPolicy | null {
-  rejectUnknownKeys(network, label, ["egress", "allow"], errors);
+  rejectUnknownKeys(network, label, ["egress"], errors);
   const egress = readOptionalString(network.egress, `${label}.egress`, errors) ?? "open";
-  if (egress !== "none" && egress !== "open" && egress !== "allowlist") {
-    errors.push(`${label}.egress must be none, open, or allowlist.`);
+  if (!isWorkbenchExecutionNetworkEgress(egress)) {
+    errors.push(`${label}.egress must be none or open.`);
     return null;
   }
-  const allow = network.allow === undefined
-    ? undefined
-    : normalizeNetworkAllowList(network.allow, `${label}.allow`, errors);
-  if (egress !== "allowlist") {
-    if (network.allow !== undefined) {
-      errors.push(`${label}.allow is only supported when ${label}.egress is allowlist.`);
-    }
-    return { egress };
-  }
-  if (!allow || allow.length === 0) {
-    errors.push(`${label}.allow must contain at least one host when ${label}.egress is allowlist.`);
-  }
-  return {
-    egress,
-    ...(allow && allow.length > 0 ? { allow } : {}),
-  };
-}
-
-function normalizeNetworkAllowList(
-  value: unknown,
-  label: string,
-  errors: string[],
-): string[] {
-  if (!Array.isArray(value)) {
-    errors.push(`${label} must be an array of hosts.`);
-    return [];
-  }
-  return value.flatMap((entry, index) => {
-    if (typeof entry !== "string" || entry.trim().length === 0) {
-      errors.push(`${label}[${index}] must be a non-empty string.`);
-      return [];
-    }
-    return [entry.trim()];
-  });
+  return { egress };
 }
 
 function normalizePhaseAdapter(
@@ -835,6 +935,26 @@ function isJson(value: unknown): value is Json {
     return Object.values(value as Record<string, unknown>).every(isJson);
   }
   return false;
+}
+
+function fingerprintJson(value: Json): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalJson(value)))
+    .digest("hex");
+}
+
+function canonicalJson(value: Json): Json {
+  if (Array.isArray(value)) {
+    return value.map(canonicalJson);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalJson(entry)]),
+    );
+  }
+  return value;
 }
 
 function splitErrorMessage(error: unknown): string[] {

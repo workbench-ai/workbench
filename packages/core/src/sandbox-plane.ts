@@ -107,6 +107,7 @@ export async function executeValidatedSandboxExecution(
   options: SandboxExecutionOptions,
 ): Promise<ValidatedSandboxExecutionResult> {
   assertWorkbenchExecutionIsolation(execution);
+  assertSandboxBackendSupportsNetworkPolicy(plane.backend, execution);
   const inputs = await options.fileStore.materializeInputs(execution);
   const now = options.now ?? new Date().toISOString();
   const timing: Record<string, Json> = {};
@@ -199,6 +200,17 @@ export async function executeValidatedSandboxExecution(
   };
 }
 
+export function assertSandboxBackendSupportsNetworkPolicy(
+  backend: SandboxBackendDescriptor,
+  execution: Pick<WorkbenchExecutionSpec, "id" | "policy">,
+): void {
+  const egress = execution.policy.network.egress;
+  if (!backend.capabilities.networkPolicy.includes(egress)) {
+    const supported = backend.capabilities.networkPolicy.join(", ") || "none";
+    throw new Error(`Sandbox backend ${backend.name} does not support network egress ${egress} for execution ${execution.id}. Supported egress policies: ${supported}.`);
+  }
+}
+
 function attachSandboxLifecycleTiming(
   result: WorkbenchExecutionResult,
   timing: Record<string, Json>,
@@ -253,19 +265,13 @@ export function createWorkbenchSandboxExecutionMetadata(args: WorkbenchSandboxEx
     allocation: {
       ...args.allocation,
       template: { ...args.allocation.template },
-      network: {
-        ...args.allocation.network,
-        ...(args.allocation.network.allow ? { allow: [...args.allocation.network.allow] } : {}),
-      },
+      network: { ...args.allocation.network },
     },
     capability: {
       ...args.capability,
       subject: { ...args.capability.subject },
       inputs: args.capability.inputs.map((input) => ({ ...input })),
-      network: {
-        ...args.capability.network,
-        ...(args.capability.network.allow ? { allow: [...args.capability.network.allow] } : {}),
-      },
+      network: { ...args.capability.network },
     },
     handle: {
       ...args.handle,
@@ -314,10 +320,7 @@ export function createWorkbenchSandboxAllocation(
     backend: options.backend,
     runnerId: options.runnerId ?? "local-runner",
     template: { ...execution.sandbox },
-    network: {
-      ...execution.policy.network,
-      ...(execution.policy.network.allow ? { allow: [...execution.policy.network.allow] } : {}),
-    },
+    network: { ...execution.policy.network },
     status: "allocated",
     createdAt: new Date(nowMs).toISOString(),
     expiresAt: new Date(nowMs + ttlMs).toISOString(),
@@ -356,10 +359,7 @@ export function createWorkbenchExecutionCapability(
     },
     inputs: execution.inputs.map((input) => ({ ...input })),
     outputPrefix: options.outputPrefix ?? `executions/${execution.id}/outputs/`,
-    network: {
-      ...execution.policy.network,
-      ...(execution.policy.network.allow ? { allow: [...execution.policy.network.allow] } : {}),
-    },
+    network: { ...execution.policy.network },
     expiresAt: new Date(nowMs + ttlMs).toISOString(),
   };
 }
@@ -414,7 +414,6 @@ function networkPolicyKey(policy: WorkbenchExecutionNetworkPolicy | undefined): 
   }
   return JSON.stringify({
     egress: policy.egress,
-    ...(Array.isArray(policy.allow) ? { allow: [...policy.allow] } : {}),
   });
 }
 
@@ -444,11 +443,6 @@ export function collectSandboxAllocationScopeIssues(
   }
   if (allocation.network.egress !== execution.policy.network.egress) {
     issues.push(`Sandbox allocation network policy does not match execution ${execution.id}.`);
-  }
-  const expectedAllow = execution.policy.network.allow ?? [];
-  const actualAllow = allocation.network.allow ?? [];
-  if (JSON.stringify(actualAllow) !== JSON.stringify(expectedAllow)) {
-    issues.push(`Sandbox allocation network allowlist does not match execution ${execution.id}.`);
   }
   if (!["allocated", "running", "stopping", "stopped"].includes(allocation.status)) {
     issues.push(`Sandbox allocation status ${allocation.status} is not supported for execution ${execution.id}.`);

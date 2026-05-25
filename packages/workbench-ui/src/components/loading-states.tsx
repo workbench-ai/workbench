@@ -1,4 +1,4 @@
-import { FolderOpenIcon, ListChecksIcon, PlayIcon } from "lucide-react";
+import { FolderOpenIcon, ListChecksIcon } from "lucide-react";
 
 import { Card, CardContent, CardHeader } from "@workbench-ai/cli-web-ui/components/ui/card";
 import { Skeleton } from "@workbench-ai/cli-web-ui/components/ui/skeleton";
@@ -15,7 +15,20 @@ function SkeletonBadgeRow({ count = 4 }: { count?: number }) {
   );
 }
 
-export function RunFactsSkeleton({ count = 4 }: { count?: number }) {
+function SkeletonCopyBlock({ rows = 3 }: { rows?: number }) {
+  return (
+    <div className="grid min-w-0 gap-2">
+      {Array.from({ length: rows }, (_, index) => (
+        <Skeleton
+          key={index}
+          className={index === rows - 1 ? "h-4 w-4/5" : "h-4 w-full"}
+        />
+      ))}
+    </div>
+  );
+}
+
+export function FactsSkeleton({ count = 4 }: { count?: number }) {
   return (
     <div className="grid gap-3 md:grid-cols-4" aria-busy="true">
       {Array.from({ length: count }, (_, index) => (
@@ -24,6 +37,52 @@ export function RunFactsSkeleton({ count = 4 }: { count?: number }) {
           <Skeleton className="mt-2 h-4 w-16" />
         </div>
       ))}
+    </div>
+  );
+}
+
+export function SourceYamlSkeleton() {
+  return (
+    <div className="grid min-w-0 gap-2" aria-busy="true" data-testid="source-yaml-loading">
+      <Skeleton className="h-5 w-48 max-w-full rounded-full" />
+      <div className="rounded-xl border border-border/70 bg-background p-3">
+        <SkeletonCopyBlock rows={5} />
+      </div>
+    </div>
+  );
+}
+
+export function SubjectManifestSkeleton() {
+  return (
+    <div className="grid min-w-0 gap-3" aria-busy="true" data-testid="subject-manifest-loading">
+      <Skeleton className="h-5 w-48 max-w-full rounded-full" />
+      <div className="rounded-xl border border-border/70 bg-background p-3">
+        <SkeletonCopyBlock rows={6} />
+      </div>
+    </div>
+  );
+}
+
+export function ExecutionTraceSkeleton() {
+  return (
+    <div className="grid min-w-0 gap-2" aria-busy="true" data-testid="execution-trace-loading">
+      <div className="rounded-lg border border-border/60 px-3 py-3">
+        <Skeleton className="h-4 w-36" />
+        <div className="mt-3 grid gap-2">
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-5/6" />
+          <Skeleton className="h-3 w-2/3" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function EvaluationDetailSurfaceSkeleton() {
+  return (
+    <div className="grid min-w-0 gap-4" aria-busy="true" data-testid="evaluation-detail-loading">
+      <SkeletonBadgeRow count={4} />
+      <EvaluationCaseRowsSkeleton showBadges={false} />
     </div>
   );
 }
@@ -64,7 +123,7 @@ export function BenchmarkSurfaceSkeleton() {
         <Skeleton className="h-8 w-48 max-w-full" />
       </div>
 
-      <SurfaceSection title="Tasks">
+      <SurfaceSection title="Cases">
         <div className="grid gap-2">
           {Array.from({ length: 4 }, (_, index) => (
             <div key={index} className="grid gap-2 border-t border-border/60 py-3 first:border-t-0 first:pt-0 last:pb-0">
@@ -125,47 +184,49 @@ export function SubjectFilesSurfaceSkeleton() {
   );
 }
 
-export function EvaluationTasksSkeleton() {
+export function EvaluationCaseRowsSkeleton({
+  showBadges = true,
+}: {
+  showBadges?: boolean;
+} = {}) {
   return (
-    <Card size="sm" aria-busy="true" data-testid="subject-evaluation-loading">
-      <CardContent className="grid gap-3 py-0">
-        <SkeletonBadgeRow count={4} />
-        <div className="grid gap-2">
-          {Array.from({ length: 5 }, (_, index) => (
-            <div key={index} className="grid grid-cols-[minmax(0,1fr)_3rem_4rem_5rem] gap-3">
-              <Skeleton className="h-5 w-full" />
-              <Skeleton className="h-5 w-full" />
-              <Skeleton className="h-5 w-full" />
-              <Skeleton className="h-5 w-full" />
-            </div>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
+    <div className="grid min-w-0 gap-3" aria-busy="true" data-testid="evaluation-cases-loading">
+      {showBadges ? <SkeletonBadgeRow count={4} /> : null}
+      <div className="grid gap-2">
+        {Array.from({ length: 4 }, (_, index) => (
+          <div key={index} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem_5rem] gap-3">
+            <Skeleton className="h-5 w-full" />
+            <Skeleton className="h-5 w-full" />
+            <Skeleton className="h-5 w-full" />
+            <Skeleton className="h-5 w-full" />
+            <Skeleton className="h-5 w-full" />
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
-export function SubjectEvaluationSkeleton() {
+export function SubjectOverviewSkeleton() {
   return (
-    <div className="grid gap-6" aria-busy="true">
-      <SurfaceSection title="Evaluation Tasks" icon={ListChecksIcon}>
-        <SkeletonBadgeRow count={5} />
-        <EvaluationTasksSkeleton />
+    <div className="grid gap-6" aria-busy="true" data-testid="subject-overview-loading">
+      <SurfaceSection title="Overview" icon={ListChecksIcon}>
+        <FactsSkeleton />
       </SurfaceSection>
-      <SurfaceSection title="Subject Summary" icon={PlayIcon}>
-        <RunFactsSkeleton />
-        <Skeleton className="h-32 w-full" />
+      <SurfaceSection title="Evaluations" icon={ListChecksIcon}>
+        <SkeletonBadgeRow count={3} />
+        <EvaluationCaseRowsSkeleton />
       </SurfaceSection>
     </div>
   );
 }
 
-export function ResultsDetailSkeleton() {
+export function EvaluationsDetailSkeleton() {
   return (
     <div
       className="grid w-full min-w-0 gap-3"
       aria-busy="true"
-      data-testid="results-loading-state"
+      data-testid="evaluations-loading-state"
     >
       <Card size="sm" className="min-w-0">
         <CardHeader>
@@ -210,22 +271,19 @@ export function LineageSurfaceSkeleton() {
   );
 }
 
-export function CaseReviewSkeleton() {
+export function EvaluationCaseDetailSkeleton() {
   return (
-    <div className="grid min-h-0 flex-1 gap-4" aria-busy="true" data-testid="case-review-loading">
+    <div className="grid min-w-0 gap-3" aria-busy="true" data-testid="evaluation-case-loading">
       <SkeletonBadgeRow count={4} />
       <div className="flex flex-wrap gap-2">
-        <Skeleton className="h-8 w-24" />
-        <Skeleton className="h-8 w-24" />
+        <Skeleton className="h-8 w-16" />
         <Skeleton className="h-8 w-20" />
-        <Skeleton className="h-8 w-20" />
+        <Skeleton className="h-8 w-14" />
       </div>
-      <div className="h-full min-h-0 flex-1 rounded-lg border border-border/60 bg-background">
-        <div className="grid min-w-0 gap-3 p-4">
-          <RunFactsSkeleton />
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-32 w-full" />
-        </div>
+      <div className="grid min-w-0 gap-2 pt-1">
+        <Skeleton className="h-4 w-48 max-w-full" />
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-5/6" />
       </div>
     </div>
   );

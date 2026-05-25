@@ -17,7 +17,12 @@ await build({
   entryPoints: [path.join(packageRoot, "src", "dev-open-client.tsx")],
   outfile: path.join(outdir, "client.js"),
   bundle: true,
+  define: {
+    "process.env.NODE_ENV": "\"production\"",
+  },
   format: "esm",
+  legalComments: "none",
+  minify: true,
   platform: "browser",
   target: ["es2022"],
   jsx: "automatic",

@@ -4,31 +4,36 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  buildSubjectCasePhaseRefs,
-  buildWorkbenchTracePhases,
+  buildSubjectCaseExecutionRefs,
+  buildWorkbenchExecutionEvidence,
   createSubjectFilePreview,
   createCaseReview,
   loadAuthoredWorkbenchSourceDocument,
   summarizeSubjectFiles,
+  traceSessionLabel,
   type SubjectRecord,
-  type EvaluationResultRecord,
-  type HostedWorkbenchJob,
-  type RunSummary,
+  type EvaluationScorecard,
   type SurfaceSnapshotFile,
   type WorkbenchExecutionTrace,
-  type WorkbenchTaskBundle,
+  type WorkbenchTraceSession,
+  type WorkbenchEngineCase,
 } from "@workbench-ai/workbench-core";
 
 import {
-  loadLocalArchive,
-  localRuntimeDir,
-  readLocalSubject,
-  readLocalSubjectFiles,
   readLocalExecutionFiles,
-  type LocalArchiveSnapshot,
+  loadLocalArchiveIndex,
+  readLocalEvaluationRecord,
+  readLocalJobInRun,
+  readLocalRunJobs,
+  readLocalSubjectFilesForId,
+  readLocalSubjectRecord,
+  type LocalArchivedJob,
+  type LocalArchiveIndex,
 } from "./local-archive.js";
 import {
+  readLocalAuthoredProjectSource,
   readLocalProjectSource,
+  type LocalProjectSource,
   WORKBENCH_BENCHMARK_FILE,
 } from "./project-source.js";
 import { localBenchmarkFingerprint } from "./benchmark-fingerprint.js";
@@ -54,7 +59,21 @@ class LocalApiError extends Error {
   }
 }
 
+interface LocalCaseInputFile {
+  path: string;
+  content: string;
+  encoding?: "utf8" | "base64";
+  executable?: boolean;
+}
+
+export interface LocalWorkbenchRequestContext {
+  workspace: string;
+  assetsRoot: string;
+  readProjectSource: () => Promise<LocalProjectSource>;
+}
+
 const DEV_OPEN_ASSET_DIR = "dev-open";
+const PROJECT_SOURCE_CACHE_TTL_MS = 1000;
 
 export async function startLocalWorkbenchDevServer(
   options: LocalWorkbenchDevServerOptions,
@@ -62,13 +81,17 @@ export async function startLocalWorkbenchDevServer(
   const workspace = path.resolve(options.workspace);
   const assetsRoot = options.assetsRoot ?? defaultDevOpenAssetsRoot();
   await assertDevOpenAssets(assetsRoot);
+  const context: LocalWorkbenchRequestContext = {
+    workspace,
+    assetsRoot,
+    readProjectSource: createProjectSourceReader(workspace),
+  };
 
   const server = http.createServer((request, response) => {
     void handleLocalWorkbenchRequest({
       request,
       response,
-      workspace,
-      assetsRoot,
+      context,
     }).catch((error: unknown) => {
       sendError(response, error, request.method);
     });
@@ -111,6 +134,24 @@ async function assertDevOpenAssets(assetsRoot: string): Promise<void> {
   });
 }
 
+function createProjectSourceReader(workspace: string): () => Promise<LocalProjectSource> {
+  let cached: { loadedAt: number; promise: Promise<LocalProjectSource> } | null = null;
+  return () => {
+    const now = Date.now();
+    if (cached && now - cached.loadedAt < PROJECT_SOURCE_CACHE_TTL_MS) {
+      return cached.promise;
+    }
+    const promise = readLocalProjectSource(workspace);
+    cached = { loadedAt: now, promise };
+    promise.catch(() => {
+      if (cached?.promise === promise) {
+        cached = null;
+      }
+    });
+    return promise;
+  };
+}
+
 async function closeServer(server: http.Server): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
@@ -120,8 +161,7 @@ async function closeServer(server: http.Server): Promise<void> {
 async function handleLocalWorkbenchRequest(args: {
   request: IncomingMessage;
   response: ServerResponse;
-  workspace: string;
-  assetsRoot: string;
+  context: LocalWorkbenchRequestContext;
 }): Promise<void> {
   const url = new URL(args.request.url ?? "/", "http://workbench.local");
   if (args.request.method !== "GET" && args.request.method !== "HEAD") {
@@ -129,19 +169,19 @@ async function handleLocalWorkbenchRequest(args: {
     return;
   }
   if (url.pathname.startsWith("/api/")) {
-    await handleApiRequest(args.request, args.response, args.workspace, url);
+    await handleApiRequest(args.request, args.response, args.context, url);
     return;
   }
   if (url.pathname === "/assets/client.js") {
-    await sendFile(args.response, path.join(args.assetsRoot, "client.js"), "text/javascript; charset=utf-8", args.request.method);
+    await sendFile(args.response, path.join(args.context.assetsRoot, "client.js"), "text/javascript; charset=utf-8", args.request.method);
     return;
   }
   if (url.pathname === "/assets/client.css") {
-    await sendFile(args.response, path.join(args.assetsRoot, "client.css"), "text/css; charset=utf-8", args.request.method);
+    await sendFile(args.response, path.join(args.context.assetsRoot, "client.css"), "text/css; charset=utf-8", args.request.method);
     return;
   }
   if (url.pathname.startsWith("/assets/fonts/")) {
-    await sendFontFile(args.response, args.assetsRoot, url, args.request.method);
+    await sendFontFile(args.response, args.context.assetsRoot, url, args.request.method);
     return;
   }
   await sendHtml(args.response, args.request.method);
@@ -150,18 +190,19 @@ async function handleLocalWorkbenchRequest(args: {
 async function handleApiRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  workspace: string,
+  context: LocalWorkbenchRequestContext,
   url: URL,
 ): Promise<void> {
+  const { workspace } = context;
   switch (url.pathname) {
     case "/api/snapshot":
-      sendJson(response, await localRuntimeSnapshot(workspace), 200, request.method);
+      sendJson(response, await localBenchmarkSnapshot(context), 200, request.method);
       return;
     case "/api/spec":
       sendJson(
         response,
         await localSpecDocument(
-          workspace,
+          context,
           readOptionalSearchString(url.searchParams, "fingerprint"),
         ),
         200,
@@ -173,7 +214,7 @@ async function handleApiRequest(
         response,
         summarizeSubjectFiles(
           await localBenchmarkMountedFiles(
-            workspace,
+            context,
             readOptionalSearchString(url.searchParams, "fingerprint"),
           ),
           [],
@@ -187,7 +228,7 @@ async function handleApiRequest(
         response,
         createSubjectFilePreview({
           files: await localBenchmarkMountedFiles(
-            workspace,
+            context,
             readOptionalSearchString(url.searchParams, "fingerprint"),
           ),
           path: readSearchString(url.searchParams, "path"),
@@ -198,25 +239,24 @@ async function handleApiRequest(
       );
       return;
     case "/api/record":
-      sendJson(response, readSubjectForApi(
-        await loadLocalArchive(workspace),
+      sendJson(response, await readSubjectForApi(
+        workspace,
         readSearchString(url.searchParams, "id"),
       ), 200, request.method);
       return;
-    case "/api/result":
-      sendJson(response, readResultForApi(
-        await loadLocalArchive(workspace),
+    case "/api/evaluation":
+      sendJson(response, await readEvaluationForApi(
+        workspace,
         readSearchString(url.searchParams, "id"),
       ), 200, request.method);
       return;
     case "/api/subject/files": {
-      const snapshot = await loadLocalArchive(workspace);
       const subjectId = readSearchString(url.searchParams, "id");
-      const subject = readSubjectForApi(snapshot, subjectId);
+      const subject = await readSubjectForApi(workspace, subjectId);
       sendJson(
         response,
         summarizeSubjectFiles(
-          readSubjectFilesForApi(snapshot, subjectId),
+          await readSubjectFilesForApi(workspace, subjectId),
           subject.fileChanges,
         ),
         200,
@@ -225,12 +265,11 @@ async function handleApiRequest(
       return;
     }
     case "/api/subject/preview": {
-      const snapshot = await loadLocalArchive(workspace);
       const subjectId = readSearchString(url.searchParams, "id");
       sendJson(
         response,
         createSubjectFilePreview({
-          files: readSubjectFilesForApi(snapshot, subjectId),
+          files: await readSubjectFilesForApi(workspace, subjectId),
           path: readSearchString(url.searchParams, "path"),
           view: readPreviewMode(url.searchParams),
         }),
@@ -239,43 +278,37 @@ async function handleApiRequest(
       );
       return;
     }
-    case "/api/task-review": {
-      const snapshot = await loadLocalArchive(workspace);
+    case "/api/case-review": {
       const subjectId = readSearchString(url.searchParams, "id");
-      const caseId = readSearchString(url.searchParams, "task");
-      const jobs = await loadLocalJobs(workspace);
+      const caseId = readSearchString(url.searchParams, "case");
+      const runId = readSearchString(url.searchParams, "run");
+      const jobs = await readLocalRunJobs(workspace, runId);
       sendJson(
         response,
         createCaseReview({
-          subject: readSubjectForApi(snapshot, subjectId),
+          subject: await readSubjectForApi(workspace, subjectId),
           caseId,
-          phases: buildSubjectCasePhaseRefs({ jobs, subjectId, caseId }),
+          executions: buildSubjectCaseExecutionRefs({ jobs, subjectId, caseId }),
         }),
         200,
         request.method,
       );
       return;
     }
-    case "/api/run":
-      sendJson(
-        response,
-        await localRunDetail(workspace, readSearchString(url.searchParams, "id")),
-        200,
-        request.method,
-      );
-      return;
     case "/api/traces": {
       const traceRunId = readSearchString(url.searchParams, "run");
-      const traceJobs = await loadLocalJobs(workspace);
+      const traceJobId = readSearchString(url.searchParams, "job");
+      const traceJobs = [await readExecutionJobForRun(workspace, traceRunId, traceJobId)];
       sendJson(
         response,
         {
           projectId: "local",
           runId: traceRunId,
-          phases: buildWorkbenchTracePhases({
-            jobs: traceJobs.filter((job) => job.runId === traceRunId),
-            traceIdPrefix: "local-phase",
-            traceForJob: readLocalTrace,
+          executions: buildWorkbenchExecutionEvidence({
+            jobs: traceJobs,
+            traceIdPrefix: "local-execution",
+            traceForJob: readLocalAggregateTrace,
+            traceSessionsForJob: readLocalTraceSessions,
           }),
         },
         200,
@@ -312,60 +345,90 @@ async function handleApiRequest(
   }
 }
 
-export async function localRuntimeSnapshot(workspace: string) {
-  const snapshot = await loadLocalArchive(workspace);
-  const summaries = snapshot.subjects.map(subjectSummary);
-  const activeId = snapshot.activeId;
-  const currentBenchmarkFingerprint = await readCurrentBenchmarkFingerprint(workspace);
+export async function localBenchmarkSnapshot(context: LocalWorkbenchRequestContext) {
+  const { workspace } = context;
+  const snapshot = await loadLocalArchiveIndex(workspace);
+  const subjects = snapshot.subjects.filter(isInspectableSubjectRecord);
+  const summaries = subjects.map(subjectSummary);
+  const activeId = snapshot.activeId && subjects.some((subject) => subject.id === snapshot.activeId)
+    ? snapshot.activeId
+    : subjects.at(-1)?.id ?? null;
+  const currentBenchmarkFingerprint = await readCurrentBenchmarkFingerprint(context);
   return {
     workspaceRoot: path.resolve(workspace),
     activeId,
     currentBenchmarkFingerprint,
     summaries,
-    results: snapshot.evaluations.map(resultSummary),
-    events: snapshot.events,
-    latestRun: snapshot.runs.at(-1) ?? null,
+    evaluations: snapshot.evaluations.map(evaluationSummary),
     runs: snapshot.runs,
   };
 }
 
 async function readCurrentBenchmarkFingerprint(
-  workspace: string,
+  context: LocalWorkbenchRequestContext,
 ): Promise<string | null> {
-  return await readLocalProjectSource(workspace)
+  return await context.readProjectSource()
     .then(localBenchmarkFingerprint)
     .catch(() => null);
 }
 
 export async function localSpecDocument(
-  workspace: string,
+  context: LocalWorkbenchRequestContext,
   benchmarkFingerprint?: string | null,
 ) {
-  const projectSource = await readLocalProjectSource(workspace).catch(() => null);
+  const { workspace } = context;
+  const projectSource = await context.readProjectSource().catch(() => null);
+  const authoredSource = projectSource
+    ? null
+    : await readLocalAuthoredProjectSource(workspace).catch(() => null);
   const requestedFingerprint = normalizeOptionalFingerprint(benchmarkFingerprint);
   const currentFingerprint = projectSource
-    ? await readCurrentBenchmarkFingerprint(workspace).catch(() => null)
+    ? localBenchmarkFingerprint(projectSource)
     : null;
   if (
     requestedFingerprint &&
     currentFingerprint &&
     requestedFingerprint !== currentFingerprint
   ) {
-    const snapshot = await loadLocalArchive(workspace);
+    const snapshot = await loadLocalArchiveIndex(workspace);
     const document = localHistoricalBenchmarkDocument(snapshot, requestedFingerprint);
     if (document) {
       return document;
     }
     throw new LocalApiError(`Benchmark version not found: ${requestedFingerprint}`, 404);
   }
-  const sourceYaml = projectSource?.specSource ?? "";
-  const cases = projectSource?.taskSourceFiles ?? [];
+  const sourceYaml = projectSource?.specSource ?? authoredSource?.specSource ?? "";
+  const cases = projectSource
+    ? caseSummaryFilesFromEngineCases(projectSource.engineCases, projectSource.engineResolveFiles)
+    : [];
   return loadAuthoredWorkbenchSourceDocument({
     sourceYaml,
     path: WORKBENCH_BENCHMARK_FILE,
-    sourceFiles: projectSource?.sourceFiles,
+    sourceFiles: projectSource?.sourceFiles ?? authoredSource?.sourceFiles,
     cases,
   });
+}
+
+function caseSummaryFilesFromEngineCases(
+  engineCases: readonly WorkbenchEngineCase[],
+  files: readonly LocalCaseInputFile[],
+): LocalCaseInputFile[] {
+  const existingCaseIds = new Set(files.flatMap((file) => {
+    const normalized = file.path.replace(/\\/gu, "/").replace(/^\/+/u, "");
+    const slash = normalized.indexOf("/");
+    return slash > 0 ? [normalized.slice(0, slash)] : [];
+  }));
+  return [
+    ...files.map((file) => ({ ...file })),
+    ...engineCases
+      .filter((engineCase) => !existingCaseIds.has(engineCase.id))
+      .map((engineCase) => ({
+        path: `${engineCase.id}/.workbench-case.json`,
+        encoding: "utf8" as const,
+        content: `${JSON.stringify({ id: engineCase.id })}\n`,
+        executable: false,
+      })),
+  ];
 }
 
 export async function localSourceFiles(workspace: string): Promise<SurfaceSnapshotFile[]> {
@@ -373,29 +436,30 @@ export async function localSourceFiles(workspace: string): Promise<SurfaceSnapsh
 }
 
 export async function localBenchmarkMountedFiles(
-  workspace: string,
+  context: LocalWorkbenchRequestContext,
   benchmarkFingerprint?: string | null,
 ): Promise<SurfaceSnapshotFile[]> {
   const requestedFingerprint = normalizeOptionalFingerprint(benchmarkFingerprint);
-  const projectSource = await readLocalProjectSource(workspace);
-  const currentFingerprint = await readCurrentBenchmarkFingerprint(workspace).catch(() => null);
+  const { workspace } = context;
+  const projectSource = await context.readProjectSource();
+  const currentFingerprint = localBenchmarkFingerprint(projectSource);
   if (
     requestedFingerprint &&
     currentFingerprint &&
     requestedFingerprint !== currentFingerprint
   ) {
-    const snapshot = await loadLocalArchive(workspace);
+    const snapshot = await loadLocalArchiveIndex(workspace);
     return localHistoricalBenchmarkFiles(snapshot, requestedFingerprint);
   }
-  return mountedTaskFiles(projectSource.taskBundles);
+  return inspectableEngineCaseFiles(projectSource.engineCases);
 }
 
 function localHistoricalBenchmarkDocument(
-  snapshot: LocalArchiveSnapshot,
+  snapshot: LocalArchiveIndex,
   benchmarkFingerprint: string,
 ) {
   const subject = snapshot.subjects.find((entry) =>
-    entry.benchmarkFingerprint === benchmarkFingerprint
+    entry.benchmarkFingerprint === benchmarkFingerprint && readBenchmarkSourceMetadata(entry)
   );
   const source = subject ? readBenchmarkSourceMetadata(subject) : null;
   if (!source?.sourceYaml) {
@@ -410,30 +474,26 @@ function localHistoricalBenchmarkDocument(
 }
 
 function localHistoricalBenchmarkFiles(
-  _snapshot: LocalArchiveSnapshot,
+  _snapshot: LocalArchiveIndex,
   _benchmarkFingerprint: string,
 ): SurfaceSnapshotFile[] {
   return [];
 }
 
-function mountedTaskFiles(taskBundles: readonly WorkbenchTaskBundle[]): SurfaceSnapshotFile[] {
-  return taskBundles.flatMap((bundle) =>
-    taskBundleInspectableFiles(bundle).map((file) => ({
+function inspectableEngineCaseFiles(engineCases: readonly WorkbenchEngineCase[]): SurfaceSnapshotFile[] {
+  return engineCases.flatMap((bundle) =>
+    engineCaseFiles(bundle).map((file) => ({
       ...file,
       path: `${bundle.id}/${file.path}`,
     }))
   ).sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function taskBundleInspectableFiles(bundle: WorkbenchTaskBundle): SurfaceSnapshotFile[] {
-  const files = bundle.sourceFiles?.length
-    ? bundle.sourceFiles
-    : [
-        ...bundle.publicFiles,
-        ...bundle.testFiles,
-        ...(bundle.solutionFiles ?? []),
-      ];
-  return files.filter((file) => !/^task\.ya?ml$/iu.test(file.path));
+function engineCaseFiles(bundle: WorkbenchEngineCase): SurfaceSnapshotFile[] {
+  const buckets = bundle.files;
+  return buckets.source?.length
+    ? buckets.source
+    : [...(buckets.public ?? []), ...(buckets.private ?? [])];
 }
 
 function subjectSummary(subject: SubjectRecord) {
@@ -441,27 +501,25 @@ function subjectSummary(subject: SubjectRecord) {
   return summary;
 }
 
-function resultSummary(result: EvaluationResultRecord) {
-  const { evaluation: _evaluation, ...summary } = result;
+function isInspectableSubjectRecord(subject: SubjectRecord): boolean {
+  return Boolean(subject.eval || asRecord(asRecord(subject.meta)?.source));
+}
+
+function evaluationSummary(evaluation: EvaluationScorecard) {
+  const { evaluation: _evaluation, ...summary } = evaluation;
   return summary;
 }
 
-function readSubjectForApi(snapshot: LocalArchiveSnapshot, subjectId: string): SubjectRecord {
-  return readArchiveRecord("Subject", subjectId, () => readLocalSubject(snapshot, subjectId));
+async function readSubjectForApi(workspace: string, subjectId: string): Promise<SubjectRecord> {
+  return await readArchiveRecord("Subject", subjectId, () => readLocalSubjectRecord(workspace, subjectId));
 }
 
-function readResultForApi(snapshot: LocalArchiveSnapshot, resultId: string): EvaluationResultRecord {
-  return readArchiveRecord("Evaluation result", resultId, () => {
-    const result = snapshot.evaluations.find((entry) => entry.id === resultId);
-    if (!result) {
-      throw new Error(`Evaluation result not found: ${resultId}`);
-    }
-    return result;
-  });
+async function readEvaluationForApi(workspace: string, evaluationId: string): Promise<EvaluationScorecard> {
+  return await readArchiveRecord("Evaluation", evaluationId, () => readLocalEvaluationRecord(workspace, evaluationId));
 }
 
-function readSubjectFilesForApi(snapshot: LocalArchiveSnapshot, subjectId: string): SurfaceSnapshotFile[] {
-  return readArchiveRecord("Subject", subjectId, () => readLocalSubjectFiles(snapshot, subjectId));
+async function readSubjectFilesForApi(workspace: string, subjectId: string): Promise<SurfaceSnapshotFile[]> {
+  return await readArchiveRecord("Subject", subjectId, () => readLocalSubjectFilesForId(workspace, subjectId));
 }
 
 function readBenchmarkSourceMetadata(subject: SubjectRecord): {
@@ -511,33 +569,19 @@ function normalizeOptionalFingerprint(value: string | null | undefined): string 
   return normalized ? normalized : null;
 }
 
-function readArchiveRecord<T>(
-  kind: "Subject" | "Evaluation result",
+async function readArchiveRecord<T>(
+  kind: "Subject" | "Evaluation",
   id: string,
-  read: () => T,
-): T {
+  read: () => Promise<T>,
+): Promise<T> {
   try {
-    return read();
+    return await read();
   } catch (error) {
     if (error instanceof Error && error.message === `${kind} not found: ${id}`) {
       throw new LocalApiError(error.message, 404);
     }
     throw error;
   }
-}
-
-async function localRunDetail(workspace: string, runId: string): Promise<{
-  run: RunSummary;
-  jobs: unknown[];
-}> {
-  const snapshot = await loadLocalArchive(workspace);
-  const run = snapshot.runs.find((entry) => entry.id === runId);
-  if (!run) {
-    throw new LocalApiError(`Run not found: ${runId}`, 404);
-  }
-  const allJobs = await loadLocalJobs(workspace);
-  const runJobs = allJobs.filter((job) => job.runId === runId);
-  return { run, jobs: runJobs };
 }
 
 async function loadExecutionFiles(workspace: string, runId: string, jobId: string) {
@@ -559,28 +603,22 @@ async function assertExecutionJobInRun(
   runId: string,
   jobId: string,
 ) {
-  const job = (await loadLocalJobs(workspace)).find((entry) => entry.id === jobId);
-  if (!job || job.runId !== runId) {
+  await readExecutionJobForRun(workspace, runId, jobId);
+}
+
+async function readExecutionJobForRun(
+  workspace: string,
+  runId: string,
+  jobId: string,
+): Promise<LocalArchivedJob> {
+  const job = await readLocalJobInRun(workspace, runId, jobId);
+  if (!job) {
     throw new LocalApiError(`Execution job not found: ${jobId}`, 404);
   }
+  return job;
 }
 
-type LocalJob = HostedWorkbenchJob & { trace?: WorkbenchExecutionTrace };
-
-async function loadLocalJobs(workspace: string): Promise<LocalJob[]> {
-  const jobsDir = path.join(localRuntimeDir(workspace), "jobs");
-  const entries = await fs.readdir(jobsDir, { withFileTypes: true }).catch(() => []);
-  const jobs: LocalJob[] = [];
-  for (const entry of entries) {
-    if (entry.isFile() && entry.name.endsWith(".json")) {
-      const content = await fs.readFile(path.join(jobsDir, entry.name), "utf8");
-      jobs.push(JSON.parse(content) as LocalJob);
-    }
-  }
-  return jobs;
-}
-
-function readLocalTrace(job: LocalJob): WorkbenchExecutionTrace {
+function readLocalAggregateTrace(job: LocalArchivedJob): WorkbenchExecutionTrace {
   const trace = (job as unknown as Record<string, unknown>).trace;
   if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
     return { trace_id: job.id, spans: [], events: [], summaries: [] };
@@ -588,6 +626,63 @@ function readLocalTrace(job: LocalJob): WorkbenchExecutionTrace {
   const record = trace as Partial<WorkbenchExecutionTrace>;
   return {
     trace_id: typeof record.trace_id === "string" ? record.trace_id : job.id,
+    spans: Array.isArray(record.spans) ? record.spans : [],
+    events: Array.isArray(record.events) ? record.events : [],
+    summaries: Array.isArray(record.summaries) ? record.summaries : [],
+  };
+}
+
+function readLocalTraceSessions(
+  job: LocalArchivedJob,
+  role: WorkbenchTraceSession["role"],
+): WorkbenchTraceSession[] {
+  if (!Array.isArray(job.traceSessions)) {
+    return [];
+  }
+  return job.traceSessions.map((session) => ({
+    id: typeof session.id === "string" && session.id.length > 0
+      ? session.id
+      : `${job.id}:trace`,
+    jobId: typeof session.jobId === "string" && session.jobId.length > 0
+      ? session.jobId
+      : job.id,
+    role: session.role === "optimizer" || session.role === "runner" || session.role === "engine"
+      ? session.role
+      : role,
+    kind: typeof session.kind === "string" && session.kind.length > 0 ? session.kind : "trace",
+    label: traceSessionDisplayLabel(session, role),
+    sourcePath: typeof session.sourcePath === "string" ? session.sourcePath : null,
+    trace: sanitizeLocalTrace(session.trace, session.id),
+    ...(session.metadata && typeof session.metadata === "object" && !Array.isArray(session.metadata)
+      ? { metadata: session.metadata }
+      : {}),
+  }));
+}
+
+function traceSessionDisplayLabel(
+  session: WorkbenchTraceSession,
+  fallbackRole: WorkbenchTraceSession["role"],
+): string {
+  const role = session.role === "optimizer" || session.role === "runner" || session.role === "engine"
+    ? session.role
+    : fallbackRole;
+  return typeof session.label === "string" && session.label.length > 0
+    ? session.label
+    : typeof session.sourcePath === "string" && session.sourcePath.length > 0
+      ? traceSessionLabel(session.sourcePath, role)
+      : "Trace";
+}
+
+function sanitizeLocalTrace(
+  trace: unknown,
+  fallbackId: string,
+): WorkbenchExecutionTrace {
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
+    return { trace_id: fallbackId, spans: [], events: [], summaries: [] };
+  }
+  const record = trace as Partial<WorkbenchExecutionTrace>;
+  return {
+    trace_id: typeof record.trace_id === "string" ? record.trace_id : fallbackId,
     spans: Array.isArray(record.spans) ? record.spans : [],
     events: Array.isArray(record.events) ? record.events : [],
     summaries: Array.isArray(record.summaries) ? record.summaries : [],

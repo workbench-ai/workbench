@@ -1,12 +1,10 @@
 import type { ReactNode } from "react";
 
 import { cn } from "../../lib/utils";
-import { Card, CardContent } from "../ui/card";
 import { Skeleton } from "../ui/skeleton";
-import { Spinner } from "../ui/spinner";
 
 export function PreviewLoadingState({
-  label = "Loading preview...",
+  label = "Preview pending.",
   testId = "preview-loading-state",
   className,
 }: {
@@ -16,11 +14,13 @@ export function PreviewLoadingState({
 }) {
   return (
     <div
-      className={cn("rounded-md border border-border p-4", className)}
+      className={cn("flex min-w-0 flex-col py-2", className)}
+      aria-busy="true"
+      aria-label={typeof label === "string" ? label : undefined}
       data-testid={testId}
     >
-      <PreviewLoadingLabel>{label}</PreviewLoadingLabel>
-      <div className="mt-4 grid gap-3">
+      <span className="sr-only">{label}</span>
+      <div className="flex flex-col gap-3">
         <Skeleton className="h-5 w-48" />
         <Skeleton className="h-64 w-full" />
       </div>
@@ -41,30 +41,25 @@ export function PreviewRendererLoadingState({
     return (
       <div
         className="flex h-full min-h-0 items-center justify-center px-6"
+        aria-busy="true"
+        aria-label={typeof label === "string" ? label : undefined}
         data-testid={testId}
       >
-        <PreviewLoadingLabel>{label}</PreviewLoadingLabel>
+        <span className="sr-only">{label}</span>
+        <Skeleton className="h-64 w-full max-w-3xl" />
       </div>
     );
   }
 
   return (
-    <div className="grid gap-3" data-testid={testId}>
-      <Card size="sm">
-        <CardContent className="py-0 text-sm text-muted-foreground">
-          <PreviewLoadingLabel>{label}</PreviewLoadingLabel>
-        </CardContent>
-      </Card>
+    <div
+      className="flex min-w-0 flex-col"
+      aria-busy="true"
+      aria-label={typeof label === "string" ? label : undefined}
+      data-testid={testId}
+    >
+      <span className="sr-only">{label}</span>
       <Skeleton className="h-64 w-full" />
     </div>
-  );
-}
-
-function PreviewLoadingLabel({ children }: { children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-      <Spinner />
-      {children}
-    </span>
   );
 }

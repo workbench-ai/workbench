@@ -1,21 +1,21 @@
 # Workbench Eval Authoring
 
-This directory is the canonical guide for creating Workbench evaluations. Use it when you need a new `benchmark.yaml`, subject manifests such as `subjects/claude/subject.yaml`, subject files under `subjects/claude/files/`, optimizer YAML files such as `optimizers/claude.yaml`, a Harbor task adapter import, or a workflow that scores files such as `.docx`, `.xlsx`, `.pdf`, or `.pptx`.
+This directory is the canonical guide for creating Workbench evaluations. Use it when you need a new `benchmark.yaml`, subject manifests such as `subjects/codex/subject.yaml`, subject files under `subjects/codex/files/`, optimizer YAML files such as `optimizers/codex.yaml`, an external Harbor engine adapter source, or a workflow that scores files such as `.docx`, `.xlsx`, `.pdf`, or `.pptx`.
 
-The subject is the mutable thing Workbench evaluates or improves. Benchmarks live in `benchmark.yaml` plus task-source output, with omitted `benchmark.tasks` defaulting to the `tasks/` directory through the built-in `path` task-source adapter. All task sources resolve to `TaskBundle` data before core runs trials; native Workbench task directories are parsed by `path`, and Harbor task directories are parsed by `harbor`. Subject manifests select how to run the subject and declare subject files with `files: { path: files }`; optimizer YAML selects edit paths and improve behavior for `workbench improve --optimizer optimizers/foo.yaml` runs. Do not make evaluator code the subject unless the evaluator itself is the product being improved.
+Workbench authoring has three public primitives. The engine is selected in `benchmark.yaml` and owns benchmark runtime behavior. The subject is the mutable thing Workbench evaluates or improves. The optimizer selects edit paths and improve behavior for `workbench improve --optimizer optimizers/foo.yaml` runs. For native Workbench evals, use `version: 3` plus `engine.use: workbench`; that engine owns `environment`, optional task path selection, and the `score` adapter slot under `engine.with`. Omitted `engine.with.tasks` defaults to `tasks/`. Harbor task directories are handled by an external engine adapter selected with `engine.use: harbor`. Do not make evaluator code the subject unless the evaluator itself is the product being improved.
 
 Workbench eval authoring has two normal starting points:
 
 - Existing workflow: start with [from-existing-workflow.md](from-existing-workflow.md) when there is already a script, test command, benchmark suite, Harbor task set, or manual scoring process.
-- File-output tasks: start with [from-file-outputs.md](from-file-outputs.md) when tasks, outputs, examples, goldens, reports, workbooks, decks, PDFs, or other opaque files affect runtime prerequisites.
+- File-output cases: start with [from-file-outputs.md](from-file-outputs.md) when case inputs, outputs, examples, goldens, reports, workbooks, decks, PDFs, or other opaque files affect runtime prerequisites.
 
 Before writing a spec, read:
 
-- [spec-syntax.md](spec-syntax.md) for the version-2 split benchmark/subject/optimizer YAML shape.
-- [runner-contract.md](runner-contract.md) for trial staging, phase visibility, same-environment scoring, and scorecard outputs.
-- [adapters.md](adapters.md) for custom adapter manifests, sources, overrides, auth, slots, task-source adapters, and local replay.
+- [spec-syntax.md](spec-syntax.md) for the version-3 split engine/subject/optimizer YAML shape.
+- [runner-contract.md](runner-contract.md) for engine staging, evidence visibility, same-environment scoring, and result outputs.
+- [adapters.md](adapters.md) for custom adapter manifests, sources, overrides, auth, slots, engine-owned helpers, and local replay.
 - [tasks-and-fixtures.md](tasks-and-fixtures.md) for task directory layout, public files, verifier tests, and Harbor imports.
-- [run-and-inspect.md](run-and-inspect.md) for the local and hosted CLI loop.
+- [run-and-inspect.md](run-and-inspect.md) for local smoke runs, cloud deployment, hosted URLs, and inspection.
 
 File-specific guidance lives under [file-recipes/](file-recipes/):
 
@@ -24,4 +24,4 @@ File-specific guidance lives under [file-recipes/](file-recipes/):
 - [pdf.md](file-recipes/pdf.md)
 - [pptx.md](file-recipes/pptx.md)
 
-The authoring goal is not to make a perfect evaluator on the first pass. First make a small smoke eval that proves Workbench can stage the subject, run it on a task, keep verifier files private until scoring, write a finite numeric score, and produce inspectable artifacts. Default to rubric scoring for qualitative behavior; use tests or command scoring only for deterministic checks or an existing scorer.
+The authoring goal is not to make a perfect evaluator on the first pass. First make a small smoke eval that proves the selected engine can stage the subject, run it on a case, keep verifier files private until scoring, write a finite numeric score, and produce inspectable artifacts. For the built-in `workbench` engine, default to rubric scoring for qualitative behavior; use tests or command scoring only for deterministic checks or an existing scoring workflow. Rubric scoring runs one judge turn per criterion, and `score.with.parallelism` is the single throttle for those criterion turns.

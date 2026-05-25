@@ -25,8 +25,11 @@ import {
   nodeBuiltin,
 } from "./runtime-utils.ts";
 import {
-  taskBundleForCase,
+  engineCaseForCase,
 } from "./execution-jobs.ts";
+import {
+  engineCaseFilesForRuntimeInput,
+} from "./generic-spec.ts";
 
 export function readWorkbenchExecutionSpec(job: HostedWorkbenchJob): WorkbenchExecutionSpec {
   const input = asRuntimeRecord(job.input);
@@ -67,8 +70,8 @@ export function materializeWorkbenchSandboxInput(
   if (input.name === "subject") {
     return materializedFileInput(input, args.baseFiles);
   }
-  if (input.name === "task") {
-    return materializedFileInput(input, selectSandboxTaskFiles(args, execution));
+  if (input.name === "case") {
+    return materializedFileInput(input, selectSandboxCaseFiles(args, execution));
   }
   if (input.name === "traces") {
     return materializedFileInput(input, args.traceFiles ?? []);
@@ -76,11 +79,11 @@ export function materializeWorkbenchSandboxInput(
   throw new Error(`Execution ${readWorkbenchExecutionSpec(args.job).id} declares unsupported sandbox input: ${input.name}.`);
 }
 
-function selectSandboxTaskFiles(
+function selectSandboxCaseFiles(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
 ): SurfaceSnapshotFile[] {
-  if (execution.purpose !== "trial") {
+  if (execution.purpose !== "attempt") {
     return [];
   }
   const metadata = asRuntimeRecord(execution.metadata);
@@ -91,11 +94,8 @@ function selectSandboxTaskFiles(
       : typeof jobInput.caseId === "string"
         ? jobInput.caseId
         : "current";
-  const taskBundle = taskBundleForCase(args.taskBundles, caseId);
-  return [
-    ...taskBundle.publicFiles.map((file) => ({ ...file })),
-    ...taskBundle.testFiles.map((file) => ({ ...file })),
-  ].sort((left, right) => left.path.localeCompare(right.path));
+  const engineCase = engineCaseForCase(args.engineCases, caseId);
+  return engineCaseFilesForRuntimeInput({ spec: args.spec, engineCase });
 }
 
 export function materializedFileInput(
@@ -120,10 +120,11 @@ export function createSandboxAdapterRequest(
       job: sanitizeWorkbenchExecutionJobForSandbox(args.job, request.execution) as unknown as Json,
       spec: args.spec as unknown as Json,
       environmentVersion: (args.environmentVersion ?? null) as unknown as Json,
-      taskBundles: args.taskBundles as unknown as Json,
+      engineCases: args.engineCases as unknown as Json,
       ...(args.adapterAuthProfiles ? { adapterAuthProfiles: args.adapterAuthProfiles as unknown as Json } : {}),
       ...(args.adapterManifests ? { adapterManifests: args.adapterManifests as unknown as Json } : {}),
       ...(args.progress ? { progress: args.progress as unknown as Json } : {}),
+      ...(args.runtimeControlOperation ? { runtimeControlOperation: args.runtimeControlOperation as unknown as Json } : {}),
     },
     execution: request.execution as unknown as Json,
     capability: request.capability as unknown as Json,
@@ -233,8 +234,8 @@ export function outputPayloadForContract(output: Record<string, unknown>, output
   if (outputName === "subject_patch") {
     return isJsonPayload(output.subjectPatch) ? output.subjectPatch : undefined;
   }
-  if (outputName === "scorecard") {
-    return isJsonPayload(output.scorecard) ? output.scorecard : undefined;
+  if (outputName === "result") {
+    return isJsonPayload(output.result) ? output.result : undefined;
   }
   return isJsonPayload(output[outputName]) ? output[outputName] : undefined;
 }

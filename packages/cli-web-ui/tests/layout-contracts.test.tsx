@@ -145,6 +145,10 @@ describe("shared layout contracts", () => {
       new URL("../components/shared/preview-panel.tsx", import.meta.url),
       "utf8",
     );
+    const pdfPreviewSource = readFileSync(
+      new URL("../components/shared/pdf-preview.tsx", import.meta.url),
+      "utf8",
+    );
 
     expect(html).toContain('data-fill-height="true"');
     expect(html).toContain("max-h-[min(18rem,35dvh)] shrink-0 overflow-y-auto");
@@ -325,13 +329,17 @@ describe("shared layout contracts", () => {
     expect(html).not.toContain('data-testid="preview-placeholder"');
   });
 
-  test("shared preview loading states use skeletons and the shared spinner", () => {
+  test("shared preview loading states use skeletons without extra loading chrome", () => {
     const filesBrowserSource = readFileSync(
       new URL("../components/shared/files-browser.tsx", import.meta.url),
       "utf8",
     );
     const previewPanelSource = readFileSync(
       new URL("../components/shared/preview-panel.tsx", import.meta.url),
+      "utf8",
+    );
+    const pdfPreviewSource = readFileSync(
+      new URL("../components/shared/pdf-preview.tsx", import.meta.url),
       "utf8",
     );
     const spreadsheetPreviewSource = readFileSync(
@@ -342,17 +350,19 @@ describe("shared layout contracts", () => {
       new URL("../components/shared/preview-loading-state.tsx", import.meta.url),
       "utf8",
     );
-    const spinnerSource = readFileSync(
-      new URL("../components/ui/spinner.tsx", import.meta.url),
-      "utf8",
-    );
 
     expect(filesBrowserSource).toContain("./preview-loading-state");
     expect(previewPanelSource).toContain("./preview-loading-state");
     expect(spreadsheetPreviewSource).toContain("./preview-loading-state");
-    expect(previewLoadingSource).toContain('../ui/spinner');
     expect(previewLoadingSource).toContain('../ui/skeleton');
-    expect(spinnerSource).toContain("Loader2Icon");
+    expect(previewLoadingSource).toContain('aria-busy="true"');
+    expect(previewLoadingSource).toContain('className="sr-only"');
+    expect(previewLoadingSource).not.toContain('../ui/spinner');
+    expect(previewLoadingSource).not.toContain("../ui/card");
+    expect(previewLoadingSource).not.toContain("<Card");
+    expect(pdfPreviewSource).toContain('../ui/skeleton');
+    expect(pdfPreviewSource).not.toContain('../ui/spinner');
+    expect(pdfPreviewSource).not.toContain("Rendering PDF preview");
     expect(filesBrowserSource).not.toContain("Loader2");
     expect(previewPanelSource).not.toContain("Loader2");
     expect(spreadsheetPreviewSource).not.toContain("Loader2");
@@ -616,6 +626,9 @@ describe("shared layout contracts", () => {
     expect(source).toContain("ResizablePanelGroup");
     expect(source).toContain("ResizablePanel");
     expect(source).toContain("ResizableHandle");
+    expect(source).toContain("data-workspace-split-panel");
+    expect(source).toContain("transition-[flex-grow]");
+    expect(source).not.toContain("setTimeout");
     expect(source).not.toContain("window.addEventListener(\"pointermove\"");
     expect(source).not.toContain("document.body.style.cursor = \"col-resize\"");
   });
@@ -725,7 +738,7 @@ describe("shared layout contracts", () => {
     expect(source).toContain("gap-0");
     expect(source).toContain("sm:max-w-[min(96rem,calc(100vw-2rem))]");
     expect(source).toContain(
-      '"min-h-0 overflow-hidden px-4 py-4 sm:px-6 sm:py-6"',
+      '"min-h-0 overflow-x-hidden overflow-y-hidden px-4 py-4 sm:px-6 sm:py-6"',
     );
     expect(source).toContain("bodyClassName");
     expect(source).not.toContain(

@@ -2,11 +2,11 @@ import { promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { executeWorkbenchBuiltInAdapterCommand } from "@workbench-ai/workbench-built-in-adapters";
 
 import {
   BENCHMARK_SPEC_FILE,
   buildWorkbenchProjectSourceFiles,
+  engineResolveInvocationForSpec,
   normalizeSurfaceFiles,
   parseWorkbenchSourceFiles,
   resolveWorkbenchResolvedSourceYaml,
@@ -23,8 +23,8 @@ import {
   workbenchAdapterOperationCommand,
   workbenchAdapterOperationResultPath,
   type WorkbenchAdapterManifest,
-  type WorkbenchTaskBundle,
-  type WorkbenchTaskSourceResult,
+  type WorkbenchEngineCase,
+  type WorkbenchEngineResolveResult,
 } from "@workbench-ai/workbench-protocol";
 
 import {
@@ -33,13 +33,14 @@ import {
   type WorkspaceSnapshotFile,
 } from "./workspace-snapshot.js";
 import {
-  builtinAdapterManifests,
+  defaultAdapterManifests,
   composeRuntimeDockerfileWithAdapters,
-  resolveBuiltinWorkbenchAdapter,
+  resolveDefaultWorkbenchAdapter,
   resolveProjectAdapterSource,
   resolveWorkbenchAdaptersForProject,
   type ResolvedWorkbenchAdapter,
 } from "./adapter-project.js";
+import { createAdapterCommandEnv } from "./adapter-command-env.js";
 import YAML from "yaml";
 
 export const WORKBENCH_BENCHMARK_FILE = BENCHMARK_SPEC_FILE;
@@ -70,17 +71,32 @@ export interface LocalProjectSource {
   runtimeDockerfile: string;
   dockerfileFiles: HostedFile[];
   subjectFiles: HostedFile[];
-  taskSourceFiles: HostedFile[];
+  engineResolveFiles: HostedFile[];
   adapters: ResolvedWorkbenchAdapter[];
   adapterFiles: HostedFile[];
-  taskIds: string[];
-  taskBundles: WorkbenchTaskBundle[];
-  taskSource: LocalTaskSourceInvocation;
-  taskFingerprintPath: string;
+  caseIds: string[];
+  engineCases: WorkbenchEngineCase[];
+  engineResolve: LocalEngineResolveInvocation;
+  engineResolveFingerprintPath: string;
+  engineResolveEnvironment?: WorkbenchEngineResolveResult["environment"];
   sourceFiles: SurfaceSnapshotFile[];
 }
 
-export interface LocalTaskSourceInvocation {
+export interface LocalAuthoredProjectSource {
+  dir: string;
+  specPath: string;
+  specSource: string;
+  benchmarkPath: string;
+  benchmarkSource: string;
+  subjectDir: string;
+  subjectSpecPath: string;
+  subjectSource: string;
+  optimizerPath?: string;
+  optimizerSource?: string;
+  sourceFiles: SurfaceSnapshotFile[];
+}
+
+export interface LocalEngineResolveInvocation {
   use: string;
   with: Json;
   auth?: Json;
@@ -88,6 +104,17 @@ export interface LocalTaskSourceInvocation {
 
 interface LocalProjectSourceOptions {
   optimizerPath?: string;
+}
+
+function rootAdapterInvocations(
+  spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
+): LocalEngineResolveInvocation[] {
+  return [
+    engineResolveInvocationForSpec(spec),
+    spec.engineRun,
+    spec.run,
+    ...(spec.improve ? [spec.improve] : []),
+  ];
 }
 
 export async function readLocalProjectSource(
@@ -129,10 +156,12 @@ export async function readLocalProjectSource(
     );
   }
   const spec = resolveWorkbenchResolvedSourceYaml(specSource);
-  const dockerfileSources = await readDockerfileSources(dir, [
-    spec.environment.dockerfile,
-  ]);
   const dockerfilePath = spec.environment.dockerfile;
+  const dockerfileSources = await readDockerfileSourcesForSpec(
+    dir,
+    spec,
+    normalizedSources.engineCases,
+  );
   const dockerfile = dockerfileSources.get(dockerfilePath);
   if (dockerfile === undefined) {
     throw new WorkspaceSnapshotError(`Dockerfile not found: ${resolveProjectPath(dir, dockerfilePath)}`);
@@ -140,7 +169,7 @@ export async function readLocalProjectSource(
   const adapters = await resolveWorkbenchAdaptersForProject(dir, spec);
   const benchmarkAdapterIds = [
     ...new Set(collectWorkbenchAdapterInvocations(
-      [spec.score],
+      rootAdapterInvocations(spec),
       adapters.map((adapter) => adapter.manifest),
     ).map((invocation) => invocation.use)),
   ];
@@ -154,15 +183,15 @@ export async function readLocalProjectSource(
   const subjectFiles = await directoryExists(absoluteSubjectFilesPath)
     ? normalizeSurfaceFiles(await readSnapshotFiles(absoluteSubjectFilesPath))
     : [];
-  const rawTaskSourceFiles = taskSourceFilesFromBundles(normalizedSources.taskBundles);
-  const taskSourceFiles = toHostedFiles(rawTaskSourceFiles);
-  const taskBundles = normalizedSources.taskBundles;
-  if (taskBundles.length === 0) {
+  const rawEngineResolveFiles = engineResolveFilesFromBundles(normalizedSources.engineCases);
+  const engineResolveFiles = toHostedFiles(rawEngineResolveFiles);
+  const engineCases = normalizedSources.engineCases;
+  if (engineCases.length === 0) {
     throw new WorkspaceSnapshotError(
-      `Task-source adapter ${normalizedSources.taskSource.use} did not emit any task bundles.`,
+      `Engine resolver ${normalizedSources.engineResolve.use} did not emit any cases.`,
     );
   }
-  const taskIds = taskBundles.map((bundle) => bundle.id);
+  const caseIds = engineCases.map((bundle) => bundle.id);
   return {
     dir,
     specPath: benchmarkPath,
@@ -183,13 +212,16 @@ export async function readLocalProjectSource(
     runtimeDockerfile: composedDockerfile,
     dockerfileFiles: toHostedFiles(dockerfileSourceFiles(dockerfileSources)),
     subjectFiles: toHostedFiles(subjectFiles),
-    taskSourceFiles,
+    engineResolveFiles,
     adapters,
     adapterFiles: toHostedFiles(adapterFiles),
-    taskIds,
-    taskBundles,
-    taskSource: normalizedSources.taskSource,
-    taskFingerprintPath: normalizedSources.taskFingerprintPath,
+    caseIds,
+    engineCases,
+    engineResolve: normalizedSources.engineResolve,
+    engineResolveFingerprintPath: normalizedSources.engineResolveFingerprintPath,
+    ...(normalizedSources.engineResolveEnvironment
+      ? { engineResolveEnvironment: normalizedSources.engineResolveEnvironment }
+      : {}),
     sourceFiles: buildWorkbenchProjectSourceFiles({
       specFiles: [
         textSourceFile(toRootRelativePath(dir, benchmarkPath), benchmarkSource),
@@ -200,11 +232,53 @@ export async function readLocalProjectSource(
       ],
       subjectFilesPath: spec.subject.files.path,
       subjectFiles,
-      tasksPath: normalizedSources.taskFingerprintPath,
-      taskFiles: rawTaskSourceFiles,
+      engineResolveFilesPath: normalizedSources.engineResolveFingerprintPath,
+      engineResolveFiles: rawEngineResolveFiles,
       adapterFiles,
       dockerfiles: dockerfileSourceFiles(dockerfileSources),
     }),
+  };
+}
+
+export async function readLocalAuthoredProjectSource(
+  source: string,
+  options: LocalProjectSourceOptions = {},
+): Promise<LocalAuthoredProjectSource> {
+  const {
+    dir,
+    benchmarkPath,
+    subjectSpecPath,
+    subjectDir,
+    optimizerPath,
+  } = await resolveLocalProjectSourcePaths(source, options);
+  const benchmarkSource = await readRequiredTextFile(benchmarkPath, WORKBENCH_BENCHMARK_FILE);
+  const subjectSource = await readRequiredTextFile(subjectSpecPath, "subject YAML");
+  const optimizerSource = optimizerPath
+    ? await readRequiredTextFile(optimizerPath, "optimizer YAML")
+    : undefined;
+  const resolvedSource = parseWorkbenchSourceFiles({
+    benchmarkSource,
+    subjectSource,
+    optimizerSource,
+  });
+  const specSource = serializeWorkbenchResolvedSourceYaml(resolvedSource);
+  return {
+    dir,
+    specPath: benchmarkPath,
+    specSource,
+    benchmarkPath,
+    benchmarkSource,
+    subjectDir,
+    subjectSpecPath,
+    subjectSource,
+    ...(optimizerPath && optimizerSource !== undefined ? { optimizerPath, optimizerSource } : {}),
+    sourceFiles: [
+      textSourceFile(toRootRelativePath(dir, benchmarkPath), benchmarkSource),
+      textSourceFile(toRootRelativePath(dir, subjectSpecPath), subjectSource),
+      ...(optimizerPath && optimizerSource !== undefined
+        ? [textSourceFile(toRootRelativePath(dir, optimizerPath), optimizerSource)]
+        : []),
+    ],
   };
 }
 
@@ -354,9 +428,10 @@ async function normalizeSourceYamlForExecution(args: {
   benchmarkSource: string;
   subjectSource: string;
   optimizerSource?: string;
-  taskFingerprintPath: string;
-  taskSource: LocalTaskSourceInvocation;
-  taskBundles: WorkbenchTaskBundle[];
+  engineResolveFingerprintPath: string;
+  engineResolve: LocalEngineResolveInvocation;
+  engineResolveEnvironment?: WorkbenchEngineResolveResult["environment"];
+  engineCases: WorkbenchEngineCase[];
 }> {
   const benchmark = parseYamlRecord(args.benchmarkSource, args.benchmarkPath);
   const subject = parseYamlRecord(args.subjectSource, args.subjectSpecPath);
@@ -371,89 +446,86 @@ async function normalizeSourceYamlForExecution(args: {
   if (optimizer && args.optimizerPath) {
     normalizeAdapterSourcePaths(args.dir, optimizer, path.dirname(args.optimizerPath));
   }
-  const authoredTaskSource = normalizeTaskSourceDeclaration(benchmark.tasks);
-  const taskSource = await resolveTaskSourceAdapter({
+  const engine = yamlRecord(benchmark.engine);
+  if (!engine || typeof engine.use !== "string" || !engine.use.trim()) {
+    throw new WorkspaceSnapshotError("benchmark.yaml engine must declare an adapter invocation with use.");
+  }
+  normalizeEngineForExecution(args.dir, benchmarkDir, subjectDir, benchmark, subject);
+  const authoredEngineResolve = engineResolveInvocationFromRecord(engine);
+  const engineResolve = await resolveEngineResolveAdapter({
     root: args.dir,
     yamlDir: benchmarkDir,
     benchmark,
-    value: authoredTaskSource,
+    value: authoredEngineResolve,
   });
-  const taskFingerprintPath = taskSourceFingerprintPath(args.dir, benchmarkDir, authoredTaskSource);
-  benchmark.tasks = { path: taskFingerprintPath };
-  if (!yamlRecord(benchmark.environment) && taskSource.environment) {
-    benchmark.environment = taskSource.environment;
-  }
-  const subjectFiles = yamlRecord(subject.files);
-  if (subjectFiles && typeof subjectFiles.path === "string") {
-    subjectFiles.path = toRootRelativePath(
-      args.dir,
-      resolveYamlReference(subjectDir, subjectFiles.path),
-    );
-    subject.files = subjectFiles;
-  }
-  const environment = yamlRecord(benchmark.environment);
-  if (environment && typeof environment.dockerfile === "string") {
-    environment.dockerfile = toRootRelativePath(
-      args.dir,
-      resolveYamlReference(benchmarkDir, environment.dockerfile),
-    );
-  }
+  const engineResolveFingerprintPath = engineResolve.sourcePath
+    ?? engineResolvePathForInvocation(args.dir, benchmarkDir, authoredEngineResolve);
+  applyEngineResolveEnvironment(benchmark, engineResolve.environment);
   return {
     benchmarkSource: YAML.stringify(benchmark).trimEnd() + "\n",
     subjectSource: YAML.stringify(subject).trimEnd() + "\n",
-    taskFingerprintPath,
-    taskSource: authoredTaskSource,
-    taskBundles: taskSource.taskBundles,
+    engineResolveFingerprintPath,
+    engineResolve: authoredEngineResolve,
+    ...(engineResolve.environment ? { engineResolveEnvironment: engineResolve.environment } : {}),
+    engineCases: engineResolve.engineCases,
     ...(optimizer
       ? { optimizerSource: YAML.stringify(optimizer).trimEnd() + "\n" }
       : {}),
   };
 }
 
-function normalizeTaskSourceDeclaration(value: unknown): LocalTaskSourceInvocation {
-  if (value === undefined || value === null) {
-    return defaultPathTaskSourceDeclaration();
-  }
-  const record = yamlRecord(value);
-  if (!record || typeof record.use !== "string" || record.use.length === 0) {
-    throw new WorkspaceSnapshotError(
-      "benchmark.yaml.tasks must be omitted for the default tasks/ directory or declare an adapter invocation with use.",
+function normalizeEngineForExecution(
+  root: string,
+  benchmarkDir: string,
+  subjectDir: string,
+  benchmark: Record<string, unknown>,
+  subject: Record<string, unknown>,
+): void {
+  const subjectFiles = yamlRecord(subject.files);
+  if (subjectFiles && typeof subjectFiles.path === "string") {
+    subjectFiles.path = toRootRelativePath(
+      root,
+      resolveYamlReference(subjectDir, subjectFiles.path),
     );
+    subject.files = subjectFiles;
   }
-  const config = record.with === undefined ? {} : yamlRecord(record.with);
-  if (record.with !== undefined && !config) {
-    throw new WorkspaceSnapshotError("benchmark.yaml.tasks.with must be a YAML object.");
+  const engine = yamlRecord(benchmark.engine);
+  const engineConfig = yamlRecord(engine?.with) ?? {};
+  const environment = yamlRecord(engineConfig.environment);
+  if (environment && typeof environment.dockerfile === "string") {
+    environment.dockerfile = toRootRelativePath(
+      root,
+      resolveYamlReference(benchmarkDir, environment.dockerfile),
+    );
+    engineConfig.environment = environment;
   }
-  const configRecord = config ?? {};
-  if (record.use === "path") {
-    if (configRecord.path === undefined) {
-      return taskSourceInvocationFromRecord({
-        ...record,
-        with: {
-          ...configRecord,
-          path: "tasks",
-        },
-      });
+  if (engine) {
+    engine.with = engineConfig as Json;
+    benchmark.engine = engine;
+  }
+}
+
+function applyEngineResolveEnvironment(
+  benchmark: Record<string, unknown>,
+  environment: WorkbenchEngineResolveResult["environment"] | undefined,
+): void {
+  if (!environment) {
+    return;
+  }
+  const engine = yamlRecord(benchmark.engine);
+  const engineConfig = yamlRecord(engine?.with) ?? {};
+  if (!yamlRecord(engineConfig.environment)) {
+    engineConfig.environment = environment;
+    if (engine) {
+      engine.with = engineConfig as Json;
+      benchmark.engine = engine;
     }
   }
-  return taskSourceInvocationFromRecord({
-    ...record,
-    with: configRecord,
-  });
 }
 
-function defaultPathTaskSourceDeclaration(): LocalTaskSourceInvocation {
-  return {
-    use: "path",
-    with: {
-      path: "tasks",
-    },
-  };
-}
-
-function taskSourceInvocationFromRecord(
+function engineResolveInvocationFromRecord(
   record: Record<string, unknown>,
-): LocalTaskSourceInvocation {
+): LocalEngineResolveInvocation {
   return {
     use: record.use as string,
     with: cloneJson((record.with ?? {}) as Json),
@@ -465,19 +537,14 @@ function cloneJson<T extends Json>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function taskSourceFingerprintPath(
+function engineResolvePathForInvocation(
   root: string,
   yamlDir: string,
-  declaration: LocalTaskSourceInvocation,
+  declaration: LocalEngineResolveInvocation,
 ): string {
-  if (declaration.use === "path") {
-    const config = yamlRecord(declaration.with);
-    const configuredPath = typeof config?.path === "string" && config.path.length > 0
-      ? config.path
-      : "tasks";
-    return toRootRelativePath(root, resolveYamlReference(yamlDir, configuredPath));
-  }
-  return `task-source/${safePathSegment(String(declaration.use))}`;
+  void root;
+  void yamlDir;
+  return `engine-resolve/${safePathSegment(String(declaration.use))}`;
 }
 
 function normalizeAdapterSourcePaths(
@@ -495,34 +562,35 @@ function normalizeAdapterSourcePaths(
   );
 }
 
-async function resolveTaskSourceAdapter(args: {
+async function resolveEngineResolveAdapter(args: {
   root: string;
   yamlDir: string;
   benchmark: Record<string, unknown>;
   value: unknown;
 }): Promise<{
-  taskBundles: WorkbenchTaskBundle[];
-  environment?: WorkbenchTaskSourceResult["environment"];
+  engineCases: WorkbenchEngineCase[];
+  sourcePath?: string;
+  environment?: WorkbenchEngineResolveResult["environment"];
 }> {
   const record = yamlRecord(args.value);
   if (!record || typeof record.use !== "string") {
-    throw new WorkspaceSnapshotError("benchmark.yaml.tasks must be an adapter invocation.");
+    throw new WorkspaceSnapshotError("benchmark.yaml engine must be an adapter invocation.");
   }
-  const adapter = await resolveTaskSourceAdapterReference({
+  const adapter = await resolveEngineResolveAdapterReference({
     root: args.root,
     benchmark: args.benchmark,
     adapterId: record.use,
   });
-  await assertTaskSourceAdapterOperations({
+  await assertEngineResolveAdapterOperations({
     root: args.root,
     benchmark: args.benchmark,
-    invocation: taskSourceInvocationFromRecord(record),
+    invocation: engineResolveInvocationFromRecord(record),
   });
   const digest = createHash("sha256")
     .update(JSON.stringify({
       adapter: adapter.contentHash,
       invocation: record,
-      cwd: path.resolve(args.yamlDir),
+      yamlDir: path.resolve(args.yamlDir),
     }))
     .digest("hex")
     .slice(0, 16);
@@ -530,7 +598,7 @@ async function resolveTaskSourceAdapter(args: {
     args.root,
     ".workbench",
     "generated",
-    "task-sources",
+    "engine-resolves",
     safePathSegment(record.use),
     `${digest}-${randomUUID().replace(/-/gu, "").slice(0, 12)}`,
   );
@@ -540,9 +608,9 @@ async function resolveTaskSourceAdapter(args: {
   await fs.writeFile(
     requestPath,
     `${JSON.stringify({
-      protocol: "workbench.adapter.v2",
-      id: `task_source_${digest}`,
-      operation: "tasks.resolve",
+      protocol: "workbench.adapter.v3",
+      id: `engine_resolve_${digest}`,
+      operation: "engine.resolve",
       invocation: {
         use: record.use,
         with: record.with ?? {},
@@ -550,35 +618,36 @@ async function resolveTaskSourceAdapter(args: {
       },
       paths: {
         workspace: args.root,
-        cwd: args.yamlDir,
         output: generatedRoot,
         result: workbenchAdapterOperationResultPath(generatedRoot),
       },
     }, null, 2)}\n`,
   );
-  await executeTaskSourceAdapter({
+  await executeEngineResolveAdapter({
     adapter,
     requestPath,
     outputRoot: generatedRoot,
     workspaceRoot: args.root,
   });
-  const result = await readTaskSourceResult(generatedRoot, record.use);
-  const environment = normalizeTaskSourceEnvironment(args.root, result.environment);
+  const result = await readEngineResolveResult(generatedRoot, record.use);
+  const environment = normalizeEngineResolveEnvironment(args.root, result.value.environment);
+  const sourcePath = engineResolveSourcePathFromFeedback(args.root, args.yamlDir, result.feedback);
   return {
-    taskBundles: result.tasks,
+    engineCases: normalizeEngineCaseEnvironments(args.root, result.value.cases),
+    ...(sourcePath ? { sourcePath } : {}),
     ...(environment ? { environment } : {}),
   };
 }
 
-async function assertTaskSourceAdapterOperations(args: {
+async function assertEngineResolveAdapterOperations(args: {
   root: string;
   benchmark: Record<string, unknown>;
-  invocation: LocalTaskSourceInvocation;
+  invocation: LocalEngineResolveInvocation;
 }): Promise<void> {
   const manifests = await resolveBenchmarkAdapterManifests(args.root, args.benchmark);
   try {
     assertWorkbenchAdapterOperationSupport(
-      [{ invocation: args.invocation, operation: "tasks.resolve" }],
+      [{ invocation: args.invocation, operation: "engine.resolve" }],
       manifests,
     );
   } catch (error) {
@@ -591,7 +660,7 @@ async function resolveBenchmarkAdapterManifests(
   benchmark: Record<string, unknown>,
 ): Promise<WorkbenchAdapterManifest[]> {
   const manifests = new Map<string, WorkbenchAdapterManifest>(
-    builtinAdapterManifests().map((manifest) => [manifest.id, manifest]),
+    defaultAdapterManifests().map((manifest) => [manifest.id, manifest]),
   );
   const sources = Array.isArray(benchmark.adapters)
     ? benchmark.adapters.filter((entry): entry is string => typeof entry === "string")
@@ -603,7 +672,7 @@ async function resolveBenchmarkAdapterManifests(
   return [...manifests.values()];
 }
 
-async function resolveTaskSourceAdapterReference(args: {
+async function resolveEngineResolveAdapterReference(args: {
   root: string;
   benchmark: Record<string, unknown>;
   adapterId: string;
@@ -617,34 +686,28 @@ async function resolveTaskSourceAdapterReference(args: {
       return adapter;
     }
   }
-  const builtin = resolveBuiltinWorkbenchAdapter(args.adapterId);
-  if (builtin) {
-    return builtin;
+  const defaultAdapter = resolveDefaultWorkbenchAdapter(args.adapterId);
+  if (defaultAdapter) {
+    return defaultAdapter;
   }
   throw new WorkspaceSnapshotError(
-    `Task-source adapter ${args.adapterId} is not installed. Add its source under benchmark.yaml adapters.`,
+    `Workbench engine resolver adapter ${args.adapterId} is not installed. Add its source under benchmark.yaml adapters.`,
   );
 }
 
-async function executeTaskSourceAdapter(args: {
+async function executeEngineResolveAdapter(args: {
   adapter: ResolvedWorkbenchAdapter;
   requestPath: string;
   outputRoot: string;
   workspaceRoot: string;
 }): Promise<void> {
-  if (args.adapter.kind === "builtin") {
-    await executeWorkbenchBuiltInAdapterCommand({
-      adapterId: args.adapter.manifest.id,
-      requestPath: args.requestPath,
-      outputRoot: args.outputRoot,
-    });
-    return;
-  }
   const cwd = args.adapter.root && await directoryExists(args.adapter.root)
     ? args.adapter.root
-    : await materializeTaskSourceAdapterFiles(args.outputRoot, args.adapter);
-  await runTaskSourceAdapterCommand({
-    command: workbenchAdapterOperationCommand(args.adapter.manifest, "tasks.resolve"),
+    : args.adapter.kind === "default"
+      ? args.workspaceRoot
+      : await materializeEngineResolveAdapterFiles(args.outputRoot, args.adapter);
+  await runEngineResolveAdapterCommand({
+    command: workbenchAdapterOperationCommand(args.adapter.manifest, "engine.resolve"),
     cwd,
     requestPath: args.requestPath,
     outputRoot: args.outputRoot,
@@ -652,7 +715,7 @@ async function executeTaskSourceAdapter(args: {
   });
 }
 
-async function materializeTaskSourceAdapterFiles(
+async function materializeEngineResolveAdapterFiles(
   outputRoot: string,
   adapter: ResolvedWorkbenchAdapter,
 ): Promise<string> {
@@ -670,23 +733,28 @@ async function materializeTaskSourceAdapterFiles(
   return adapterRoot;
 }
 
-async function runTaskSourceAdapterCommand(args: {
+async function runEngineResolveAdapterCommand(args: {
   command: string;
   cwd: string;
   requestPath: string;
   outputRoot: string;
   workspaceRoot: string;
 }): Promise<void> {
+  const adapterRoot = await fs.realpath(args.cwd).catch(() => args.cwd);
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("sh", ["-lc", args.command], {
+    const child = spawn("sh", ["-c", args.command], {
       cwd: args.cwd,
-      env: {
-        ...process.env,
-        WORKBENCH_ADAPTER_REQUEST: args.requestPath,
-        WORKBENCH_OUTPUT: args.outputRoot,
-        WORKBENCH_RESULT: workbenchAdapterOperationResultPath(args.outputRoot),
-        WORKBENCH_WORKSPACE_ROOT: args.workspaceRoot,
-      },
+      env: createAdapterCommandEnv({
+        workspaceRoot: args.workspaceRoot,
+        adapterRoot,
+        extraEnv: {
+          WORKBENCH_ADAPTER_REQUEST: args.requestPath,
+          WORKBENCH_OUTPUT: args.outputRoot,
+          WORKBENCH_RESULT: workbenchAdapterOperationResultPath(args.outputRoot),
+          WORKBENCH_WORKSPACE_ROOT: args.workspaceRoot,
+          WORKBENCH_ADAPTER_ROOT: adapterRoot,
+        },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
@@ -706,8 +774,8 @@ async function runTaskSourceAdapterCommand(args: {
       reject(new WorkspaceSnapshotError(
         [
           signal
-            ? `Task-source adapter command exited from signal ${signal}.`
-            : `Task-source adapter command exited with status ${code ?? "unknown"}.`,
+            ? `Workbench engine resolver adapter command exited from signal ${signal}.`
+            : `Workbench engine resolver adapter command exited with status ${code ?? "unknown"}.`,
           detail,
         ].filter(Boolean).join("\n"),
       ));
@@ -715,30 +783,50 @@ async function runTaskSourceAdapterCommand(args: {
   });
 }
 
-async function readTaskSourceResult(
+async function readEngineResolveResult(
   outputRoot: string,
   adapterId: string,
-): Promise<WorkbenchTaskSourceResult> {
-  return await readWorkbenchAdapterOperationResult(outputRoot, "tasks.resolve").then((result) => {
-    assertWorkbenchAdapterOperationResultOk(result, `Adapter ${adapterId} tasks.resolve`);
+): Promise<{ value: WorkbenchEngineResolveResult; feedback?: Json }> {
+  return await readWorkbenchAdapterOperationResult(outputRoot, "engine.resolve").then((result) => {
+    assertWorkbenchAdapterOperationResultOk(result, `Adapter ${adapterId} engine.resolve`);
     if (!result.value || typeof result.value !== "object" || Array.isArray(result.value)) {
-      throw new WorkspaceSnapshotError(`Adapter ${adapterId} tasks.resolve did not return task bundles.`);
+      throw new WorkspaceSnapshotError(`Adapter ${adapterId} engine.resolve did not return engine cases.`);
     }
-    return result.value as WorkbenchTaskSourceResult;
+    return {
+      value: result.value as WorkbenchEngineResolveResult,
+      ...(result.feedback !== undefined ? { feedback: result.feedback as Json } : {}),
+    };
   }).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new WorkspaceSnapshotError(
-        `Adapter ${adapterId} must write workbench-result.json for tasks.resolve.`,
+        `Adapter ${adapterId} must write workbench-result.json for engine.resolve.`,
       );
     }
     throw new WorkspaceSnapshotError(error instanceof Error ? error.message : String(error));
   });
 }
 
-function normalizeTaskSourceEnvironment(
+function engineResolveSourcePathFromFeedback(
   root: string,
-  environment: WorkbenchTaskSourceResult["environment"] | undefined,
-): WorkbenchTaskSourceResult["environment"] | undefined {
+  yamlDir: string,
+  feedback: Json | undefined,
+): string | undefined {
+  const record = yamlRecord(feedback);
+  if (!record || typeof record.path !== "string" || record.path.trim().length === 0) {
+    return undefined;
+  }
+  const absolute = resolveYamlReference(yamlDir, record.path);
+  const relative = path.relative(root, absolute);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return undefined;
+  }
+  return normalizeSnapshotPath(relative);
+}
+
+function normalizeEngineResolveEnvironment(
+  root: string,
+  environment: WorkbenchEngineResolveResult["environment"] | undefined,
+): WorkbenchEngineResolveResult["environment"] | undefined {
   if (!environment) {
     return undefined;
   }
@@ -755,17 +843,33 @@ function normalizeTaskSourceEnvironment(
   };
 }
 
-function taskSourceFilesFromBundles(
-  taskBundles: readonly WorkbenchTaskBundle[],
+function normalizeEngineCaseEnvironments(
+  root: string,
+  engineCases: readonly WorkbenchEngineCase[],
+): WorkbenchEngineCase[] {
+  return engineCases.map((engineCase) => {
+    const environment = normalizeEngineResolveEnvironment(
+      root,
+      engineCase.case.environment,
+    );
+    return {
+      ...engineCase,
+      case: {
+        ...engineCase.case,
+        ...(environment ? { environment } : {}),
+      },
+    };
+  });
+}
+
+function engineResolveFilesFromBundles(
+  engineCases: readonly WorkbenchEngineCase[],
 ): SurfaceSnapshotFile[] {
-  return normalizeSurfaceFiles(taskBundles.flatMap((bundle) => {
-    const files = bundle.sourceFiles?.length
-      ? bundle.sourceFiles
-      : [
-          ...bundle.publicFiles,
-          ...bundle.testFiles,
-          ...(bundle.solutionFiles ?? []),
-        ];
+  return normalizeSurfaceFiles(engineCases.flatMap((bundle) => {
+    const buckets = bundle.files;
+    const files = buckets.source?.length
+      ? buckets.source
+      : [...(buckets.public ?? []), ...(buckets.private ?? [])];
     return files.map((file) => ({
       ...file,
       path: normalizeSnapshotPath(`${bundle.id}/${file.path}`),
@@ -782,7 +886,7 @@ function isPathAdapterSource(source: string): boolean {
 }
 
 function isBenchmarkSourceRecord(record: Record<string, unknown>): boolean {
-  return record.score !== undefined;
+  return record.engine !== undefined;
 }
 
 function isSubjectSourceRecord(record: Record<string, unknown>): boolean {
@@ -909,19 +1013,28 @@ async function readRequiredTextFile(filePath: string, label: string): Promise<st
   });
 }
 
-async function readDockerfileSources(
+async function readDockerfileSourcesForSpec(
   dir: string,
-  dockerfilePaths: readonly (string | undefined)[],
+  spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
+  engineCases: readonly WorkbenchEngineCase[] = [],
 ): Promise<Map<string, string>> {
+  const dockerfilePaths = new Set<string>([spec.environment.dockerfile]);
+  for (const engineCase of engineCases) {
+    const dockerfile = engineCase.case.environment?.dockerfile;
+    if (dockerfile) {
+      dockerfilePaths.add(dockerfile);
+    }
+  }
   const sources = new Map<string, string>();
-  for (const dockerfilePath of [...new Set(dockerfilePaths.filter((entry): entry is string => Boolean(entry)))]) {
+  for (const dockerfilePath of [...dockerfilePaths].sort()) {
     const absoluteDockerfilePath = resolveProjectPath(dir, dockerfilePath);
-    sources.set(dockerfilePath, await fs.readFile(absoluteDockerfilePath, "utf8").catch((error: unknown) => {
+    const source = await fs.readFile(absoluteDockerfilePath, "utf8").catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new WorkspaceSnapshotError(`Dockerfile not found: ${absoluteDockerfilePath}`);
       }
       throw error;
-    }));
+    });
+    sources.set(dockerfilePath, source);
   }
   return sources;
 }
@@ -950,7 +1063,7 @@ function adapterSourceFiles(
   adapters: readonly ResolvedWorkbenchAdapter[],
 ): SurfaceSnapshotFile[] {
   return adapters.flatMap((adapter) =>
-    adapter.kind === "builtin"
+    adapter.kind === "default"
       ? []
       : (adapter.files ?? []).map((file) => ({
           path: adapterSourceSnapshotPath(adapter, file.path),

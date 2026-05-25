@@ -18,7 +18,7 @@ import {
   type LineageEdge,
   type LineageNode,
 } from "../lib/lineage";
-import type { RuntimeSnapshot } from "../types";
+import type { BenchmarkSnapshot } from "../types";
 import { LineageSurfaceSkeleton } from "./loading-states";
 
 interface FlowState {
@@ -48,7 +48,7 @@ export function LineageGraph({
   selectedSubjectId,
   onSelectSubject,
 }: {
-  snapshot: RuntimeSnapshot | null;
+  snapshot: BenchmarkSnapshot | null;
   selectedSubjectId: string | null;
   onSelectSubject: (subjectId: string) => void;
 }) {
@@ -68,7 +68,7 @@ function LineageGraphCanvas({
   selectedSubjectId,
   onSelectSubject,
 }: {
-  snapshot: RuntimeSnapshot | null;
+  snapshot: BenchmarkSnapshot | null;
   selectedSubjectId: string | null;
   onSelectSubject: (subjectId: string) => void;
 }) {
@@ -214,12 +214,15 @@ const SubjectNode = memo(function SubjectNode(props: NodeProps<LineageNode>) {
         {flowData.active ? (
           <div className="text-[11px] leading-4 text-primary">Active</div>
         ) : null}
-        {flowData.metricText ? (
+        <div className="min-w-0 truncate text-[11px] font-medium leading-4 text-foreground">
+          {flowData.scoreText}
+        </div>
+        {flowData.sourceText ? (
           <div
             className="min-w-0 truncate text-[11px] leading-4 text-muted-foreground"
-            title={flowData.metricText}
+            title={flowData.sourceText}
           >
-            {flowData.metricText}
+            {flowData.sourceText}
           </div>
         ) : null}
       </div>

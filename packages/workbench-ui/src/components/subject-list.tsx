@@ -4,20 +4,24 @@ import { Button } from "@workbench-ai/cli-web-ui/components/ui/button";
 
 import {
   formatSubjectSelectionLabel,
-  formatMetricSummary,
-  formatTimestamp,
   shortId,
 } from "../lib/format";
-import type { SubjectSummary } from "../types";
+import {
+  buildLatestEvaluationBySubject,
+  resolveSubjectEvaluationDisplay,
+} from "../lib/subject-evaluation-display";
+import type { EvaluationSummary, SubjectSummary } from "../types";
 import { StatusBadge } from "./status-badge";
 
 export function SubjectList({
   summaries,
+  evaluations,
   activeId,
   selectedId,
   onSelect,
 }: {
   summaries: SubjectSummary[];
+  evaluations: EvaluationSummary[];
   activeId: string | null;
   selectedId: string | null;
   onSelect: (subjectId: string) => void;
@@ -35,6 +39,8 @@ export function SubjectList({
     );
   }
 
+  const latestEvaluationBySubject = buildLatestEvaluationBySubject(evaluations);
+
   return (
     <div className="grid gap-3">
       {summaries.map((summary) => {
@@ -42,12 +48,13 @@ export function SubjectList({
         const isActive = activeId === summary.id;
         const subjectLabel = shortId(summary.id) ?? summary.id;
         const baseId = summary.baseId && summary.baseId !== summary.id ? summary.baseId : null;
-        const metricSummary = formatMetricSummary(summary.metrics);
-        const createdAtLabel = formatTimestamp(summary.createdAt);
+        const evaluationDisplay = resolveSubjectEvaluationDisplay({
+          latestEvaluation: latestEvaluationBySubject.get(summary.id) ?? null,
+        });
         const accessibilityLabel = formatSubjectSelectionLabel({
           summary,
           active: isActive,
-          details: [metricSummary, createdAtLabel],
+          details: [evaluationDisplay.ariaText],
         });
 
         return (
@@ -63,24 +70,26 @@ export function SubjectList({
             onClick={() => onSelect(summary.id)}
           >
             <div className="flex h-full w-full min-w-0 flex-col gap-2 p-3 sm:p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="grid gap-1">
-                  <span className="text-[11px] font-medium uppercase text-muted-foreground">
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="grid min-w-0 gap-1">
+                  <span className="min-w-0 truncate text-[11px] font-medium uppercase text-muted-foreground">
                     {baseId ? `from ${shortId(baseId)}` : "genesis"}
                   </span>
-                  <p className="text-sm font-semibold text-foreground">{subjectLabel}</p>
+                  <p className="min-w-0 break-words text-sm font-semibold text-foreground [overflow-wrap:anywhere]">
+                    {subjectLabel}
+                  </p>
                 </div>
-                <StatusBadge status={summary.status} active={isActive} />
+                <StatusBadge status={summary.status} active={isActive} className="shrink-0" />
               </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                <span>{metricSummary}</span>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                <span className="font-medium text-foreground">{evaluationDisplay.scoreText}</span>
+                <span className="text-muted-foreground">{evaluationDisplay.sourceText}</span>
                 {isActive ? (
                   <span className="inline-flex items-center gap-1 text-primary">
                     <GitBranchIcon className="size-3.5" />
                     Active
                   </span>
                 ) : null}
-                <span>{createdAtLabel}</span>
               </div>
             </div>
           </Button>

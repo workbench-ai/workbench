@@ -10,7 +10,7 @@ import {
 } from "./execution-graph.ts";
 import type {
   GenericRunSpec,
-  WorkbenchTaskBundle,
+  WorkbenchEngineCase,
 } from "./generic-spec.ts";
 
 export type WorkbenchRunWorkflow = "eval" | "improve";
@@ -51,7 +51,7 @@ export function validateWorkbenchRunEnvelope(args: {
   return null;
 }
 
-export function trialJobCountForRunSpec(_spec: GenericRunSpec): number {
+export function attemptJobCountForRunSpec(_spec: GenericRunSpec): number {
   return 1;
 }
 
@@ -60,7 +60,7 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   projectId: string;
   runId: string;
   subjectId: string;
-  trialIndex: number;
+  attemptIndex: number;
   samples: number;
   caseIds?: readonly string[];
   spec: GenericRunSpec;
@@ -68,33 +68,34 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   purpose: WorkbenchExecutionSpec["purpose"];
   now: string;
   baseFiles?: readonly SurfaceSnapshotFile[];
-  taskBundles: readonly WorkbenchTaskBundle[];
+  engineCases: readonly WorkbenchEngineCase[];
   traceFiles?: readonly SurfaceSnapshotFile[];
   environmentRef?: string;
+  environmentRefsByCase?: ReadonlyMap<string, string>;
   baseId?: string | null;
 }): HostedWorkbenchJob[] {
   const jobs: HostedWorkbenchJob[] = [];
-  const taskBundles = args.taskBundles;
+  const engineCases = args.engineCases;
   const caseIds = args.caseIds && args.caseIds.length > 0
     ? [...args.caseIds]
-    : taskBundleIds(taskBundles);
+    : engineCaseIds(engineCases);
   if (caseIds.length === 0) {
-    throw new Error("Run planning requires at least one task bundle.");
+    throw new Error("Run planning requires at least one engine case.");
   }
   for (const caseId of caseIds) {
-    const taskBundle = taskBundleForCase(taskBundles, caseId);
+    const engineCase = engineCaseForCase(engineCases, caseId);
     for (let sampleIndex = 0; sampleIndex < args.samples; sampleIndex += 1) {
       const graph = compileWorkbenchExecutionGraph({
         ownerUserId: args.ownerUserId,
         projectId: args.projectId,
         runId: args.runId,
         subjectId: args.subjectId,
-        trialIndex: args.trialIndex,
+        attemptIndex: args.attemptIndex,
         sampleIndex,
         caseId,
         spec: args.spec,
-        task: taskBundle.task,
-        environmentRef: args.environmentRef,
+        engineCase: engineCase.case,
+        environmentRef: args.environmentRefsByCase?.get(caseId) ?? args.environmentRef,
         workflow: args.workflow === "improve" ? "improve" : "eval",
       });
       for (const node of graph.nodes) {
@@ -118,19 +119,19 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   return jobs.filter((job, index) => jobs.findIndex((entry) => entry.id === job.id) === index);
 }
 
-export function taskBundleIds(taskBundles: readonly WorkbenchTaskBundle[]): string[] {
-  return [...new Set(taskBundles.map((bundle) => bundle.id))].sort();
+export function engineCaseIds(engineCases: readonly WorkbenchEngineCase[]): string[] {
+  return [...new Set(engineCases.map((bundle) => bundle.id))].sort();
 }
 
-export function taskBundleForCase(
-  taskBundles: readonly WorkbenchTaskBundle[],
+export function engineCaseForCase(
+  engineCases: readonly WorkbenchEngineCase[],
   caseId: string,
-): WorkbenchTaskBundle {
-  const taskBundle = taskBundles.find((bundle) => bundle.id === caseId);
-  if (!taskBundle) {
-    throw new Error(`Task bundle not found for case ${caseId}.`);
+): WorkbenchEngineCase {
+  const engineCase = engineCases.find((bundle) => bundle.id === caseId);
+  if (!engineCase) {
+    throw new Error(`Engine case not found for case ${caseId}.`);
   }
-  return taskBundle;
+  return engineCase;
 }
 
 export function createWorkbenchExecutionJob(args: {
@@ -144,7 +145,7 @@ export function createWorkbenchExecutionJob(args: {
   traceFiles?: readonly SurfaceSnapshotFile[];
   baseId?: string | null;
 }): HostedWorkbenchJob {
-  const trialIndex = readExecutionMetadataNumber(args.execution, "trialIndex");
+  const attemptIndex = readExecutionMetadataNumber(args.execution, "attemptIndex");
   const sampleIndex = readExecutionMetadataNumber(args.execution, "sampleIndex");
   const caseId = readExecutionMetadataString(args.execution, "caseId");
   return {
@@ -161,7 +162,7 @@ export function createWorkbenchExecutionJob(args: {
       execution: args.execution,
       dependsOn: args.dependsOn.map(workbenchExecutionJobId),
       subjectId: args.subjectId,
-      trialIndex,
+      attemptIndex,
       sampleIndex,
       caseId,
       ...(args.baseFiles ? { baseFiles: args.baseFiles.map((file) => ({ ...file })) } : {}),
@@ -171,26 +172,26 @@ export function createWorkbenchExecutionJob(args: {
   };
 }
 
-export function createSyntheticProposalExecution(args: {
+export function createBaselineSubjectExecution(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
   subjectId: string;
-  trialIndex: number;
+  attemptIndex: number;
 }): WorkbenchExecutionSpec {
   return {
-    id: `exec_${args.runId.replace(/[^a-z0-9_]/giu, "_")}_trial_${String(args.trialIndex).padStart(3, "0")}_case_current_sample_000_improve`,
+    id: `exec_${args.runId.replace(/[^a-z0-9_]/giu, "_")}_attempt_${String(args.attemptIndex).padStart(3, "0")}_case_current_sample_000_improve`,
     projectId: args.projectId,
     runId: args.runId,
     subjectId: args.subjectId,
     purpose: "improve",
     adapter: {
-      use: "synthetic",
+      use: "baseline",
       with: {},
     },
     sandbox: {
       kind: "snapshot",
-      ref: "workbench/synthetic-baseline",
+      ref: "workbench/baseline-subject",
     },
     inputs: [],
     outputs: [{
@@ -211,15 +212,15 @@ export function createSyntheticProposalExecution(args: {
       },
     },
     metadata: {
-      trialIndex: args.trialIndex,
+      attemptIndex: args.attemptIndex,
       sampleIndex: 0,
       caseId: "current",
-      synthetic: true,
+      baseline: true,
     },
   };
 }
 
-export function createSyntheticProposalJob(args: {
+export function createBaselineSubjectJob(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
@@ -227,15 +228,15 @@ export function createSyntheticProposalJob(args: {
   files: readonly SurfaceSnapshotFile[];
   now: string;
   baseId: string | null;
-  trialIndex: number;
+  attemptIndex: number;
   fileSet?: Json;
 }): HostedWorkbenchJob {
-  const execution = createSyntheticProposalExecution({
+  const execution = createBaselineSubjectExecution({
     ownerUserId: args.ownerUserId,
     projectId: args.projectId,
     runId: args.runId,
     subjectId: args.subjectId,
-    trialIndex: args.trialIndex,
+    attemptIndex: args.attemptIndex,
   });
   const files = args.files.map((file) => ({ ...file }));
   return {
@@ -254,15 +255,15 @@ export function createSyntheticProposalJob(args: {
       execution,
       dependsOn: [],
       subjectId: args.subjectId,
-      trialIndex: args.trialIndex,
-      synthetic: true,
+      attemptIndex: args.attemptIndex,
+      baseline: true,
     } as unknown as Json,
     output: {
       ok: true,
       executionId: execution.id,
       purpose: "improve",
       subjectId: args.subjectId,
-      trialIndex: args.trialIndex,
+      attemptIndex: args.attemptIndex,
       baseId: args.baseId,
       subjectPatch: {
         files,
@@ -286,7 +287,7 @@ export function workbenchExecutionJobPurpose(job: HostedWorkbenchJob): Workbench
   }
 	  const execution = asRecord(asRecord(job.input).execution);
 	  const purpose = execution.purpose;
-	  return purpose === "improve" || purpose === "trial" ? purpose : null;
+	  return purpose === "improve" || purpose === "attempt" ? purpose : null;
 }
 
 function readExecutionMetadataNumber(

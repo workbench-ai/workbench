@@ -1,13 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import YAML from "yaml";
 import type {
   AuthoredWorkbenchCaseSummary,
   AuthoredWorkbenchSourceSpec,
   AuthoredWorkbenchSourceDocument,
-  SubjectCasePhaseRef,
+  SubjectCaseExecutionRef,
   SubjectCaseReview,
   SubjectFilePreview,
   SubjectFileSummary,
@@ -18,7 +19,7 @@ import type {
   SubjectSummary,
   EvalCaseResult,
   EvaluationRecord,
-  EvaluationResultRecord,
+  EvaluationScorecard,
   EvaluationSampleRecord,
   HostedWorkbenchEnvironment,
   HostedWorkbenchEnvironmentVersion,
@@ -35,28 +36,39 @@ import type {
   WorkbenchExecutionResult,
   WorkbenchExecutionSpec,
   WorkbenchSandboxExecutionMetadata,
-  WorkbenchScorecard,
+  WorkbenchResult,
 } from "@workbench-ai/workbench-contract";
 import {
   adapterCommandName,
   assertWorkbenchAdapterOperationResultOk,
   collectWorkbenchAdapterAuthRequirements,
+  parseWorkbenchAdapterManifest,
   readWorkbenchAdapterOperationResult,
+  WORKBENCH_RUNTIME_CONTROL_TOKEN_ENV,
+  WORKBENCH_RUNTIME_CONTROL_URL_ENV,
   workbenchAdapterOperationCommand,
+  workbenchAdapterOperationExecutor,
   workbenchAdapterOperationResultPath,
   type WorkbenchAdapterOperation,
+  type WorkbenchAdapterOperationExecutor,
   type WorkbenchAdapterOperationResult,
   type WorkbenchAdapterManifest,
+  type WorkbenchRuntimeControlOperation,
+  type WorkbenchRuntimeControlOperationSequenceRequest,
+  type WorkbenchRuntimeControlOperationSequenceResult,
 } from "@workbench-ai/workbench-protocol";
 import {
   BENCHMARK_SPEC_FILE,
-  resolveTaskExecutionConfig,
+  engineCasePrivateFiles,
+  engineCaseFilesForRuntimeInput,
+  engineCasePublicFiles,
+  resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml as resolveWorkbenchResolvedSourceYamlInternal,
   validateWorkbenchResolvedSourceYaml as validateWorkbenchResolvedSourceYamlInternal,
   isWorkbenchSubjectManifestPath,
-  type GenericTaskSpec,
+  type GenericEngineCaseSpec,
   type GenericRunSpec,
-  type WorkbenchTaskBundle,
+  type WorkbenchEngineCase,
 } from "./generic-spec.ts";
 import {
   attachSandboxMetadataToJob,
@@ -66,7 +78,7 @@ import {
 } from "./sandbox-inputs.ts";
 import type {
   WorkbenchExecutionRuntimeInput,
-  WorkbenchWorkloadPhaseCommand,
+  WorkbenchWorkloadStepCommand,
 } from "./execution-runtime-types.ts";
 import {
   asRuntimeRecord,
@@ -83,6 +95,11 @@ import {
 } from "./runtime-utils.ts";
 import {
   createWorkbenchExecutionCapability,
+  createWorkbenchSandboxAllocation,
+  collectExecutionCapabilityScopeIssues,
+  collectSandboxAllocationScopeIssues,
+  collectSandboxHandleScopeIssues,
+  assertSandboxBackendSupportsNetworkPolicy,
   executeValidatedSandboxExecution,
   type SandboxBackendCapabilities,
   type SandboxBackendDescriptor,
@@ -109,17 +126,17 @@ import {
 import {
   readOutputTraceFiles,
   traceFilePaths,
-  workbenchTracePhaseDirectory,
+  workbenchTraceExecutionDirectory,
 } from "./trace-files.ts";
 import {
-  taskBundleForCase,
+  engineCaseForCase,
 } from "./execution-jobs.ts";
 import {
   createWorkbenchExecutionEventPublisher,
-  publishCommandPhaseEvent,
+  publishCommandStepEvent,
   type WorkbenchExecutionEventPublisher,
 } from "./execution-events.ts";
-import { readWorkbenchExecutionPurpose } from "./execution-phases.ts";
+import { readWorkbenchExecutionPurpose } from "./execution-evidence.ts";
 import { validateWorkbenchExecutionOutputPayloads } from "./execution-outputs.ts";
 import {
   adapterAuthEnv,
@@ -133,21 +150,35 @@ import {
 export {
   BENCHMARK_SPEC_FILE,
   DEFAULT_EXECUTION_RESOURCES,
+  engineCasePrivateFiles,
+  engineCaseFilesForRuntimeInput,
+  engineCasePublicFiles,
+  engineResolveInvocationForSpec,
+  engineResolveBindingForSpec,
+  engineResolveBindingForSourceYaml,
   isWorkbenchSubjectManifestPath,
   parseWorkbenchSourceFiles,
+  resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml,
   resolveWorkbenchSourceFiles,
+  runtimeNetwork,
+  runtimeResources,
   serializeWorkbenchResolvedSourceYaml,
   validateWorkbenchResolvedSourceYaml,
   type AuthoredBenchmarkSpec,
   type AuthoredOptimizerSpec,
   type GenericRunSpec,
-  type GenericTaskSpec,
+  type GenericEngineCaseSpec,
   type ResolvedSubjectSpec,
-  type WorkbenchTaskBundle,
+  type WorkbenchEngineCase,
   type WorkbenchResolvedSource,
   type WorkbenchSubjectManifestSpec,
 } from "./generic-spec.ts";
+export {
+  composeRuntimeDockerfileWithAdapterInstallers,
+  type WorkbenchRuntimeAdapterInstaller,
+  type WorkbenchRuntimeAdapterInstallerFile,
+} from "./runtime-dockerfile.ts";
 export {
   adapterCommandName,
   cloneWorkbenchAdapterManifest,
@@ -157,9 +188,12 @@ export {
   workbenchAdapterManifestRequiresAuth,
   workbenchAdapterManifestSupportsOperation,
   workbenchAdapterOperationCommand,
+  workbenchAdapterOperationExecutor,
   withDefaultWorkbenchAdapterAuth,
   withDefaultWorkbenchAdapterAuthProfiles,
+  type WorkbenchPrimitiveAdapterOperation,
   type WorkbenchAdapterOperation,
+  type WorkbenchAdapterOperationExecutor,
   type WorkbenchAdapterOperationManifest,
   type WorkbenchAdapterSlotManifest,
   type WorkbenchAdapterAuthRequirement,
@@ -186,7 +220,7 @@ export {
 } from "./adapter-auth.ts";
 export type {
   WorkbenchExecutionRuntimeInput,
-  WorkbenchWorkloadPhaseCommand,
+  WorkbenchWorkloadStepCommand,
 } from "./execution-runtime-types.ts";
 export {
   asRuntimeRecord,
@@ -205,7 +239,6 @@ export {
 } from "./execution-usage.ts";
 export {
   createWorkbenchProgressStdoutParser,
-  executionTracePersistenceForPublisher,
   publishWorkbenchProgressStdoutEnvelope,
 } from "./execution-events.ts";
 export {
@@ -213,7 +246,7 @@ export {
 } from "./sandbox-backends/template-images.ts";
 export {
   readOutputTraceFiles,
-  workbenchTracePhaseDirectory,
+  workbenchTraceExecutionDirectory,
   workbenchTraceRunDirectory,
   workbenchTraceRunDirectoryName,
 } from "./trace-files.ts";
@@ -234,8 +267,8 @@ export {
   type WorkbenchAdapterOperationResult,
   type WorkbenchAdapterOperationResultValue,
   type WorkbenchAdapterOperationRequirement,
-  type WorkbenchTaskSourceResult,
-  type WorkbenchTaskSpec,
+  type WorkbenchEngineResolveResult,
+  type WorkbenchEngineCaseSpec,
 } from "@workbench-ai/workbench-protocol";
 export {
   applyWorkbenchSubjectPatch,
@@ -256,16 +289,16 @@ export {
   type WorkbenchExecutionGraphNode,
 } from "./execution-graph.ts";
 export {
-  createSyntheticProposalExecution,
-  createSyntheticProposalJob,
-	  createWorkbenchExecutionJob,
-	  expectedWorkbenchRunJobCount,
-  taskBundleForCase,
-  taskBundleIds,
-	  trialJobCountForRunSpec,
-	  workbenchExecutionJobPurpose,
+  createBaselineSubjectExecution,
+  createBaselineSubjectJob,
+  createWorkbenchExecutionJob,
+  expectedWorkbenchRunJobCount,
+  engineCaseForCase,
+  engineCaseIds,
+  attemptJobCountForRunSpec,
+  workbenchExecutionJobPurpose,
   MAX_WORKBENCH_RUN_BUDGET,
-	  planWorkbenchExecutionJobsForPurpose,
+  planWorkbenchExecutionJobsForPurpose,
   validateWorkbenchRunEnvelope,
   workbenchExecutionJobId,
   type WorkbenchRunWorkflow,
@@ -309,18 +342,22 @@ export {
   type ValidatedSandboxExecutionResult,
 } from "./sandbox-plane.ts";
 export {
-  buildSubjectCasePhaseRefs,
-  buildWorkbenchTracePhases,
-  isWorkbenchPhaseActive,
+  buildSubjectCaseExecutionRefs,
+  buildWorkbenchExecutionEvidence,
+  isWorkbenchExecutionActive,
   readWorkbenchExecutionId,
   readWorkbenchExecutionMetadataNumber,
   readWorkbenchExecutionMetadataString,
   readWorkbenchExecutionPurpose,
   resolveWorkbenchJobGroupStatus,
-} from "./execution-phases.ts";
+} from "./execution-evidence.ts";
 export {
+  buildWorkbenchTraceSessionsFromFiles,
+  combineWorkbenchTraceSessions,
   finalizeWorkbenchExecutionTraceForJob,
   mergeWorkbenchExecutionTracesByJob,
+  readWorkbenchExecutionTraceFiles,
+  traceSessionLabel,
   type WorkbenchTraceMergeJob,
 } from "./execution-traces.ts";
 export {
@@ -348,7 +385,8 @@ export type {
 export type {
   SubjectCaseReview,
   SubjectRecord,
-  EvaluationResultRecord,
+  EngineResolveBinding,
+  EvaluationScorecard,
   HostedWorkbenchJob,
   Json,
   RunSummary,
@@ -356,6 +394,7 @@ export type {
   SurfaceSnapshotFile,
   WorkbenchExecutionCapability,
   WorkbenchExecutionTrace,
+  WorkbenchTraceSession,
   WorkbenchSandboxHandle,
   WorkbenchSandboxExecutionMetadata,
 } from "@workbench-ai/workbench-contract";
@@ -363,12 +402,13 @@ export type {
 interface RuntimeCommandSpec {
   use: "command";
   command: string;
+  executor: WorkbenchAdapterOperationExecutor;
 }
 
 export interface WorkbenchRunMaterialization {
   subjects: SubjectRecord[];
   subjectFiles: Record<string, SurfaceSnapshotFile[]>;
-  evaluations: EvaluationResultRecord[];
+  evaluations: EvaluationScorecard[];
   activeSubjectId: string | null;
   selectedSubject: SubjectRecord | null;
   completedJobCount: number;
@@ -379,14 +419,14 @@ export interface WorkbenchRunWorkload {
   job: HostedWorkbenchJob;
   spec: GenericRunSpec;
   subjectId: string;
-  trialIndex: number;
+  attemptIndex: number;
   sampleIndex: number;
   caseId: string;
   subjectFiles: SurfaceSnapshotFile[];
-  taskSourceFiles: SurfaceSnapshotFile[];
+  engineResolveFiles: SurfaceSnapshotFile[];
   traceFiles: SurfaceSnapshotFile[];
-  taskBundle?: WorkbenchTaskBundle;
-  task?: GenericTaskSpec;
+  engineCase?: WorkbenchEngineCase;
+  engineCaseSpec?: GenericEngineCaseSpec;
   prompt: string;
   changedPaths: string[];
   baseId: string | null;
@@ -395,9 +435,10 @@ export interface WorkbenchRunWorkload {
 export interface RuntimeWorkloadResult {
   files: SurfaceSnapshotFile[];
   fileChanges: string[];
+  operationResults?: WorkbenchAdapterOperationResult[];
+  workspaceFiles?: SurfaceSnapshotFile[];
   subjectPatch?: WorkbenchSubjectPatch;
-  scorecard?: WorkbenchScorecard;
-  score?: number;
+  result?: WorkbenchResult;
   metrics?: Record<string, number>;
   cases?: EvalCaseResult[];
   usage?: UsageSummary;
@@ -525,7 +566,7 @@ export const DEFAULT_ENVIRONMENTS: HostedWorkbenchEnvironment[] = [
     id: "env_libreoffice_agent",
     name: "LibreOffice + Agent",
     description:
-      "Agent runtime with soffice and Python libraries for spreadsheet-heavy skill and rubric evaluations.",
+      "Agent runtime with soffice and Python libraries for spreadsheet-heavy evaluations.",
     currentVersionId: "envv_libreoffice_agent",
     builtIn: true,
     createdAt: "2026-04-29T00:00:00.000Z",
@@ -654,29 +695,28 @@ function formatOptimizerSummary(spec: GenericRunSpec): string {
   return spec.improve ? `adapter:${spec.improve.use}` : "optimizer not configured";
 }
 
-function formatScoreSummary(spec: GenericRunSpec): string {
-  return `adapter:${spec.score.use}`;
+function formatEngineRunSummary(spec: GenericRunSpec): string {
+  return `adapter:${spec.engineRun.use}`;
 }
 
-function environmentImage(spec: GenericRunSpec): string {
-  return spec.environment.dockerfile;
-}
-
-function environmentNetwork(spec: GenericRunSpec): "off" | "on" {
-  const egress = spec.environment.network?.egress;
+function environmentNetwork(runtime: GenericRunSpec["environment"]): "off" | "on" {
+  const egress = runtime.network?.egress;
   return egress === "none" ? "off" : "on";
 }
 
 function environmentResources(
-  spec: GenericRunSpec,
+  runtime: GenericRunSpec["environment"],
 ): RuntimeEnvironmentResources | undefined {
-  const resources = spec.environment.resources ?? {};
+  const resources = runtime.resources ?? {};
   const output: RuntimeEnvironmentResources = {};
   if (typeof resources.cpu === "number") {
     output.cpu = resources.cpu;
   }
   if (typeof resources.memoryGb === "number") {
     output.memoryGb = resources.memoryGb;
+  }
+  if (typeof resources.diskGb === "number") {
+    output.diskGb = resources.diskGb;
   }
   if (typeof resources.timeoutMinutes === "number") {
     output.timeoutMinutes = resources.timeoutMinutes;
@@ -696,73 +736,138 @@ function adapterProtocolCommandSpec(
   return {
     use: "command",
     command: manifest ? workbenchAdapterOperationCommand(manifest, operation) : adapterCommandName(adapter.use),
+    executor: manifest ? workbenchAdapterOperationExecutor(manifest, operation) : "sandbox",
   };
 }
 
-function protocolPhaseForExecution(
+function protocolStepForExecution(
   execution: WorkbenchExecutionSpec,
   manifests?: readonly WorkbenchAdapterManifest[],
-): WorkbenchWorkloadPhaseCommand {
-  const role = executionPurposeRole(execution.purpose);
-  const operation = execution.purpose === "improve" ? "subject.improve" : "subject.run";
+): WorkbenchWorkloadStepCommand {
+  if (execution.purpose !== "improve") {
+    throw new Error(`Protocol execution step only supports improve executions, not ${execution.purpose}.`);
+  }
+  const operation = "optimizer.improve";
   const command = adapterProtocolCommandSpec(
     execution.adapter,
     operation,
     manifests,
   );
   return {
-    kind: role,
+    kind: "optimizer",
     label: execution.purpose,
     operation,
+    executor: command.executor,
     adapter: execution.adapter,
     command: command.command,
   };
 }
 
-function trialPhasesForExecution(
+function attemptStepsForExecution(
   execution: WorkbenchExecutionSpec,
   spec: GenericRunSpec,
   manifests?: readonly WorkbenchAdapterManifest[],
-): WorkbenchWorkloadPhaseCommand[] {
-  const scorer = trialScoreAdapter(execution, spec);
-  return [
-    {
-      kind: "runner",
-      label: "run",
-      operation: "subject.run",
-      adapter: execution.adapter,
-      command: adapterProtocolCommandSpec(execution.adapter, "subject.run", manifests).command,
-    },
-    {
-      kind: "scorer",
-      label: "score",
-      operation: "trial.score",
-      adapter: scorer,
-      command: adapterProtocolCommandSpec(scorer, "trial.score", manifests).command,
-    },
-  ];
-}
-
-function trialScoreAdapter(
-  execution: WorkbenchExecutionSpec,
-  spec: GenericRunSpec,
-): WorkbenchExecutionSpec["adapter"] {
-  const metadata = jsonRecord(execution.metadata);
-  const scoreAdapter = jsonRecord(metadata.scoreAdapter);
-  if (typeof scoreAdapter.use === "string" && scoreAdapter.use.length > 0) {
-    return {
-      use: scoreAdapter.use,
-      with: isJsonPayload(scoreAdapter.with) ? scoreAdapter.with : {},
-      ...(scoreAdapter.auth !== undefined && isJsonPayload(scoreAdapter.auth) ? { auth: scoreAdapter.auth } : {}),
-    };
-  }
-  return spec.score;
+): WorkbenchWorkloadStepCommand[] {
+  void spec;
+  const command = adapterProtocolCommandSpec(execution.adapter, "engine.run", manifests);
+  const engineStep: WorkbenchWorkloadStepCommand = {
+    kind: "engine",
+    label: "engine",
+    operation: "engine.run",
+    executor: command.executor,
+    adapter: execution.adapter,
+    command: command.command,
+  };
+  return [engineStep];
 }
 
 function adapterConfigRecord(
   adapter: WorkbenchExecutionSpec["adapter"],
+  manifests: readonly WorkbenchAdapterManifest[] = [],
 ): Record<string, Json> {
-  return jsonRecord(adapter.with);
+  const config = cloneJsonRecord(jsonRecord(adapter.with));
+  const manifest = manifests.find((entry) => entry.id === adapter.use);
+  if (!manifest?.slots) {
+    return config;
+  }
+  for (const slot of Object.values(manifest.slots)) {
+    const value = jsonPointerValue(config, slot.path);
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        const nested = jsonRecord(value[index]);
+        if (nested) {
+          value[index] = invocationWithCommand(nested, slot.operation, manifests);
+        }
+      }
+      continue;
+    }
+    const nested = jsonRecord(value);
+    if (nested) {
+      setJsonPointerValue(config, slot.path, invocationWithCommand(nested, slot.operation, manifests));
+    }
+  }
+  return config;
+}
+
+function invocationWithCommand(
+  invocation: Record<string, Json>,
+  operation: WorkbenchAdapterOperation,
+  manifests: readonly WorkbenchAdapterManifest[],
+): Record<string, Json> {
+  const use = typeof invocation.use === "string" ? invocation.use : "";
+  if (!use) {
+    return invocation;
+  }
+  const manifest = manifests.find((entry) => entry.id === use);
+  return {
+    ...invocation,
+    command: manifest ? workbenchAdapterOperationCommand(manifest, operation) : adapterCommandName(use),
+  };
+}
+
+function cloneJsonRecord(value: Record<string, Json>): Record<string, Json> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, Json>;
+}
+
+function jsonPointerValue(root: Record<string, Json>, pointer: string): unknown {
+  let current: unknown = root;
+  for (const segment of jsonPointerSegments(pointer)) {
+    if (!current || typeof current !== "object") {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function setJsonPointerValue(
+  root: Record<string, Json>,
+  pointer: string,
+  value: Record<string, Json>,
+): void {
+  const segments = jsonPointerSegments(pointer);
+  let current: Record<string, Json> = root;
+  for (const segment of segments.slice(0, -1)) {
+    const next = current[segment];
+    if (!next || typeof next !== "object" || Array.isArray(next)) {
+      return;
+    }
+    current = next as Record<string, Json>;
+  }
+  const key = segments.at(-1);
+  if (key) {
+    current[key] = value as Json;
+  }
+}
+
+function jsonPointerSegments(pointer: string): string[] {
+  if (pointer === "") {
+    return [];
+  }
+  return pointer
+    .replace(/^\//u, "")
+    .split("/")
+    .map((segment) => segment.replace(/~1/gu, "/").replace(/~0/gu, "~"));
 }
 
 export function materializeWorkbenchRunResult(args: {
@@ -785,15 +890,15 @@ export function materializeWorkbenchRunResult(args: {
   const completedJobCount = args.jobs.filter(
     (job) => job.status === "succeeded",
   ).length;
-  const proposals = completed
+  const subjectRevisions = completed
     .filter((job) => workbenchExecutionPurpose(job) === "improve")
-    .map((job) => normalizeProposalJobOutput(job.output))
-    .filter((output): output is HostedProposalJobOutput => output !== null)
-    .sort((left, right) => left.trialIndex - right.trialIndex);
-	  const evaluationJobs = args.jobs.filter(
-	    (job) =>
-	      workbenchExecutionPurpose(job) === "trial",
-	  );
+    .map((job) => normalizeSubjectRevisionJobOutput(job.output))
+    .filter((output): output is HostedSubjectRevisionJobOutput => output !== null)
+    .sort((left, right) => left.attemptIndex - right.attemptIndex);
+  const evaluationJobs = args.jobs.filter(
+    (job) =>
+      workbenchExecutionPurpose(job) === "attempt",
+  );
   const evaluationsBySubject = new Map<string, HostedWorkbenchJob[]>();
   for (const job of evaluationJobs) {
     const subjectId =
@@ -810,9 +915,9 @@ export function materializeWorkbenchRunResult(args: {
 
   const subjects: SubjectRecord[] = [];
   const subjectFiles: Record<string, SurfaceSnapshotFile[]> = {};
-  const evaluations: EvaluationResultRecord[] = [];
-  for (const proposal of proposals) {
-    const subjectId = proposal.subjectId;
+  const evaluations: EvaluationScorecard[] = [];
+  for (const subjectRevision of subjectRevisions) {
+    const subjectId = subjectRevision.subjectId;
     const subjectJobs = evaluationsBySubject.get(subjectId) ?? [];
     const succeededEvaluationJobs = subjectJobs.filter(
       (job) => job.status === "succeeded",
@@ -827,7 +932,10 @@ export function materializeWorkbenchRunResult(args: {
     );
     const completedSampleKeys = new Set(
       outputs
-        .map(({ output }) => evaluationSampleGroupKeyFromOutput(output))
+        .flatMap(({ jobs, output }) => [
+          evaluationSampleGroupKeyFromOutput(output),
+          ...jobs.map(evaluationSampleGroupKeyFromJob),
+        ])
         .filter((key): key is string => key !== null),
     );
     const errorSampleJobs = [
@@ -837,7 +945,7 @@ export function materializeWorkbenchRunResult(args: {
     const errorSamples = errorEvaluationSamplesFromJobs(
       errorSampleJobs,
       subjectId,
-      proposal.trialIndex,
+      subjectRevision.attemptIndex,
       completedSampleKeys,
     );
     const samples = [
@@ -855,30 +963,30 @@ export function materializeWorkbenchRunResult(args: {
     );
     const evalRecord = createEvaluationRecord(subjectId, samples);
     const usage = mergeUsageSummaries([
-      proposal.usage,
+      subjectRevision.usage,
       ...samples.map((sample) => sample.usage),
     ]);
     const metrics = evaluationMeanMetrics(
       createEvaluationRecord(subjectId, samples),
     );
-    const trialIndex = proposal.trialIndex;
+    const attemptIndex = subjectRevision.attemptIndex;
     const evaluationTraces = [
       ...outputs.flatMap(({ output }) => output.traces),
       ...errorSampleJobs.flatMap(jobTracePaths),
     ].sort();
-    const baseId = proposal.baseId && proposal.baseId !== subjectId
-      ? proposal.baseId
+    const baseId = subjectRevision.baseId && subjectRevision.baseId !== subjectId
+      ? subjectRevision.baseId
       : null;
     const sourceMeta = subjectSourceMetadata(args.subjectSourceFiles);
     const benchmarkMeta = benchmarkSourceMetadata(args.benchmarkSourceFiles);
     const meta: Record<string, Json> = {
-      trialIndex,
+      attemptIndex,
       sampleCount: evalRecord.sampleCount,
       optimizer: formatOptimizerSummary(args.spec),
-	      score: formatScoreSummary(args.spec),
+      engineRun: formatEngineRunSummary(args.spec),
       strategy: "greedy",
       traces: {
-        improve: proposal.traces,
+        improve: subjectRevision.traces,
         evaluations: evaluationTraces,
       },
     };
@@ -892,20 +1000,20 @@ export function materializeWorkbenchRunResult(args: {
       id: subjectId,
       ordinal: args.existingSubjectCount + subjects.length,
       benchmarkFingerprint: args.benchmarkFingerprint,
-      subjectFingerprint: args.subjectFingerprint ?? materializedSubjectFingerprint(args.spec, proposal.files),
+      subjectFingerprint: args.subjectFingerprint ?? materializedSubjectFingerprint(args.spec, subjectRevision.files),
       createdAt: args.startedAt,
       ...(baseId ? { baseId } : {}),
       referenceIds: [],
       status: evalRecord.completedSampleCount > 0 ? "evaluated" : "eval_error",
-      fileChanges: proposal.fileChanges,
+      fileChanges: subjectRevision.fileChanges,
       ...(metrics ? { metrics } : {}),
       ...(usage ? { usage } : {}),
       eval: evalRecord,
-      ...(proposal.prompt ? { prompt: proposal.prompt } : {}),
+      ...(subjectRevision.prompt ? { prompt: subjectRevision.prompt } : {}),
       meta,
     };
     subjects.push(record);
-    evaluations.push(createEvaluationResultRecord({
+    evaluations.push(createEvaluationScorecard({
       runId: args.runId,
       benchmarkFingerprint: args.benchmarkFingerprint,
       createdAt: args.startedAt,
@@ -913,7 +1021,7 @@ export function materializeWorkbenchRunResult(args: {
       evaluation: evalRecord,
     }));
     subjectFiles[subjectId] = materializedSubjectFiles({
-      proposalFiles: proposal.files,
+      subjectRevisionFiles: subjectRevision.files,
     });
   }
 
@@ -973,6 +1081,8 @@ function materializedSubjectFingerprint(
   hash.update("workbench-subject-v1\0");
   hash.update("materialized\0runner\0");
   hash.update(JSON.stringify(spec.run));
+  hash.update("prepare");
+  hash.update(JSON.stringify(spec.subject.prepare ?? null));
   for (const file of filterSubjectSourceFiles(files).slice().sort((left, right) => left.path.localeCompare(right.path))) {
     hash.update("\0file\0");
     hash.update(file.path);
@@ -987,10 +1097,10 @@ function materializedSubjectFingerprint(
 }
 
 function materializedSubjectFiles(args: {
-  proposalFiles: readonly SurfaceSnapshotFile[];
+  subjectRevisionFiles: readonly SurfaceSnapshotFile[];
 }): SurfaceSnapshotFile[] {
   const byPath = new Map<string, SurfaceSnapshotFile>();
-  for (const file of filterSubjectSourceFiles(args.proposalFiles)) {
+  for (const file of filterSubjectSourceFiles(args.subjectRevisionFiles)) {
     byPath.set(file.path, { ...file });
   }
   return [...byPath.values()].sort((left, right) =>
@@ -998,16 +1108,16 @@ function materializedSubjectFiles(args: {
   );
 }
 
-function createEvaluationResultRecord(args: {
+function createEvaluationScorecard(args: {
   runId: string;
   benchmarkFingerprint: string;
   createdAt: string;
   subject: SubjectRecord;
   evaluation: EvaluationRecord;
-}): EvaluationResultRecord {
+}): EvaluationScorecard {
   const evaluation = args.evaluation;
   return {
-    id: evaluationResultId(args.runId, args.subject.id),
+    id: evaluationScorecardId(args.runId, args.subject.id),
     runId: args.runId,
     benchmarkFingerprint: args.benchmarkFingerprint,
     subjectFingerprint: args.subject.subjectFingerprint,
@@ -1026,7 +1136,7 @@ function createEvaluationResultRecord(args: {
   };
 }
 
-function evaluationResultId(runId: string, subjectId: string): string {
+export function evaluationScorecardId(runId: string, subjectId: string): string {
   const runPart = runId.replace(/[^a-z0-9]+/giu, "_").replace(/^_+|_+$/gu, "").slice(-24);
   const subjectPart = subjectId.replace(/[^a-z0-9]+/giu, "_").replace(/^_+|_+$/gu, "").slice(-24);
   return `eval_${runPart}_${subjectPart}`;
@@ -1049,11 +1159,11 @@ export function isWorkbenchInternalOutputPath(filePath: string): boolean {
     normalized === "sandbox-environment.json" ||
     normalized === "sandbox_error.log" ||
     normalized === "exit_code" ||
-    /^[a-z-]+_(stdout\.log|stderr\.log|exit_code)$/u.test(normalized)
+    /^[a-z_-]+_(stdout\.log|stderr\.log|exit_code)$/u.test(normalized)
   );
 }
 
-export function createProposalTraceInputFiles(args: {
+export function createSubjectRevisionTraceInputFiles(args: {
   runId: string;
   jobs: readonly HostedWorkbenchJob[];
   events: readonly RuntimeEvent[];
@@ -1080,7 +1190,7 @@ export function createProposalTraceInputFiles(args: {
       ));
     }
     const summaryPath = `jobs/${job.id}.json`;
-    const summary = proposalTraceJobSummary(job, {
+    const summary = subjectRevisionTraceJobSummary(job, {
       eventPath: events.length > 0 ? eventPath : null,
       rawTracePaths: rawTraceFiles.map((file) => file.path).sort(),
     });
@@ -1100,6 +1210,29 @@ export function createProposalTraceInputFiles(args: {
   return dedupeSurfaceFiles(files);
 }
 
+export function createSubjectEvaluationTraceInputFiles(args: {
+  subject?: SubjectRecord | null;
+  path?: string;
+}): SurfaceSnapshotFile[] {
+  const subject = args.subject;
+  if (!subject?.eval && !subject?.metrics) {
+    return [];
+  }
+  const filePath = normalizeRelativePath(
+    args.path ?? `base-subject/${subject.id}/evaluation.json`,
+  );
+  const payload = {
+    kind: "subject_evaluation",
+    subjectId: subject.id,
+    status: subject.status,
+    metrics: subject.metrics ?? null,
+    fileChanges: subject.fileChanges,
+    eval: subject.eval ?? null,
+    prompt: subject.prompt ?? null,
+  };
+  return [textSurfaceFile(filePath, `${JSON.stringify(payload, null, 2)}\n`)];
+}
+
 function isTerminalExecutionJob(job: HostedWorkbenchJob): boolean {
   return job.kind === "execute" && (
     job.status === "succeeded" ||
@@ -1112,9 +1245,9 @@ function compareTraceInputJobs(
   left: HostedWorkbenchJob,
   right: HostedWorkbenchJob,
 ): number {
-  const leftTrial = readOptionalJobNumber(left.input, "trialIndex") ?? -1;
-  const rightTrial = readOptionalJobNumber(right.input, "trialIndex") ?? -1;
-  return leftTrial - rightTrial ||
+  const leftAttempt = readOptionalJobNumber(left.input, "attemptIndex") ?? -1;
+  const rightAttempt = readOptionalJobNumber(right.input, "attemptIndex") ?? -1;
+  return leftAttempt - rightAttempt ||
     purposeSortKey(workbenchExecutionPurpose(left)) - purposeSortKey(workbenchExecutionPurpose(right)) ||
     (readOptionalJobNumber(left.input, "sampleIndex") ?? -1) - (readOptionalJobNumber(right.input, "sampleIndex") ?? -1) ||
     (readJobString(left.input, "caseId") ?? "").localeCompare(readJobString(right.input, "caseId") ?? "") ||
@@ -1122,13 +1255,13 @@ function compareTraceInputJobs(
 }
 
 function purposeSortKey(purpose: WorkbenchExecutionSpec["purpose"] | null): number {
-	  if (purpose === "improve") {
-	    return 0;
-	  }
-	  if (purpose === "trial") {
-	    return 1;
-	  }
-	  return 3;
+  if (purpose === "improve") {
+    return 0;
+  }
+  if (purpose === "attempt") {
+    return 1;
+  }
+  return 3;
 }
 
 function completedJobOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[] {
@@ -1145,7 +1278,7 @@ function completedJobOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[]
   return files;
 }
 
-function proposalTraceJobSummary(
+function subjectRevisionTraceJobSummary(
   job: HostedWorkbenchJob,
   paths: { eventPath: string | null; rawTracePaths: readonly string[] },
 ): Record<string, Json> {
@@ -1155,7 +1288,7 @@ function proposalTraceJobSummary(
     purpose: workbenchExecutionPurpose(job) ?? "unknown",
     status: job.status,
     subject_id: job.subjectId ?? readJobString(job.input, "subjectId"),
-    trial_index: readOptionalJobNumber(job.input, "trialIndex"),
+    attempt_index: readOptionalJobNumber(job.input, "attemptIndex"),
     sample_index: readOptionalJobNumber(job.input, "sampleIndex"),
     case_id: readJobString(job.input, "caseId"),
     created_at: job.createdAt,
@@ -1214,8 +1347,8 @@ export interface WorkbenchProjectSourceFilesInput {
   specFiles?: readonly SurfaceSnapshotFile[];
   subjectFilesPath: string;
   subjectFiles: readonly SurfaceSnapshotFile[];
-  tasksPath: string;
-  taskFiles: readonly SurfaceSnapshotFile[];
+  engineResolveFilesPath: string;
+  engineResolveFiles: readonly SurfaceSnapshotFile[];
   adapterFiles?: readonly SurfaceSnapshotFile[];
   dockerfilePath?: string;
   dockerfile?: string | null;
@@ -1230,7 +1363,7 @@ export function buildWorkbenchProjectSourceFiles(
       ? input.specFiles.map((file) => ({ ...file }))
       : [textSurfaceFile("benchmark.yaml", input.specSource ?? "")]),
     ...prefixProjectSourceFiles(input.subjectFiles, input.subjectFilesPath),
-    ...prefixProjectSourceFiles(input.taskFiles, input.tasksPath),
+    ...prefixProjectSourceFiles(input.engineResolveFiles, input.engineResolveFilesPath),
     ...(input.adapterFiles ?? []).map((file) => ({ ...file })),
     ...(input.dockerfiles ?? []).map((file) => ({ ...file })),
   ];
@@ -1432,16 +1565,11 @@ export function createSubjectFilePreview(args: {
 export function createCaseReview(args: {
   subject: SubjectRecord;
   caseId: string;
-  phases?: SubjectCasePhaseRef[];
+  executions?: SubjectCaseExecutionRef[];
 }): SubjectCaseReview {
-  const preferredSampleIndex = uniquePhaseSampleIndex(args.phases ?? []);
+  const preferredSampleIndex = uniqueExecutionSampleIndex(args.executions ?? []);
   const sampleMatchesCase = (sample: EvaluationSampleRecord) =>
-    sample.id === args.caseId ||
-    sample.id.startsWith(`${args.caseId}__`) ||
-    (sample.cases ?? []).some(
-      (entry) =>
-        entry.id === args.caseId || entry.id.startsWith(`${args.caseId}__`),
-    );
+    (sample.cases ?? []).some((entry) => entry.id === args.caseId);
   const samples = args.subject.eval?.samples ?? [];
   const sampleResult =
     samples.find(
@@ -1450,11 +1578,8 @@ export function createCaseReview(args: {
         sample.index === preferredSampleIndex &&
         sampleMatchesCase(sample),
     ) ?? samples.find(sampleMatchesCase);
-  const caseResult = sampleResult?.cases?.find(
-    (entry) =>
-      entry.id === args.caseId || entry.id.startsWith(`${args.caseId}__`),
-  );
-  if (!sampleResult && (args.phases?.length ?? 0) > 0) {
+  const caseResult = sampleResult?.cases?.find((entry) => entry.id === args.caseId);
+  if (!sampleResult && (args.executions?.length ?? 0) > 0) {
     return {
       subjectId: args.subject.id,
       caseId: args.caseId,
@@ -1463,7 +1588,7 @@ export function createCaseReview(args: {
         ? { sampleIndex: preferredSampleIndex }
         : {}),
       metrics: {},
-      phases: args.phases ?? [],
+      executions: args.executions ?? [],
       criteria_results: [],
     };
   }
@@ -1475,29 +1600,21 @@ export function createCaseReview(args: {
   const durationMs =
     typeof caseResult?.durationMs === "number"
       ? caseResult.durationMs
-      : sampleResult?.cases?.length === 1 &&
-          typeof sampleResult.durationMs === "number"
-        ? sampleResult.durationMs
-        : !caseResult && typeof sampleResult.durationMs === "number"
-          ? sampleResult.durationMs
-        : undefined;
-  const sampleStatus =
-    sampleResult.status === "planned" ? undefined : sampleResult.status;
-  const status = caseResult?.status ?? sampleStatus;
+      : undefined;
   return {
     subjectId: args.subject.id,
-    caseId: caseResult?.id ?? sampleResult.id,
+    caseId: caseResult?.id ?? args.caseId,
     caseLabel: caseResult?.label ?? args.caseId,
     sampleId: sampleResult.id,
     sampleIndex: sampleResult.index,
-    ...(status ? { status } : {}),
-    metrics: caseResult?.metrics ?? sampleResult.metrics ?? {},
+    ...(caseResult?.status ? { status: caseResult.status } : {}),
+    metrics: caseResult?.metrics ?? {},
     ...(typeof durationMs === "number" ? { durationMs } : {}),
     ...(caseResult?.source ? { source: caseResult.source } : {}),
-    ...((caseResult?.feedback ?? sampleResult.feedback) !== undefined
-      ? { feedback: caseResult?.feedback ?? sampleResult.feedback }
+    ...(caseResult?.feedback !== undefined
+      ? { feedback: caseResult.feedback }
       : {}),
-    phases: args.phases ?? [],
+    executions: args.executions ?? [],
     criteria_results: (caseResult?.criteria ?? []).map((criterion) => ({
       criterion_id: criterion.criterion_id,
       pass: criterion.pass,
@@ -1508,12 +1625,12 @@ export function createCaseReview(args: {
   };
 }
 
-function uniquePhaseSampleIndex(
-  phases: readonly SubjectCasePhaseRef[],
+function uniqueExecutionSampleIndex(
+  executions: readonly SubjectCaseExecutionRef[],
 ): number | null {
   const sampleIndices = new Set(
-    phases
-      .map((phase) => phase.sampleIndex)
+    executions
+      .map((execution) => execution.sampleIndex)
       .filter((index): index is number => typeof index === "number"),
   );
   if (sampleIndices.size !== 1) {
@@ -1530,18 +1647,17 @@ function parseAuthoredWorkbenchSourceSpec(source: string): AuthoredWorkbenchSour
   }
   const resolved = resolveWorkbenchResolvedSourceYamlInternal(source);
   return {
-    version: 2,
+    version: 3,
     benchmark: {
       name: resolved.benchmark.name,
       description: resolved.benchmark.description,
-      tasks: resolved.benchmark.tasks,
-      environment: runtimeSpecFromRuntime(resolved.benchmark.environment),
-      score: scoreSpecFromInvocation(resolved.score),
+      engine: authoredAdapterSpecFromInvocation(resolved.engine),
     },
     subject: {
       name: resolved.subject.name,
       description: resolved.subject.description,
       files: { path: resolved.subject.files.path },
+      ...(resolved.subject.prepare ? { prepare: { ...resolved.subject.prepare } } : {}),
       run: runSpecFromInvocation(resolved.run),
     },
     ...(resolved.optimizer
@@ -1563,25 +1679,9 @@ function improveSpecFromInvocation(
   return authoredAdapterSpecFromInvocation(invocation);
 }
 
-function runtimeSpecFromRuntime(
-  runtime: GenericRunSpec["environment"],
-): AuthoredWorkbenchSourceSpec["benchmark"]["environment"] {
-  return {
-    dockerfile: runtime.dockerfile,
-    ...(runtime.resources ? { resources: runtime.resources } : {}),
-    ...(runtime.network ? { network: runtime.network } : {}),
-  };
-}
-
 function runSpecFromInvocation(
   invocation: WorkbenchAdapterInvocation,
 ): AuthoredWorkbenchSourceSpec["subject"]["run"] {
-  return authoredAdapterSpecFromInvocation(invocation);
-}
-
-function scoreSpecFromInvocation(
-  invocation: WorkbenchAdapterInvocation,
-): AuthoredWorkbenchSourceSpec["benchmark"]["score"] {
   return authoredAdapterSpecFromInvocation(invocation);
 }
 
@@ -1602,7 +1702,7 @@ function summarizeCaseInputs(
   if (files.length === 0) {
     return [];
   }
-  const taskIds = [...new Set(files.flatMap((file) => {
+  const caseIds = [...new Set(files.flatMap((file) => {
     const normalized = normalizeRelativePath(file.path);
     const slash = normalized.indexOf("/");
     if (slash <= 0) {
@@ -1610,10 +1710,10 @@ function summarizeCaseInputs(
     }
     return [normalized.slice(0, slash)];
   }))].sort();
-  if (taskIds.length === 0) {
+  if (caseIds.length === 0) {
     return [];
   }
-  return taskIds.map((taskId, index) => {
+  return caseIds.map((taskId, index) => {
     const prefix = `${taskId}/`;
     const fileCount = files.filter(
       (file) => normalizeRelativePath(file.path).startsWith(prefix),
@@ -1646,7 +1746,7 @@ function buildLineageEdges(
 
 interface HostedSampleJobOutput {
   subjectId: string;
-  trialIndex: number;
+  attemptIndex: number;
   sample: EvaluationSampleRecord;
   fileChanges: string[];
   files: SurfaceSnapshotFile[];
@@ -1658,9 +1758,9 @@ interface HostedMaterializedSampleOutput {
   output: HostedSampleJobOutput;
 }
 
-interface HostedProposalJobOutput {
+interface HostedSubjectRevisionJobOutput {
   subjectId: string;
-  trialIndex: number;
+  attemptIndex: number;
   baseId: string | null;
   prompt?: string;
   fileChanges: string[];
@@ -1673,8 +1773,8 @@ export function createWorkbenchRunWorkload(args: {
   job: HostedWorkbenchJob;
   spec: GenericRunSpec;
   baseFiles: readonly SurfaceSnapshotFile[];
-  taskSourceFiles: readonly SurfaceSnapshotFile[];
-  taskBundles: readonly WorkbenchTaskBundle[];
+  engineResolveFiles: readonly SurfaceSnapshotFile[];
+  engineCases: readonly WorkbenchEngineCase[];
   traceFiles?: readonly SurfaceSnapshotFile[];
 }): WorkbenchRunWorkload {
   const purpose = workbenchExecutionPurpose(args.job);
@@ -1686,9 +1786,9 @@ export function createWorkbenchRunWorkload(args: {
   if (!subjectId) {
     throw new Error(`${purpose} execution job is missing subjectId.`);
   }
-  const trialIndex = readRequiredJobNumber(
+  const attemptIndex = readRequiredJobNumber(
     args.job.input,
-    "trialIndex",
+    "attemptIndex",
     `${purpose} execution job`,
   );
   const sampleIndex =
@@ -1707,48 +1807,40 @@ export function createWorkbenchRunWorkload(args: {
           "caseId",
           `${purpose} execution job`,
         );
-  const taskBundle = purpose === "improve"
+  const engineCase = purpose === "improve"
     ? undefined
-    : taskBundleForCase(args.taskBundles, caseId);
-  const selectedTaskSourceFiles = taskBundle
-    ? taskBundle.sourceFiles?.map((file) => ({ ...file })) ?? taskBundleRuntimeSourceFiles(taskBundle)
+    : engineCaseForCase(args.engineCases, caseId);
+  const selectedEngineResolveFiles = engineCase
+    ? engineCaseFilesForRuntimeInput({ spec: args.spec, engineCase })
     : [];
-  const task = taskBundle?.task;
+  const engineCaseSpec = engineCase?.case;
   const initial = createInitialSubjectFiles({
     baseFiles: args.baseFiles,
     spec: args.spec,
-    trialIndex,
+    attemptIndex,
   });
   return {
     job: args.job,
     spec: args.spec,
     subjectId,
-    trialIndex,
+    attemptIndex,
     sampleIndex,
     subjectFiles: initial.files,
     caseId,
-    taskSourceFiles: selectedTaskSourceFiles,
+    engineResolveFiles: selectedEngineResolveFiles,
     traceFiles: (args.traceFiles ?? []).map((file) => ({ ...file })),
-    ...(taskBundle ? { taskBundle } : {}),
-    ...(task ? { task } : {}),
+    ...(engineCase ? { engineCase } : {}),
+    ...(engineCaseSpec ? { engineCaseSpec } : {}),
     prompt: initial.prompt,
     changedPaths: initial.changedPaths,
     baseId: readJobString(args.job.input, "baseId"),
   };
 }
 
-function taskBundleRuntimeSourceFiles(taskBundle: WorkbenchTaskBundle): SurfaceSnapshotFile[] {
-  return [
-    ...taskBundle.publicFiles.map((file) => ({ ...file })),
-    ...taskBundle.testFiles.map((file) => ({ ...file })),
-    ...(taskBundle.solutionFiles ?? []).map((file) => ({ ...file })),
-  ].sort((left, right) => left.path.localeCompare(right.path));
-}
-
 function createInitialSubjectFiles(args: {
   baseFiles: readonly SurfaceSnapshotFile[];
   spec: GenericRunSpec;
-  trialIndex: number;
+  attemptIndex: number;
 }): {
   files: SurfaceSnapshotFile[];
   changedPaths: string[];
@@ -1765,7 +1857,7 @@ function createInitialSubjectFiles(args: {
         : [];
   const prompt = [
     `Run the subject workload for benchmark: ${args.spec.benchmark.description}`,
-    `Trial ${args.trialIndex + 1} uses ${formatOptimizerSummary(args.spec)}; the improve adapter may edit the subject before Workbench scores it.`,
+    `Attempt ${args.attemptIndex + 1} uses ${formatOptimizerSummary(args.spec)}; the improve adapter may edit the subject before Workbench scores it.`,
   ].join("\n");
   const byPath = new Map(files.map((file) => [file.path, file]));
   if (
@@ -1816,7 +1908,24 @@ export async function executeWorkbenchExecutionJob(
       adapterAuthProfiles.length > 0
         ? { ...args, adapterAuthProfiles }
         : args;
-    const executionForSandbox = readWorkbenchExecutionSpec(runtimeArgs.job);
+    const executionForRuntime = readWorkbenchExecutionSpec(runtimeArgs.job);
+    const executor = workbenchExecutionExecutorForRuntimeInput(runtimeArgs);
+    if (executor === "host") {
+      return await withWorkbenchRuntimeControlServer(
+        runtimeArgs,
+        options,
+        startedAt,
+        async (adapterRuntimeEnv) => executeAdapterInCurrentRuntime(
+          {
+            ...runtimeArgs,
+            adapterRuntimeEnv,
+          },
+          executionForRuntime,
+          startedAt,
+          createWorkbenchExecutionCapability(executionForRuntime, { now: startedAt }),
+        ),
+      );
+    }
     const fileStore = createWorkbenchSandboxFileStore(runtimeArgs);
     const planeFactory = options.createSandboxPlaneForProvider ?? createSandboxBackendPlaneForProvider;
     const plane = planeFactory(
@@ -1825,7 +1934,7 @@ export async function executeWorkbenchExecutionJob(
       startedAt,
       fileStore,
     );
-    const validated = await executeValidatedSandboxExecution(plane, executionForSandbox, {
+    const validated = await executeValidatedSandboxExecution(plane, executionForRuntime, {
       now: startedAt,
       runnerId: resolveWorkbenchWorkerId(
         [
@@ -1846,6 +1955,269 @@ export async function executeWorkbenchExecutionJob(
   } catch (error) {
     return failWorkbenchRunJob(args.job, startedAt, error);
   }
+}
+
+export function workbenchExecutionExecutorForRuntimeInput(
+  args: Pick<WorkbenchExecutionRuntimeInput, "job" | "adapterManifests" | "runtimeControlOperation">,
+): WorkbenchAdapterOperationExecutor {
+  if (args.runtimeControlOperation) {
+    return "sandbox";
+  }
+  const execution = readWorkbenchExecutionSpec(args.job);
+  const operation = adapterOperationForExecutionPurpose(execution.purpose);
+  if (!operation) {
+    return "sandbox";
+  }
+  const manifest = args.adapterManifests?.find((entry) => entry.id === execution.adapter.use);
+  return manifest ? workbenchAdapterOperationExecutor(manifest, operation) : "sandbox";
+}
+
+function adapterOperationForExecutionPurpose(
+  purpose: WorkbenchExecutionSpec["purpose"],
+): WorkbenchAdapterOperation | null {
+  if (purpose === "improve") {
+    return "optimizer.improve";
+  }
+  if (purpose === "attempt") {
+    return "engine.run";
+  }
+  return null;
+}
+
+const RUNTIME_CONTROL_MAX_BODY_BYTES = 512 * 1024 * 1024;
+
+async function withWorkbenchRuntimeControlServer(
+  args: WorkbenchExecutionRuntimeInput,
+  options: WorkbenchExecutionJobOptions,
+  startedAt: string,
+  run: (env: Record<string, string>) => Promise<HostedWorkbenchJob>,
+): Promise<HostedWorkbenchJob> {
+  const [{ createServer }] = await Promise.all([
+    importNodeModule<typeof import("node:http")>(nodeBuiltin("http")),
+  ]);
+  const token = randomBytes(24).toString("base64url");
+  const server = createServer((request, response) => {
+    void handleWorkbenchRuntimeControlHttpRequest({
+      request,
+      response,
+      token,
+      args,
+      options,
+      startedAt,
+    });
+  });
+  const url = await new Promise<string>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("Workbench runtime-control server did not expose a local TCP address."));
+        return;
+      }
+      resolve(`http://127.0.0.1:${address.port}`);
+    });
+  });
+  try {
+    return await run({
+      [WORKBENCH_RUNTIME_CONTROL_URL_ENV]: url,
+      [WORKBENCH_RUNTIME_CONTROL_TOKEN_ENV]: token,
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+async function handleWorkbenchRuntimeControlHttpRequest(args: {
+  request: import("node:http").IncomingMessage;
+  response: import("node:http").ServerResponse;
+  token: string;
+  args: WorkbenchExecutionRuntimeInput;
+  options: WorkbenchExecutionJobOptions;
+  startedAt: string;
+}): Promise<void> {
+  const { request, response } = args;
+  try {
+    if (request.method !== "POST" || request.url !== "/v1/operation-sequence") {
+      writeRuntimeControlJson(response, 404, { error: "Unknown Workbench runtime-control endpoint." });
+      return;
+    }
+    if (request.headers.authorization !== `Bearer ${args.token}`) {
+      writeRuntimeControlJson(response, 401, { error: "Workbench runtime-control token is invalid." });
+      return;
+    }
+    const parsed = JSON.parse(await readRuntimeControlBody(request)) as unknown;
+    const controlRequest = normalizeRuntimeControlOperationSequenceRequest(parsed);
+    const result = await executeRuntimeControlOperationSequenceInSandbox(
+      args.args,
+      args.options,
+      args.startedAt,
+      controlRequest,
+    );
+    writeRuntimeControlJson(response, 200, result as unknown as Json);
+  } catch (error) {
+    writeRuntimeControlJson(response, 500, {
+      error: error instanceof Error ? error.stack ?? error.message : String(error),
+    });
+  }
+}
+
+function writeRuntimeControlJson(
+  response: import("node:http").ServerResponse,
+  statusCode: number,
+  payload: Json,
+): void {
+  response.statusCode = statusCode;
+  response.setHeader("content-type", "application/json");
+  response.end(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function readRuntimeControlBody(
+  request: import("node:http").IncomingMessage,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > RUNTIME_CONTROL_MAX_BODY_BYTES) {
+        reject(new Error("Workbench runtime-control request body is too large."));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("error", reject);
+    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  });
+}
+
+function normalizeRuntimeControlOperationSequenceRequest(
+  value: unknown,
+): WorkbenchRuntimeControlOperationSequenceRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Workbench runtime-control operation sequence request must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.operations) || record.operations.length === 0) {
+    throw new Error("Workbench runtime-control operation sequence requires at least one operation.");
+  }
+  const inputs = normalizeRuntimeControlInputs(record.inputs);
+  return {
+    ...(inputs ? { inputs } : {}),
+    operations: record.operations.map((entry, index) =>
+      normalizeRuntimeControlOperation(entry, `operations[${index}]`)
+    ),
+    ...(typeof record.prepare === "boolean" ? { prepare: record.prepare } : {}),
+    ...(typeof record.collectWorkspace === "boolean" ? { collectWorkspace: record.collectWorkspace } : {}),
+  };
+}
+
+function normalizeRuntimeControlInputs(
+  value: unknown,
+): WorkbenchRuntimeControlOperationSequenceRequest["inputs"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Workbench runtime-control inputs must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  const inputs: NonNullable<WorkbenchRuntimeControlOperationSequenceRequest["inputs"]> = {};
+  if (hasOwn(record, "subject")) {
+    inputs.subject = normalizeRuntimeControlFiles(record.subject, "inputs.subject");
+  }
+  if (hasOwn(record, "case")) {
+    inputs.case = normalizeRuntimeControlFiles(record.case, "inputs.case");
+  }
+  if (hasOwn(record, "enginePrivate")) {
+    inputs.enginePrivate = normalizeRuntimeControlFiles(record.enginePrivate, "inputs.enginePrivate");
+  }
+  if (hasOwn(record, "traces")) {
+    inputs.traces = normalizeRuntimeControlFiles(record.traces, "inputs.traces");
+  }
+  if (hasOwn(record, "workspace")) {
+    inputs.workspace = normalizeRuntimeControlFiles(record.workspace, "inputs.workspace");
+  }
+  if (hasOwn(record, "output")) {
+    inputs.output = normalizeRuntimeControlFiles(record.output, "inputs.output");
+  }
+  return inputs;
+}
+
+function normalizeRuntimeControlFiles(
+  value: unknown,
+  label: string,
+): SurfaceSnapshotFile[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`Workbench runtime-control ${label} must be an array.`);
+  }
+  return value.map((entry, index) => {
+    if (!isSurfaceSnapshotFile(entry)) {
+      throw new Error(`Workbench runtime-control ${label}[${index}] must be a surface snapshot file.`);
+    }
+    return { ...entry, path: normalizeRelativePath(entry.path) };
+  });
+}
+
+function hasOwn(
+  value: Record<string, unknown>,
+  key: string,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeRuntimeControlOperation(
+  value: unknown,
+  label: string,
+): WorkbenchRuntimeControlOperation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Workbench runtime-control ${label} must be an object.`);
+  }
+  const record = value as Record<string, unknown>;
+  const operation = record.operation;
+  if (
+    operation !== "engine.resolve" &&
+    operation !== "engine.run" &&
+    operation !== "subject.run" &&
+    operation !== "optimizer.improve"
+  ) {
+    throw new Error(`Workbench runtime-control ${label}.operation is invalid.`);
+  }
+  const invocation = record.invocation;
+  if (!invocation || typeof invocation !== "object" || Array.isArray(invocation)) {
+    throw new Error(`Workbench runtime-control ${label}.invocation must be an object.`);
+  }
+  const invocationRecord = invocation as Record<string, unknown>;
+  if (typeof invocationRecord.use !== "string" || invocationRecord.use.length === 0) {
+    throw new Error(`Workbench runtime-control ${label}.invocation.use is required.`);
+  }
+  const withConfig = invocationRecord.with === undefined
+    ? {}
+    : isJsonPayload(invocationRecord.with)
+      ? invocationRecord.with
+      : null;
+  if (withConfig === null) {
+    throw new Error(`Workbench runtime-control ${label}.invocation.with must be JSON.`);
+  }
+  if (invocationRecord.auth !== undefined && !isJsonPayload(invocationRecord.auth)) {
+    throw new Error(`Workbench runtime-control ${label}.invocation.auth must be JSON.`);
+  }
+  return {
+    operation,
+    invocation: {
+      use: invocationRecord.use,
+      with: withConfig,
+      ...(invocationRecord.auth !== undefined ? { auth: invocationRecord.auth as Json } : {}),
+      ...(typeof invocationRecord.command === "string" && invocationRecord.command.trim()
+        ? { command: invocationRecord.command }
+        : {}),
+    },
+    ...(typeof record.label === "string" && record.label.trim() ? { label: record.label } : {}),
+  };
 }
 
 async function explicitAdapterAuthProfilesForExecution(
@@ -1899,7 +2271,7 @@ export function workbenchExecutionPurpose(
   return readWorkbenchExecutionPurpose(job);
 }
 
-export async function executeAdapterInCurrentSandboxRuntime(
+export async function executeAdapterInCurrentRuntime(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
   startedAt: string,
@@ -1920,11 +2292,10 @@ export async function executeAdapterInCurrentSandboxRuntime(
     ...(Object.keys(adapterAuth.env).length > 0
       ? { adapterAuthEnv: adapterAuth.env }
       : {}),
-    ...(adapterAuth.request ? { adapterAuthRequest: adapterAuth.request } : {}),
   };
   try {
     if (execution.purpose === "improve") {
-      return await executeProposalExecutionInSandbox(
+      return await executeSubjectRevisionExecutionInCurrentRuntime(
         runtimeInput,
         execution,
         startedAt,
@@ -1932,8 +2303,8 @@ export async function executeAdapterInCurrentSandboxRuntime(
         eventPublisher,
       );
     }
-    if (execution.purpose === "trial") {
-      return await executeTrialExecutionInSandbox(
+    if (execution.purpose === "attempt") {
+      return await executeAttemptExecutionInCurrentRuntime(
         runtimeInput,
         execution,
         startedAt,
@@ -1958,7 +2329,6 @@ async function materializeSandboxAdapterAuth(
 ): Promise<{
   root?: string;
   env: Record<string, string>;
-  request?: Json;
   cleanup?: () => Promise<void>;
 }> {
   const adapterProfiles = adapterAuthProfilesForExecution(execution, args);
@@ -1971,10 +2341,7 @@ async function materializeSandboxAdapterAuth(
   }
   const adapterFileBundles = adapterProfiles.filter((bundle) => bundle.files.length > 0);
   if (adapterFileBundles.length === 0) {
-    return {
-      env,
-      request: adapterAuthRequest(adapterProfiles, undefined, execution.adapter.use),
-    };
+    return { env };
   }
   const [fs, os, path] = await Promise.all([
     importNodeModule<any>(nodeBuiltin("fs/promises")),
@@ -1988,7 +2355,6 @@ async function materializeSandboxAdapterAuth(
   return {
     ...(root ? { root } : {}),
     env,
-    request: adapterAuthRequest(adapterProfiles, root, execution.adapter.use),
     cleanup: async () => {
       if (root) {
         await fs.rm(root, { recursive: true, force: true });
@@ -2068,6 +2434,18 @@ function adapterAuthRequest(
   return entries;
 }
 
+function adapterAuthRequestForStep(
+  args: Pick<WorkbenchExecutionRuntimeInput, "adapterAuthProfiles" | "adapterAuthRoot" | "adapterAuthRequest">,
+  adapterId: string,
+): Json | undefined {
+  const profiles = (args.adapterAuthProfiles ?? [])
+    .map((bundle) => sanitizeWorkbenchAdapterAuthBundle(bundle));
+  if (profiles.length === 0) {
+    return args.adapterAuthRequest;
+  }
+  return adapterAuthRequest(profiles, args.adapterAuthRoot, adapterId);
+}
+
 function adapterAuthProfilesForExecution(
   execution: WorkbenchExecutionSpec,
   args: WorkbenchExecutionRuntimeInput,
@@ -2089,11 +2467,44 @@ function adapterAuthProfilesForExecution(
 
 function requiredAdapterAuthTargetsForExecution(
   execution: WorkbenchExecutionSpec,
-  args: Pick<WorkbenchExecutionRuntimeInput, "adapterManifests">,
+  args: Pick<WorkbenchExecutionRuntimeInput, "adapterManifests" | "runtimeControlOperation" | "spec">,
 ): WorkbenchAdapterAuthTarget[] {
   const manifests = args.adapterManifests ?? [];
-  return collectWorkbenchAdapterAuthRequirements([execution.adapter], manifests)
+  return collectWorkbenchAdapterAuthRequirements(adapterInvocationsForExecution(execution, args), manifests)
     .map((target) => normalizeWorkbenchAdapterAuthTarget(target));
+}
+
+function adapterInvocationsForExecution(
+  execution: WorkbenchExecutionSpec,
+  args: Pick<WorkbenchExecutionRuntimeInput, "runtimeControlOperation" | "spec">,
+): WorkbenchAdapterInvocation[] {
+  if (args.runtimeControlOperation) {
+    return uniqueAdapterInvocations(args.runtimeControlOperation.operations.map((operation) => ({
+      use: operation.invocation.use,
+      with: operation.invocation.with ?? {},
+      ...(operation.invocation.auth !== undefined ? { auth: operation.invocation.auth } : {}),
+    })));
+  }
+  if (execution.purpose === "attempt") {
+    return uniqueAdapterInvocations([execution.adapter, args.spec.run]);
+  }
+  return [execution.adapter];
+}
+
+function uniqueAdapterInvocations(
+  invocations: readonly WorkbenchAdapterInvocation[],
+): WorkbenchAdapterInvocation[] {
+  const seen = new Set<string>();
+  const result: WorkbenchAdapterInvocation[] = [];
+  for (const invocation of invocations) {
+    const key = JSON.stringify(invocation);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(invocation);
+  }
+  return result;
 }
 
 function completedJobFromSandboxResult(
@@ -2135,7 +2546,7 @@ function completedJobFromSandboxResult(
   );
 }
 
-async function executeProposalExecutionInSandbox(
+async function executeSubjectRevisionExecutionInCurrentRuntime(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
   startedAt: string,
@@ -2170,7 +2581,7 @@ async function executeProposalExecutionInSandbox(
       result,
     );
   }
-  const proposalFiles = applyWorkbenchSubjectPatch({
+  const subjectRevisionFiles = applyWorkbenchSubjectPatch({
     baseFiles: workload.subjectFiles,
     patch: subjectPatch,
     edits: requireOptimizerEdits(args.spec),
@@ -2188,12 +2599,12 @@ async function executeProposalExecutionInSandbox(
       executionId: execution.id,
       purpose: execution.purpose,
       subjectId: workload.subjectId,
-      trialIndex: workload.trialIndex,
+      attemptIndex: workload.attemptIndex,
       baseId: workload.baseId,
       prompt: workload.prompt,
       subjectPatch,
       fileChanges: subjectPatch.fileChanges,
-      files: proposalFiles,
+      files: subjectRevisionFiles,
       traces: traceFilePaths(result.files),
       ...(usage ? { usage } : {}),
       ...(result.summary !== undefined ? { summary: result.summary } : {}),
@@ -2202,7 +2613,7 @@ async function executeProposalExecutionInSandbox(
   };
 }
 
-async function executeTrialExecutionInSandbox(
+async function executeAttemptExecutionInCurrentRuntime(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
   startedAt: string,
@@ -2213,63 +2624,60 @@ async function executeTrialExecutionInSandbox(
     job: args.job,
     spec: args.spec,
     baseFiles: args.baseFiles,
-    taskSourceFiles: args.taskSourceFiles,
-    taskBundles: args.taskBundles,
+    engineResolveFiles: args.engineResolveFiles,
+    engineCases: args.engineCases,
     traceFiles: args.traceFiles,
   });
-  const result = await runHostedCommandExecutionPhases(
+  const workloadResult = await runHostedCommandExecutionSteps(
     args,
     workload,
-    trialPhasesForExecution(execution, args.spec, args.adapterManifests),
+    attemptStepsForExecution(execution, args.spec, args.adapterManifests),
     startedAt,
     {
       capability,
       eventPublisher,
     },
   );
-  if (result.error || (result.exitCode ?? 0) !== 0) {
+  if (workloadResult.error || (workloadResult.exitCode ?? 0) !== 0) {
     return failWorkbenchRunJob(
       args.job,
       startedAt,
-      result.error ?? `Trial adapter execution exited with status ${result.exitCode}.`,
-      result.finishedAt,
-      result,
+      workloadResult.error ?? `Attempt adapter execution exited with status ${workloadResult.exitCode}.`,
+      workloadResult.finishedAt,
+      workloadResult,
     );
   }
-  const scorecard = result.scorecard;
+  const engineResult = workloadResult.result;
   if (
-    !scorecard ||
-    typeof scorecard.score !== "number" ||
-    !Number.isFinite(scorecard.score)
+    !engineResult ||
+    typeof engineResult.score !== "number" ||
+    !Number.isFinite(engineResult.score)
   ) {
     return failWorkbenchRunJob(
       args.job,
       startedAt,
-      "Trial scorer must return a workbench-result scorecard with a finite numeric score.",
-      result.finishedAt,
-      result,
+      "Attempt engine must return a workbench-result result with a finite numeric score.",
+      workloadResult.finishedAt,
+      workloadResult,
     );
   }
-  const finishedAt = result.finishedAt ?? new Date().toISOString();
-  const usage = mergeUsageSummaries([
-    result.usage,
-    scorecard.usage,
-  ]);
+  const finishedAt = workloadResult.finishedAt ?? new Date().toISOString();
+  const usage = attemptUsageSummary(workloadResult.usage, engineResult.usage);
   const sample = evaluateSample({
     subjectId: workload.subjectId,
-    files: result.files,
-    taskSourceFiles: workload.taskSourceFiles,
+    files: workloadResult.files,
+    engineResolveFiles: workload.engineResolveFiles,
     spec: workload.spec,
-    trialIndex: workload.trialIndex,
+    attemptIndex: workload.attemptIndex,
     sampleIndex: workload.sampleIndex,
     caseId: workload.caseId,
     startedAt,
     finishedAt,
-    durationMs: result.durationMs,
+    durationMs: workloadResult.durationMs,
     workload: {
-      ...result,
+      ...workloadResult,
       ...(usage ? { usage } : {}),
-      score: scorecard.score,
+      result: engineResult,
     },
   });
   return {
@@ -2284,21 +2692,375 @@ async function executeTrialExecutionInSandbox(
       executionId: execution.id,
       purpose: execution.purpose,
       subjectId: workload.subjectId,
-      trialIndex: workload.trialIndex,
+      attemptIndex: workload.attemptIndex,
       sampleIndex: workload.sampleIndex,
       caseId: workload.caseId,
       prompt: workload.prompt,
-      scorecard,
+      result: engineResult,
       fileChanges:
-        result.fileChanges.length > 0
-          ? result.fileChanges
+        workloadResult.fileChanges.length > 0
+          ? workloadResult.fileChanges
           : workload.changedPaths,
-      files: result.files,
+      files: workloadResult.files,
       sample,
       ...(usage ? { usage } : {}),
-      traces: traceFilePaths(result.files),
+      traces: traceFilePaths(workloadResult.files),
     } as unknown as Json,
   };
+}
+
+export async function executeRuntimeControlOperationSequenceInCurrentRuntime(
+  args: WorkbenchExecutionRuntimeInput,
+  execution: WorkbenchExecutionSpec,
+  startedAt: string,
+  capability?: WorkbenchExecutionCapability,
+): Promise<HostedWorkbenchJob> {
+  void execution;
+  void capability;
+  if (!args.runtimeControlOperation) {
+    throw new Error("Runtime-control operation sequence is missing from the sandbox request.");
+  }
+  const childExecution = readWorkbenchExecutionSpec(args.job);
+  const workload = createWorkbenchRunWorkload({
+    job: args.job,
+    spec: args.spec,
+    baseFiles: args.baseFiles,
+    engineResolveFiles: args.engineResolveFiles,
+    engineCases: args.engineCases,
+    traceFiles: args.traceFiles,
+  });
+  const runtimeArgs: WorkbenchExecutionRuntimeInput = { ...args };
+  delete runtimeArgs.adapterRuntimeEnv;
+  const adapterAuth = await materializeSandboxAdapterAuth(runtimeArgs, childExecution);
+  let result: RuntimeWorkloadResult;
+  try {
+    result = await runHostedCommandExecutionSteps(
+      {
+        ...runtimeArgs,
+        ...(adapterAuth.root ? { adapterAuthRoot: adapterAuth.root } : {}),
+        ...(Object.keys(adapterAuth.env).length > 0
+          ? { adapterAuthEnv: adapterAuth.env }
+          : {}),
+      },
+      workload,
+      args.runtimeControlOperation.operations.map((operation, index) =>
+        runtimeControlStepForOperation(operation, index, args.adapterManifests)
+      ),
+      startedAt,
+      {
+        runSubjectPrepare: args.runtimeControlOperation.prepare ?? false,
+        workspaceFiles: args.runtimeControlOperation.inputs?.workspace ?? [],
+        outputFiles: args.runtimeControlOperation.inputs?.output ?? [],
+        collectWorkspace: args.runtimeControlOperation.collectWorkspace ?? false,
+      },
+    );
+  } finally {
+    if (adapterAuth.cleanup) {
+      await adapterAuth.cleanup().catch(() => undefined);
+    }
+  }
+  const finishedAt = result.finishedAt ?? new Date().toISOString();
+  const failed = Boolean(result.error) || (result.exitCode ?? 0) !== 0;
+  return {
+    ...args.job,
+    status: failed ? "failed" : "succeeded",
+    attempt: Math.max(1, args.job.attempt),
+    startedAt,
+    finishedAt,
+    updatedAt: finishedAt,
+    ...(failed ? { error: result.error ?? `Runtime-control operation sequence exited with status ${result.exitCode}.` } : {}),
+    output: runtimeControlJobOutput(result, !failed) as unknown as Json,
+  };
+}
+
+async function executeRuntimeControlOperationSequenceInSandbox(
+  args: WorkbenchExecutionRuntimeInput,
+  options: WorkbenchExecutionJobOptions,
+  startedAt: string,
+  request: WorkbenchRuntimeControlOperationSequenceRequest,
+): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
+  const childArgs = createRuntimeControlSandboxInput(args, request);
+  const execution = readWorkbenchExecutionSpec(childArgs.job);
+  const fileStore = createWorkbenchSandboxFileStore(childArgs);
+  const planeFactory = options.createSandboxPlaneForProvider ?? createSandboxBackendPlaneForProvider;
+  const plane = planeFactory(
+    options.sandboxProvider,
+    childArgs,
+    startedAt,
+    fileStore,
+  );
+  assertSandboxBackendSupportsNetworkPolicy(plane.backend, execution);
+  const sandboxOptions = {
+    now: startedAt,
+    runnerId: resolveWorkbenchWorkerId(
+      [
+        process.env.WORKBENCH_WORKER_ID,
+        process.env.EC2_INSTANCE_ID,
+        os.hostname(),
+        process.env.HOSTNAME,
+      ],
+      "local-runner",
+    ),
+    fileStore,
+  };
+  const inputs = await fileStore.materializeInputs(execution);
+  const environment = plane.prepareEnvironment
+    ? await plane.prepareEnvironment(execution, sandboxOptions)
+    : {
+        backend: plane.backend.name,
+        kind: execution.sandbox.kind,
+        ref: execution.sandbox.ref,
+      };
+  const allocation = createWorkbenchSandboxAllocation(execution, {
+    backend: plane.backend.name,
+    runnerId: sandboxOptions.runnerId,
+    now: startedAt,
+  });
+  const capability = createWorkbenchExecutionCapability(execution, { now: startedAt });
+  assertRuntimeControlScope("Runtime-control sandbox allocation", collectSandboxAllocationScopeIssues(allocation, execution, { now: startedAt }));
+  assertRuntimeControlScope("Runtime-control execution capability", collectExecutionCapabilityScopeIssues(capability, execution, { now: startedAt }));
+  const sandbox = await plane.createSandbox({
+    execution,
+    environment,
+    allocation,
+    capability,
+    inputs,
+  }, sandboxOptions);
+  assertRuntimeControlScope("Runtime-control sandbox handle", collectSandboxHandleScopeIssues(sandbox, allocation, execution));
+  let result: WorkbenchExecutionResult;
+  try {
+    result = await plane.exec({
+      execution,
+      environment,
+      sandbox,
+      allocation,
+      capability,
+      inputs,
+    }, sandboxOptions);
+  } finally {
+    await plane.destroySandbox(sandbox, sandboxOptions);
+  }
+  const completedJob = completedJobFromSandboxResult(childArgs.job, startedAt, result);
+  return runtimeControlResultFromCompletedJob(completedJob);
+}
+
+function createRuntimeControlSandboxInput(
+  args: WorkbenchExecutionRuntimeInput,
+  request: WorkbenchRuntimeControlOperationSequenceRequest,
+): WorkbenchExecutionRuntimeInput {
+  const parentExecution = readWorkbenchExecutionSpec(args.job);
+  const parentWorkload = createWorkbenchRunWorkload({
+    job: args.job,
+    spec: args.spec,
+    baseFiles: args.baseFiles,
+    engineResolveFiles: args.engineResolveFiles,
+    engineCases: args.engineCases,
+    traceFiles: args.traceFiles,
+  });
+  const nonce = runtimeControlNonce();
+  const childExecutionId = `${parentExecution.id}:runtime:${nonce}`;
+  const childJobId = `${args.job.id}:runtime:${nonce}`;
+  const parentInput = asRuntimeRecord(args.job.input);
+  const publicFiles = runtimeControlInputFiles(
+    request.inputs,
+    "case",
+    parentWorkload.engineCase ? engineCasePublicFiles(parentWorkload.engineCase) : [],
+  );
+  const privateFiles = runtimeControlInputFiles(
+    request.inputs,
+    "enginePrivate",
+    parentWorkload.engineCase ? engineCasePrivateFiles(parentWorkload.engineCase) : [],
+  );
+  const subjectFiles = runtimeControlInputFiles(
+    request.inputs,
+    "subject",
+    parentWorkload.subjectFiles,
+  );
+  const traceFiles = runtimeControlInputFiles(
+    request.inputs,
+    "traces",
+    parentWorkload.traceFiles,
+  );
+  const adapter = request.operations[request.operations.length - 1]?.invocation;
+  const childExecution: WorkbenchExecutionSpec = {
+    ...parentExecution,
+    id: childExecutionId,
+    outputs: [],
+    adapter: adapter
+      ? {
+          use: adapter.use,
+          with: adapter.with ?? {},
+          ...(adapter.auth !== undefined ? { auth: adapter.auth } : {}),
+        }
+      : parentExecution.adapter,
+    metadata: {
+      ...asRuntimeRecord(parentExecution.metadata),
+      runtimeControl: true,
+      caseId: parentWorkload.caseId,
+    },
+  };
+  const engineCase: WorkbenchEngineCase = {
+    id: parentWorkload.caseId,
+    case: parentWorkload.engineCaseSpec ?? {
+      version: 3,
+      prompt: parentWorkload.prompt,
+    },
+    files: {
+      public: publicFiles,
+      private: privateFiles,
+    },
+  };
+  const childJob: HostedWorkbenchJob = {
+    ...args.job,
+    id: childJobId,
+    input: {
+      ...parentInput,
+      execution: childExecution as unknown as Json,
+      caseId: parentWorkload.caseId,
+    } as unknown as Json,
+  };
+  const childArgs: WorkbenchExecutionRuntimeInput = {
+    ...args,
+    job: childJob,
+    baseFiles: subjectFiles,
+    engineResolveFiles: [...publicFiles, ...privateFiles],
+    engineCases: [engineCase],
+    traceFiles,
+    runtimeControlOperation: request,
+  };
+  delete childArgs.adapterRuntimeEnv;
+  delete childArgs.workspaceRoot;
+  return childArgs;
+}
+
+function runtimeControlInputFiles(
+  inputs: WorkbenchRuntimeControlOperationSequenceRequest["inputs"],
+  key: keyof NonNullable<WorkbenchRuntimeControlOperationSequenceRequest["inputs"]>,
+  fallback: readonly SurfaceSnapshotFile[],
+): SurfaceSnapshotFile[] {
+  if (inputs && Object.prototype.hasOwnProperty.call(inputs, key)) {
+    return cloneSurfaceFiles(inputs[key] ?? []);
+  }
+  return cloneSurfaceFiles(fallback);
+}
+
+function runtimeControlStepForOperation(
+  operation: WorkbenchRuntimeControlOperation,
+  index: number,
+  manifests: readonly WorkbenchAdapterManifest[] = [],
+): WorkbenchWorkloadStepCommand {
+  const command = operation.invocation.command?.trim()
+    || adapterProtocolCommandSpec(
+      {
+        use: operation.invocation.use,
+        with: operation.invocation.with ?? {},
+        ...(operation.invocation.auth !== undefined ? { auth: operation.invocation.auth } : {}),
+      },
+      operation.operation,
+      manifests,
+    ).command;
+  return {
+    kind: operation.operation === "subject.run"
+      ? "subject"
+      : operation.operation === "optimizer.improve"
+        ? "optimizer"
+        : "engine",
+    label: operation.label ?? `${operation.operation.replace(".", "_")}_${index + 1}`,
+    operation: operation.operation,
+    executor: "sandbox",
+    adapter: {
+      use: operation.invocation.use,
+      with: operation.invocation.with ?? {},
+      ...(operation.invocation.auth !== undefined ? { auth: operation.invocation.auth } : {}),
+    },
+    command,
+  };
+}
+
+function runtimeControlResultFromCompletedJob(
+  job: HostedWorkbenchJob,
+): WorkbenchRuntimeControlOperationSequenceResult {
+  return normalizeRuntimeControlResultOutput(asRuntimeRecord(job.output), job.status === "succeeded", job.error);
+}
+
+function runtimeControlJobOutput(
+  result: RuntimeWorkloadResult,
+  ok: boolean,
+): Record<string, Json> {
+  return normalizeRuntimeControlResultOutput({
+    ok,
+    files: result.files as unknown as Json,
+    fileChanges: result.fileChanges as unknown as Json,
+    ...(result.operationResults ? { operationResults: result.operationResults as unknown as Json } : {}),
+    ...(result.workspaceFiles ? { workspaceFiles: result.workspaceFiles as unknown as Json } : {}),
+    ...(result.result ? { result: result.result as unknown as Json } : {}),
+    ...(result.usage ? { usage: result.usage as unknown as Json } : {}),
+    ...(result.summary !== undefined ? { summary: result.summary } : {}),
+    ...(result.feedback !== undefined ? { feedback: result.feedback } : {}),
+    ...(result.error ? { error: result.error } : {}),
+  }, ok, result.error) as unknown as Record<string, Json>;
+}
+
+function normalizeRuntimeControlResultOutput(
+  output: Record<string, unknown>,
+  ok: boolean,
+  fallbackError?: string,
+): WorkbenchRuntimeControlOperationSequenceResult {
+  const files = Array.isArray(output.files)
+    ? output.files.filter(isSurfaceSnapshotFile)
+    : [];
+  const workspaceFiles = Array.isArray(output.workspaceFiles)
+    ? output.workspaceFiles.filter(isSurfaceSnapshotFile)
+    : undefined;
+  const operationResults = Array.isArray(output.operationResults)
+    ? output.operationResults.filter(isWorkbenchAdapterOperationResult)
+    : [];
+  return {
+    ok: ok && output.ok !== false,
+    files,
+    fileChanges: Array.isArray(output.fileChanges)
+      ? output.fileChanges.filter((entry): entry is string => typeof entry === "string")
+      : files.map((file) => file.path),
+    operationResults,
+    ...(workspaceFiles ? { workspaceFiles } : {}),
+    ...(output.result && typeof output.result === "object" && !Array.isArray(output.result)
+      ? { result: output.result as unknown as WorkbenchResult }
+      : {}),
+    ...(output.usage && typeof output.usage === "object" && !Array.isArray(output.usage)
+      ? { usage: output.usage as UsageSummary }
+      : {}),
+    ...(typeof output.summary === "string" ? { summary: output.summary } : {}),
+    ...(output.feedback !== undefined && isJsonPayload(output.feedback) ? { feedback: output.feedback } : {}),
+    ...(typeof output.error === "string" ? { error: output.error } : fallbackError ? { error: fallbackError } : {}),
+  };
+}
+
+function isWorkbenchAdapterOperationResult(value: unknown): value is WorkbenchAdapterOperationResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return record.protocol === "workbench.adapter-result.v1" &&
+    (record.operation === "engine.resolve" ||
+      record.operation === "engine.run" ||
+      record.operation === "subject.run" ||
+      record.operation === "optimizer.improve");
+}
+
+function cloneSurfaceFiles(
+  files: readonly SurfaceSnapshotFile[],
+): SurfaceSnapshotFile[] {
+  return files.map((file) => ({ ...file, path: normalizeRelativePath(file.path) }));
+}
+
+function runtimeControlNonce(): string {
+  return randomBytes(6).toString("hex");
+}
+
+function assertRuntimeControlScope(label: string, issues: readonly string[]): void {
+  if (issues.length > 0) {
+    throw new Error(`${label} failed validation:\n${issues.join("\n")}`);
+  }
 }
 
 async function runHostedProtocolExecutionResult(
@@ -2312,14 +3074,14 @@ async function runHostedProtocolExecutionResult(
     job: args.job,
     spec: args.spec,
     baseFiles: args.baseFiles,
-    taskSourceFiles: args.taskSourceFiles,
-    taskBundles: args.taskBundles,
+    engineResolveFiles: args.engineResolveFiles,
+    engineCases: args.engineCases,
     traceFiles: args.traceFiles,
   });
-  const result = await runHostedCommandExecutionPhases(
+  const result = await runHostedCommandExecutionSteps(
     args,
     workload,
-    [protocolPhaseForExecution(execution, args.adapterManifests)],
+    [protocolStepForExecution(execution, args.adapterManifests)],
     startedAt,
     {
       capability,
@@ -2329,14 +3091,18 @@ async function runHostedProtocolExecutionResult(
   return { workload, result };
 }
 
-async function runHostedCommandExecutionPhases(
+async function runHostedCommandExecutionSteps(
   args: WorkbenchExecutionRuntimeInput,
   workload: WorkbenchRunWorkload,
-  phases: readonly WorkbenchWorkloadPhaseCommand[],
+  steps: readonly WorkbenchWorkloadStepCommand[],
   startedAt: string,
   options: {
     capability?: ReturnType<typeof createWorkbenchExecutionCapability>;
     eventPublisher?: WorkbenchExecutionEventPublisher;
+    runSubjectPrepare?: boolean;
+    workspaceFiles?: readonly SurfaceSnapshotFile[];
+    outputFiles?: readonly SurfaceSnapshotFile[];
+    collectWorkspace?: boolean;
   } = {},
 ): Promise<RuntimeWorkloadResult> {
   const [{ execFile }, fs, os, path, { promisify }] = await Promise.all([
@@ -2347,17 +3113,16 @@ async function runHostedCommandExecutionPhases(
     importNodeModule<any>(nodeBuiltin("util")),
   ]);
   const execFileAsync = promisify(execFile);
-  const resolvedRuntime = workload.task
-    ? resolveTaskExecutionConfig({
+  const resolvedRuntime = workload.engineCaseSpec
+    ? resolveEngineCaseExecutionConfig({
         spec: workload.spec,
-        task: workload.task,
+        engineCase: workload.engineCaseSpec,
       }).environment
     : workload.spec.environment;
   const environmentVersion =
-    args.environmentVersion ??
-    (resolvedRuntime
-      ? environmentVersionForSpec(workload.spec)
-      : undefined);
+    args.environmentVersion
+      ? environmentVersionForRuntime(resolvedRuntime, args.environmentVersion)
+      : environmentVersionForRuntime(resolvedRuntime);
   const workspace = await createRuntimeWorkspaceRoot(
     args,
     fs,
@@ -2367,9 +3132,28 @@ async function runHostedCommandExecutionPhases(
   );
   try {
     await stageWorkbenchRunWorkload(workspace.root, workload);
+    if (options.workspaceFiles && options.workspaceFiles.length > 0) {
+      await stageInitialWorkspaceFiles(workspace.root, options.workspaceFiles);
+    }
+    if (options.outputFiles && options.outputFiles.length > 0) {
+      await writeSurfaceFiles(outputDir(workspace.root), options.outputFiles);
+    }
+    const execution = readWorkbenchExecutionSpec(workload.job);
+    const hostAdapterIds = new Set(
+      steps.flatMap((step) => step.executor === "host"
+        ? [step.adapter?.use ?? execution.adapter.use]
+        : []),
+    );
+    const hostAdapterRoots = hostAdapterIds.size > 0
+      ? await materializeHostAdapterRoots(
+          workspace.root,
+          args.adapterFiles ?? [],
+          hostAdapterIds,
+        )
+      : new Map<string, string>();
     let exitCode = 0;
     let runtimeError: string | undefined;
-    const phaseResults: WorkbenchAdapterOperationResult[] = [];
+    const operationResults: WorkbenchAdapterOperationResult[] = [];
     try {
       if (!environmentVersion) {
         throw new Error(
@@ -2390,66 +3174,85 @@ async function runHostedCommandExecutionPhases(
           )}\n`,
         );
       }
-      const phaseTimeoutMs = environmentVersion
+      const stepTimeoutMs = environmentVersion
         ? environmentVersionTimeoutMs(environmentVersion)
         : 5 * 60 * 1000;
-      const execution = readWorkbenchExecutionSpec(workload.job);
-      for (const phase of phases) {
-        await resetHostedWorkloadPhaseOutput(workspace.root, phase);
-        if (phase.kind === "scorer" && execution.purpose === "trial") {
-          await stageTrialScoringInputs(workspace.root, workload);
+      const shouldRunSubjectPrepare =
+        options.runSubjectPrepare ?? steps.some((step) => step.executor === "sandbox");
+      if (shouldRunSubjectPrepare) {
+        await runSubjectPrepareCommand({
+          root: workspace.root,
+          workload,
+          execution,
+          execFileAsync,
+          timeoutMs: stepTimeoutMs,
+          eventPublisher: options.eventPublisher,
+        });
+      }
+      let enginePrivateStaged = false;
+      for (const step of steps) {
+        if (step.kind === "engine" && !enginePrivateStaged) {
+          await stageWorkbenchEnginePrivateFiles(workspace.root, workload);
+          enginePrivateStaged = true;
         }
+        await resetHostedWorkloadStepOutput(workspace.root);
         const adapterRequestPath = await writeWorkbenchAdapterRequest(
           workspace.root,
           workload,
           execution,
-          phase,
-          args.adapterAuthRequest,
+          step,
+          adapterAuthRequestForStep(args, step.adapter?.use ?? execution.adapter.use),
+          args.adapterManifests,
         );
-        const phaseRole = phaseEventRole(phase);
-        await publishCommandPhaseEvent(options.eventPublisher, {
-          phase: phase.label,
+        const stepRole = stepEventRole(step);
+        await publishCommandStepEvent(options.eventPublisher, {
+          step: step.label,
           status: "started",
-          ...(phaseRole ? { role: phaseRole } : {}),
+          ...(stepRole ? { role: stepRole } : {}),
         });
         try {
-          if (!phase.command) {
-            throw new Error(`Adapter phase ${phase.label} is missing a command.`);
+          if (!step.command) {
+            throw new Error(`Adapter step ${step.label} is missing a command.`);
           }
+          const adapterRoot = step.executor === "host"
+            ? hostAdapterRoots.get(step.adapter?.use ?? execution.adapter.use)
+            : undefined;
           const command = createHostedWorkloadShellCommand(
             workspace.root,
-            phase.command,
-            phase.label,
-            phase.okExitCodes,
+            step.command,
+            step.label,
+            step.okExitCodes,
           );
-          await execFileAsync("sh", ["-lc", command], {
-            cwd: workspace.root,
-            env: createHostedWorkloadPhaseEnv(
+          await execFileAsync("sh", ["-c", command], {
+            cwd: adapterRoot ?? workspace.root,
+            env: createHostedWorkloadAdapterEnv(
               workspace.root,
               adapterRequestPath,
               args.adapterAuthEnv,
+              adapterRoot ? { adapterRoot } : undefined,
+              args.adapterRuntimeEnv,
             ),
             maxBuffer: 10 * 1024 * 1024,
-            timeout: phaseTimeoutMs,
+            timeout: stepTimeoutMs,
           });
-          const operationResult = await readWorkbenchAdapterOperationResult(outputDir(workspace.root), phase.operation);
+          const operationResult = await readWorkbenchAdapterOperationResult(outputDir(workspace.root), step.operation);
           assertWorkbenchAdapterOperationResultOk(
             operationResult,
-            `Adapter ${phase.adapter?.use ?? execution.adapter.use} ${phase.operation}`,
+            `Adapter ${step.adapter?.use ?? execution.adapter.use} ${step.operation}`,
           );
-          phaseResults.push(operationResult);
-          await publishCommandPhaseEvent(options.eventPublisher, {
-            phase: phase.label,
+          operationResults.push(operationResult);
+          await publishCommandStepEvent(options.eventPublisher, {
+            step: step.label,
             status: "succeeded",
-            ...(phaseRole ? { role: phaseRole } : {}),
+            ...(stepRole ? { role: stepRole } : {}),
           });
         } catch (error) {
-          await publishCommandPhaseEvent(options.eventPublisher, {
-            phase: phase.label,
+          await publishCommandStepEvent(options.eventPublisher, {
+            step: step.label,
             status: "failed",
             exitCode: readExitCode(error),
             error: error instanceof Error ? error.message : String(error),
-            ...(phaseRole ? { role: phaseRole } : {}),
+            ...(stepRole ? { role: stepRole } : {}),
           });
           throw error;
         }
@@ -2476,13 +3279,68 @@ async function runHostedCommandExecutionPhases(
         startedAt,
       });
     }
-    return await readWorkbenchRunWorkloadResult(workspace.root, workload, {
+    const result = await readWorkbenchRunWorkloadResult(workspace.root, workload, {
       exitCode,
       startedAt,
-      phaseResults,
+      operationResults,
     });
+    if (options.collectWorkspace) {
+      result.workspaceFiles = await readMutableWorkspaceSnapshotFiles(workspace.root);
+    }
+    return result;
   } finally {
     await workspace.cleanup();
+  }
+}
+
+async function runSubjectPrepareCommand(args: {
+  root: string;
+  workload: WorkbenchRunWorkload;
+  execution: WorkbenchExecutionSpec;
+  execFileAsync: (
+    file: string,
+    args: string[],
+    options?: Record<string, unknown>,
+  ) => Promise<unknown>;
+  timeoutMs: number;
+  eventPublisher?: WorkbenchExecutionEventPublisher;
+}): Promise<void> {
+  const command = args.workload.spec.subject.prepare?.command;
+  if (!command) {
+    return;
+  }
+  const role = args.execution.purpose === "improve" ? "optimizer" : "runner";
+  await publishCommandStepEvent(args.eventPublisher, {
+    step: "subject_prepare",
+    status: "started",
+    role,
+  });
+  try {
+    const shellCommand = createHostedWorkloadShellCommand(
+      args.root,
+      command,
+      "subject_prepare",
+    );
+    await args.execFileAsync("sh", ["-c", shellCommand], {
+      cwd: args.root,
+      env: createHostedWorkloadPrepareEnv(args.root),
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: args.timeoutMs,
+    });
+    await publishCommandStepEvent(args.eventPublisher, {
+      step: "subject_prepare",
+      status: "succeeded",
+      role,
+    });
+  } catch (error) {
+    await publishCommandStepEvent(args.eventPublisher, {
+      step: "subject_prepare",
+      status: "failed",
+      exitCode: readExitCode(error),
+      error: error instanceof Error ? error.message : String(error),
+      role,
+    });
+    throw new Error(`Subject prepare command failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -2528,17 +3386,17 @@ async function createRuntimeWorkspaceRoot(
   };
 }
 
-function phaseEventRole(
-  phase: WorkbenchWorkloadPhaseCommand,
-): "optimizer" | "runner" | "scorer" | undefined {
-  if (phase.kind === "optimizer") {
+function stepEventRole(
+  step: WorkbenchWorkloadStepCommand,
+): "optimizer" | "runner" | "engine" | undefined {
+  if (step.kind === "optimizer") {
     return "optimizer";
   }
-  if (phase.kind === "runner") {
+  if (step.kind === "subject") {
     return "runner";
   }
-  if (phase.kind === "scorer") {
-    return "scorer";
+  if (step.kind === "engine") {
+    return "engine";
   }
   return undefined;
 }
@@ -2546,25 +3404,35 @@ function phaseEventRole(
 function adapterOperationUsageSummary(
   result: WorkbenchAdapterOperationResult,
 ): UsageSummary | undefined {
-  if (result.operation === "subject.improve") {
+  if (hasExplicitUsageRole(result.usage)) {
+    return completeUsageSummary(result.usage);
+  }
+  if (result.operation === "optimizer.improve") {
     return assignUsageRole("optimizer", result.usage);
   }
   if (result.operation === "subject.run") {
     return assignUsageRole("runner", result.usage);
   }
-  if (result.operation === "trial.score") {
-    return assignUsageRole("scorer", result.usage);
+  if (result.operation === "engine.run") {
+    return assignUsageRole("engine", result.usage);
   }
   return result.usage;
 }
 
-function executionPurposeRole(
-  purpose: WorkbenchExecutionSpec["purpose"],
-): "optimizer" | "runner" {
-  if (purpose === "improve") {
-    return "optimizer";
-  }
-  return "runner";
+function attemptUsageSummary(
+  workloadUsage: UsageSummary | undefined,
+  resultUsage: UsageSummary | undefined,
+): UsageSummary | undefined {
+  const normalizedWorkloadUsage = completeUsageSummary(workloadUsage);
+  const legacyEngineUsage = normalizedWorkloadUsage?.engine
+    ? undefined
+    : assignUsageRole("engine", resultUsage);
+  return mergeUsageSummaries([normalizedWorkloadUsage, legacyEngineUsage]);
+}
+
+function hasExplicitUsageRole(usage: UsageSummary | undefined): boolean {
+  const normalized = completeUsageSummary(usage);
+  return Boolean(normalized?.optimizer || normalized?.runner || normalized?.engine);
 }
 
 function createSubjectPatchFromResult(
@@ -2609,19 +3477,26 @@ function isSubjectEditPath(
 function environmentVersionForSpec(
   spec: GenericRunSpec,
 ): Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec"> {
-  const image = environmentImage(spec);
+  return environmentVersionForRuntime(spec.environment);
+}
+
+function environmentVersionForRuntime(
+  runtime: GenericRunSpec["environment"],
+  base?: Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec">,
+): Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec"> {
+  const image = runtime.dockerfile;
   const resolved = findEnvironmentVersionForImage(
     image,
     DEFAULT_ENVIRONMENT_VERSIONS,
-  );
+  ) ?? base;
   if (resolved) {
     return {
       id: resolved.id,
       imageRef: resolved.imageRef,
       spec: {
         ...resolved.spec,
-        network: environmentNetwork(spec),
-        resources: definedEnvironmentResources(environmentResources(spec)),
+        network: environmentNetwork(runtime),
+        resources: definedEnvironmentResources(environmentResources(runtime)),
       },
     };
   }
@@ -2632,8 +3507,8 @@ function environmentVersionForSpec(
       : `dockerfile://${image}`,
     spec: {
       base: "custom",
-      network: environmentNetwork(spec),
-      resources: definedEnvironmentResources(environmentResources(spec)),
+      network: environmentNetwork(runtime),
+      resources: definedEnvironmentResources(environmentResources(runtime)),
     },
   };
 }
@@ -2666,44 +3541,136 @@ export async function stageWorkbenchRunWorkload(
     fs
       .rm(outputDir(root), { recursive: true, force: true })
       .catch(() => undefined),
+    fs
+      .rm(runtimePrivateDir(root), { recursive: true, force: true })
+      .catch(() => undefined),
   ]);
   await fs.mkdir(inputDir(root), { recursive: true });
   await fs.mkdir(outputDir(root), { recursive: true });
-  if (purpose === "trial") {
-    await Promise.all([
-      fs.rm(runtimeTestsDir(root), { recursive: true, force: true }).catch(() => undefined),
-      fs.rm(runtimeLogsDir(root), { recursive: true, force: true }).catch(() => undefined),
-    ]);
+  if (purpose === "attempt") {
     await fs.mkdir(subjectDir(root), { recursive: true });
-    await fs.mkdir(taskDir(root), { recursive: true });
-    await fs.mkdir(runtimeLogsAgentDir(root), { recursive: true });
-    await fs.mkdir(runtimeLogsVerifierDir(root), { recursive: true });
-    await fs.mkdir(runtimeLogsArtifactsDir(root), { recursive: true });
-    const taskBundle = requireWorkloadTaskBundle(workload, "Trial staging");
+    await fs.mkdir(caseDir(root), { recursive: true });
+    const engineCase = requireWorkloadEngineCase(workload, "Attempt staging");
     await writeSurfaceFiles(subjectDir(root), workload.subjectFiles);
-    await writeSurfaceFiles(taskDir(root), workload.taskSourceFiles);
-    await writeSurfaceFiles(root, taskBundle.publicFiles);
-    await writeSurfaceFiles(root, workload.subjectFiles);
+    await writeSurfaceFiles(caseDir(root), engineCasePublicFiles(engineCase));
     return;
   }
   if (purpose === "improve") {
     await fs.mkdir(subjectDir(root), { recursive: true });
     await writeSurfaceFiles(subjectDir(root), workload.subjectFiles);
-    await writeSurfaceFiles(root, workload.subjectFiles);
     await fs.mkdir(tracesDir(root), { recursive: true });
     await writeSurfaceFiles(tracesDir(root), workload.traceFiles);
   }
 }
 
-async function stageTrialScoringInputs(
+async function stageWorkbenchEnginePrivateFiles(
   root: string,
   workload: WorkbenchRunWorkload,
 ): Promise<void> {
+  if (readWorkloadExecutionPurpose(workload) !== "attempt") {
+    return;
+  }
   const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
-  const taskBundle = requireWorkloadTaskBundle(workload, "Trial scoring");
-  await fs.mkdir(runtimeTestsDir(root), { recursive: true });
-  await fs.mkdir(runtimeLogsVerifierDir(root), { recursive: true });
-  await writeSurfaceFiles(runtimeTestsDir(root), taskBundle.testFiles);
+  await fs.mkdir(runtimeEnginePrivateDir(root), { recursive: true });
+  await writeSurfaceFiles(
+    runtimeEnginePrivateDir(root),
+    engineCasePrivateFiles(requireWorkloadEngineCase(workload, "Engine-private staging")),
+  );
+}
+
+async function stageInitialWorkspaceFiles(
+  root: string,
+  files: readonly SurfaceSnapshotFile[],
+): Promise<void> {
+  await writeSurfaceFiles(root, files.filter((file) => isMutableWorkspaceSnapshotPath(file.path)));
+}
+
+async function readMutableWorkspaceSnapshotFiles(
+  root: string,
+): Promise<SurfaceSnapshotFile[]> {
+  return (await readSurfaceFiles(root))
+    .filter((file) => isMutableWorkspaceSnapshotPath(file.path))
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function isMutableWorkspaceSnapshotPath(filePath: string): boolean {
+  const normalized = normalizeRelativePath(filePath);
+  return Boolean(
+    normalized &&
+      !normalized.startsWith("../") &&
+      normalized !== "input" &&
+      !normalized.startsWith("input/") &&
+      normalized !== "private" &&
+      !normalized.startsWith("private/") &&
+      normalized !== "output" &&
+      !normalized.startsWith("output/") &&
+      normalized !== ".workbench" &&
+      !normalized.startsWith(".workbench/"),
+  );
+}
+
+async function materializeHostAdapterRoots(
+  root: string,
+  adapterFiles: readonly SurfaceSnapshotFile[],
+  adapterIds: ReadonlySet<string>,
+): Promise<Map<string, string>> {
+  if (adapterFiles.length === 0 || adapterIds.size === 0) {
+    return new Map();
+  }
+  const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
+  const path = await importNodeModule<any>(nodeBuiltin("path"));
+  const sourceRoots = hostAdapterSourceRoots(adapterFiles, adapterIds);
+  const roots = new Map<string, string>();
+  for (const [adapterId, sourceRoot] of sourceRoots) {
+    const targetRoot = path.join(root, ".workbench", "adapters", adapterId);
+    const files = adapterFiles.flatMap((file) => {
+      const relativePath = adapterFilePathWithinRoot(file.path, sourceRoot);
+      return relativePath === null
+        ? []
+        : [{ ...file, path: relativePath }];
+    });
+    await fs.rm(targetRoot, { recursive: true, force: true }).catch(() => undefined);
+    await fs.mkdir(targetRoot, { recursive: true });
+    await writeSurfaceFiles(targetRoot, files);
+    roots.set(adapterId, await fs.realpath(targetRoot));
+  }
+  return roots;
+}
+
+function hostAdapterSourceRoots(
+  adapterFiles: readonly SurfaceSnapshotFile[],
+  adapterIds: ReadonlySet<string>,
+): Map<string, string> {
+  const roots = new Map<string, string>();
+  for (const file of adapterFiles) {
+    const normalized = normalizeRelativePath(file.path);
+    if (!normalized.endsWith("workbench.adapter.yaml")) {
+      continue;
+    }
+    const manifest = parseWorkbenchAdapterManifest(file.content);
+    if (!adapterIds.has(manifest.id)) {
+      continue;
+    }
+    const sourceRoot = normalized === "workbench.adapter.yaml"
+      ? ""
+      : normalized.slice(0, -"workbench.adapter.yaml".length).replace(/\/+$/u, "");
+    roots.set(manifest.id, sourceRoot);
+  }
+  return roots;
+}
+
+function adapterFilePathWithinRoot(
+  filePath: string,
+  sourceRoot: string,
+): string | null {
+  const normalized = normalizeRelativePath(filePath);
+  if (!sourceRoot) {
+    return normalized;
+  }
+  if (!normalized.startsWith(`${sourceRoot}/`)) {
+    return null;
+  }
+  return normalized.slice(sourceRoot.length + 1);
 }
 
 async function readHostedRunFailureResult(
@@ -2738,7 +3705,7 @@ async function readWorkbenchRunWorkloadResult(
     error?: string;
     startedAt?: string;
     usage?: UsageSummary;
-    phaseResults?: readonly WorkbenchAdapterOperationResult[];
+    operationResults?: readonly WorkbenchAdapterOperationResult[];
   } = {},
 ): Promise<RuntimeWorkloadResult> {
   const path = await importNodeModule<any>(nodeBuiltin("path"));
@@ -2752,50 +3719,49 @@ async function readWorkbenchRunWorkloadResult(
   const startedAt = options.startedAt ?? new Date().toISOString();
   const finishedAt = new Date().toISOString();
   const purpose = readWorkloadExecutionPurpose(workload);
-  const primaryOperation: WorkbenchAdapterOperation = purpose === "improve" ? "subject.improve" : "trial.score";
-  const primaryResult = [...(options.phaseResults ?? [])]
+  const primaryOperation: WorkbenchAdapterOperation = purpose === "improve"
+    ? "optimizer.improve"
+    : "engine.run";
+  const primaryResult = [...(options.operationResults ?? [])]
     .reverse()
     .find((result) => result.operation === primaryOperation);
-  const result = jsonRecord(primaryResult?.value);
+  const resultPayload = jsonRecord(primaryResult?.value);
   const usage = mergeUsageSummaries([
     options.usage,
-    ...(options.phaseResults ?? []).map(adapterOperationUsageSummary),
+    ...(options.operationResults ?? []).map(adapterOperationUsageSummary),
   ]);
-  const metrics = normalizeRewardMetrics(result.metrics);
-  const cases = normalizeRewardCases(result.cases);
-	  const includeResultScoring = purpose === "trial";
+  const metrics = normalizeResultMetrics(resultPayload.metrics);
+  const cases = normalizeResultCases(resultPayload.cases);
+  const includeResultScoring = purpose === "attempt";
   const files = [...outputFiles, ...traceFiles].sort((left, right) =>
     left.path.localeCompare(right.path),
   );
   const subjectPatch =
     purpose === "improve" ? primaryResult?.value as WorkbenchSubjectPatch | undefined : undefined;
-  const scorecard =
-	    purpose === "trial" ? primaryResult?.value as WorkbenchScorecard | undefined : undefined;
+  const engineResult =
+    purpose === "attempt" ? primaryResult?.value as WorkbenchResult | undefined : undefined;
   const declaredChanges =
     subjectPatch?.fileChanges ??
-    (Array.isArray(result.fileChanges)
-      ? result.fileChanges.filter(
+    (Array.isArray(resultPayload.fileChanges)
+      ? resultPayload.fileChanges.filter(
           (entry): entry is string => typeof entry === "string",
         )
       : files.map((file) => file.path));
   return {
     files,
     fileChanges: declaredChanges,
+    ...(options.operationResults ? { operationResults: [...options.operationResults] } : {}),
     ...(subjectPatch ? { subjectPatch } : {}),
-    ...(scorecard ? { scorecard } : {}),
-    ...(includeResultScoring &&
-    typeof result.score === "number" && Number.isFinite(result.score)
-      ? { score: result.score }
-      : {}),
+    ...(engineResult ? { result: engineResult } : {}),
     ...(includeResultScoring && metrics ? { metrics } : {}),
     ...(includeResultScoring && cases ? { cases } : {}),
-    ...(typeof result.summary === "string"
-      ? { summary: result.summary }
+    ...(typeof resultPayload.summary === "string"
+      ? { summary: resultPayload.summary }
       : primaryResult?.summary !== undefined
         ? { summary: primaryResult.summary }
         : {}),
-    ...(result.feedback !== undefined
-      ? { feedback: result.feedback as Json }
+    ...(resultPayload.feedback !== undefined
+      ? { feedback: resultPayload.feedback as Json }
       : primaryResult?.feedback !== undefined
         ? { feedback: primaryResult.feedback }
       : {}),
@@ -2815,10 +3781,10 @@ async function readRuntimeTraceFiles(
   const path = await importNodeModule<any>(nodeBuiltin("path"));
   const traceRoot = path.join(outputDir(root), ".workbench", "traces", workload.job.id);
   const purpose = readWorkloadExecutionPurpose(workload);
-  const outputTraceRoot = workbenchTracePhaseDirectory({
+  const outputTraceRoot = workbenchTraceExecutionDirectory({
     sequence: 1,
     runId: workload.job.runId,
-    phase: purpose,
+    purpose,
   });
   return (await readSurfaceFiles(traceRoot)).map((file) => ({
     ...file,
@@ -2858,9 +3824,8 @@ function createHostedWorkloadShellCommand(
   ].join("; ");
 }
 
-async function resetHostedWorkloadPhaseOutput(
+async function resetHostedWorkloadStepOutput(
   root: string,
-  _phase: WorkbenchWorkloadPhaseCommand,
 ): Promise<void> {
   const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
   await fs
@@ -2872,8 +3837,9 @@ async function writeWorkbenchAdapterRequest(
   root: string,
   workload: WorkbenchRunWorkload,
   execution: WorkbenchExecutionSpec,
-  phase: WorkbenchWorkloadPhaseCommand,
+  step: WorkbenchWorkloadStepCommand,
   auth?: Json,
+  manifests?: readonly WorkbenchAdapterManifest[],
 ): Promise<string> {
   const [fs, path] = await Promise.all([
     importNodeModule<any>(nodeBuiltin("fs/promises")),
@@ -2881,18 +3847,19 @@ async function writeWorkbenchAdapterRequest(
   ]);
   const requestPath = path.join(root, ".workbench", "request.json");
   await fs.mkdir(path.dirname(requestPath), { recursive: true });
-  const task = workload.task?.task;
-  const adapter = phase.adapter ?? execution.adapter;
+  const casePrompt = workload.engineCaseSpec?.prompt;
+  const adapter = step.adapter ?? execution.adapter;
+  const subjectCommand = adapterProtocolCommandSpec(workload.spec.run, "subject.run", manifests).command;
   await fs.writeFile(
     requestPath,
     `${JSON.stringify({
-      protocol: "workbench.adapter.v2",
+      protocol: "workbench.adapter.v3",
       id: execution.id,
       jobId: workload.job.id,
-      operation: phase.operation,
+      operation: step.operation,
       invocation: {
         use: adapter.use,
-        with: adapterConfigRecord(adapter),
+        with: adapterConfigRecord(adapter, manifests),
         ...(adapter.auth !== undefined ? { auth: adapter.auth } : {}),
       },
       ...(auth !== undefined ? { auth } : {}),
@@ -2904,29 +3871,33 @@ async function writeWorkbenchAdapterRequest(
         subject: {
           id: workload.subjectId,
           path: workload.spec.subject.files.path,
+          ...(workload.spec.subject.prepare ? { prepare: { ...workload.spec.subject.prepare } } : {}),
+          run: {
+            ...workload.spec.run,
+            command: subjectCommand,
+          },
         },
         ...(workload.spec.optimizer
           ? { optimizer: { edits: [...workload.spec.optimizer.edits] } }
           : {}),
-        trial: {
-          trialIndex: workload.trialIndex,
+        attempt: {
+          attemptIndex: workload.attemptIndex,
           sampleIndex: workload.sampleIndex,
           caseId: workload.caseId,
         },
-        ...(task ? { task: { text: task } } : {}),
+        case: {
+          id: workload.caseId,
+          ...(casePrompt ? { prompt: casePrompt } : {}),
+        },
       },
       paths: {
         workspace: root,
-        cwd: root,
-        input: inputDir(root),
         output: outputDir(root),
         result: workbenchAdapterOperationResultPath(outputDir(root)),
         subject: subjectDir(root),
-        task: taskDir(root),
+        ...(workload.engineCaseSpec ? { case: caseDir(root) } : {}),
         traces: tracesDir(root),
-        tests: runtimeTestsDir(root),
-        logs: runtimeLogsDir(root),
-        artifacts: runtimeLogsArtifactsDir(root),
+        ...(step.kind === "engine" ? { enginePrivate: runtimeEnginePrivateDir(root) } : {}),
       },
     }, null, 2)}\n`,
   );
@@ -2945,11 +3916,37 @@ function requireOptimizerEdits(spec: GenericRunSpec): string[] {
   return edits;
 }
 
-function createHostedWorkloadPhaseEnv(
+function createHostedWorkloadAdapterEnv(
   root: string,
   adapterRequestPath: string,
   adapterEnv: Record<string, string> = {},
+  options: { adapterRoot?: string } = {},
+  runtimeEnv: Record<string, string> = {},
 ): Record<string, string> {
+  const env = createHostedWorkloadBaseEnv();
+  env.WORKBENCH_ADAPTER_REQUEST = adapterRequestPath;
+  env.WORKBENCH_OUTPUT = outputDir(root);
+  env.WORKBENCH_RESULT = workbenchAdapterOperationResultPath(outputDir(root));
+  if (options.adapterRoot) {
+    env.WORKBENCH_ADAPTER_ROOT = options.adapterRoot;
+    env.WORKBENCH_WORKSPACE_ROOT = root;
+    env.PATH = [
+      `${options.adapterRoot}/node_modules/.bin`,
+      env.PATH,
+    ].filter(Boolean).join(":");
+  }
+  Object.assign(env, adapterEnv);
+  Object.assign(env, runtimeEnv);
+  return env;
+}
+
+function createHostedWorkloadPrepareEnv(root: string): Record<string, string> {
+  const env = createHostedWorkloadBaseEnv();
+  env.WORKBENCH_OUTPUT = outputDir(root);
+  return env;
+}
+
+function createHostedWorkloadBaseEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === "string") {
@@ -2961,21 +3958,60 @@ function createHostedWorkloadPhaseEnv(
       delete env[key];
     }
   }
-  env.PATH = process.env.PATH
-    ? `${process.env.PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
-    : "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-  env.WORKBENCH_ADAPTER_REQUEST = adapterRequestPath;
-  env.WORKBENCH_OUTPUT = outputDir(root);
-  env.WORKBENCH_RESULT = workbenchAdapterOperationResultPath(outputDir(root));
-  Object.assign(env, adapterEnv);
+  const runtimeBins = uniquePathEntries([
+    ...nodeModuleBinDirsForAncestors(process.cwd()),
+    ...nodeModuleBinDirsForAncestors(path.dirname(fileURLToPath(import.meta.url))),
+    "/app/node_modules/.bin",
+    "/workbench-runtime/node_modules/.bin",
+    "/workbench-runtime/products/workbench/node_modules/.bin",
+  ]);
+  env.PATH = uniquePathEntries([
+    path.dirname(process.execPath),
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+    ...runtimeBins,
+    ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
+  ]).join(path.delimiter);
   return env;
+}
+
+function nodeModuleBinDirsForAncestors(start: string): string[] {
+  const dirs: string[] = [];
+  let current = path.resolve(start);
+  for (let depth = 0; depth < 12; depth += 1) {
+    dirs.push(path.join(current, "node_modules", ".bin"));
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return dirs;
+}
+
+function uniquePathEntries(entries: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const entry of entries) {
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    output.push(trimmed);
+  }
+  return output;
 }
 
 function readWorkloadExecutionPurpose(
   workload: WorkbenchRunWorkload,
 ): WorkbenchExecutionSpec["purpose"] {
   const purpose = workbenchExecutionPurpose(workload.job);
-  if (purpose === "improve" || purpose === "trial") {
+  if (purpose === "improve" || purpose === "attempt") {
     return purpose;
   }
   throw new Error(
@@ -2983,22 +4019,22 @@ function readWorkloadExecutionPurpose(
   );
 }
 
-function requireWorkloadTaskBundle(
+function requireWorkloadEngineCase(
   workload: WorkbenchRunWorkload,
   label: string,
-): WorkbenchTaskBundle {
-  if (!workload.taskBundle) {
-    throw new Error(`${label} workload is missing a task bundle.`);
+): WorkbenchEngineCase {
+  if (!workload.engineCase) {
+    throw new Error(`${label} workload is missing an engine case.`);
   }
-  return workload.taskBundle;
+  return workload.engineCase;
 }
 
 function subjectDir(root: string): string {
   return `${inputDir(root)}/subject`;
 }
 
-function taskDir(root: string): string {
-  return `${inputDir(root)}/task`;
+function caseDir(root: string): string {
+  return `${inputDir(root)}/case`;
 }
 
 function tracesDir(root: string): string {
@@ -3013,24 +4049,12 @@ function outputDir(root: string): string {
   return `${root}/output`;
 }
 
-function runtimeTestsDir(root: string): string {
-  return process.env.WORKBENCH_IN_DOCKER_SANDBOX === "1" ? "/tests" : `${root}/tests`;
+function runtimePrivateDir(root: string): string {
+  return `${root}/private`;
 }
 
-function runtimeLogsDir(root: string): string {
-  return process.env.WORKBENCH_IN_DOCKER_SANDBOX === "1" ? "/logs" : `${root}/logs`;
-}
-
-function runtimeLogsAgentDir(root: string): string {
-  return `${runtimeLogsDir(root)}/agent`;
-}
-
-function runtimeLogsVerifierDir(root: string): string {
-  return `${runtimeLogsDir(root)}/verifier`;
-}
-
-function runtimeLogsArtifactsDir(root: string): string {
-  return `${runtimeLogsDir(root)}/artifacts`;
+function runtimeEnginePrivateDir(root: string): string {
+  return `${runtimePrivateDir(root)}/engine`;
 }
 
 async function writeSurfaceFiles(
@@ -3107,7 +4131,7 @@ function encodeSurfaceSnapshotContent(
   }
 }
 
-function normalizeRewardMetrics(
+function normalizeResultMetrics(
   value: unknown,
 ): Record<string, number> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -3122,7 +4146,7 @@ function normalizeRewardMetrics(
   return Object.keys(metrics).length > 0 ? metrics : undefined;
 }
 
-function normalizeRewardCases(value: unknown): EvalCaseResult[] | undefined {
+function normalizeResultCases(value: unknown): EvalCaseResult[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
@@ -3136,7 +4160,7 @@ function normalizeRewardCases(value: unknown): EvalCaseResult[] | undefined {
     if (!id) {
       return [];
     }
-    const metrics = normalizeRewardMetrics(record.metrics) ?? {};
+    const metrics = normalizeResultMetrics(record.metrics) ?? {};
     const status =
       record.status === "completed" || record.status === "error"
         ? record.status
@@ -3168,9 +4192,7 @@ function normalizeRewardCases(value: unknown): EvalCaseResult[] | undefined {
             const pass =
               typeof criterionRecord.pass === "boolean"
                 ? criterionRecord.pass
-                : score !== undefined
-                  ? score >= 0.5
-                  : undefined;
+                : undefined;
             if (!criterionId || score === undefined || pass === undefined) {
               return [];
             }
@@ -3312,9 +4334,9 @@ function failWorkbenchRunJob(
 function evaluateSample(args: {
   subjectId: string;
   files: readonly SurfaceSnapshotFile[];
-  taskSourceFiles: readonly SurfaceSnapshotFile[];
+  engineResolveFiles: readonly SurfaceSnapshotFile[];
   spec: GenericRunSpec;
-  trialIndex: number;
+  attemptIndex: number;
   sampleIndex: number;
   caseId: string;
   startedAt: string;
@@ -3325,14 +4347,17 @@ function evaluateSample(args: {
   const durationMs =
     args.durationMs ??
     Math.max(0, Date.parse(args.finishedAt) - Date.parse(args.startedAt));
-  const sampleScore = args.workload.score!;
-  const cases = args.workload.cases?.length ? args.workload.cases : undefined;
+  const sampleScore = args.workload.result?.score;
+  if (typeof sampleScore !== "number" || !Number.isFinite(sampleScore)) {
+    throw new Error("Evaluation sample requires an engine result with a finite numeric score.");
+  }
   const metrics = args.workload.metrics ?? {
     score: sampleScore,
   };
   if (metrics.score === undefined) {
     metrics.score = sampleScore;
   }
+  const cases = args.workload.cases?.length ? args.workload.cases : undefined;
   const feedback = {
     ...(args.workload.summary !== undefined
       ? { summary: args.workload.summary }
@@ -3363,7 +4388,6 @@ function evaluateSample(args: {
 
 function normalizeSampleJobOutput(
   value: unknown,
-  fallbackFiles: readonly SurfaceSnapshotFile[] = [],
 ): HostedSampleJobOutput | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -3380,40 +4404,37 @@ function normalizeSampleJobOutput(
     return null;
   }
   if (
-    typeof record.trialIndex !== "number" ||
-    !Number.isFinite(record.trialIndex)
+    typeof record.attemptIndex !== "number" ||
+    !Number.isFinite(record.attemptIndex)
   ) {
     return null;
   }
-  const sampleFiles = files.length > 0
-    ? files
-    : fallbackFiles.map((file) => ({ ...file }));
   return {
     subjectId: record.subjectId,
-    trialIndex: record.trialIndex,
+    attemptIndex: record.attemptIndex,
     sample,
     fileChanges: Array.isArray(record.fileChanges)
       ? record.fileChanges.filter(
           (entry): entry is string => typeof entry === "string",
         )
       : [],
-    files: sampleFiles,
+    files,
     traces: Array.isArray(record.traces)
       ? record.traces.filter(
           (entry): entry is string => typeof entry === "string",
         )
-      : traceFilePaths(sampleFiles),
+      : traceFilePaths(files),
   };
 }
 
 function normalizeEvaluationSampleOutputs(args: {
   jobs: readonly HostedWorkbenchJob[];
   allJobs: readonly HostedWorkbenchJob[];
-	}): HostedMaterializedSampleOutput[] {
-	  return args.jobs.flatMap((job): HostedMaterializedSampleOutput[] => {
-	    const output = normalizeSampleJobOutput(job.output);
-	    return output ? [{ jobs: [job], output }] : [];
-	  });
+}): HostedMaterializedSampleOutput[] {
+  return args.jobs.flatMap((job): HostedMaterializedSampleOutput[] => {
+    const output = normalizeSampleJobOutput(job.output);
+    return output ? [{ jobs: [job], output }] : [];
+  });
 }
 
 function meanFinite(values: readonly unknown[]): number | undefined {
@@ -3443,9 +4464,9 @@ function maxIsoTimestamp(values: readonly string[]): string | null {
 function withJobUsage(
   sample: EvaluationSampleRecord,
   _jobs: readonly HostedWorkbenchJob[],
-  trialJob: HostedWorkbenchJob,
+  attemptJob: HostedWorkbenchJob,
 ): EvaluationSampleRecord {
-  const usage = normalizeUsageSummary(jsonRecord(trialJob.output).usage)
+  const usage = normalizeUsageSummary(jsonRecord(attemptJob.output).usage)
     ?? completeUsageSummary(sample.usage);
   if (!usage) {
     return sample;
@@ -3456,9 +4477,9 @@ function withJobUsage(
   };
 }
 
-function normalizeProposalJobOutput(
+function normalizeSubjectRevisionJobOutput(
   value: unknown,
-): HostedProposalJobOutput | null {
+): HostedSubjectRevisionJobOutput | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -3470,15 +4491,15 @@ function normalizeProposalJobOutput(
     ? record.files.filter(isSurfaceSnapshotFile)
     : [];
   if (
-    typeof record.trialIndex !== "number" ||
-    !Number.isFinite(record.trialIndex)
+    typeof record.attemptIndex !== "number" ||
+    !Number.isFinite(record.attemptIndex)
   ) {
     return null;
   }
   const usage = normalizeUsageSummary(record.usage);
   return {
     subjectId: record.subjectId,
-    trialIndex: record.trialIndex,
+    attemptIndex: record.attemptIndex,
     baseId:
       typeof record.baseId === "string" && record.baseId.length > 0
         ? record.baseId
@@ -3502,7 +4523,7 @@ function normalizeProposalJobOutput(
 function errorEvaluationSamplesFromJobs(
   jobs: readonly HostedWorkbenchJob[],
   subjectId: string,
-  trialIndex: number,
+  attemptIndex: number,
   completedSampleKeys: ReadonlySet<string>,
 ): EvaluationSampleRecord[] {
   const groups = new Map<string, HostedWorkbenchJob[]>();
@@ -3514,14 +4535,14 @@ function errorEvaluationSamplesFromJobs(
     groups.set(key, [...(groups.get(key) ?? []), job]);
   }
   return [...groups.values()]
-    .map((group) => errorEvaluationSampleFromJobGroup(group, subjectId, trialIndex))
+    .map((group) => errorEvaluationSampleFromJobGroup(group, subjectId, attemptIndex))
     .filter((sample): sample is EvaluationSampleRecord => sample !== null);
 }
 
 function errorEvaluationSampleFromJobGroup(
   jobs: readonly HostedWorkbenchJob[],
   subjectId: string,
-  trialIndex: number,
+  attemptIndex: number,
 ): EvaluationSampleRecord | null {
   const job = jobs[0];
   if (!job) {
@@ -3719,14 +4740,14 @@ function mergeEvaluationSampleGroup(
 ): EvaluationSampleRecord {
   const first = group[0]!;
   if (group.length === 1) {
-    return normalizeSingleCaseDurations(first);
+    return first;
   }
   const startedAt = minTimestamp(group.flatMap((sample) => (sample.startedAt ? [sample.startedAt] : [])));
   const finishedAt = maxTimestamp(group.flatMap((sample) => (sample.finishedAt ? [sample.finishedAt] : [])));
   const durationMs = startedAt && finishedAt
     ? Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt))
     : undefined;
-  const cases = group.flatMap((sample) => normalizeCaseDurations(sample));
+  const cases = group.flatMap((sample) => sample.cases ?? []);
   const metrics = aggregateSampleGroupMetrics(group);
   const usage = mergeUsageSummaries(group.map((sample) => sample.usage));
   const errors = group.flatMap((sample) => sample.error ? [sample.error] : []);
@@ -3743,30 +4764,6 @@ function mergeEvaluationSampleGroup(
     ...(errors.length > 0 ? { error: errors.join("; ") } : {}),
     ...(cases.length > 0 ? { cases } : {}),
   };
-}
-
-function normalizeSingleCaseDurations(
-  sample: EvaluationSampleRecord,
-): EvaluationSampleRecord {
-  if (!sample.cases) {
-    return sample;
-  }
-  const cases = normalizeCaseDurations(sample);
-  return cases.length === sample.cases.length
-    ? { ...sample, cases }
-    : sample;
-}
-
-function normalizeCaseDurations(
-  sample: EvaluationSampleRecord,
-): EvalCaseResult[] {
-  return (sample.cases ?? []).map((caseResult) => (
-    typeof caseResult.durationMs === "number" ||
-    sample.cases?.length !== 1 ||
-    typeof sample.durationMs !== "number"
-      ? caseResult
-      : { ...caseResult, durationMs: sample.durationMs }
-  ));
 }
 
 function aggregateSampleGroupMetrics(

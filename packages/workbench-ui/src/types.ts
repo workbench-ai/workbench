@@ -1,8 +1,9 @@
 import type {
   EvaluationRecord,
-  EvaluationResultRecord,
-  EvaluationResultSummary,
+  EvaluationScorecard,
+  EvaluationSummary,
   MetricStats,
+  RuntimeSnapshot,
 } from "@workbench-ai/workbench-contract";
 
 export type {
@@ -15,8 +16,8 @@ export type {
   EvaluationRecord,
   EvaluationSampleRecord,
   EvaluationCaseStats,
-  EvaluationResultRecord,
-  EvaluationResultSummary,
+  EvaluationScorecard,
+  EvaluationSummary,
   MetricStats,
   SubjectFileSummary as SubjectWorkspaceFileSummary,
   SubjectFilePreview as SubjectWorkspaceFilePreview,
@@ -24,33 +25,36 @@ export type {
   AuthoredWorkbenchSourceDocument,
   HostedWorkbenchJob,
   HostedWorkbenchRun,
-  RunOutcome,
-  RunStatus,
   RunSummary,
-  RuntimeEvent,
-  RuntimeSnapshot,
+  WorkbenchExecutionEvidence,
   WorkbenchExecutionTraceDetail,
-  WorkbenchTracePhase,
 } from "@workbench-ai/workbench-contract";
 
-export type ResultMetricDirection = "higher" | "lower";
-export type ResultMetricKind = "number" | "duration_ms" | "currency_usd";
-export type ResultMetricGroup = "metric" | "criteria" | "runtime" | "usage" | "other";
-export type ResultMetricSemanticRole = "performance" | "speed" | "cost";
+export type EvaluationMetricDirection = "higher" | "lower";
+export type EvaluationMetricKind = "number" | "duration_ms" | "currency_usd";
+export type EvaluationMetricGroup = "metric" | "execution" | "usage" | "other";
+export type EvaluationMetricSemanticRole = "performance" | "speed" | "cost";
 
-export interface ResultMetricDescriptor {
+export interface EvaluationMetricDescriptor {
   id: string;
   label: string;
-  direction: ResultMetricDirection;
-  kind: ResultMetricKind;
-  group: ResultMetricGroup;
+  direction: EvaluationMetricDirection;
+  kind: EvaluationMetricKind;
+  group: EvaluationMetricGroup;
   primary: boolean;
-  semanticRole?: ResultMetricSemanticRole;
+  semanticRole?: EvaluationMetricSemanticRole;
 }
 
-export type ResultMetricStats = MetricStats;
+export type EvaluationMetricStats = MetricStats;
 
-export type LabeledEvaluationResultRecord = EvaluationResultRecord & {
+export type BenchmarkSnapshot = RuntimeSnapshot;
+
+export type LabeledEvaluationScorecard = EvaluationScorecard & {
   label: string;
   evaluation: EvaluationRecord;
+};
+
+export type LabeledEvaluationSummary = EvaluationSummary & {
+  label: string;
+  evaluation?: EvaluationRecord;
 };

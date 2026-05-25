@@ -4,13 +4,13 @@ Use for PowerPoint decks, investor presentations, board decks, and slide templat
 
 ## Runtime Essentials
 
-- Include a presentation parser such as `python-pptx` or an equivalent when the subject runner or scorer needs to inspect slide text, notes, tables, charts, images, or shape counts.
+- Include a presentation parser such as `python-pptx` or an equivalent when the subject runner or scoring helper needs to inspect slide text, notes, tables, charts, images, or shape counts.
 - Include LibreOffice/`soffice` when slide rendering, PDF conversion, or Office fidelity checks matter.
 - Add `poppler-utils` only when converting rendered PDFs into slide images.
 
 ## Essentials
 
 - Text extraction can miss layout, clipping, overlaps, and chart readability issues.
-- Render slides when visual layout is part of the task.
+- Render slides when visual layout is part of the case.
 - Speaker notes, theme/layout names, charts, and embedded media may need parser-specific checks.
 - Do not score raw `.pptx` bytes; presentation package metadata and relationship ordering are not stable scoring surfaces.

@@ -5,7 +5,6 @@ import {
   formatDurationMs,
   formatMetricSummary,
   formatMetricValue,
-  formatRunStartSummary,
   formatWorkspaceLabel,
   hasMetricValues,
   shortId,
@@ -55,25 +54,5 @@ describe("format helpers", () => {
     expect(formatDurationMs(950)).toBe("950ms");
     expect(formatDurationMs(3_500)).toBe("3s");
     expect(formatDurationMs(125_000)).toBe("2m 5s");
-  });
-
-  test("formats run start summaries from the shared run contract", () => {
-    expect(
-      formatRunStartSummary({
-        id: "run-123",
-        workflow: "eval",
-        status: "finished",
-        startedAt: "2026-04-14T00:00:00.000Z",
-        optimizer: "flow",
-        score: "harbor",
-        strategy: "greedy",
-        budget: 1,
-        repairBudget: 2,
-        trialsRequested: 1,
-        trialsExecuted: 1,
-        samples: 1,
-        sampleConcurrency: 1,
-      }),
-    ).toBe("eval started");
   });
 });

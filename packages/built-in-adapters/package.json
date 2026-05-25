@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench-built-in-adapters",
-  "version": "0.0.44",
+  "version": "0.0.47",
   "type": "module",
   "repository": {
     "type": "git",
@@ -13,17 +13,19 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./local-traces": {
+      "types": "./dist/local-traces.d.ts",
+      "default": "./dist/local-traces.js"
     }
   },
   "bin": {
+    "workbench-adapter-workbench": "dist/bin/workbench.js",
     "workbench-adapter-command": "dist/bin/command.js",
     "workbench-adapter-tests": "dist/bin/tests.js",
-    "workbench-adapter-path": "dist/bin/path.js",
-    "workbench-adapter-harbor": "dist/bin/harbor.js",
     "workbench-adapter-rubric": "dist/bin/rubric.js",
     "workbench-adapter-codex": "dist/bin/codex.js",
-    "workbench-adapter-claude": "dist/bin/claude.js",
-    "workbench-adapter-pi": "dist/bin/pi.js"
+    "workbench-adapter-claude": "dist/bin/claude.js"
   },
   "files": [
     "dist"
@@ -34,11 +36,9 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@workbench-ai/flow-contracts": "workspace:*",
-    "@workbench-ai/flow-harness-anthropic-claude-code": "workspace:*",
-    "@workbench-ai/flow-harness-badlogic-pi-coding-agent": "workspace:*",
-    "@workbench-ai/flow-harness-openai-codex": "workspace:*",
-    "@workbench-ai/flow-harness-sdk": "workspace:*",
+    "@workbench-ai/agent-driver-anthropic-claude-code": "workspace:*",
+    "@workbench-ai/agent-driver-openai-codex": "workspace:*",
+    "@workbench-ai/agent-driver": "workspace:*",
     "@workbench-ai/workbench-contract": "workspace:*",
     "@workbench-ai/workbench-core": "workspace:*",
     "@workbench-ai/workbench-protocol": "workspace:*",

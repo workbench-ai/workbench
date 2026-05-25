@@ -1,11 +1,17 @@
 import type {
   SubjectSummary,
-  EvaluationResultSummary,
+  EvaluationSummary,
+  HostedWorkbenchJob,
   RunSummary,
-  RuntimeEvent,
 } from "../types";
 
 type BadgeTone = "success" | "warning" | "destructive" | "outline" | "accent";
+type WorkbenchDisplayStatus =
+  | SubjectSummary["status"]
+  | EvaluationSummary["status"]
+  | HostedWorkbenchJob["status"]
+  | RunSummary["status"]
+  | RunSummary["outcome"];
 
 interface SubjectSelectionLabelOptions {
   summary: SubjectSummary;
@@ -59,14 +65,6 @@ export function formatDurationMs(value: number | undefined): string {
   return `${seconds}s`;
 }
 
-export function formatRunStartSummary(run: RunSummary | null | undefined): string | null {
-  if (!run) {
-    return null;
-  }
-
-  return `${run.workflow} started`;
-}
-
 export function formatMetricValue(value: number): string {
   if (!Number.isFinite(value)) {
     return String(value);
@@ -110,7 +108,7 @@ export function formatMetricSummary(metrics: Record<string, number> | undefined)
     .join(" · ");
 }
 
-export function formatResultSubjectLabel(
+export function formatEvaluationSubjectLabel(
   subjectId: string | null | undefined,
 ): string {
   if (!subjectId) {
@@ -138,9 +136,7 @@ export function formatSubjectSelectionLabel({
 
 export function statusLabel(
   status:
-    | SubjectSummary["status"]
-    | EvaluationResultSummary["status"]
-    | RuntimeEvent["status"]
+    | WorkbenchDisplayStatus
     | null
     | undefined,
 ): string {
@@ -152,9 +148,7 @@ export function statusLabel(
 
 export function badgeToneForStatus(
   status:
-    | SubjectSummary["status"]
-    | EvaluationResultSummary["status"]
-    | RuntimeEvent["status"]
+    | WorkbenchDisplayStatus
     | null
     | undefined,
 ): BadgeTone {
@@ -163,7 +157,6 @@ export function badgeToneForStatus(
     case "completed":
       return "success";
     case "repair_exhausted":
-    case "checkpointed":
     case "running":
     case "planned":
     case "partial":

@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, startTransition, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   ActivityIcon,
   ChartColumnIcon,
@@ -9,13 +9,12 @@ import {
   GitBranchIcon,
   InfoIcon,
   ListChecksIcon,
-  PlayIcon,
+  PanelRightCloseIcon,
   Settings2Icon,
 } from "lucide-react";
 import { CodeBlockSurface } from "@workbench-ai/cli-web-ui/components/shared/code-block-surface";
 import {
   DesktopWorkspaceSplit,
-  DesktopWorkspaceSplitToggle,
 } from "@workbench-ai/cli-web-ui/components/shared/desktop-workspace-split";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
 import {
@@ -53,7 +52,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@workbench-ai/cli-web-ui/components/ui/card";
-import { Spinner } from "@workbench-ai/cli-web-ui/components/ui/spinner";
 import {
   Select,
   SelectContent,
@@ -72,10 +70,6 @@ import {
 } from "@workbench-ai/cli-web-ui/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@workbench-ai/cli-web-ui/components/ui/tabs";
 import {
-  ToggleGroup,
-  ToggleGroupItem,
-} from "@workbench-ai/cli-web-ui/components/ui/toggle-group";
-import {
   buildExecutionTraceTimeline,
   type ExecutionTrace,
 } from "@workbench-ai/cli-web-ui/lib/execution-trace-timeline";
@@ -85,16 +79,20 @@ import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 import { badgeToneProps, type BadgeTone } from "@workbench-ai/cli-web-ui/lib/badge";
 
 import { SubjectList } from "./components/subject-list";
-import { ResultsDetail } from "./components/results-detail";
+import { EvaluationsDetail } from "./components/evaluations-detail";
 import {
   SubjectArchiveSkeleton,
-  SubjectEvaluationSkeleton,
+  SubjectOverviewSkeleton,
   SubjectFilesSurfaceSkeleton,
-  CaseReviewSkeleton,
-  ResultsDetailSkeleton,
-  EvaluationTasksSkeleton,
+  EvaluationCaseRowsSkeleton,
+  EvaluationDetailSurfaceSkeleton,
+  EvaluationCaseDetailSkeleton,
+  ExecutionTraceSkeleton,
+  EvaluationsDetailSkeleton,
   LineageSurfaceSkeleton,
   BenchmarkSurfaceSkeleton,
+  SourceYamlSkeleton,
+  SubjectManifestSkeleton,
 } from "./components/loading-states";
 import { LineageGraph } from "./components/lineage-graph";
 import { StatusBadge } from "./components/status-badge";
@@ -109,19 +107,19 @@ import {
 import {
   formatDurationMs,
   formatMetricValue,
-  formatRunStartSummary,
   formatTimestamp,
   shortId,
   statusLabel,
 } from "./lib/format";
 import {
   buildWorkbenchLocationHref,
+  createEvaluationsRoute,
   createSubjectRoute,
   createSubjectsRoute,
   createBenchmarkRoute,
   parseWorkbenchLocation,
+  type SubjectDialog,
   type SubjectView,
-  type SubjectReviewTab,
   type WorkbenchPersistentSearchParams,
   type WorkbenchRoute,
 } from "./lib/routes";
@@ -131,27 +129,26 @@ import type {
   SubjectRecord,
   SubjectSummary,
   EvaluationRecord,
-  EvaluationResultRecord,
-  EvaluationResultSummary,
+  EvaluationScorecard,
+  EvaluationSummary,
   SubjectWorkspaceFilePreview,
   SubjectWorkspaceFileSummary,
   AuthoredWorkbenchSourceDocument,
   HostedWorkbenchJob,
-  HostedWorkbenchRun,
-  RunOutcome,
-  RunStatus,
   RunSummary,
-  RuntimeSnapshot,
+  BenchmarkSnapshot,
+  WorkbenchExecutionEvidence,
   WorkbenchExecutionTraceDetail,
-  WorkbenchTracePhase,
 } from "./types";
 
-const DESKTOP_RUNTIME_PANE_STORAGE_KEY = "workbench-dual-pane-layout";
-const COMPACT_RUNTIME_LAYOUT_MEDIA_QUERY = "(max-width: 1535px)";
-const DESKTOP_RUNTIME_LEFT_DEFAULT_PERCENT = 35;
-const DESKTOP_RUNTIME_LEFT_MIN_PERCENT = 28;
-const DESKTOP_RUNTIME_LEFT_MAX_PERCENT = 42;
+const DESKTOP_DETAIL_PANE_STORAGE_KEY = "workbench-dual-pane-layout";
+const COMPACT_WORKSPACE_LAYOUT_MEDIA_QUERY = "(max-width: 1535px)";
+const DESKTOP_DETAIL_LEFT_DEFAULT_PERCENT = 35;
+const DESKTOP_DETAIL_LEFT_MIN_PERCENT = 28;
+const DESKTOP_DETAIL_LEFT_MAX_PERCENT = 42;
 const EMPTY_PERSISTENT_SEARCH_PARAMS: WorkbenchPersistentSearchParams = {};
+
+type TraceSessionView = WorkbenchExecutionEvidence["sessions"][number];
 
 interface SubjectRecordState {
   loading: boolean;
@@ -159,21 +156,17 @@ interface SubjectRecordState {
   record: SubjectRecord | null;
 }
 
-interface ResultRecordsState {
+interface EvaluationRecordsState {
   loading: boolean;
   error: string | null;
-  records: EvaluationResultRecord[];
+  records: EvaluationScorecard[];
 }
 
-interface CaseReviewState {
-  open: boolean;
-  subjectId: string | null;
-  caseId: string | null;
-  tab: CaseReviewTab;
-  runId: string | null;
+interface CaseReviewDetailState {
   loading: boolean;
   error: string | null;
   review: SubjectCaseReview | null;
+  requestKey: string | null;
 }
 
 interface SubjectFilesState {
@@ -187,8 +180,7 @@ interface SourceYamlFile {
   content: string;
 }
 
-type SubjectEvalCaseResult = NonNullable<NonNullable<NonNullable<SubjectRecord["eval"]>["samples"][number]["cases"]>[number]>;
-type SubjectCasePhase = SubjectCaseReview["phases"][number];
+type SubjectCaseExecution = SubjectCaseReview["executions"][number];
 type TimedExecutionRecord = {
   status: HostedWorkbenchJob["status"];
   createdAt?: string;
@@ -197,7 +189,7 @@ type TimedExecutionRecord = {
   durationMs?: number | null;
 };
 
-interface EvaluationTaskRow {
+interface EvaluationCaseRow {
   id: string;
   label: string;
   status: string;
@@ -206,7 +198,6 @@ interface EvaluationTaskRow {
   metricValue: number | null;
   durationMs: number | null;
   split: string | null;
-  detailAvailable: boolean;
 }
 
 interface SubjectPreviewState {
@@ -215,13 +206,12 @@ interface SubjectPreviewState {
   preview: SubjectWorkspaceFilePreview | null;
 }
 
-type RuntimeRootView = "lineage" | "archive" | "results" | "runs";
 type BenchmarkSurfaceTab = "processed" | "manifest" | "files";
 
 interface BenchmarkFingerprintOption {
   fingerprint: string;
   subjectCount: number;
-  resultCount: number;
+  evaluationCount: number;
   runCount: number;
   current: boolean;
 }
@@ -230,15 +220,6 @@ interface TraceDetailState {
   loading: boolean;
   error: string | null;
   detail: WorkbenchExecutionTraceDetail | null;
-}
-
-interface RunDetailState {
-  loading: boolean;
-  error: string | null;
-  detail: {
-    run: HostedWorkbenchRun;
-    jobs: HostedWorkbenchJob[];
-  } | null;
 }
 
 interface ExecutionFilesState {
@@ -253,24 +234,22 @@ interface ExecutionPreviewState {
   preview: SubjectWorkspaceFilePreview | null;
 }
 
-type CaseReviewTab = SubjectReviewTab;
-
-function clampDesktopRuntimeLeftPercent(value: number): number {
+function clampDesktopDetailLeftPercent(value: number): number {
   return Math.min(
-    DESKTOP_RUNTIME_LEFT_MAX_PERCENT,
-    Math.max(DESKTOP_RUNTIME_LEFT_MIN_PERCENT, value),
+    DESKTOP_DETAIL_LEFT_MAX_PERCENT,
+    Math.max(DESKTOP_DETAIL_LEFT_MIN_PERCENT, value),
   );
 }
 
-function readDesktopRuntimeLeftPercent(): number {
+function readDesktopDetailLeftPercent(): number {
   if (typeof window === "undefined") {
-    return DESKTOP_RUNTIME_LEFT_DEFAULT_PERCENT;
+    return DESKTOP_DETAIL_LEFT_DEFAULT_PERCENT;
   }
-  const stored = Number.parseFloat(window.localStorage.getItem(DESKTOP_RUNTIME_PANE_STORAGE_KEY) ?? "");
+  const stored = Number.parseFloat(window.localStorage.getItem(DESKTOP_DETAIL_PANE_STORAGE_KEY) ?? "");
   if (!Number.isFinite(stored)) {
-    return DESKTOP_RUNTIME_LEFT_DEFAULT_PERCENT;
+    return DESKTOP_DETAIL_LEFT_DEFAULT_PERCENT;
   }
-  return clampDesktopRuntimeLeftPercent(stored);
+  return clampDesktopDetailLeftPercent(stored);
 }
 
 export interface WorkbenchWorkspaceProps {
@@ -290,7 +269,7 @@ export function WorkbenchWorkspace({
 }: WorkbenchWorkspaceProps) {
   const apiPath = useMemo(() => createApiPathResolver(apiBasePath), [apiBasePath]);
   const [route, navigate] = useWorkbenchRoute(routeBasePath, persistentSearchParams);
-  const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<BenchmarkSnapshot | null>(null);
   const [specDocument, setSpecDocument] = useState<AuthoredWorkbenchSourceDocument | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
@@ -299,22 +278,11 @@ export function WorkbenchWorkspace({
     error: null,
     record: null,
   });
-  const [resultRecordsState, setResultRecordsState] = useState<ResultRecordsState>({
+  const [evaluationRecordsState, setEvaluationRecordsState] = useState<EvaluationRecordsState>({
     loading: false,
     error: null,
     records: [],
   });
-  const [caseReviewState, setCaseReviewState] = useState<CaseReviewState>({
-    open: false,
-    subjectId: null,
-    caseId: null,
-    tab: "overview",
-    runId: null,
-    loading: false,
-    error: null,
-    review: null,
-  });
-  const [runtimeRootView, setRuntimeRootView] = useState<RuntimeRootView>("lineage");
   const [benchmarkSurfaceTab, setBenchmarkSurfaceTab] = useState<BenchmarkSurfaceTab>("processed");
   const [selectedBenchmarkFingerprint, setSelectedBenchmarkFingerprint] = useState<string | null>(null);
   const [subjectFilesState, setSubjectFilesState] = useState<SubjectFilesState>({
@@ -340,8 +308,9 @@ export function WorkbenchWorkspace({
     error: null,
     preview: null,
   });
-  const [desktopRuntimeLeftPercent, setDesktopRuntimeLeftPercent] = useState(readDesktopRuntimeLeftPercent);
+  const [desktopDetailLeftPercent, setDesktopDetailLeftPercent] = useState(readDesktopDetailLeftPercent);
   const benchmarkSurfaceFillsBody = benchmarkSurfaceTab === "files";
+  const shouldLoadBenchmarkSourceFiles = benchmarkSurfaceTab === "files";
   const snapshotLoading = snapshot === null && snapshotError === null;
   const specLoading = specDocument === null && specError === null;
 
@@ -350,7 +319,7 @@ export function WorkbenchWorkspace({
 
     async function loadSnapshot() {
       try {
-        const next = await requestJson<RuntimeSnapshot>(apiPath("/api/snapshot"));
+        const next = await requestJson<BenchmarkSnapshot>(apiPath("/api/snapshot"));
         if (cancelled) {
           return;
         }
@@ -381,10 +350,10 @@ export function WorkbenchWorkspace({
     () => buildBenchmarkFingerprintOptions({
       currentBenchmarkFingerprint,
       summaries: orderedSubjectSummaries,
-      results: snapshot?.results ?? [],
+      evaluations: snapshot?.evaluations ?? [],
       runs: snapshot?.runs ?? [],
     }),
-    [currentBenchmarkFingerprint, orderedSubjectSummaries, snapshot?.results, snapshot?.runs],
+    [currentBenchmarkFingerprint, orderedSubjectSummaries, snapshot?.evaluations, snapshot?.runs],
   );
   const scopedBenchmarkFingerprint =
     selectedBenchmarkFingerprint &&
@@ -398,10 +367,10 @@ export function WorkbenchWorkspace({
     }),
     [orderedSubjectSummaries, scopedBenchmarkFingerprint],
   );
-  const currentBenchmarkResults = useMemo(
+  const currentBenchmarkEvaluations = useMemo(
     () => snapshot
-      ? orderResultSummaries(snapshot.results).filter(
-          (result) => normalizeBenchmarkFingerprint(result.benchmarkFingerprint) === scopedBenchmarkFingerprint,
+      ? orderEvaluationSummaries(snapshot.evaluations).filter(
+          (evaluation) => normalizeBenchmarkFingerprint(evaluation.benchmarkFingerprint) === scopedBenchmarkFingerprint,
         )
       : [],
     [scopedBenchmarkFingerprint, snapshot],
@@ -414,9 +383,28 @@ export function WorkbenchWorkspace({
       : [],
     [scopedBenchmarkFingerprint, snapshot],
   );
-  const orderedResultsRecordKey = useMemo(
-    () => currentBenchmarkResults.map((result) => `${result.id}:${result.updatedAt}`).join("|"),
-    [currentBenchmarkResults],
+  const routeEvaluationDialog =
+    (route.kind === "subject" || route.kind === "evaluations") &&
+    route.dialog?.kind === "evaluation"
+      ? route.dialog
+      : null;
+  const routeEvaluationId = routeEvaluationDialog?.evaluationId ?? null;
+  const routeEvaluationCaseId = routeEvaluationDialog?.caseId ?? null;
+  const routeEvaluationSummary = useMemo(
+    () => routeEvaluationId && snapshot
+      ? snapshot.evaluations.find((evaluation) => evaluation.id === routeEvaluationId) ?? null
+      : null,
+    [routeEvaluationId, snapshot],
+  );
+  const evaluationIdsToLoad = useMemo(() => {
+    if (routeEvaluationId) {
+      return [routeEvaluationId];
+    }
+    return [];
+  }, [routeEvaluationId]);
+  const evaluationRecordKey = useMemo(
+    () => evaluationIdsToLoad.join("|"),
+    [evaluationIdsToLoad],
   );
   const selectedSubjectId = resolveSelectedSubjectId({
     route,
@@ -448,7 +436,7 @@ export function WorkbenchWorkspace({
   const subjectDirectoryPath = route.kind === "subject" && route.view === "files"
     ? route.directoryPath
     : null;
-  const prefersCompactRuntimeLayout = useMediaQuery(COMPACT_RUNTIME_LAYOUT_MEDIA_QUERY);
+  const prefersCompactWorkspaceLayout = useMediaQuery(COMPACT_WORKSPACE_LAYOUT_MEDIA_QUERY);
 
   useEffect(() => {
     let cancelled = false;
@@ -487,12 +475,24 @@ export function WorkbenchWorkspace({
       return;
     }
     window.localStorage.setItem(
-      DESKTOP_RUNTIME_PANE_STORAGE_KEY,
-      String(desktopRuntimeLeftPercent),
+      DESKTOP_DETAIL_PANE_STORAGE_KEY,
+      String(desktopDetailLeftPercent),
     );
-  }, [desktopRuntimeLeftPercent]);
+  }, [desktopDetailLeftPercent]);
 
   useEffect(() => {
+    if (!shouldLoadBenchmarkSourceFiles) {
+      setBenchmarkFilesState((current) =>
+        current.files.length > 0
+          ? { ...current, loading: false, error: null }
+          : {
+              loading: false,
+              error: null,
+              files: [],
+            }
+      );
+      return;
+    }
     const controller = new AbortController();
     let cancelled = false;
     setBenchmarkFilesState({
@@ -535,7 +535,7 @@ export function WorkbenchWorkspace({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, scopedBenchmarkFingerprint]);
+  }, [apiPath, scopedBenchmarkFingerprint, shouldLoadBenchmarkSourceFiles]);
 
   useEffect(() => {
     const nextBenchmarkFingerprint =
@@ -560,7 +560,7 @@ export function WorkbenchWorkspace({
   }, [orderedBenchmarkFiles, selectedBenchmarkFilePath]);
 
   useEffect(() => {
-    if (!selectedBenchmarkFilePath) {
+    if (!shouldLoadBenchmarkSourceFiles || !selectedBenchmarkFilePath) {
       setBenchmarkPreviewState({
         loading: false,
         error: null,
@@ -613,7 +613,7 @@ export function WorkbenchWorkspace({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, selectedBenchmarkFilePath, benchmarkPreviewMode, scopedBenchmarkFingerprint]);
+  }, [apiPath, selectedBenchmarkFilePath, benchmarkPreviewMode, scopedBenchmarkFingerprint, shouldLoadBenchmarkSourceFiles]);
 
   useEffect(() => {
     if (route.kind !== "subject") {
@@ -635,9 +635,7 @@ export function WorkbenchWorkspace({
           filePath: route.view === "files" ? route.filePath : null,
           directoryPath: route.view === "files" ? route.directoryPath : null,
           previewMode: route.view === "files" ? route.previewMode : "rendered",
-          reviewCaseId: route.view === "evaluation" ? route.reviewCaseId : null,
-          reviewTab: route.view === "evaluation" ? route.reviewTab : "overview",
-          reviewRunId: route.view === "evaluation" ? route.reviewRunId : null,
+          dialog: route.dialog,
         }),
         { replace: true },
       );
@@ -667,6 +665,7 @@ export function WorkbenchWorkspace({
           filePath: nextFilePath,
           directoryPath: route.directoryPath ?? directoryPathForFile(nextFilePath),
           previewMode: route.previewMode,
+          dialog: route.dialog,
         }),
         { replace: true },
       );
@@ -681,7 +680,7 @@ export function WorkbenchWorkspace({
   ]);
 
   useEffect(() => {
-    if (route.kind !== "subject" || !selectedSubjectId) {
+    if (route.kind !== "subject" || route.view !== "manifest" || !selectedSubjectId) {
       setRecordState({
         loading: false,
         error: null,
@@ -728,11 +727,11 @@ export function WorkbenchWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [apiPath, route.kind, selectedSubjectId]);
+  }, [apiPath, route, selectedSubjectId]);
 
   useEffect(() => {
-    if (route.kind !== "subjects" || runtimeRootView !== "results" || currentBenchmarkResults.length === 0) {
-      setResultRecordsState({
+    if (evaluationIdsToLoad.length === 0) {
+      setEvaluationRecordsState({
         loading: false,
         error: null,
         records: [],
@@ -741,18 +740,18 @@ export function WorkbenchWorkspace({
     }
 
     let cancelled = false;
-    setResultRecordsState((current) => ({
+    setEvaluationRecordsState((current) => ({
       loading: current.records.length === 0,
       error: null,
       records: current.records,
     }));
 
-    async function loadResults() {
+    async function loadEvaluations() {
       try {
         const records = await Promise.all(
-          currentBenchmarkResults.map((result) =>
-            requestJson<EvaluationResultRecord>(
-              apiPath(`/api/result?id=${encodeURIComponent(result.id)}`),
+          evaluationIdsToLoad.map((evaluationId) =>
+            requestJson<EvaluationScorecard>(
+              apiPath(`/api/evaluation?id=${encodeURIComponent(evaluationId)}`),
             ),
           ),
         );
@@ -760,7 +759,7 @@ export function WorkbenchWorkspace({
           return;
         }
         startTransition(() => {
-          setResultRecordsState({
+          setEvaluationRecordsState({
             loading: false,
             error: null,
             records,
@@ -768,7 +767,7 @@ export function WorkbenchWorkspace({
         });
       } catch (error) {
         if (!cancelled) {
-          setResultRecordsState({
+          setEvaluationRecordsState({
             loading: false,
             error: toMessage(error),
             records: [],
@@ -777,11 +776,11 @@ export function WorkbenchWorkspace({
       }
     }
 
-    void loadResults();
+    void loadEvaluations();
     return () => {
       cancelled = true;
     };
-  }, [apiPath, currentBenchmarkResults, orderedResultsRecordKey, route.kind, runtimeRootView]);
+  }, [apiPath, evaluationIdsToLoad, evaluationRecordKey]);
 
   useEffect(() => {
     if (
@@ -900,178 +899,19 @@ export function WorkbenchWorkspace({
     };
   }, [apiPath, subjectPreviewMode, route, selectedSubjectFilePath, selectedSubjectHasInspectableFiles, selectedSubjectId]);
 
-  const latestRun = currentBenchmarkRuns.at(-1) ?? null;
-  const latestRuns = currentBenchmarkRuns.slice(-5).reverse();
-  const runRouteDetailState = useRunDetail(apiPath, route.kind === "run" ? route.runId : null);
-  const runRouteTarget = resolveRunTraceRouteTarget(
-    runRouteDetailState.detail,
-    route.kind === "run" ? route.runId : null,
-  );
-  useEffect(() => {
-    if (route.kind !== "run" || !runRouteTarget) {
-      return;
-    }
-    navigate(
-      createSubjectRoute({
-        subjectId: runRouteTarget.subjectId,
-        view: "evaluation",
-        reviewCaseId: runRouteTarget.caseId,
-        reviewTab: "trace",
-        reviewRunId: runRouteTarget.runId,
-      }),
-      { replace: true },
-    );
-  }, [
-    navigate,
-    route.kind,
-    runRouteTarget?.subjectId,
-    runRouteTarget?.caseId,
-    runRouteTarget?.runId,
-  ]);
-
-  useEffect(() => {
-    const subjectId = caseReviewState.subjectId;
-    const caseId = caseReviewState.caseId;
-    if (!caseReviewState.open || !subjectId || !caseId) {
-      return;
-    }
-    const requestedSubjectId = subjectId;
-    const requestedCaseId = caseId;
-
-    let cancelled = false;
-    let inFlightController: AbortController | null = null;
-
-    async function loadReview() {
-      if (inFlightController) {
-        return;
-      }
-      const controller = new AbortController();
-      inFlightController = controller;
-      setCaseReviewState((current) =>
-        current.open && current.subjectId === requestedSubjectId && current.caseId === requestedCaseId
-          ? {
-              ...current,
-              loading: !current.review,
-              error: null,
-            }
-          : current,
-      );
-      try {
-        const review = await requestJson<SubjectCaseReview>(
-          apiPath(`/api/task-review?id=${encodeURIComponent(requestedSubjectId)}&task=${encodeURIComponent(requestedCaseId)}`),
-          { signal: controller.signal },
-        );
-        if (cancelled) {
-          return;
-        }
-        startTransition(() => {
-          setCaseReviewState((current) =>
-            current.open && current.subjectId === requestedSubjectId && current.caseId === requestedCaseId
-              ? {
-                  open: true,
-                  subjectId: requestedSubjectId,
-                  caseId: requestedCaseId,
-                  tab: current.tab,
-                  runId: current.runId,
-                  loading: false,
-                  error: null,
-                  review,
-                }
-              : current,
-          );
-        });
-      } catch (error) {
-        if (cancelled || controller.signal.aborted) {
-          return;
-        }
-        setCaseReviewState((current) =>
-          current.open && current.subjectId === requestedSubjectId && current.caseId === requestedCaseId
-            ? {
-                ...current,
-                loading: false,
-                error: toMessage(error),
-              }
-            : current,
-        );
-      } finally {
-        if (inFlightController === controller) {
-          inFlightController = null;
-        }
-      }
-    }
-
-    void loadReview();
-    return () => {
-      cancelled = true;
-      inFlightController?.abort();
-    };
-  }, [
+  const routeEvaluationScorecard = routeEvaluationId
+    ? evaluationRecordsState.records.find((record) => record.id === routeEvaluationId) ?? null
+    : null;
+  const routeEvaluationSubjectId =
+    routeEvaluationScorecard?.subjectId ??
+    routeEvaluationSummary?.subjectId ??
+    null;
+  const evaluationCaseReviewState = useCaseReview(
     apiPath,
-    caseReviewState.caseId,
-    caseReviewState.subjectId,
-    caseReviewState.open,
-  ]);
-
-  useEffect(() => {
-    if (route.kind !== "subject" || route.view !== "evaluation" || !route.reviewCaseId || !selectedSubjectId) {
-      setCaseReviewState((current) =>
-        current.open
-          ? {
-              open: false,
-              subjectId: null,
-              caseId: null,
-              tab: "overview",
-              runId: null,
-              loading: false,
-              error: null,
-              review: null,
-            }
-          : current,
-      );
-      return;
-    }
-
-    const subjectId = selectedSubjectId;
-    const caseId = route.reviewCaseId;
-    const tab = route.reviewTab;
-    const runId = route.reviewRunId;
-    setCaseReviewState((current) => {
-      const review = current.subjectId === subjectId && current.caseId === caseId
-        ? current.review
-        : null;
-      return {
-        open: true,
-        subjectId,
-        caseId,
-        tab,
-        runId,
-        loading: !review,
-        error: null,
-        review,
-      };
-    });
-  }, [
-    route.kind,
-    route.kind === "subject" ? route.subjectId : null,
-    route.kind === "subject" ? route.view : null,
-    route.kind === "subject" ? route.reviewCaseId : null,
-    route.kind === "subject" ? route.reviewRunId : null,
-    route.kind === "subject" ? route.reviewTab : "overview",
-    selectedSubjectId,
-  ]);
-
-  function openCaseReview(caseId: string, tab: CaseReviewTab = "overview", runId: string | null = null) {
-    if (!selectedSubjectId) {
-      return;
-    }
-    navigateToSubject({
-      subjectId: selectedSubjectId,
-      view: "evaluation",
-      reviewCaseId: caseId,
-      reviewTab: tab,
-      reviewRunId: runId,
-    });
-  }
+    routeEvaluationCaseId ? routeEvaluationSubjectId : null,
+    routeEvaluationCaseId ? (routeEvaluationSummary?.runId ?? routeEvaluationScorecard?.runId ?? null) : null,
+    routeEvaluationCaseId,
+  );
 
   function navigateToSubject(args: {
     subjectId: string;
@@ -1079,12 +919,10 @@ export function WorkbenchWorkspace({
     filePath?: string | null;
     directoryPath?: string | null;
     previewMode?: SubjectPreviewMode;
-    reviewCaseId?: string | null;
-    reviewTab?: CaseReviewTab;
-    reviewRunId?: string | null;
+    dialog?: SubjectDialog | null;
     replace?: boolean;
   }) {
-    const view = args.view ?? (route.kind === "subject" ? route.view : "evaluation");
+    const view = args.view ?? (route.kind === "subject" ? route.view : "overview");
     navigate(
       createSubjectRoute({
         subjectId: args.subjectId,
@@ -1096,9 +934,7 @@ export function WorkbenchWorkspace({
         previewMode: view === "files"
           ? args.previewMode ?? (route.kind === "subject" && route.view === "files" ? route.previewMode : "rendered")
           : "rendered",
-        reviewCaseId: view === "evaluation" ? args.reviewCaseId ?? null : null,
-        reviewTab: view === "evaluation" ? args.reviewTab ?? "overview" : "overview",
-        reviewRunId: view === "evaluation" ? args.reviewRunId ?? null : null,
+        dialog: args.dialog ?? (route.kind === "subject" ? route.dialog : null),
       }),
       args.replace ? { replace: true } : undefined,
     );
@@ -1107,14 +943,29 @@ export function WorkbenchWorkspace({
   function handleSelectSubject(subjectId: string) {
     navigateToSubject({
       subjectId,
-      view: route.kind === "subject" ? route.view : "evaluation",
+      view: route.kind === "subject" ? route.view : "overview",
       filePath: route.kind === "subject" && route.view === "files" ? route.filePath : null,
       directoryPath: route.kind === "subject" && route.view === "files" ? route.directoryPath : null,
       previewMode: route.kind === "subject" && route.view === "files" ? route.previewMode : "rendered",
+      dialog: null,
     });
   }
 
-  const runtimeSurface = (() => {
+  function createCurrentSubjectRoute(dialog: SubjectDialog | null): WorkbenchRoute | null {
+    if (route.kind !== "subject" || !selectedSubjectId) {
+      return null;
+    }
+    return createSubjectRoute({
+      subjectId: selectedSubjectId,
+      view: route.view,
+      filePath: route.view === "files" ? route.filePath : null,
+      directoryPath: route.view === "files" ? route.directoryPath : null,
+      previewMode: route.view === "files" ? route.previewMode : "rendered",
+      dialog,
+    });
+  }
+
+  const objectSurface = (() => {
     if (route.kind === "subject" && route.view === "manifest") {
       return (
         <SubjectYamlSurface
@@ -1180,78 +1031,81 @@ export function WorkbenchWorkspace({
       );
     }
 
-    if (route.kind === "subject" && route.view === "evaluation") {
+    if (route.kind === "subject" && route.view === "overview") {
       return (
-        <SubjectEvaluationSurface
-          apiPath={apiPath}
+        <SubjectOverviewSurface
           snapshot={snapshot}
           snapshotError={snapshotError}
           snapshotLoading={snapshotLoading}
           selectedSubjectSummary={selectedSubjectSummary}
-          recordState={recordState}
-          specDocument={specDocument}
-          latestRun={latestRun}
-          latestRuns={latestRuns}
-          onOpenCaseReview={openCaseReview}
+          evaluations={currentBenchmarkEvaluations}
+          onOpenEvaluation={(evaluationId) => {
+            const next = createCurrentSubjectRoute({ kind: "evaluation", evaluationId });
+            if (next) {
+              navigate(next);
+            }
+          }}
         />
       );
     }
 
-    if (route.kind === "run") {
+    if (route.kind === "evaluations") {
       return (
-        <RunRouteResolutionSurface
-          runId={route.runId}
-          state={runRouteDetailState}
-          resolving={Boolean(runRouteTarget)}
-        />
+        <ScrollableObjectSurface>
+          <EvaluationsSurface
+            snapshotError={snapshotError}
+            snapshotLoading={snapshotLoading}
+            evaluations={currentBenchmarkEvaluations}
+            onSelectEvaluation={(evaluationId) => navigate(createEvaluationsRoute({
+              dialog: { kind: "evaluation", evaluationId },
+            }))}
+          />
+        </ScrollableObjectSurface>
       );
     }
 
     return (
-      <SubjectsPaneSurface
-        view={runtimeRootView}
+      <SubjectsIndexSurface
         snapshot={snapshot}
         snapshotError={snapshotError}
         snapshotLoading={snapshotLoading}
         currentBenchmarkSummaries={currentBenchmarkSummaries}
-        currentBenchmarkResults={currentBenchmarkResults}
+        currentBenchmarkEvaluations={currentBenchmarkEvaluations}
         currentBenchmarkRuns={currentBenchmarkRuns}
         selectedSubjectId={selectedSubjectId}
-        resultRecordsState={resultRecordsState}
-        onViewChange={(nextView) => {
-          setRuntimeRootView(nextView);
-          navigate(createSubjectsRoute());
-        }}
+        view={route.kind === "subjects" ? route.view : "archive"}
+        onViewChange={(view) => navigate(createSubjectsRoute({ view }))}
         onSelectSubject={handleSelectSubject}
-        showHeading={false}
       />
     );
   })();
 
-  const desktopRuntimePaneOpen =
-    route.kind !== "benchmark" && !prefersCompactRuntimeLayout;
+  const desktopObjectPaneOpen =
+    route.kind !== "benchmark" && !prefersCompactWorkspaceLayout;
   const routeHref = (next: WorkbenchRoute) => buildWorkbenchLocationHref(next, routeBasePath, persistentSearchParams);
   const benchmarkHref = routeHref(createBenchmarkRoute());
   const workbenchBrandHref = brandHref ?? benchmarkHref;
-
-  function handleRuntimePaneAction() {
-    if (route.kind === "benchmark") {
-      navigate(createSubjectsRoute());
-      return;
-    }
-    navigate(createBenchmarkRoute());
-  }
-
-  const runtimePaneToggleAction = (
-    <DesktopWorkspaceSplitToggle
-      paneOpen={desktopRuntimePaneOpen}
-      openLabel="Show subjects pane"
-      closeLabel="Hide subjects pane"
-      openText="Subjects"
-      testId="runtime-pane-toggle"
-      onClick={handleRuntimePaneAction}
+  const benchmarkNavigation = (
+    <WorkbenchBenchmarkNavigation
+      route={route}
+      routeHref={routeHref}
+      onNavigate={navigate}
     />
   );
+  const objectPaneCollapseAction = desktopObjectPaneOpen ? (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      aria-label="Collapse details pane"
+      title="Collapse details pane"
+      data-testid="object-pane-collapse"
+      onClick={() => navigate(createBenchmarkRoute())}
+    >
+      <PanelRightCloseIcon />
+      <span className="sr-only">Collapse details pane</span>
+    </Button>
+  ) : null;
 
   const benchmarkSurface = (
     <BenchmarkSurface
@@ -1275,50 +1129,54 @@ export function WorkbenchWorkspace({
       onSourcePreviewModeChange={setBenchmarkPreviewMode}
       onBenchmarkFingerprintChange={setSelectedBenchmarkFingerprint}
       loading={specLoading}
-      actions={!prefersCompactRuntimeLayout ? runtimePaneToggleAction : undefined}
+      actions={objectPaneCollapseAction}
     />
-  );
-
-  const compactBenchmarkPaneActions = (
-    <>
-      {runtimePaneToggleAction}
-    </>
   );
 
   const workspaceHeader = (
-    <WorkspaceTopBar
-      brand={(
-        <a
-          href={workbenchBrandHref}
-          aria-label={brandHref ? "Workbench dashboard" : "Workbench Home"}
-          data-testid="app-brand-link"
-          className="inline-flex w-fit rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          onClick={(event) => {
-            if (brandHref) {
-              return;
-            }
-            event.preventDefault();
-            navigate(createBenchmarkRoute());
-          }}
-        >
-          <WorkbenchBrand />
-        </a>
-      )}
-      actions={(
-        <>
-          {headerControls}
-        </>
-      )}
-    />
+    <div className="flex min-w-0 flex-col">
+      <div className="px-4 py-3 sm:px-5">
+        <WorkspaceTopBar
+          brand={(
+            <a
+              href={workbenchBrandHref}
+              aria-label="Workbench home"
+              data-testid="app-brand-link"
+              className="inline-flex shrink-0 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={(event) => {
+                if (brandHref) {
+                  return;
+                }
+                event.preventDefault();
+                navigate(createBenchmarkRoute());
+              }}
+            >
+              <WorkbenchBrand />
+            </a>
+          )}
+          actions={headerControls}
+        />
+      </div>
+      <div className="border-t border-border/60 bg-muted/30 px-4 py-2 sm:px-5">
+        <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div className="min-w-0">
+            <WorkbenchBreadcrumbs
+              route={route}
+              selectedSubjectSummary={selectedSubjectSummary}
+              routeHref={routeHref}
+              onNavigate={navigate}
+            />
+          </div>
+          {benchmarkNavigation}
+        </div>
+      </div>
+    </div>
   );
 
   const benchmarkPane = (
     <WorkspacePane
       tone="secondary"
-      actions={(
-        prefersCompactRuntimeLayout ? compactBenchmarkPaneActions : undefined
-      )}
-      hideHeader={!prefersCompactRuntimeLayout}
+      hideHeader
       scrollBody={!benchmarkSurfaceFillsBody}
       contentClassName={benchmarkSurfaceFillsBody ? "flex h-full min-h-0 flex-col" : undefined}
     >
@@ -1326,13 +1184,13 @@ export function WorkbenchWorkspace({
     </WorkspacePane>
   );
 
-  const runtimeTabs = route.kind === "subject" ? (
+  const subjectDetailViewSwitch = route.kind === "subject" ? (
     <ViewSwitch
       ariaLabel="Subject views"
       value={route.view}
       className="self-start"
       items={[
-        { value: "evaluation", label: "Evaluation", icon: PlayIcon },
+        { value: "overview", label: "Overview", icon: InfoIcon },
         { value: "manifest", label: "Manifest", icon: FileCode2Icon },
         { value: "files", label: "Files", icon: FolderOpenIcon },
       ]}
@@ -1341,7 +1199,7 @@ export function WorkbenchWorkspace({
           return;
         }
         const nextView: SubjectView =
-          value === "files" ? "files" : value === "manifest" ? "manifest" : "evaluation";
+          value === "files" ? "files" : value === "manifest" ? "manifest" : "overview";
         navigateToSubject({
           subjectId: selectedSubjectId,
           view: nextView,
@@ -1351,38 +1209,85 @@ export function WorkbenchWorkspace({
       }}
     />
   ) : null;
-  const runtimeSurfaceFillsBody =
+  const objectSurfaceFillsBody =
     (route.kind === "subject" && route.view === "files") ||
-    (route.kind === "subjects" && (runtimeRootView === "lineage" || runtimeRootView === "results" || runtimeRootView === "runs"));
+    route.kind === "subjects" ||
+    route.kind === "evaluations";
 
-  const runtimePane = (
+  const objectPane = (
     <WorkspacePane
-      breadcrumbs={route.kind !== "benchmark" ? (
-          <RuntimeBreadcrumbs
-            route={route}
-            selectedSubjectSummary={selectedSubjectSummary}
-            routeHref={routeHref}
-            onNavigate={navigate}
-          />
-      ) : undefined}
-      title={runtimeTitle({
+      title={objectPaneTitle({
         route,
         selectedSubjectSummary,
       })}
       badges={(
-        <RuntimePaneBadges
+        <ObjectPaneBadges
           route={route}
           snapshot={snapshot}
-          subjectCount={route.kind === "subjects" ? currentBenchmarkSummaries.length : snapshot?.summaries.length ?? 0}
+          subjectCount={currentBenchmarkSummaries.length}
+          evaluationCount={currentBenchmarkEvaluations.length}
           selectedSubjectSummary={selectedSubjectSummary}
         />
       )}
-      subnav={runtimeTabs}
-      scrollBody={!runtimeSurfaceFillsBody}
-      contentClassName={runtimeSurfaceFillsBody ? "flex h-full min-h-0 flex-col" : undefined}
+      subnav={subjectDetailViewSwitch}
+      scrollBody={!objectSurfaceFillsBody}
+      contentClassName={objectSurfaceFillsBody ? "flex h-full min-h-0 flex-col" : undefined}
     >
-      {runtimeSurface}
+      {objectSurface}
     </WorkspacePane>
+  );
+  const subjectContextDialog = route.kind === "subject" ? route.dialog : null;
+  const evaluationsContextDialog = route.kind === "evaluations" ? route.dialog : null;
+  const contextualDialogs = (
+    <>
+      {subjectContextDialog?.kind === "evaluation" ? (
+        <EvaluationDetailDialog
+          open
+          evaluationId={subjectContextDialog.evaluationId}
+          evaluationSummary={routeEvaluationSummary}
+          state={evaluationRecordsState}
+          selectedCaseId={subjectContextDialog.caseId ?? null}
+          caseReviewState={evaluationCaseReviewState}
+          onClose={() => {
+            const next = createCurrentSubjectRoute(null);
+            if (next) {
+              navigate(next);
+            }
+          }}
+          onSelectCase={(caseId) => {
+            const next = createCurrentSubjectRoute({
+              kind: "evaluation",
+              evaluationId: subjectContextDialog.evaluationId,
+              caseId,
+            });
+            if (next) {
+              navigate(next);
+            }
+          }}
+          apiPath={apiPath}
+        />
+      ) : null}
+
+      {evaluationsContextDialog?.kind === "evaluation" ? (
+        <EvaluationDetailDialog
+          open
+          evaluationId={evaluationsContextDialog.evaluationId}
+          evaluationSummary={routeEvaluationSummary}
+          state={evaluationRecordsState}
+          selectedCaseId={evaluationsContextDialog.caseId ?? null}
+          caseReviewState={evaluationCaseReviewState}
+          onClose={() => navigate(createEvaluationsRoute())}
+          onSelectCase={(caseId) => navigate(createEvaluationsRoute({
+            dialog: {
+              kind: "evaluation",
+              evaluationId: evaluationsContextDialog.evaluationId,
+              caseId,
+            },
+          }))}
+          apiPath={apiPath}
+        />
+      ) : null}
+    </>
   );
 
   return (
@@ -1390,69 +1295,25 @@ export function WorkbenchWorkspace({
       mainId="main-content"
       skipLinkLabel="Skip to Workbench workspace"
       header={workspaceHeader}
+      headerClassName="px-0 py-0 sm:px-0"
     >
-      {prefersCompactRuntimeLayout ? (
-        route.kind === "benchmark" ? benchmarkPane : runtimePane
+      {prefersCompactWorkspaceLayout ? (
+        route.kind === "benchmark" ? benchmarkPane : objectPane
       ) : (
         <DesktopWorkspaceSplit
-          paneOpen={desktopRuntimePaneOpen}
-          primaryPercent={desktopRuntimeLeftPercent}
-          minPrimaryPercent={DESKTOP_RUNTIME_LEFT_MIN_PERCENT}
-          maxPrimaryPercent={DESKTOP_RUNTIME_LEFT_MAX_PERCENT}
-          onPrimaryPercentChange={setDesktopRuntimeLeftPercent}
+          paneOpen={desktopObjectPaneOpen}
+          primaryPercent={desktopDetailLeftPercent}
+          minPrimaryPercent={DESKTOP_DETAIL_LEFT_MIN_PERCENT}
+          maxPrimaryPercent={DESKTOP_DETAIL_LEFT_MAX_PERCENT}
+          onPrimaryPercentChange={setDesktopDetailLeftPercent}
           primaryPane={benchmarkPane}
-          secondaryPane={runtimePane}
-          secondaryPaneId="workbench-core-pane"
-          separatorLabel="Resize subjects pane"
+          secondaryPane={objectPane}
+          secondaryPaneId="workbench-object-pane"
+          separatorLabel="Resize details pane"
         />
       )}
 
-      <CaseReviewDialog
-        apiPath={apiPath}
-        state={caseReviewState}
-        onOpenChange={(open) => {
-          if (!open) {
-            setCaseReviewState({
-              open: false,
-              subjectId: null,
-              caseId: null,
-              tab: "overview",
-              runId: null,
-              loading: false,
-              error: null,
-              review: null,
-            });
-            if (route.kind === "subject" && route.view === "evaluation") {
-              const subjectId = selectedSubjectId ?? route.subjectId;
-              if (!subjectId) {
-                return;
-              }
-              navigateToSubject({
-                subjectId,
-                view: "evaluation",
-                replace: true,
-              });
-            }
-          }
-        }}
-        onTabChange={(tab) => {
-          setCaseReviewState((current) => ({ ...current, tab }));
-          if (route.kind === "subject" && route.view === "evaluation" && route.reviewCaseId) {
-            const subjectId = selectedSubjectId ?? route.subjectId;
-            if (!subjectId) {
-              return;
-            }
-            navigateToSubject({
-              subjectId,
-              view: "evaluation",
-              reviewCaseId: route.reviewCaseId,
-              reviewTab: tab,
-              reviewRunId: route.reviewRunId,
-              replace: true,
-            });
-          }
-        }}
-      />
+      {contextualDialogs}
     </WorkspaceRoot>
   );
 }
@@ -1521,12 +1382,75 @@ function useWorkbenchRoute(
   return [route, navigate];
 }
 
-  function runtimeTitle(args: {
+function WorkbenchBenchmarkNavigation({
+  route,
+  routeHref,
+  onNavigate,
+}: {
+  route: WorkbenchRoute;
+  routeHref: (route: WorkbenchRoute) => string;
+  onNavigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
+}) {
+  const value =
+    route.kind === "subjects" || route.kind === "subject"
+      ? "subjects"
+      : route.kind === "evaluations"
+          ? "evaluations"
+          : null;
+  const items = [
+    {
+      value: "subjects",
+      label: "Subjects",
+      route: createSubjectsRoute(),
+    },
+    {
+      value: "evaluations",
+      label: "Evaluations",
+      route: createEvaluationsRoute(),
+    },
+  ] as const;
+
+  return (
+    <nav aria-label="Benchmark navigation" className="flex min-w-0 items-center gap-1 overflow-x-auto md:justify-end">
+      {items.map((item) => {
+        const active = item.value === value;
+        const targetRoute = active ? createBenchmarkRoute() : item.route;
+        return (
+          <Button
+            key={item.value}
+            asChild
+            size="sm"
+            variant={active ? "secondary" : "ghost"}
+          >
+            <a
+              aria-current={active ? "page" : undefined}
+              href={routeHref(targetRoute)}
+              onClick={(event) => {
+                event.preventDefault();
+                onNavigate(targetRoute);
+              }}
+            >
+              {item.label}
+            </a>
+          </Button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function objectPaneTitle(args: {
   route: WorkbenchRoute;
   selectedSubjectSummary: SubjectSummary | null;
 }): string {
-  if (args.route.kind !== "subject") {
+  if (args.route.kind === "subjects") {
     return "Subjects";
+  }
+  if (args.route.kind === "evaluations") {
+    return "Evaluations";
+  }
+  if (args.route.kind !== "subject") {
+    return "Benchmark";
   }
   if (!args.selectedSubjectSummary) {
     return "Subject";
@@ -1534,7 +1458,7 @@ function useWorkbenchRoute(
   return shortId(args.selectedSubjectSummary.id) ?? args.selectedSubjectSummary.id;
 }
 
-function RuntimeBreadcrumbs({
+function WorkbenchBreadcrumbs({
   route,
   selectedSubjectSummary,
   routeHref,
@@ -1545,15 +1469,35 @@ function RuntimeBreadcrumbs({
   routeHref: (route: WorkbenchRoute) => string;
   onNavigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
 }) {
+  if (route.kind === "benchmark") {
+    return (
+      <Breadcrumb className="min-w-0">
+        <BreadcrumbList className="min-w-0 flex-nowrap">
+          <BreadcrumbItem className="min-w-0">
+            <BreadcrumbPage className="truncate">Benchmark</BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+    );
+  }
+
   const terminalLabel = route.kind === "subject"
     ? selectedSubjectSummary
       ? shortId(selectedSubjectSummary.id) ?? selectedSubjectSummary.id
       : "Subject"
-    : "Subjects";
+    : route.kind === "evaluations"
+        ? "Evaluations"
+        : "Subjects";
+  const parentRoute =
+    route.kind === "subject" ? createSubjectsRoute() :
+    null;
+  const parentLabel =
+    route.kind === "subject" ? "Subjects" :
+    null;
 
   return (
-    <Breadcrumb>
-      <BreadcrumbList>
+    <Breadcrumb className="min-w-0">
+      <BreadcrumbList className="min-w-0 flex-nowrap">
         <BreadcrumbItem>
           <BreadcrumbLink
             href={routeHref(createBenchmarkRoute())}
@@ -1566,27 +1510,27 @@ function RuntimeBreadcrumbs({
           </BreadcrumbLink>
         </BreadcrumbItem>
         <BreadcrumbSeparator />
-        {route.kind === "subject" ? (
+        {parentRoute && parentLabel ? (
           <>
             <BreadcrumbItem>
               <BreadcrumbLink
-                href={routeHref(createSubjectsRoute())}
+                href={routeHref(parentRoute)}
                 onClick={(event) => {
                   event.preventDefault();
-                  onNavigate(createSubjectsRoute());
+                  onNavigate(parentRoute);
                 }}
               >
-                Subjects
+                {parentLabel}
               </BreadcrumbLink>
             </BreadcrumbItem>
             <BreadcrumbSeparator />
-            <BreadcrumbItem>
-              <BreadcrumbPage>{terminalLabel}</BreadcrumbPage>
+            <BreadcrumbItem className="min-w-0">
+              <BreadcrumbPage className="truncate">{terminalLabel}</BreadcrumbPage>
             </BreadcrumbItem>
           </>
         ) : (
-          <BreadcrumbItem>
-            <BreadcrumbPage>{terminalLabel}</BreadcrumbPage>
+          <BreadcrumbItem className="min-w-0">
+            <BreadcrumbPage className="truncate">{terminalLabel}</BreadcrumbPage>
           </BreadcrumbItem>
         )}
       </BreadcrumbList>
@@ -1594,17 +1538,27 @@ function RuntimeBreadcrumbs({
   );
 }
 
-function RuntimePaneBadges({
+function ObjectPaneBadges({
   route,
   snapshot,
   subjectCount,
+  evaluationCount,
   selectedSubjectSummary,
 }: {
   route: WorkbenchRoute;
-  snapshot: RuntimeSnapshot | null;
+  snapshot: BenchmarkSnapshot | null;
   subjectCount: number;
+  evaluationCount: number;
   selectedSubjectSummary: SubjectSummary | null;
 }) {
+  if (route.kind === "evaluations") {
+    return snapshot ? <Badge variant="outline">{formatCount(evaluationCount, "evaluation")}</Badge> : null;
+  }
+
+  if (route.kind === "benchmark") {
+    return snapshot ? <Badge variant="outline">{formatCount(subjectCount, "subject")}</Badge> : null;
+  }
+
   if (route.kind !== "subject") {
     return snapshot ? (
       <Badge variant="outline">
@@ -1625,32 +1579,43 @@ function RuntimePaneBadges({
   );
 }
 
-function BenchmarkAccordionSection({
+function DetailAccordionSection({
   value,
   title,
   summary,
   children,
+  contentClassName = "pb-3",
+  bordered = false,
   "data-testid": dataTestId,
 }: {
   value: string;
   title: string;
   summary?: ReactNode;
-  children: React.ReactNode;
+  children: ReactNode;
+  contentClassName?: string;
+  bordered?: boolean;
   "data-testid"?: string;
 }) {
   return (
-    <AccordionItem value={value} data-testid={dataTestId} className="min-w-0">
-      <AccordionTrigger className="min-w-0 py-2.5 hover:no-underline">
+    <AccordionItem
+      value={value}
+      data-testid={dataTestId}
+      className={cn(
+        "min-w-0",
+        bordered && "rounded-lg border border-border/60 px-3 not-last:border-b",
+      )}
+    >
+      <AccordionTrigger className="min-w-0 py-2.5">
         <div className="grid min-w-0 flex-1 gap-1 text-left">
           <span className="min-w-0 text-sm font-medium text-foreground">{title}</span>
           {summary ? (
-            <span className="min-w-0 max-w-full text-xs font-normal text-muted-foreground whitespace-normal break-words [overflow-wrap:anywhere] group-aria-expanded/accordion-trigger:hidden">
+            <span className="min-w-0 max-w-full text-xs font-normal text-muted-foreground whitespace-normal break-words [overflow-wrap:anywhere]">
               {summary}
             </span>
           ) : null}
         </div>
       </AccordionTrigger>
-      <AccordionContent className="pb-3">
+      <AccordionContent className={contentClassName}>
         <div className="flex flex-col gap-3">{children}</div>
       </AccordionContent>
     </AccordionItem>
@@ -1725,10 +1690,11 @@ function BenchmarkSurface({
     );
   }
 
-	  const spec = specDocument.spec;
-	  const environment = spec.benchmark.environment;
-	  const score = spec.benchmark.score;
-  const environmentImage = environment.dockerfile;
+  const spec = specDocument.spec;
+  const engine = spec.benchmark.engine;
+  const environment = engineEnvironmentConfig(engine);
+  const environmentSummary = environment?.dockerfile ?? "Not declared";
+  const resolvedEngineSourcePath = engineResolvePath(engine);
   const benchmarkYamlSource = sourceYamlFileFromDocument(specDocument, "benchmark.yaml");
 
   return (
@@ -1792,32 +1758,43 @@ function BenchmarkSurface({
           <div className="grid min-w-0 gap-6">
             <SurfaceSection title="Benchmark">
               <Accordion type="multiple">
-                <BenchmarkAccordionSection
-                  value="runtime-environment"
+                <DetailAccordionSection
+                  value="environment"
                   title="Environment"
-                  summary={environmentImage}
+                  summary={environmentSummary}
                 >
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <BenchmarkField label="Dockerfile" value={environmentImage} mono />
-                    <BenchmarkField label="Network" value={formatNetworkConfig(environment.network)} mono />
-                  </div>
-                  {environment.resources ? (
-                    <StructuredValueView value={environment.resources} />
-                  ) : null}
-                </BenchmarkAccordionSection>
+                  {environment ? (
+                    <>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <BenchmarkField label="Dockerfile" value={environment.dockerfile} mono />
+                        <BenchmarkField label="Network" value={formatNetworkConfig(environment.network)} mono />
+                      </div>
+                      {environment.resources ? (
+                        <StructuredValueView value={environment.resources} />
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      No environment settings were declared in this manifest.
+                    </p>
+                  )}
+                </DetailAccordionSection>
 
-                <BenchmarkAccordionSection
-                  value="eval-tasks"
-                  title="Task Files"
-                  summary={formatCount(specDocument.cases.length, "task")}
-                  data-testid="benchmark-task-card"
+                <DetailAccordionSection
+                  value="eval-cases"
+                  title="Engine Cases"
+                  summary={formatCount(specDocument.cases.length, "case")}
+                  data-testid="benchmark-engine-cases-card"
                 >
-                  <BenchmarkPlainStringList title="Resolved Task Packages" values={[spec.benchmark.tasks.path]} />
+                  <BenchmarkPlainStringList
+                    title="Resolved Engine Source"
+                    values={resolvedEngineSourcePath ? [resolvedEngineSourcePath] : []}
+                  />
                   <div className="overflow-x-auto">
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Task</TableHead>
+                          <TableHead>Case</TableHead>
                           <TableHead>Split</TableHead>
                           <TableHead className="text-right">Files</TableHead>
                         </TableRow>
@@ -1833,15 +1810,15 @@ function BenchmarkSurface({
                       </TableBody>
                     </Table>
                   </div>
-                </BenchmarkAccordionSection>
+                </DetailAccordionSection>
 
-	                <BenchmarkAccordionSection
-	                  value="eval-scorer"
-	                  title="Score"
-	                  summary={formatUseBlockSummary(score)}
-	                >
-	                  <StructuredValueView value={score} />
-	                </BenchmarkAccordionSection>
+                <DetailAccordionSection
+                  value="eval-engine"
+                  title="Engine"
+                  summary={formatUseBlockSummary(engine)}
+                >
+                  <StructuredValueView value={engine} />
+                </DetailAccordionSection>
 
               </Accordion>
             </SurfaceSection>
@@ -1850,16 +1827,16 @@ function BenchmarkSurface({
         <TabsContent value="manifest" className="min-w-0">
           <SourceYamlSection
             title="Benchmark Manifest"
-            description="The benchmark manifest defines tasks, environment, and grading."
+            description="The benchmark manifest defines the engine, subject, optimizer, and source files."
             source={benchmarkYamlSource}
             testId="benchmark-yaml-source"
           />
         </TabsContent>
         <TabsContent value="files" className="min-h-0 min-w-0">
           <SurfaceSection
-            title="Mounted Task Files"
+            title="Engine Case Files"
             icon={FolderOpenIcon}
-            description="Task input and expected files mounted during runner and scorer execution."
+            description="Public, private, and source files exposed by the engine."
             className="flex h-full min-h-0 flex-col"
           >
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1876,10 +1853,10 @@ function BenchmarkSurface({
                 isChangesLoading={sourceFilesState.loading}
                 isPreviewLoading={sourcePreviewState.loading}
                 layout={prefersStackedFilesLayout ? "stacked" : "split"}
-                emptyMessage="No mounted task files are available for this benchmark."
-                emptySelectionMessage="Select a mounted task file to preview."
-                listErrorMessage="Couldn't load the mounted task file list."
-                previewErrorMessage="Couldn't load the mounted task file preview."
+                emptyMessage="No engine case files are available for this benchmark."
+                emptySelectionMessage="Select an engine case file to preview."
+                listErrorMessage="Couldn't load the engine case file list."
+                previewErrorMessage="Couldn't load the engine case file preview."
                 onSelectFile={onSelectSourceFile}
                 onDirectoryChange={onSourceDirectoryChange}
                 onPreviewModeChange={(mode) => onSourcePreviewModeChange(mode as SubjectPreviewMode)}
@@ -1935,12 +1912,7 @@ function SourceYamlSection({
   return (
     <SurfaceSection title={title} icon={FileCode2Icon} description={description}>
       {loading ? (
-        <Card>
-          <CardContent className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-            <Spinner className="size-4" />
-            Loading manifest
-          </CardContent>
-        </Card>
+        <SourceYamlSkeleton />
       ) : error ? (
         <Card>
           <CardContent className="py-4 text-sm text-destructive">{error}</CardContent>
@@ -1948,7 +1920,12 @@ function SourceYamlSection({
       ) : source ? (
         <div className="grid min-w-0 gap-2">
           <div className="flex min-w-0 flex-wrap gap-2">
-            <Badge variant="outline" className="font-mono">{source.path}</Badge>
+            <Badge
+              variant="outline"
+              className="min-w-0 max-w-full whitespace-normal break-words font-mono [overflow-wrap:anywhere]"
+            >
+              {source.path}
+            </Badge>
           </div>
           <CodeBlockSurface
             value={source.content}
@@ -2070,6 +2047,35 @@ function StructuredValueView({
 
 type BenchmarkUseBlock = Record<string, unknown> & { use: string };
 
+function engineEnvironmentConfig(engine: unknown): {
+  dockerfile: string;
+  network?: unknown;
+  resources?: unknown;
+} | null {
+  const block = normalizeBenchmarkUseBlock(engine);
+  const config = useBlockConfig(block);
+  const environment = config.environment &&
+    typeof config.environment === "object" &&
+    !Array.isArray(config.environment)
+    ? config.environment as Record<string, unknown>
+    : null;
+  if (!environment || typeof environment.dockerfile !== "string" || environment.dockerfile.length === 0) {
+    return null;
+  }
+  return {
+    dockerfile: environment.dockerfile,
+    ...(environment.network !== undefined ? { network: environment.network } : {}),
+    ...(environment.resources !== undefined ? { resources: environment.resources } : {}),
+  };
+}
+
+function engineResolvePath(value: unknown): string | null {
+  const config = useBlockConfig(value);
+  return typeof config.path === "string" && config.path.length > 0
+    ? config.path
+    : null;
+}
+
 function formatUseBlockSummary(value: unknown): string {
   const block = normalizeBenchmarkUseBlock(value);
   if (!block) {
@@ -2123,10 +2129,10 @@ function useBlockConfig(value: unknown): Record<string, unknown> {
 
 function formatNetworkConfig(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return "none";
+    return "open";
   }
   const egress = (value as Record<string, unknown>).egress;
-  return typeof egress === "string" && egress.length > 0 ? egress : "none";
+  return typeof egress === "string" && egress.length > 0 ? egress : "open";
 }
 
 function isDisplayScalar(value: unknown): value is string | number | boolean {
@@ -2172,35 +2178,29 @@ function BenchmarkFingerprintSelector({
   );
 }
 
-function SubjectsPaneSurface({
-  view,
+function SubjectsIndexSurface({
   snapshot,
   snapshotError,
   snapshotLoading,
   currentBenchmarkSummaries,
-  currentBenchmarkResults,
+  currentBenchmarkEvaluations,
   currentBenchmarkRuns,
   selectedSubjectId,
-  resultRecordsState,
+  view,
   onViewChange,
   onSelectSubject,
-  showHeading = true,
 }: {
-  view: RuntimeRootView;
-  snapshot: RuntimeSnapshot | null;
+  snapshot: BenchmarkSnapshot | null;
   snapshotError: string | null;
   snapshotLoading: boolean;
   currentBenchmarkSummaries: SubjectSummary[];
-  currentBenchmarkResults: EvaluationResultSummary[];
+  currentBenchmarkEvaluations: EvaluationSummary[];
   currentBenchmarkRuns: RunSummary[];
   selectedSubjectId: string | null;
-  resultRecordsState: ResultRecordsState;
-  onViewChange: (view: RuntimeRootView) => void;
+  view: "archive" | "lineage";
+  onViewChange: (view: "archive" | "lineage") => void;
   onSelectSubject: (subjectId: string) => void;
-  showHeading?: boolean;
 }) {
-  const fillsBody = view === "lineage" || view === "results" || view === "runs";
-  const subjectCountLabel = formatCount(currentBenchmarkSummaries.length, "subject");
   const scopedActiveId =
     snapshot?.activeId && currentBenchmarkSummaries.some((summary) => summary.id === snapshot.activeId)
       ? snapshot.activeId
@@ -2212,17 +2212,16 @@ function SubjectsPaneSurface({
           activeId: scopedActiveId,
           currentBenchmarkFingerprint:
             currentBenchmarkSummaries[0]?.benchmarkFingerprint ??
-            currentBenchmarkResults[0]?.benchmarkFingerprint ??
+            currentBenchmarkEvaluations[0]?.benchmarkFingerprint ??
             currentBenchmarkRuns[0]?.benchmarkFingerprint ??
             null,
           summaries: currentBenchmarkSummaries,
-          results: currentBenchmarkResults,
+          evaluations: currentBenchmarkEvaluations,
           runs: currentBenchmarkRuns,
-          latestRun: currentBenchmarkRuns.at(-1) ?? null,
         }
       : null,
     [
-      currentBenchmarkResults,
+      currentBenchmarkEvaluations,
       currentBenchmarkRuns,
       currentBenchmarkSummaries,
       scopedActiveId,
@@ -2231,99 +2230,51 @@ function SubjectsPaneSurface({
   );
 
   return (
-    <div
-      className={cn(
-        "w-full min-w-0 max-w-full",
-        fillsBody ? "flex h-full min-h-0 flex-1 flex-col gap-4" : "grid grid-cols-[minmax(0,1fr)] gap-4",
-      )}
-    >
-      {showHeading ? (
-        <div className="grid gap-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-semibold text-foreground">Subjects</h2>
-            {snapshot ? (
-              <Badge variant="outline">{subjectCountLabel}</Badge>
-            ) : null}
-          </div>
-          <p className="text-sm leading-6 text-muted-foreground">
-            Browse lineage, subjects, results, and runs for the selected benchmark version.
-          </p>
-        </div>
-      ) : null}
-
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-4">
       <Tabs
         value={view}
         onValueChange={(nextValue) => {
-          if (
-            nextValue === "lineage" ||
-            nextValue === "archive" ||
-            nextValue === "results" ||
-            nextValue === "runs"
-          ) {
+          if (nextValue === "archive" || nextValue === "lineage") {
             onViewChange(nextValue);
           }
         }}
-        className={cn(
-          "w-full min-w-0 max-w-full",
-          fillsBody ? "flex min-h-0 flex-1 flex-col gap-4" : "grid grid-cols-[minmax(0,1fr)] gap-4",
-        )}
+        className="flex min-h-0 min-w-0 flex-1 flex-col gap-4"
       >
-        <TabsList variant="line" aria-label="Benchmark version views" className="self-start">
+        <TabsList variant="line" aria-label="Subject index views" className="self-start">
+          <TabsTrigger value="archive">
+            <FolderOpenIcon data-icon="inline-start" />
+            Archive
+          </TabsTrigger>
           <TabsTrigger value="lineage">
             <GitBranchIcon data-icon="inline-start" />
             Lineage
           </TabsTrigger>
-          <TabsTrigger value="archive">
-            <FolderOpenIcon data-icon="inline-start" />
-            Subjects
-          </TabsTrigger>
-          <TabsTrigger value="results">
-            <ChartColumnIcon data-icon="inline-start" />
-            Results
-          </TabsTrigger>
-          <TabsTrigger value="runs">
-            <ActivityIcon data-icon="inline-start" />
-            Runs
-          </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="lineage" className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col">
-          <SubjectsLineageSurface
-            snapshot={scopedSnapshot}
-            snapshotError={snapshotError}
-            loading={snapshotLoading}
-            selectedSubjectId={selectedSubjectId}
-            onSelectSubject={onSelectSubject}
-          />
-        </TabsContent>
-        <TabsContent value="archive" className="mt-0 min-w-0">
-          <SubjectsArchiveSurface
-            summaries={currentBenchmarkSummaries}
-            activeId={scopedActiveId}
-            snapshotError={snapshotError}
-            loading={snapshotLoading}
-            selectedSubjectId={selectedSubjectId}
-            onSelectSubject={onSelectSubject}
-          />
-        </TabsContent>
-        <TabsContent value="results" className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col">
-          <ScrollableRuntimeSurface>
-            <ResultsSurface
+        <TabsContent value="archive" className="mt-0 min-h-0 min-w-0 flex-1">
+          <ScrollableObjectSurface>
+            <SubjectsArchiveSurface
+              summaries={currentBenchmarkSummaries}
+              evaluations={currentBenchmarkEvaluations}
+              activeId={scopedActiveId}
               snapshotError={snapshotError}
-              snapshotLoading={snapshotLoading}
-              results={currentBenchmarkResults}
-              resultRecordsState={resultRecordsState}
+              loading={snapshotLoading}
+              selectedSubjectId={selectedSubjectId}
+              onSelectSubject={onSelectSubject}
             />
-          </ScrollableRuntimeSurface>
+          </ScrollableObjectSurface>
         </TabsContent>
-        <TabsContent value="runs" className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col">
-          <ScrollableRuntimeSurface>
-            <RunsSurface
+
+        <TabsContent value="lineage" className="mt-0 min-h-0 min-w-0 flex-1">
+          <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col p-1">
+            <SubjectsLineageSurface
+              snapshot={scopedSnapshot}
               snapshotError={snapshotError}
-              snapshotLoading={snapshotLoading}
-              runs={currentBenchmarkRuns}
+              loading={snapshotLoading}
+              selectedSubjectId={selectedSubjectId}
+              onSelectSubject={onSelectSubject}
             />
-          </ScrollableRuntimeSurface>
+          </div>
         </TabsContent>
       </Tabs>
     </div>
@@ -2332,6 +2283,7 @@ function SubjectsPaneSurface({
 
 function SubjectsArchiveSurface({
   summaries,
+  evaluations,
   activeId,
   snapshotError,
   loading,
@@ -2339,6 +2291,7 @@ function SubjectsArchiveSurface({
   onSelectSubject,
 }: {
   summaries: SubjectSummary[];
+  evaluations: EvaluationSummary[];
   activeId: string | null;
   snapshotError: string | null;
   loading: boolean;
@@ -2361,6 +2314,7 @@ function SubjectsArchiveSurface({
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3">
       <SubjectList
         summaries={summaries}
+        evaluations={evaluations}
         activeId={activeId}
         selectedId={selectedSubjectId}
         onSelect={onSelectSubject}
@@ -2376,7 +2330,7 @@ function SubjectsLineageSurface({
   selectedSubjectId,
   onSelectSubject,
 }: {
-  snapshot: RuntimeSnapshot | null;
+  snapshot: BenchmarkSnapshot | null;
   snapshotError: string | null;
   loading: boolean;
   selectedSubjectId: string | null;
@@ -2405,85 +2359,7 @@ function SubjectsLineageSurface({
   );
 }
 
-function RunsSurface({
-  snapshotError,
-  snapshotLoading,
-  runs,
-}: {
-  snapshotError: string | null;
-  snapshotLoading: boolean;
-  runs: RunSummary[];
-}) {
-  const nowMs = Date.now();
-
-  if (snapshotError) {
-    return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{snapshotError}</CardContent>
-      </Card>
-    );
-  }
-
-  if (snapshotLoading) {
-    return (
-      <Card>
-        <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-          <Spinner className="size-4" />
-          Loading runs
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (runs.length === 0) {
-    return (
-      <EmptyState
-        icon={ActivityIcon}
-        eyebrow="Runs"
-        title="No runs for this version"
-        message="Runs appear here once Workbench executes this benchmark version."
-        variant="hero"
-        size="sm"
-      />
-    );
-  }
-
-  return (
-    <Card size="sm" className="min-w-0">
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle>Runs</CardTitle>
-          <Badge variant="outline">{formatCount(runs.length, "run")}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="grid min-w-0 gap-0 py-0">
-        {runs.map((run) => (
-          <div
-            key={run.id}
-            className="grid min-w-0 gap-2 border-b border-border/60 px-2 py-3 text-sm last:border-b-0"
-          >
-            <div className="grid min-w-0 gap-0.5">
-              <span className="font-medium truncate">{formatTimestamp(run.startedAt)}</span>
-              <span className="font-mono text-[11px] text-muted-foreground truncate">
-                {shortId(run.id) ?? run.id}
-              </span>
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <Badge variant="outline">{formatRunWorkflow(run.workflow)}</Badge>
-              <RunStatusBadge run={run} />
-              <Badge variant="secondary">{formatRunPhaseStatus(run)}</Badge>
-              <span className="text-sm tabular-nums text-muted-foreground">
-                {formatRunDuration(run, nowMs)}
-              </span>
-            </div>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-function ScrollableRuntimeSurface({
+function ScrollableObjectSurface({
   children,
   className,
 }: {
@@ -2534,14 +2410,7 @@ function SubjectYamlSurface({
   }
 
   if (snapshotLoading) {
-    return (
-      <Card>
-        <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-          <Spinner className="size-4" />
-          Loading subject
-        </CardContent>
-      </Card>
-    );
+    return <SubjectManifestSkeleton />;
   }
 
   if (!selectedSubjectSummary) {
@@ -2633,9 +2502,9 @@ function SubjectFilesSurface({
 
   return (
     <SurfaceSection
-      title="Mounted Subject Files"
+      title="Subject Files"
       icon={FolderOpenIcon}
-      description="Files mounted under /workspace/input/subject for run and improve executions."
+      description="Files that make up this subject version."
       className="flex min-h-0 flex-1 flex-col"
     >
       <div className="flex flex-wrap gap-2">
@@ -2669,86 +2538,10 @@ function SubjectFilesSurface({
   );
 }
 
-function useRunDetail(
+function useExecutionTrace(
   apiPath: (pathname: string) => string,
   runId: string | null,
-): RunDetailState {
-  const [state, setState] = useState<RunDetailState>({
-    loading: false,
-    error: null,
-    detail: null,
-  });
-
-  useEffect(() => {
-    if (!runId) {
-      setState({
-        loading: false,
-        error: null,
-        detail: null,
-      });
-      return;
-    }
-
-    let cancelled = false;
-    let inFlightController: AbortController | null = null;
-    const params = new URLSearchParams({ id: runId });
-
-    async function loadRunDetail() {
-      if (inFlightController) {
-        return;
-      }
-      const controller = new AbortController();
-      inFlightController = controller;
-      setState((current) => ({
-        loading: true,
-        error: null,
-        detail: current.detail?.run.id === runId ? current.detail : null,
-      }));
-      try {
-        const detail = await requestJson<{ run: HostedWorkbenchRun; jobs: HostedWorkbenchJob[] }>(
-          apiPath(`/api/run?${params.toString()}`),
-          { signal: controller.signal },
-        );
-        if (cancelled) {
-          return;
-        }
-        startTransition(() => {
-          setState({
-            loading: false,
-            error: null,
-            detail,
-          });
-        });
-      } catch (error) {
-        if (cancelled || controller.signal.aborted) {
-          return;
-        }
-        setState((current) => ({
-          loading: false,
-          error: toMessage(error),
-          detail: current.detail?.run.id === runId ? current.detail : null,
-        }));
-      } finally {
-        if (inFlightController === controller) {
-          inFlightController = null;
-        }
-      }
-    }
-
-    void loadRunDetail();
-
-    return () => {
-      cancelled = true;
-      inFlightController?.abort();
-    };
-  }, [apiPath, runId]);
-
-  return state;
-}
-
-function useRunTrace(
-  apiPath: (pathname: string) => string,
-  runId: string | null,
+  jobId: string | null,
 ): TraceDetailState {
   const [state, setState] = useState<TraceDetailState>({
     loading: false,
@@ -2757,7 +2550,7 @@ function useRunTrace(
   });
 
   useEffect(() => {
-    if (!runId) {
+    if (!runId || !jobId) {
       setState({
         loading: false,
         error: null,
@@ -2768,7 +2561,7 @@ function useRunTrace(
 
     let cancelled = false;
     let inFlightController: AbortController | null = null;
-    const params = new URLSearchParams({ run: runId });
+    const params = new URLSearchParams({ run: runId, job: jobId });
 
     async function loadTrace() {
       if (inFlightController) {
@@ -2818,42 +2611,105 @@ function useRunTrace(
       cancelled = true;
       inFlightController?.abort();
     };
-  }, [apiPath, runId]);
+  }, [apiPath, runId, jobId]);
 
   return state;
 }
 
-function SubjectEvaluationSurface({
-  apiPath,
+function useCaseReview(
+  apiPath: (pathname: string) => string,
+  subjectId: string | null,
+  runId: string | null,
+  caseId: string | null,
+): CaseReviewDetailState {
+  const [state, setState] = useState<CaseReviewDetailState>({
+    loading: false,
+    error: null,
+    review: null,
+    requestKey: null,
+  });
+
+  useEffect(() => {
+    if (!subjectId || !runId || !caseId) {
+      setState({
+        loading: false,
+        error: null,
+        review: null,
+        requestKey: null,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+    const nextSubjectId = subjectId;
+    const nextRunId = runId;
+    const nextCaseId = caseId;
+    const nextRequestKey = `${nextSubjectId}\0${nextRunId}\0${nextCaseId}`;
+    setState((current) => ({
+      loading: true,
+      error: null,
+      review: current.requestKey === nextRequestKey
+        ? current.review
+        : null,
+      requestKey: nextRequestKey,
+    }));
+
+    async function loadReview() {
+      try {
+        const review = await requestJson<SubjectCaseReview>(
+          apiPath(`/api/case-review?id=${encodeURIComponent(nextSubjectId)}&run=${encodeURIComponent(nextRunId)}&case=${encodeURIComponent(nextCaseId)}`),
+          { signal: controller.signal },
+        );
+        if (cancelled) {
+          return;
+        }
+        startTransition(() => {
+          setState({
+            loading: false,
+            error: null,
+            review,
+            requestKey: nextRequestKey,
+          });
+        });
+      } catch (error) {
+        if (cancelled || controller.signal.aborted) {
+          return;
+        }
+        setState({
+          loading: false,
+          error: toMessage(error),
+          review: null,
+          requestKey: nextRequestKey,
+        });
+      }
+    }
+
+    void loadReview();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [apiPath, caseId, runId, subjectId]);
+
+  return state;
+}
+
+function SubjectOverviewSurface({
   snapshot,
   snapshotError,
   snapshotLoading,
   selectedSubjectSummary,
-  recordState,
-  specDocument,
-  latestRun,
-  latestRuns,
-  onOpenCaseReview,
+  evaluations,
+  onOpenEvaluation,
 }: {
-  apiPath: (pathname: string) => string;
-  snapshot: RuntimeSnapshot | null;
+  snapshot: BenchmarkSnapshot | null;
   snapshotError: string | null;
   snapshotLoading: boolean;
   selectedSubjectSummary: SubjectSummary | null;
-  recordState: SubjectRecordState;
-  specDocument: AuthoredWorkbenchSourceDocument | null;
-  latestRun: RuntimeSnapshot["latestRun"];
-  latestRuns: RuntimeSnapshot["runs"];
-  onOpenCaseReview: (caseId: string) => void;
+  evaluations: EvaluationSummary[];
+  onOpenEvaluation: (evaluationId: string) => void;
 }) {
-  const evalRecord = recordState.record?.eval ?? null;
-  const nowMs = Date.now();
-  const shouldLoadRunDetail = Boolean(latestRun && selectedSubjectSummary);
-  const runDetailState = useRunDetail(
-    apiPath,
-    shouldLoadRunDetail ? latestRun?.id ?? null : null,
-  );
-
   if (snapshotError) {
     return (
       <Card>
@@ -2863,237 +2719,417 @@ function SubjectEvaluationSurface({
   }
 
   if (snapshotLoading) {
-    return <SubjectEvaluationSkeleton />;
+    return <SubjectOverviewSkeleton />;
   }
 
   if (!snapshot || snapshot.summaries.length === 0 || !selectedSubjectSummary) {
     return (
       <EmptyState
-        icon={PlayIcon}
-        title="No subject evaluation yet"
-        message="Select or create a subject to inspect its task-level evaluation."
+        icon={InfoIcon}
+        title="No subject selected"
+        message="Select or create a subject to inspect its overview."
         variant="hero"
         size="sm"
       />
     );
   }
 
-  const cases = resolveEvaluationDisplayCases(evalRecord);
-  const metricKeys = resolveEvaluationMetricKeys(cases, selectedSubjectSummary.metrics, "score", evalRecord?.metrics);
+  const subjectEvaluations = orderEvaluationSummaries(
+    evaluations.filter((evaluation) => evaluation.subjectId === selectedSubjectSummary.id),
+  );
+  const latestEvaluation = subjectEvaluations[0] ?? null;
+  const metricKeys = resolveEvaluationMetricKeys(selectedSubjectSummary.metrics, "score", latestEvaluation?.metrics);
   const primaryMetricKey = metricKeys[0] ?? null;
   const primaryMetricValue = primaryMetricKey
     ? selectedSubjectSummary.metrics?.[primaryMetricKey]
     : undefined;
-  const primaryMetricStats = primaryMetricKey ? evalRecord?.metrics?.[primaryMetricKey] : undefined;
-  const subjectBenchmarkFingerprint =
-    selectedSubjectSummary.benchmarkFingerprint.trim() || null;
-  const taskRows = resolveEvaluationTaskRows({
-    subjectId: selectedSubjectSummary.id,
-    evalRecord,
-    latestRun,
-    metricKey: primaryMetricKey,
-    nowMs,
-    runJobs: runDetailState.detail?.jobs ?? [],
-    specDocument,
-  });
-  const taskRowsLoading = recordState.loading || (runDetailState.loading && taskRows.length === 0);
+  const primaryMetricStats = primaryMetricKey ? latestEvaluation?.metrics?.[primaryMetricKey] : undefined;
 
   return (
     <div className="grid gap-6">
-      <SurfaceSection title="Evaluation Tasks" icon={ListChecksIcon}>
-        <div className="flex flex-wrap gap-2">
-          <Badge variant="outline">
-            {taskRowsLoading ? "loading tasks" : formatCount(taskRows.length, "task")}
-          </Badge>
-          {evalRecord ? (
-            <Badge variant="outline">
-              samples {evalRecord.completedSampleCount}/{evalRecord.sampleCount}
-            </Badge>
-          ) : latestRun ? (
-            <Badge variant="outline">samples 0/{latestRun.samples}</Badge>
-          ) : null}
-          {primaryMetricKey && typeof primaryMetricValue === "number" ? (
-            <Badge variant="outline">
-              {primaryMetricKey} {formatSubjectMetricStats(primaryMetricStats, primaryMetricValue)}
-            </Badge>
-          ) : null}
-        </div>
-
-        {taskRowsLoading ? (
-          <EvaluationTasksSkeleton />
-        ) : recordState.error || (runDetailState.error && taskRows.length === 0) ? (
-          <p className="text-sm text-destructive">{recordState.error ?? runDetailState.error}</p>
-        ) : taskRows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No task-level evaluation detail is available yet.</p>
-        ) : (
-          <Card size="sm">
-            <CardContent className="py-0">
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Task</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Samples</TableHead>
-                      <TableHead>Split</TableHead>
-                      <TableHead className="text-right">
-                        {primaryMetricKey ?? "Metric"}
-                      </TableHead>
-                      <TableHead className="text-right">Duration</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {taskRows.map((task) => {
-                      const openTask = () => {
-                        if (task.detailAvailable) {
-                          void onOpenCaseReview(task.id);
-                        }
-                      };
-                      return (
-                        <TableRow
-                          key={task.id}
-                          {...(task.detailAvailable
-                            ? {
-                                role: "button" as const,
-                                tabIndex: 0,
-                                onClick: openTask,
-                                onKeyDown: (event: KeyboardEvent<HTMLTableRowElement>) =>
-                                  handleCaseRowKeyDown(event, task.id, onOpenCaseReview),
-                              }
-                            : {})}
-                          className={cn(task.detailAvailable && "cursor-pointer")}
-                        >
-                          <TableCell className="font-medium">
-                            <div className="grid gap-0.5">
-                              <span>{task.label}</span>
-                              <span className="font-mono text-[11px] text-muted-foreground">
-                                {task.id}
-                              </span>
-                            </div>
-                          </TableCell>
-                          <TableCell>{task.status}</TableCell>
-                          <TableCell className="tabular-nums">
-                            {task.sampleCount > 0
-                              ? `${task.completedSampleCount}/${task.sampleCount}`
-                              : "—"}
-                          </TableCell>
-                          <TableCell className="font-mono text-xs text-muted-foreground">
-                            {task.split ?? "—"}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {typeof task.metricValue === "number"
-                              ? formatMetricValue(task.metricValue)
-                              : "—"}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums text-muted-foreground">
-                            {formatOptionalDuration(task.durationMs)}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-      </SurfaceSection>
-
-      <SurfaceSection title="Subject Summary" icon={PlayIcon}>
-        <div className="grid gap-3 md:grid-cols-4">
-          <RunFact title="Subject Created" value={formatTimestamp(selectedSubjectSummary.createdAt)} />
-          <RunFact title="Subject Status" value={statusLabel(selectedSubjectSummary.status)} />
-          <RunFact
-            title={primaryMetricKey ? `Subject ${primaryMetricKey}` : "Subject Score"}
+      <section className="grid min-w-0 gap-3">
+        <div className="grid gap-3 md:grid-cols-3">
+          <FactItem title="Created" value={formatTimestamp(selectedSubjectSummary.createdAt)} />
+          <FactItem
+            title={primaryMetricKey ? formatLabelText(primaryMetricKey) : "Score"}
             value={formatSubjectMetricStats(primaryMetricStats, primaryMetricValue)}
           />
-          <RunFact
-            title="Eval Samples"
-            value={evalRecord ? `${evalRecord.completedSampleCount}/${evalRecord.sampleCount}` : "—"}
+          <FactItem
+            title="Samples"
+            value={latestEvaluation ? `${latestEvaluation.completedSampleCount}/${latestEvaluation.sampleCount}` : "—"}
           />
         </div>
 
-        <Card size="sm">
-          <CardHeader>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <CardTitle>Provenance</CardTitle>
-              <Badge variant="outline">benchmark version</Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="grid gap-3 md:grid-cols-3">
-            <RunFact
-              title="Benchmark"
-              value={formatBenchmarkFingerprint(subjectBenchmarkFingerprint)}
-            />
-            <RunFact
-              title="Subject Digest"
-              value={shortFingerprint(selectedSubjectSummary.subjectFingerprint)}
-            />
-            <RunFact
-              title="Subject"
-              value={shortId(selectedSubjectSummary.id) ?? selectedSubjectSummary.id}
-            />
-          </CardContent>
-        </Card>
+      </section>
 
-        {latestRun ? (
-          <Card size="sm">
-            <CardHeader>
-              <CardTitle>Latest Workspace Run</CardTitle>
-              <CardDescription>{formatRunStartSummary(latestRun) ?? "Latest workspace run state."}</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-3">
-              <RunFact title="Started" value={formatTimestamp(latestRun.startedAt)} />
-              <RunFact title="Duration" value={formatRunDuration(latestRun, nowMs)} />
-              <RunFact title="Outcome" value={formatRunOutcomeLabel(latestRun.outcome, latestRun.status)} />
-            </CardContent>
-          </Card>
-        ) : null}
-
-        {latestRuns.length > 0 ? (
-          <div className="grid gap-2">
-            {latestRuns.map((run) => (
-              <div key={run.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border px-3 py-2 text-sm">
-                <span className="font-medium">{formatTimestamp(run.startedAt)}</span>
-                <span className="text-muted-foreground">{formatRunDuration(run, nowMs)}</span>
-                <span className="text-muted-foreground">{formatRunOutcomeLabel(run.outcome, run.status)}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
+      <SurfaceSection title="Evaluations" icon={ChartColumnIcon}>
+        {subjectEvaluations.length > 0 ? (
+          <EvaluationSummaryTable
+            evaluations={subjectEvaluations}
+            showSubject={false}
+            onSelectEvaluation={onOpenEvaluation}
+          />
+        ) : (
+          <p className="text-sm text-muted-foreground">No evaluations are recorded for this subject yet.</p>
+        )}
       </SurfaceSection>
     </div>
   );
 }
 
-function RunRouteResolutionSurface({
-  runId,
-  state,
-  resolving,
+function EvaluationSummaryTable({
+  evaluations,
+  showSubject,
+  onSelectEvaluation,
 }: {
-  runId: string | null;
-  state: RunDetailState;
-  resolving: boolean;
+  evaluations: EvaluationSummary[];
+  showSubject: boolean;
+  onSelectEvaluation: (evaluationId: string) => void;
 }) {
-  if (!runId) {
+  return (
+    <Card size="sm">
+      <CardContent className="py-0">
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{showSubject ? "Subject" : "Evaluation"}</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Score</TableHead>
+                <TableHead className="text-right">Samples</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {evaluations.map((evaluation) => (
+                <TableRow
+                  key={evaluation.id}
+                  aria-label={`Open ${formatEvaluationDisplayName(evaluation)}`}
+                  role="button"
+                  tabIndex={0}
+                  className="cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  onClick={() => onSelectEvaluation(evaluation.id)}
+                  onKeyDown={(event) => {
+                    if (isKeyboardActivation(event)) {
+                      event.preventDefault();
+                      onSelectEvaluation(evaluation.id);
+                    }
+                  }}
+                >
+                  <TableCell className="font-medium">
+                    {showSubject
+                      ? formatSubjectDisplayName(evaluation.subjectId)
+                      : formatEvaluationDisplayName(evaluation)}
+                  </TableCell>
+                  <TableCell>{statusLabel(evaluation.status)}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {typeof evaluation.metrics?.score?.mean === "number"
+                      ? formatMetricValue(evaluation.metrics.score.mean)
+                      : "—"}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {evaluation.completedSampleCount}/{evaluation.sampleCount}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CaseAttemptTable({
+  executions,
+  apiPath,
+}: {
+  executions: SubjectCaseExecution[];
+  apiPath: (pathname: string) => string;
+}) {
+  const rows = executions.flatMap((execution, executionIndex) =>
+    execution.jobIds.map((jobId, jobIndex) => ({
+      id: `${execution.runId}:${execution.kind}:${execution.sampleIndex ?? "current"}:${jobId}`,
+      execution,
+      jobId,
+      label: execution.jobIds.length > 1
+        ? `${formatExecutionKindLabel(execution.kind)} ${executionIndex + 1}.${jobIndex + 1}`
+        : `${formatExecutionKindLabel(execution.kind)} ${executionIndex + 1}`,
+    }))
+  );
+
+  return (
+    <div className="grid min-w-0 gap-4">
+      {rows.map((row) => (
+        <section key={row.id} className="grid min-w-0 gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
+            <span className="font-medium text-foreground">{row.label}</span>
+            <span className="text-muted-foreground">{formatOperationalStatus(row.execution.status)}</span>
+            <span className="text-muted-foreground">
+              {typeof row.execution.sampleIndex === "number"
+                ? `sample ${row.execution.sampleIndex + 1}`
+                : "sample not recorded"}
+            </span>
+            <span className="text-muted-foreground">
+              {formatOptionalDuration(
+                typeof row.execution.durationMs === "number" ? row.execution.durationMs : null,
+              )}
+            </span>
+          </div>
+          <AttemptTraceLoader
+            apiPath={apiPath}
+            runId={row.execution.runId}
+            jobId={row.jobId}
+          />
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function AttemptTraceLoader({
+  apiPath,
+  runId,
+  jobId,
+}: {
+  apiPath: (pathname: string) => string;
+  runId: string;
+  jobId: string;
+}) {
+  const traceState = useExecutionTrace(apiPath, runId, jobId);
+  return (
+    <AttemptTraceContent
+      jobId={jobId}
+      traceState={traceState}
+    />
+  );
+}
+
+function AttemptTraceContent({
+  jobId,
+  traceState,
+}: {
+  jobId: string;
+  traceState: TraceDetailState;
+}) {
+  const traceExecution = useMemo(
+    () => (traceState.detail?.executions ?? []).find((execution) => execution.jobIds.includes(jobId)) ?? null,
+    [jobId, traceState.detail?.executions],
+  );
+  const traceSessions = useMemo(
+    () => resolveTraceSessionsForJob(traceExecution, jobId),
+    [jobId, traceExecution],
+  );
+
+  if (traceState.loading && !traceExecution) {
+    return <ExecutionTraceSkeleton />;
+  }
+
+  if (traceState.error) {
+    return <p className="text-sm text-destructive">{traceState.error}</p>;
+  }
+
+  if (!traceExecution) {
     return (
       <EmptyState
         icon={ActivityIcon}
-        title="No run selected"
-        message="Run routes resolve to task execution traces when a task trace exists."
-        variant="hero"
+        title="No execution trace"
+        message="No trace events were recorded for this attempt."
         size="sm"
       />
     );
   }
 
-  if (resolving || (state.loading && !state.detail)) {
+  if (traceSessions.length === 0 && traceExecution.trace.events.length === 0 && traceExecution.trace.spans.length === 0) {
     return (
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Spinner className="size-4" />
-        Opening task trace
-      </div>
+      <EmptyState
+        icon={ActivityIcon}
+        title="No execution trace"
+        message="No trace events were recorded for this attempt."
+        size="sm"
+      />
     );
+  }
+
+  return (
+    <Accordion
+      key={`${jobId}:${traceSessions.map((session) => session.id).join("|")}`}
+      type="multiple"
+      className="gap-2"
+    >
+      {traceSessions.length > 0 ? (
+        traceSessions.map((session) => (
+          <TraceSessionAccordionItem key={session.id} session={session} />
+        ))
+      ) : (
+        <TraceTimelineAccordionItem
+          value={`${jobId}:execution`}
+          title="Execution"
+          trace={traceExecution.trace as ExecutionTrace}
+        />
+      )}
+    </Accordion>
+  );
+}
+
+function TraceSessionAccordionItem({
+  session,
+}: {
+  session: TraceSessionView;
+}) {
+  const timeline = useMemo(
+    () => buildExecutionTraceTimeline({ trace: session.trace as ExecutionTrace }),
+    [session.trace],
+  );
+
+  return (
+    <TraceTimelineAccordionSection
+      value={session.id}
+      title={session.label}
+      trace={session.trace as ExecutionTrace}
+      timeline={timeline}
+    />
+  );
+}
+
+function TraceTimelineAccordionItem({
+  trace,
+  title,
+  value,
+}: {
+  trace: ExecutionTrace;
+  title: string;
+  value: string;
+}) {
+  const timeline = useMemo(
+    () => buildExecutionTraceTimeline({ trace }),
+    [trace],
+  );
+  return (
+    <TraceTimelineAccordionSection
+      value={value}
+      title={title}
+      trace={trace}
+      timeline={timeline}
+    />
+  );
+}
+
+function TraceTimelineAccordionSection({
+  trace,
+  timeline,
+  title,
+  value,
+}: {
+  trace: ExecutionTrace;
+  timeline: ReturnType<typeof buildExecutionTraceTimeline>;
+  title: string;
+  value: string;
+}) {
+  const summary = formatCount(trace.events.length, "event");
+  return (
+    <DetailAccordionSection
+      value={value}
+      title={title}
+      summary={summary}
+      contentClassName="h-auto pb-3"
+      bordered
+    >
+      <ExecutionTraceTimeline executionTimeline={timeline} layout="content" />
+    </DetailAccordionSection>
+  );
+}
+
+function isKeyboardActivation(event: KeyboardEvent): boolean {
+  return event.key === "Enter" || event.key === " ";
+}
+
+function EvaluationDetailDialog({
+  open,
+  evaluationId,
+  evaluationSummary,
+  state,
+  selectedCaseId,
+  caseReviewState,
+  onClose,
+  onSelectCase,
+  apiPath,
+}: {
+  open: boolean;
+  evaluationId: string;
+  evaluationSummary: EvaluationSummary | null;
+  state: EvaluationRecordsState;
+  selectedCaseId: string | null;
+  caseReviewState: CaseReviewDetailState;
+  onClose: () => void;
+  onSelectCase: (caseId: string | null) => void;
+  apiPath: (pathname: string) => string;
+}) {
+  const scorecard = evaluationId
+    ? state.records.find((record) => record.id === evaluationId) ?? null
+    : null;
+  const summary = scorecard ?? evaluationSummary;
+  const title = "Evaluation";
+  const description = summary
+    ? [
+        statusLabel(summary.status),
+        typeof summary.metrics?.score?.mean === "number" ? `score ${formatMetricValue(summary.metrics.score.mean)}` : null,
+        `${summary.completedSampleCount}/${summary.sampleCount} samples`,
+      ].filter((part): part is string => Boolean(part)).join(" · ")
+    : "Evaluation details";
+
+  return (
+    <InspectorDialogShell
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onClose();
+        }
+      }}
+      title={title}
+      description={description}
+      className="h-[min(94vh,calc(100dvh-1rem))]"
+      bodyClassName="overflow-y-auto"
+      testId="context-evaluation-dialog"
+      bodyTestId="context-evaluation-dialog-body"
+    >
+      <EvaluationDetailSurface
+        evaluationId={evaluationId}
+        evaluationSummary={evaluationSummary}
+        state={state}
+        selectedCaseId={selectedCaseId}
+        caseReviewState={caseReviewState}
+        onSelectCase={onSelectCase}
+        apiPath={apiPath}
+      />
+    </InspectorDialogShell>
+  );
+}
+
+function EvaluationDetailSurface({
+  evaluationId,
+  evaluationSummary,
+  state,
+  selectedCaseId,
+  caseReviewState,
+  onSelectCase,
+  apiPath,
+}: {
+  evaluationId: string;
+  evaluationSummary: EvaluationSummary | null;
+  state: EvaluationRecordsState;
+  selectedCaseId: string | null;
+  caseReviewState: CaseReviewDetailState;
+  onSelectCase: (caseId: string | null) => void;
+  apiPath: (pathname: string) => string;
+}) {
+  const scorecard = evaluationId
+    ? state.records.find((record) => record.id === evaluationId) ?? null
+    : null;
+  const summary = scorecard ?? evaluationSummary;
+  const cases = scorecard ? resolveScorecardCaseRows(scorecard) : [];
+
+  if (state.loading && !scorecard) {
+    return <EvaluationDetailSurfaceSkeleton />;
   }
 
   if (state.error) {
@@ -3104,37 +3140,294 @@ function RunRouteResolutionSurface({
     );
   }
 
+  if (!summary) {
+    return (
+      <EmptyState
+        icon={ChartColumnIcon}
+        title="Evaluation not found"
+        message="The selected scorecard is not available for this benchmark."
+        variant="hero"
+        size="sm"
+      />
+    );
+  }
+
+  const content = (
+    <>
+      <section className="grid min-w-0 gap-3">
+        <div className="flex flex-wrap gap-2">
+          <Badge variant="outline">{statusLabel(summary.status)}</Badge>
+          <Badge variant="outline">{formatCount(summary.completedSampleCount, "completed sample")}</Badge>
+          {summary.errorSampleCount > 0 ? (
+            <Badge variant="destructive">{formatCount(summary.errorSampleCount, "error sample")}</Badge>
+          ) : null}
+        </div>
+        <FactGrid>
+          <FactItem title="Updated" value={formatTimestamp(summary.updatedAt)} />
+          <FactItem title="Samples" value={`${summary.completedSampleCount}/${summary.sampleCount}`} />
+          <FactItem
+            title="Score"
+            value={typeof summary.metrics?.score?.mean === "number" ? formatMetricValue(summary.metrics.score.mean) : "not recorded"}
+          />
+        </FactGrid>
+      </section>
+
+      <SurfaceSection title="Cases" icon={ListChecksIcon}>
+        {scorecard && cases.length > 0 ? (
+          <EvaluationCasesTable
+            cases={cases}
+            selectedCaseId={selectedCaseId}
+            onSelectCase={onSelectCase}
+            renderSelectedCase={() =>
+              selectedCaseId ? (
+                <EvaluationCaseDetailSurface
+                  apiPath={apiPath}
+                  caseId={selectedCaseId}
+                  state={caseReviewState}
+                />
+              ) : null
+            }
+          />
+        ) : scorecard ? (
+          <p className="text-sm text-muted-foreground">No case-level results were recorded for this evaluation.</p>
+        ) : (
+          <EvaluationCaseRowsSkeleton showBadges={false} />
+        )}
+      </SurfaceSection>
+    </>
+  );
+
+  return <div className="grid min-w-0 gap-6">{content}</div>;
+}
+
+function EvaluationCasesTable({
+  cases,
+  selectedCaseId,
+  onSelectCase,
+  renderSelectedCase,
+}: {
+  cases: EvaluationCaseRow[];
+  selectedCaseId: string | null;
+  onSelectCase: (caseId: string | null) => void;
+  renderSelectedCase: () => ReactNode;
+}) {
   return (
-    <EmptyState
-      icon={ActivityIcon}
-      title="No task trace"
-      message="This run has not produced a task execution trace yet."
-      variant="hero"
-      size="sm"
-    />
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Case</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead className="text-right">Score</TableHead>
+          <TableHead className="text-right">Samples</TableHead>
+          <TableHead className="text-right">Duration</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {cases.map((row) => {
+          const selected = selectedCaseId === row.id;
+          return (
+            <Fragment key={row.id}>
+              <TableRow
+                aria-label={`Open case ${row.label}`}
+                data-state={selected ? "selected" : undefined}
+                role="button"
+                tabIndex={0}
+                className="cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                onClick={() => onSelectCase(selected ? null : row.id)}
+                onKeyDown={(event) => {
+                  if (isKeyboardActivation(event)) {
+                    event.preventDefault();
+                    onSelectCase(selected ? null : row.id);
+                  }
+                }}
+              >
+                <TableCell>
+                  <div className="grid min-w-0 gap-1">
+                    <span className="font-medium">{row.label}</span>
+                    {row.split ? <span className="text-xs text-muted-foreground">{row.split}</span> : null}
+                  </div>
+                </TableCell>
+                <TableCell>{row.status}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {row.metricValue === null ? "not recorded" : formatMetricValue(row.metricValue)}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {row.completedSampleCount}/{row.sampleCount}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {row.durationMs !== null ? formatOptionalDuration(row.durationMs) : "—"}
+                </TableCell>
+              </TableRow>
+              {selected ? (
+                <TableRow className="hover:bg-transparent">
+                  <TableCell colSpan={5} className="border-b bg-background px-3 py-4">
+                    {renderSelectedCase()}
+                  </TableCell>
+                </TableRow>
+              ) : null}
+            </Fragment>
+          );
+        })}
+      </TableBody>
+    </Table>
   );
 }
 
-function ResultsSurface({
+function EvaluationCaseDetailSurface({
+  apiPath,
+  caseId,
+  state,
+}: {
+  apiPath: (pathname: string) => string;
+  caseId: string;
+  state: CaseReviewDetailState;
+}) {
+  const review = state.review;
+  const nowMs = Date.now();
+  const reviewStatus = review ? resolveCaseReviewStatus(review) : null;
+  const reviewDurationMs = review ? resolveCaseReviewDurationMs(review, nowMs) : null;
+
+  if (state.loading && !review) {
+    return <EvaluationCaseDetailSkeleton />;
+  }
+
+  if (state.error) {
+    return (
+      <Card>
+        <CardContent className="py-6 text-sm text-destructive">{state.error}</CardContent>
+      </Card>
+    );
+  }
+
+  if (!review) {
+    return (
+      <EmptyState
+        icon={ListChecksIcon}
+        title="Case not found"
+        message="The selected case is not available for this evaluation."
+        variant="hero"
+        size="sm"
+      />
+    );
+  }
+
+  const caseSummary = (
+    <section className="grid min-w-0 gap-3">
+      <div className="flex flex-wrap gap-2">
+        {Object.entries(review.metrics).map(([key, value]) => (
+          <Badge key={key} variant="outline">
+            {key} {formatMetricValue(value)}
+          </Badge>
+        ))}
+        {reviewStatus ? <Badge variant="outline">{formatOperationalStatus(reviewStatus)}</Badge> : null}
+        <Badge variant="outline">{formatCriterionCount(review.criteria_results.length)}</Badge>
+        <Badge variant="outline">
+          {review.executions.length > 0 ? formatCount(review.executions.length, "execution") : "no executions"}
+        </Badge>
+        <Badge variant="outline">{formatOptionalDuration(reviewDurationMs)}</Badge>
+      </div>
+    </section>
+  );
+
+  const content = (
+    <>
+      {caseSummary}
+
+      <Tabs key={caseId} defaultValue="score" className="min-w-0">
+        <TabsList variant="line">
+          <TabsTrigger value="score">Score</TabsTrigger>
+          <TabsTrigger value="attempts">Attempts</TabsTrigger>
+          <TabsTrigger value="files">Files</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="score" className="grid min-w-0 gap-3 pt-2">
+          {review.feedback !== undefined ? (
+            <CaseFeedbackCard value={review.feedback} />
+          ) : null}
+
+          {review.criteria_results.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full table-fixed caption-bottom text-sm">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-52">Criterion</TableHead>
+                    <TableHead className="w-16 text-center">Pass</TableHead>
+                    <TableHead className="whitespace-normal">Rationale</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {review.criteria_results.map((criterion) => (
+                    <TableRow key={criterion.criterion_id}>
+                      <TableCell className="w-52 align-top font-mono text-xs whitespace-normal break-words [overflow-wrap:anywhere]">
+                        {criterion.criterion_id}
+                      </TableCell>
+                      <TableCell className="w-16 align-top text-center tabular-nums">
+                        {criterion.pass ? "1" : "0"}
+                      </TableCell>
+                      <TableCell className="align-top whitespace-normal">
+                        <div className="grid min-w-0 gap-2">
+                          <TextBlockView
+                            value={criterion.rationale ?? "No rationale recorded."}
+                            className="text-sm leading-6"
+                          />
+                          {criterion.errors.length > 0 ? (
+                            <TextBlockView
+                              value={criterion.errors.join(" · ")}
+                              className="text-xs leading-5 text-muted-foreground"
+                            />
+                          ) : null}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No scoring criteria were recorded for this case.</p>
+          )}
+        </TabsContent>
+
+        <TabsContent value="attempts" className="grid min-w-0 gap-3 pt-2">
+          {review.executions.length > 0 ? (
+            <CaseAttemptTable
+              executions={review.executions}
+              apiPath={apiPath}
+            />
+          ) : (
+            <EmptyState
+              icon={ActivityIcon}
+              title="No task attempts"
+              message="No attempts were recorded for this case."
+              size="sm"
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent
+          value="files"
+          className="flex-none h-[clamp(28rem,calc(100dvh-28rem),42rem)] overflow-hidden pt-2"
+        >
+          <ExecutionFilesSurface apiPath={apiPath} review={review} />
+        </TabsContent>
+      </Tabs>
+    </>
+  );
+
+  return <div className="grid min-w-0 gap-4">{content}</div>;
+}
+
+function EvaluationsSurface({
   snapshotError,
   snapshotLoading,
-  results,
-  resultRecordsState,
+  evaluations,
+  onSelectEvaluation,
 }: {
   snapshotError: string | null;
   snapshotLoading: boolean;
-  results: EvaluationResultSummary[];
-  resultRecordsState: ResultRecordsState;
+  evaluations: EvaluationSummary[];
+  onSelectEvaluation: (evaluationId: string) => void;
 }) {
-  const resultIds = useMemo(
-    () => new Set(results.map((result) => result.id)),
-    [results],
-  );
-  const visibleRecords = useMemo(
-    () => resultRecordsState.records.filter((record) => resultIds.has(record.id)),
-    [resultIds, resultRecordsState.records],
-  );
-
   if (snapshotError) {
     return (
       <Card>
@@ -3144,290 +3437,58 @@ function ResultsSurface({
   }
 
   if (snapshotLoading) {
-    return <ResultsDetailSkeleton />;
+    return <EvaluationsDetailSkeleton />;
   }
 
   return (
-    <ResultsDetail
-      resultRecords={visibleRecords}
-      loading={resultRecordsState.loading}
-      error={resultRecordsState.error}
-      hasResults={results.length > 0}
+    <EvaluationsDetail
+      evaluations={evaluations}
+      hasEvaluations={evaluations.length > 0}
+      onSelectEvaluation={onSelectEvaluation}
     />
   );
 }
 
-function resolveAuthoredCase(
-  caseId: string,
-  specDocument: AuthoredWorkbenchSourceDocument | null,
-) {
-  return specDocument?.cases.find((entry) => caseId === entry.id || caseId.startsWith(`${entry.id}__`)) ?? null;
-}
-
-function resolveEvaluationDisplayCases(evalRecord: EvaluationRecord | null): SubjectEvalCaseResult[] {
-  return evalRecord?.samples.flatMap((sample) => sample.cases ?? []) ?? [];
-}
-
-function resolveLatestCompletedEvaluationSample(evalRecord: EvaluationRecord | null) {
-  return [...(evalRecord?.samples ?? [])]
-    .filter((sample) => sample.status === "completed")
-    .sort((left, right) => right.index - left.index)[0] ?? null;
-}
-
-function resolveEvaluationTaskRows({
-  subjectId,
-  evalRecord,
-  latestRun,
-  metricKey,
-  nowMs,
-  runJobs,
-  specDocument,
-}: {
-  subjectId: string;
-  evalRecord: EvaluationRecord | null;
-  latestRun: RuntimeSnapshot["latestRun"];
-  metricKey: string | null;
-  nowMs: number;
-  runJobs: HostedWorkbenchJob[];
-  specDocument: AuthoredWorkbenchSourceDocument | null;
-}): EvaluationTaskRow[] {
-  const rows = new Map<string, EvaluationTaskRow>();
-  const expectedSampleCount = evalRecord?.sampleCount ?? latestRun?.samples ?? 0;
-  const latestCompletedSample = resolveLatestCompletedEvaluationSample(evalRecord);
-  const latestCompletedCases = latestCompletedSample?.cases ?? [];
-
-  for (const caseStats of evalRecord?.cases ?? []) {
-    const authoredCase = resolveAuthoredCase(caseStats.id, specDocument);
-    const id = authoredCase?.id ?? caseStats.id;
-    const metricValue = metricKey ? caseStats.metrics[metricKey]?.mean : null;
-    rows.set(id, {
-      ...(rows.get(id) ?? {
-        id,
-        label: caseStats.label ?? authoredCase?.name ?? id,
-        split: caseStats.split ?? authoredCase?.split ?? null,
-      }),
-      id,
-      label: authoredCase?.name ?? caseStats.label ?? id,
+function resolveScorecardCaseRows(scorecard: EvaluationScorecard): EvaluationCaseRow[] {
+  return (scorecard.evaluation.cases ?? []).map((caseStats) => {
+    const metricValue = caseStats.metrics.score?.mean ?? firstMetricStatsValue(caseStats.metrics);
+    return {
+      id: caseStats.id,
+      label: caseStats.label ?? caseStats.id,
       status: caseStats.status ? formatCaseStatus(caseStats.status) : "completed",
       completedSampleCount: caseStats.sampleCount,
       sampleCount: caseStats.sampleCount,
-      metricValue: typeof metricValue === "number" ? metricValue : null,
+      metricValue,
       durationMs: caseStats.durationMs?.mean ?? null,
-      split: caseStats.split ?? authoredCase?.split ?? null,
-      detailAvailable: false,
-    });
+      split: caseStats.split ?? null,
+    };
+  }).sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function formatSubjectDisplayName(subjectId: string): string {
+  return shortId(subjectId) ?? subjectId;
+}
+
+function formatEvaluationDisplayName(evaluation: EvaluationSummary): string {
+  return `Evaluation ${formatTimestamp(evaluation.updatedAt)}`;
+}
+
+function resolveTraceSessionsForJob(
+  traceExecution: WorkbenchExecutionEvidence | null,
+  jobId: string,
+): TraceSessionView[] {
+  if (!traceExecution) {
+    return [];
   }
-
-  for (const caseResult of latestCompletedCases) {
-    const authoredCase = resolveAuthoredCase(caseResult.id, specDocument);
-    const id = authoredCase?.id ?? caseResult.id;
-    const current = rows.get(id);
-    const metricValue = metricKey
-      ? caseResult.metrics[metricKey]
-      : firstMetricValue(caseResult.metrics);
-    const caseDurationMs = readCaseDurationMs(
-      caseResult,
-      latestCompletedCases.length === 1 ? latestCompletedSample?.durationMs : undefined,
-    );
-    rows.set(id, {
-      ...(current ?? {
-        id,
-        label: authoredCase?.name ?? caseResult.label ?? id,
-        completedSampleCount: 1,
-        sampleCount: evalRecord?.sampleCount ?? 1,
-        durationMs: caseDurationMs,
-        split: caseResult.split ?? authoredCase?.split ?? null,
-      }),
-      id,
-      label: authoredCase?.name ?? caseResult.label ?? id,
-      status: caseResult.status ? formatCaseStatus(caseResult.status) : current?.status ?? "completed",
-      metricValue: typeof metricValue === "number" ? metricValue : current?.metricValue ?? null,
-      durationMs: current?.durationMs ?? caseDurationMs,
-      detailAvailable: true,
-    });
+  const sessions = Array.isArray(traceExecution.sessions) ? traceExecution.sessions : [];
+  const jobSessions = sessions.filter((session) => session.jobId === jobId);
+  if (jobSessions.length > 0) {
+    return jobSessions;
   }
-
-  for (const [caseId, jobs] of groupExecutionJobsByCase(runJobs, subjectId)) {
-    const authoredCase = resolveAuthoredCase(caseId, specDocument);
-    const current = rows.get(caseId);
-    const executionStatus = formatExecutionTaskStatus(jobs);
-    const useRuntimeState = latestRun?.status !== "finished" || !current?.detailAvailable;
-    const sampleIndices = new Set(
-      jobs
-        .map((job) => readRunJobNumber(job, "sampleIndex"))
-        .filter((index): index is number => typeof index === "number"),
-    );
-    const completedSampleCount = countCompletedExecutionSamples(jobs);
-    const sampleCount =
-      current?.sampleCount ?? (expectedSampleCount || sampleIndices.size || 1);
-    rows.set(caseId, {
-      ...(current ?? {
-        id: caseId,
-        label: authoredCase?.name ?? caseId,
-        completedSampleCount,
-        sampleCount,
-        metricValue: null,
-        durationMs: null,
-        split: authoredCase?.split ?? null,
-      }),
-      id: caseId,
-      label: current?.label ?? authoredCase?.name ?? caseId,
-      status: useRuntimeState ? executionStatus : current?.status ?? executionStatus,
-      completedSampleCount: useRuntimeState
-        ? completedSampleCount
-        : current?.completedSampleCount ?? completedSampleCount,
-      sampleCount,
-      metricValue: useRuntimeState && executionStatus !== "completed"
-        ? null
-        : current?.metricValue ?? null,
-      durationMs: useRuntimeState
-        ? resolveExecutionJobsDurationMs(jobs, nowMs)
-        : current?.durationMs ?? resolveExecutionJobsDurationMs(jobs, nowMs),
-      split: current?.split ?? authoredCase?.split ?? null,
-      detailAvailable: true,
-    });
+  if (sessions.length > 0 && traceExecution.jobIds.length === 1) {
+    return sessions;
   }
-
-  return Array.from(rows.values());
-}
-
-interface RunTraceRouteTarget {
-  subjectId: string;
-  caseId: string;
-  runId: string;
-}
-
-function resolveRunTraceRouteTarget(
-  detail: RunDetailState["detail"],
-  requestedRunId: string | null,
-): RunTraceRouteTarget | null {
-  if (!detail || !requestedRunId || detail.run.id !== requestedRunId) {
-    return null;
-  }
-	  const taskJobs = detail.jobs
-	    .filter((job) => {
-	      const purpose = readRunJobPurpose(job);
-	      return purpose === "trial";
-	    })
-    .filter((job) => readRunJobSubjectId(job) && readRunJobString(job, "caseId"))
-    .sort(compareRunTraceRouteJobs);
-  const job = taskJobs[0] ?? null;
-  const subjectId = job ? readRunJobSubjectId(job) : null;
-  const caseId = job ? readRunJobString(job, "caseId") : null;
-  if (!job || !subjectId || !caseId) {
-    return null;
-  }
-  return {
-    subjectId,
-    caseId,
-    runId: detail.run.id,
-  };
-}
-
-function compareRunTraceRouteJobs(
-  left: HostedWorkbenchJob,
-  right: HostedWorkbenchJob,
-): number {
-  const leftRank = runTraceRouteJobRank(left);
-  const rightRank = runTraceRouteJobRank(right);
-  if (leftRank !== rightRank) {
-    return leftRank - rightRank;
-  }
-  return (left.startedAt ?? left.createdAt).localeCompare(right.startedAt ?? right.createdAt);
-}
-
-function runTraceRouteJobRank(job: HostedWorkbenchJob): number {
-  if (job.status === "succeeded" && readRunJobPurpose(job) === "trial") {
-    return 0;
-  }
-  if (job.status === "running") {
-    return 1;
-  }
-  if (job.status === "queued") {
-    return 2;
-  }
-  return 3;
-}
-
-function groupExecutionJobsByCase(
-  jobs: HostedWorkbenchJob[],
-  subjectId: string,
-): Map<string, HostedWorkbenchJob[]> {
-  const byCase = new Map<string, HostedWorkbenchJob[]>();
-  for (const job of jobs) {
-    if (readRunJobSubjectId(job) !== subjectId) {
-      continue;
-    }
-	    const purpose = readRunJobPurpose(job);
-	    if (purpose !== "trial") {
-	      continue;
-	    }
-    const caseId = readRunJobString(job, "caseId");
-    if (!caseId) {
-      continue;
-    }
-    byCase.set(caseId, [...(byCase.get(caseId) ?? []), job]);
-  }
-  return byCase;
-}
-
-function readRunJobSubjectId(job: HostedWorkbenchJob): string | null {
-  return job.subjectId ?? readRunJobString(job, "subjectId");
-}
-
-function countCompletedExecutionSamples(jobs: HostedWorkbenchJob[]): number {
-  const sampleIndices = new Set<number>();
-  let completedWithoutSampleIndex = 0;
-  for (const job of jobs) {
-    if (job.status !== "succeeded") {
-      continue;
-    }
-    const sampleIndex = readRunJobNumber(job, "sampleIndex");
-    if (typeof sampleIndex === "number") {
-      sampleIndices.add(sampleIndex);
-    } else {
-      completedWithoutSampleIndex += 1;
-    }
-  }
-  return sampleIndices.size + completedWithoutSampleIndex;
-}
-
-function formatExecutionTaskStatus(jobs: HostedWorkbenchJob[]): string {
-  return formatOperationalStatus(resolveExecutionCollectionStatus(jobs, "pending"));
-}
-
-function resolveExecutionJobsDurationMs(
-  jobs: HostedWorkbenchJob[],
-  nowMs: number,
-): number | null {
-  return resolveTimedExecutionRecordsDurationMs(jobs, nowMs);
-}
-
-function readRunJobPurpose(job: HostedWorkbenchJob): string | null {
-  return readRunJobString(job, "purpose");
-}
-
-function readRunJobString(
-  job: HostedWorkbenchJob,
-  key: string,
-): string | null {
-  const raw = readRunJobValue(job, key);
-  return typeof raw === "string" && raw.length > 0 ? raw : null;
-}
-
-function readRunJobNumber(
-  job: HostedWorkbenchJob,
-  key: string,
-): number | null {
-  const raw = readRunJobValue(job, key);
-  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
-}
-
-function readRunJobValue(job: HostedWorkbenchJob, key: string): unknown {
-  const input = asUiRecord(job.input);
-  const execution = asUiRecord(input?.execution);
-  const metadata = asUiRecord(execution?.metadata);
-  return key === "purpose" ? execution?.purpose : metadata?.[key] ?? null;
+  return [];
 }
 
 function asUiRecord(value: unknown): Record<string, unknown> | null {
@@ -3436,13 +3497,12 @@ function asUiRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function firstMetricValue(metrics: Record<string, number>): number | null {
+function firstMetricStatsValue(metrics: Record<string, { mean: number }>): number | null {
   const [value] = Object.values(metrics);
-  return typeof value === "number" ? value : null;
+  return typeof value?.mean === "number" ? value.mean : null;
 }
 
 function resolveEvaluationMetricKeys(
-  cases: SubjectEvalCaseResult[],
   subjectMetrics: Record<string, number> | undefined,
   preferredMetricKey: string | null,
   aggregateMetrics?: EvaluationRecord["metrics"],
@@ -3454,11 +3514,6 @@ function resolveEvaluationMetricKeys(
   for (const key of Object.keys(aggregateMetrics ?? {})) {
     available.add(key);
   }
-  for (const caseResult of cases) {
-    for (const key of Object.keys(caseResult.metrics)) {
-      available.add(key);
-    }
-  }
 
   const ordered: string[] = [];
   const add = (key: string | null | undefined) => {
@@ -3469,7 +3524,6 @@ function resolveEvaluationMetricKeys(
 
   add(preferredMetricKey);
   add("score");
-  add("reward");
   for (const key of Array.from(available).sort()) {
     add(key);
   }
@@ -3507,20 +3561,27 @@ function StructuredValueCard({
   );
 }
 
-function readCaseDurationMs(
-  caseResult: SubjectEvalCaseResult,
-  sampleDurationMs?: number,
-): number | null {
-  if (typeof caseResult.durationMs === "number" && Number.isFinite(caseResult.durationMs)) {
-    return caseResult.durationMs;
+function CaseFeedbackCard({
+  value,
+}: {
+  value: unknown;
+}) {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return (
+      <Card size="sm">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">Feedback</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <TextBlockView value={value.trim()} className="text-sm leading-6" />
+        </CardContent>
+      </Card>
+    );
   }
-  if (typeof sampleDurationMs === "number" && Number.isFinite(sampleDurationMs)) {
-    return sampleDurationMs;
-  }
-  return null;
+  return <StructuredValueCard title="Feedback" value={value} />;
 }
 
-function formatCaseStatus(status: SubjectEvalCaseResult["status"] | undefined): string {
+function formatCaseStatus(status: string | undefined): string {
   return formatOperationalStatus(status);
 }
 
@@ -3543,39 +3604,16 @@ function formatOperationalStatus(status: string | null | undefined): string {
   }
 }
 
-function handleCaseRowKeyDown(
-  event: KeyboardEvent<HTMLTableRowElement>,
-  caseId: string,
-  onOpenCaseReview: (caseId: string) => void,
-): void {
-  if (event.key !== "Enter" && event.key !== " ") {
-    return;
-  }
-  event.preventDefault();
-  onOpenCaseReview(caseId);
-}
-
 function formatOptionalDuration(durationMs: number | null): string {
   return durationMs === null ? "—" : formatDurationMs(durationMs);
-}
-
-function formatRunDuration(run: RunSummary, nowMs: number): string {
-  const durationMs = resolveTimedDurationMs({
-    active: run.status !== "finished",
-    durationMs: run.durationMs,
-    finishedAt: run.finishedAt,
-    nowMs,
-    startedAt: run.startedAt,
-  });
-  return durationMs === null ? "unknown" : formatDurationMs(durationMs);
 }
 
 function resolveCaseReviewStatus(review: SubjectCaseReview): string | null {
   if (review.status) {
     return review.status;
   }
-  return review.phases.length > 0
-    ? resolveExecutionCollectionStatus(review.phases, "pending")
+  return review.executions.length > 0
+    ? resolveExecutionCollectionStatus(review.executions, "pending")
     : null;
 }
 
@@ -3583,18 +3621,18 @@ function resolveCaseReviewDurationMs(
   review: SubjectCaseReview,
   nowMs: number,
 ): number | null {
-  const activeDurationMs = resolvePhaseRefsDurationMs(review.phases, nowMs);
-  if (hasActivePhaseRecords(review.phases)) {
+  const activeDurationMs = resolveExecutionRefsDurationMs(review.executions, nowMs);
+  if (hasActiveExecutionRecords(review.executions)) {
     return activeDurationMs ?? review.durationMs ?? null;
   }
   return review.durationMs ?? activeDurationMs;
 }
 
-function resolvePhaseRefsDurationMs(
-  phases: SubjectCasePhase[],
+function resolveExecutionRefsDurationMs(
+  executions: SubjectCaseExecution[],
   nowMs: number,
 ): number | null {
-  return resolveTimedExecutionRecordsDurationMs(phases, nowMs);
+  return resolveTimedExecutionRecordsDurationMs(executions, nowMs);
 }
 
 function resolveExecutionCollectionStatus(
@@ -3690,345 +3728,13 @@ function isTimedExecutionStatus(status: HostedWorkbenchJob["status"]): boolean {
   return status === "running";
 }
 
-function hasActivePhaseRecords(records: readonly { status: HostedWorkbenchJob["status"] }[]): boolean {
+function hasActiveExecutionRecords(records: readonly { status: HostedWorkbenchJob["status"] }[]): boolean {
   return records.some((record) => isActiveExecutionStatus(record.status));
 }
 
-function CaseReviewDialog({
-  apiPath,
-  state,
-  onOpenChange,
-  onTabChange,
-}: {
-  apiPath: (pathname: string) => string;
-  state: CaseReviewState;
-  onOpenChange: (open: boolean) => void;
-  onTabChange: (tab: CaseReviewTab) => void;
-}) {
-  const review = state.review;
-  const activeTab = state.tab;
-  const nowMs = Date.now();
-  const reviewStatus = review ? resolveCaseReviewStatus(review) : null;
-  const reviewDurationMs = review ? resolveCaseReviewDurationMs(review, nowMs) : null;
-
-  return (
-    <InspectorDialogShell
-      open={state.open}
-      onOpenChange={onOpenChange}
-      title={state.review?.caseLabel ?? state.caseId ?? "Task Review"}
-      description="Inspect task metrics, scoring detail, execution traces, files, and raw data."
-      className="h-[min(94vh,calc(100dvh-1rem))]"
-      bodyClassName="flex min-h-0 flex-1 flex-col gap-4"
-    >
-      {state.loading ? (
-        <CaseReviewSkeleton />
-      ) : state.error ? (
-        <p className="text-sm text-destructive">{state.error}</p>
-      ) : !review ? (
-        <p className="text-sm text-muted-foreground">No task detail was found.</p>
-      ) : (
-        <>
-          <div className="flex shrink-0 flex-wrap gap-2">
-            {Object.entries(review.metrics).map(([key, value]) => (
-              <Badge key={key} variant="outline">
-                {key} {formatMetricValue(value)}
-              </Badge>
-            ))}
-            {reviewStatus ? <Badge variant="outline">{formatOperationalStatus(reviewStatus)}</Badge> : null}
-            <Badge variant="outline">{formatCriterionCount(review.criteria_results.length)}</Badge>
-            <Badge variant="outline">
-              {review.phases.length > 0
-                ? formatCount(review.phases.length, "execution")
-                : "no executions"}
-            </Badge>
-          </div>
-
-          <Tabs
-            value={activeTab}
-            onValueChange={(value) => onTabChange(value as CaseReviewTab)}
-            className="flex min-h-0 flex-1 flex-col gap-4"
-          >
-            <TabsList variant="line" className="self-start">
-              <TabsTrigger value="overview">
-                <InfoIcon data-icon="inline-start" />
-                Overview
-              </TabsTrigger>
-              <TabsTrigger value="scoring">
-                <ListChecksIcon data-icon="inline-start" />
-                Scoring
-              </TabsTrigger>
-              <TabsTrigger value="trace">
-                <ActivityIcon data-icon="inline-start" />
-                Trace
-              </TabsTrigger>
-              <TabsTrigger value="files">
-                <FolderOpenIcon data-icon="inline-start" />
-                Files
-              </TabsTrigger>
-              <TabsTrigger value="raw">
-                <FileCode2Icon data-icon="inline-start" />
-                Raw
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="overview" className="mt-0 flex min-h-0 flex-1 flex-col">
-              <CaseReviewTabViewport>
-                <div className="grid gap-3 md:grid-cols-3">
-                  <RunFact title="Status" value={reviewStatus ?? "—"} />
-                  <RunFact title="Duration" value={formatOptionalDuration(reviewDurationMs)} />
-                  <RunFact title="Executions" value={String(review.phases.length)} />
-                </div>
-
-                <StructuredValueCard title="Metrics" value={review.metrics} />
-              </CaseReviewTabViewport>
-            </TabsContent>
-
-            <TabsContent value="scoring" className="mt-0 flex min-h-0 flex-1 flex-col">
-              <CaseReviewTabViewport contentClassName={review.criteria_results.length > 0 ? "gap-0 p-0" : undefined}>
-                {review.feedback !== undefined ? (
-                  <div className="p-4">
-                    <StructuredValueCard title="Feedback" value={review.feedback} />
-                  </div>
-                ) : null}
-
-                {review.source ? (
-                  <div className="px-4 pb-4">
-                    <StructuredValueCard title="Source" value={review.source} />
-                  </div>
-                ) : null}
-
-                {review.criteria_results.length > 0 ? (
-                  <>
-                  <div className="grid gap-0 sm:hidden">
-                    {review.criteria_results.map((criterion) => (
-                      <div
-                        key={criterion.criterion_id}
-                        className="grid gap-2 border-t border-border/60 px-4 py-3 first:border-t-0"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0 font-mono text-xs break-words [overflow-wrap:anywhere]">
-                            {criterion.criterion_id}
-                          </div>
-                          <Badge variant="outline" className="shrink-0 tabular-nums">
-                            {criterion.pass ? "1" : "0"}
-                          </Badge>
-                        </div>
-                        <TextBlockView
-                          value={criterion.rationale ?? "No rationale recorded."}
-                          className="text-sm leading-6"
-                        />
-                        {criterion.errors.length > 0 ? (
-                          <TextBlockView
-                            value={criterion.errors.join(" · ")}
-                            className="text-xs leading-5 text-muted-foreground"
-                          />
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="hidden sm:block">
-                    <Table className="table-fixed">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-52">Criterion</TableHead>
-                          <TableHead className="w-16 text-center">Pass</TableHead>
-                          <TableHead className="whitespace-normal">Rationale</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {review.criteria_results.map((criterion) => (
-                          <TableRow key={criterion.criterion_id}>
-                            <TableCell className="w-52 align-top font-mono text-xs whitespace-normal break-words [overflow-wrap:anywhere]">
-                              {criterion.criterion_id}
-                            </TableCell>
-                            <TableCell className="w-16 align-top text-center tabular-nums">
-                              {criterion.pass ? "1" : "0"}
-                            </TableCell>
-                            <TableCell className="align-top whitespace-normal">
-                              <div className="grid min-w-0 gap-2">
-                                <TextBlockView
-                                  value={criterion.rationale ?? "No rationale recorded."}
-                                  className="text-sm leading-6"
-                                />
-                                {criterion.errors.length > 0 ? (
-                                  <TextBlockView
-                                    value={criterion.errors.join(" · ")}
-                                    className="text-xs leading-5 text-muted-foreground"
-                                  />
-                                ) : null}
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                  </>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No scoring criteria were recorded for this task.</p>
-                )}
-              </CaseReviewTabViewport>
-            </TabsContent>
-
-            <TabsContent value="trace" className="mt-0 flex min-h-0 flex-1 flex-col">
-              <TaskExecutionTraceTab apiPath={apiPath} review={review} preferredRunId={state.runId} />
-            </TabsContent>
-
-            <TabsContent value="files" className="mt-0 flex min-h-0 flex-1 flex-col">
-              <TaskExecutionFilesTab apiPath={apiPath} review={review} />
-            </TabsContent>
-
-            <TabsContent value="raw" className="mt-0 flex min-h-0 flex-1 flex-col">
-              <CaseReviewTabViewport>
-                <CodeBlockSurface
-                  value={JSON.stringify(review, null, 2)}
-                  language="json"
-                  surface="plain"
-                />
-              </CaseReviewTabViewport>
-            </TabsContent>
-          </Tabs>
-        </>
-      )}
-    </InspectorDialogShell>
-  );
-}
-
-function TaskExecutionTraceTab({
-  apiPath,
-  review,
-  preferredRunId,
-}: {
-  apiPath: (pathname: string) => string;
-  review: SubjectCaseReview;
-  preferredRunId: string | null;
-}) {
-  const phases = review.phases;
-  const [selectedPhase, setSelectedPhase] = useState<string | null>(null);
-  const activePhase =
-    phases.find((entry) => phaseSelectorValue(entry) === selectedPhase) ??
-    phases[0] ??
-    null;
-  const traceState = useRunTrace(apiPath, activePhase?.runId ?? null);
-
-  useEffect(() => {
-    const preferredPhase = preferredRunId
-      ? phases.find((phase) => phase.runId === preferredRunId)
-      : null;
-    setSelectedPhase((current) => {
-      const currentPhase = current
-        ? phases.find((entry) => phaseSelectorValue(entry) === current)
-        : null;
-      if (currentPhase && (!preferredRunId || currentPhase.runId === preferredRunId)) {
-        return current;
-      }
-      return preferredPhase
-        ? phaseSelectorValue(preferredPhase)
-        : phases[0] ? phaseSelectorValue(phases[0]) : null;
-    });
-  }, [phases, preferredRunId]);
-
-  const tracePhase = useMemo(
-    () =>
-      activePhase
-        ? (traceState.detail?.phases ?? []).find(
-            (phase) => phase.jobIds.some((jobId) => activePhase.jobIds.includes(jobId)),
-          ) ?? null
-        : null,
-    [activePhase, traceState.detail?.phases],
-  );
-  const timeline = useMemo(
-    () =>
-      tracePhase
-        ? buildExecutionTraceTimeline({
-            trace: tracePhase.trace as ExecutionTrace,
-          })
-        : { groups: [], stageMaps: [] },
-    [tracePhase],
-  );
-
-  if (phases.length === 0) {
-    return (
-      <CaseReviewTabViewport>
-        <EmptyState
-          icon={ActivityIcon}
-          title="No execution trace"
-          message="No task execution was recorded for this task."
-          size="sm"
-        />
-      </CaseReviewTabViewport>
-    );
-  }
-
-  return (
-    <CaseReviewTabViewport contentClassName="gap-3">
-      <ToggleGroup
-        type="single"
-        variant="outline"
-        size="sm"
-        value={activePhase ? phaseSelectorValue(activePhase) : ""}
-        onValueChange={(value) => {
-          if (value) {
-            setSelectedPhase(value);
-          }
-        }}
-      >
-        {phases.map((phase) => (
-          <ToggleGroupItem
-            key={phaseSelectorValue(phase)}
-            value={phaseSelectorValue(phase)}
-            aria-label={`Show ${formatPhaseLabel(phase.phase)} trace`}
-          >
-            {formatPhaseSelectorLabel(phase)}
-          </ToggleGroupItem>
-        ))}
-      </ToggleGroup>
-
-      {traceState.error ? (
-        <p className="text-sm text-destructive">{traceState.error}</p>
-      ) : traceState.loading && !tracePhase ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Spinner className="size-4" />
-          Loading execution trace
-        </div>
-      ) : tracePhase ? (
-        <div className="grid gap-3">
-          <div className="grid gap-2">
-            <div className="grid gap-1">
-              <h3 className="text-base font-semibold text-foreground">Execution Trace</h3>
-              <p className="text-sm text-muted-foreground">
-                {describePhaseTrace(activePhase, tracePhase)}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">
-                {formatPhaseLabel(activePhase?.phase ?? tracePhase.phase)}
-              </Badge>
-              <Badge variant="outline">{activePhase?.status ?? tracePhase.status}</Badge>
-              {typeof activePhase?.sampleIndex === "number" ? (
-                <Badge variant="outline">sample {activePhase.sampleIndex + 1}</Badge>
-              ) : null}
-            </div>
-          </div>
-
-          <ExecutionTraceTimeline executionTimeline={timeline} layout="content" />
-        </div>
-      ) : (
-        <EmptyState
-          icon={ActivityIcon}
-          title="No execution trace"
-          message="No trace events were recorded for this execution."
-          size="sm"
-        />
-      )}
-    </CaseReviewTabViewport>
-  );
-}
-
-function formatPhaseLabel(purpose: string): string {
-  if (purpose === "trial") {
-    return "Trial";
+function formatExecutionKindLabel(purpose: string): string {
+  if (purpose === "attempt") {
+    return "Attempt";
   }
   if (purpose === "improve") {
     return "Optimizer";
@@ -4036,42 +3742,19 @@ function formatPhaseLabel(purpose: string): string {
   return formatLabelText(purpose);
 }
 
-function phaseSelectorValue(phase: SubjectCasePhase): string {
-  return `${phase.runId}:${phase.phase}:${phase.sampleIndex ?? "current"}`;
-}
-
-function formatPhaseSelectorLabel(phase: SubjectCasePhase): string {
-  const label = formatPhaseLabel(phase.phase);
-  return phase.status === "succeeded" ? label : `${label} · ${phase.status}`;
-}
-
-function describePhaseTrace(
-  phase: SubjectCasePhase | null,
-  tracePhase: WorkbenchTracePhase,
-): string {
-  const parts = [
-    formatPhaseLabel(phase?.phase ?? tracePhase.phase),
-    tracePhase.caseId ? `task ${tracePhase.caseId}` : null,
-    typeof (phase?.sampleIndex ?? tracePhase.sampleIndex) === "number"
-      ? `sample ${(phase?.sampleIndex ?? tracePhase.sampleIndex)! + 1}`
-      : null,
-  ].filter((part): part is string => Boolean(part));
-  return parts.join(" · ");
-}
-
 function formatLabelText(value: string): string {
   return value.replaceAll(/[_-]+/g, " ").replace(/^\w/u, (match) => match.toUpperCase());
 }
 
-function TaskExecutionFilesTab({
+function ExecutionFilesSurface({
   apiPath,
   review,
 }: {
   apiPath: (pathname: string) => string;
   review: SubjectCaseReview;
 }) {
-	  const outputPhase = review.phases[0] ?? null;
-  const outputJobId = outputPhase?.jobIds[0] ?? null;
+  const outputExecution = review.executions[0] ?? null;
+  const outputJobId = outputExecution?.jobIds[0] ?? null;
   const prefersStackedFilesLayout = useMediaQuery("(max-width: 900px)");
   const [executionFilesState, setExecutionFilesState] = useState<ExecutionFilesState>({
     loading: false,
@@ -4100,10 +3783,10 @@ function TaskExecutionFilesTab({
       error: null,
       preview: null,
     });
-  }, [review.subjectId, review.caseId, outputPhase?.runId, outputJobId]);
+  }, [review.subjectId, review.caseId, outputExecution?.runId, outputJobId]);
 
   useEffect(() => {
-    if (!outputPhase || !outputJobId) {
+    if (!outputExecution || !outputJobId) {
       setExecutionFilesState({
         loading: false,
         error: null,
@@ -4120,7 +3803,7 @@ function TaskExecutionFilesTab({
       files: [],
     });
     const params = new URLSearchParams({
-      run: outputPhase.runId,
+      run: outputExecution.runId,
       id: outputJobId,
     });
 
@@ -4153,7 +3836,7 @@ function TaskExecutionFilesTab({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, outputPhase?.runId, outputJobId]);
+  }, [apiPath, outputExecution?.runId, outputJobId]);
 
   useEffect(() => {
     const nextFilePath =
@@ -4167,7 +3850,7 @@ function TaskExecutionFilesTab({
   }, [orderedFiles, selectedFilePath]);
 
   useEffect(() => {
-    if (!outputPhase || !outputJobId || !selectedFilePath) {
+    if (!outputExecution || !outputJobId || !selectedFilePath) {
       setPreviewState({
         loading: false,
         error: null,
@@ -4184,7 +3867,7 @@ function TaskExecutionFilesTab({
       preview: null,
     });
     const params = new URLSearchParams({
-      run: outputPhase.runId,
+      run: outputExecution.runId,
       id: outputJobId,
       path: selectedFilePath,
       view: previewMode,
@@ -4219,75 +3902,53 @@ function TaskExecutionFilesTab({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, outputPhase?.runId, outputJobId, previewMode, selectedFilePath]);
+  }, [apiPath, outputExecution?.runId, outputJobId, previewMode, selectedFilePath]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="grid gap-3 md:grid-cols-2">
-        <RunFact
-          title="Run"
-          value={outputPhase ? (shortId(outputPhase.runId) ?? outputPhase.runId) : "not recorded"}
-        />
-        <RunFact
-          title="Files"
-          value={outputPhase ? (executionFilesState.loading ? "loading" : String(executionFilesState.files.length)) : "not recorded"}
-        />
-      </div>
-
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <FilesBrowser
-          changes={orderedFiles}
-          selectedFilePath={selectedFilePath}
-          browseMode="folders"
-          currentDirectory={directoryPath}
-          previewMode={previewMode}
-          availablePreviewModes={supportedPreviewModes()}
-          preview={previewState.preview}
-          changesError={executionFilesState.error}
-          previewError={previewState.error}
-          isChangesLoading={executionFilesState.loading}
-          isPreviewLoading={previewState.loading}
-          layout={prefersStackedFilesLayout ? "stacked" : "split"}
-          emptyMessage={outputPhase ? "No files were captured for this task." : "No output file reference was recorded for this task."}
-          emptySelectionMessage="Select an execution file to preview."
-          listErrorMessage="Couldn't load the execution file list."
-          previewErrorMessage="Couldn't load the execution file preview."
-          onSelectFile={(filePath) => {
-            setSelectedFilePath(filePath);
-            setDirectoryPath(directoryPathForFile(filePath));
-          }}
-          onDirectoryChange={setDirectoryPath}
-          onPreviewModeChange={(mode) => setPreviewMode(mode as SubjectPreviewMode)}
-        />
-      </div>
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      <FilesBrowser
+        changes={orderedFiles}
+        selectedFilePath={selectedFilePath}
+        browseMode="folders"
+        currentDirectory={directoryPath}
+        previewMode={previewMode}
+        availablePreviewModes={supportedPreviewModes()}
+        preview={previewState.preview}
+        changesError={executionFilesState.error}
+        previewError={previewState.error}
+        isChangesLoading={executionFilesState.loading}
+        isPreviewLoading={previewState.loading}
+        layout={prefersStackedFilesLayout ? "stacked" : "split"}
+        emptyMessage={outputExecution ? "No files were captured for this case." : "No output file reference was recorded for this case."}
+        emptySelectionMessage="Select a case file to preview."
+        listErrorMessage="Couldn't load the case file list."
+        previewErrorMessage="Couldn't load the case file preview."
+        onSelectFile={(filePath) => {
+          setSelectedFilePath(filePath);
+          setDirectoryPath(directoryPathForFile(filePath));
+        }}
+        onDirectoryChange={setDirectoryPath}
+        onPreviewModeChange={(mode) => setPreviewMode(mode as SubjectPreviewMode)}
+      />
     </div>
   );
 }
 
-function CaseReviewTabViewport({
+function FactGrid({
   children,
-  className,
-  contentClassName,
+  columnsClassName = "md:grid-cols-3",
 }: {
   children: ReactNode;
-  className?: string;
-  contentClassName?: string;
+  columnsClassName?: string;
 }) {
   return (
-    <div
-      className={cn(
-        "min-h-0 min-w-0 flex-1 overflow-y-auto rounded-lg border border-border/60 bg-background",
-        className,
-      )}
-    >
-      <div className={cn("grid min-w-0 gap-3 p-4", contentClassName)}>
-        {children}
-      </div>
+    <div className={cn("grid gap-3", columnsClassName)}>
+      {children}
     </div>
   );
 }
 
-function RunFact({
+function FactItem({
   title,
   value,
 }: {
@@ -4295,9 +3956,14 @@ function RunFact({
   value: string;
 }) {
   return (
-    <div className="rounded-xl bg-muted/35 px-4 py-3">
-      <div className="text-sm text-muted-foreground">{title}</div>
-      <div className="mt-2 text-sm font-medium text-foreground">{value}</div>
+    <div className="min-w-0 rounded-xl bg-muted/35 px-4 py-3">
+      <div className="min-w-0 truncate text-sm text-muted-foreground">{title}</div>
+      <div
+        className="mt-2 min-w-0 text-sm font-medium text-foreground whitespace-normal break-words [overflow-wrap:anywhere]"
+        title={value}
+      >
+        {value}
+      </div>
     </div>
   );
 }
@@ -4377,8 +4043,8 @@ function orderSubjectSummaries(summaries: SubjectSummary[]): SubjectSummary[] {
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
-function orderResultSummaries(results: EvaluationResultSummary[]): EvaluationResultSummary[] {
-  return results
+function orderEvaluationSummaries(evaluations: EvaluationSummary[]): EvaluationSummary[] {
+  return evaluations
     .slice()
     .sort((left, right) => {
       const updatedOrder = right.updatedAt.localeCompare(left.updatedAt);
@@ -4404,7 +4070,7 @@ function orderRunSummaries(runs: RunSummary[]): RunSummary[] {
 function buildBenchmarkFingerprintOptions(args: {
   currentBenchmarkFingerprint: string | null;
   summaries: SubjectSummary[];
-  results: EvaluationResultSummary[];
+  evaluations: EvaluationSummary[];
   runs: RunSummary[];
 }): BenchmarkFingerprintOption[] {
   const entries = new Map<string, BenchmarkFingerprintOption>();
@@ -4421,7 +4087,7 @@ function buildBenchmarkFingerprintOptions(args: {
     const option: BenchmarkFingerprintOption = {
       fingerprint: normalized,
       subjectCount: 0,
-      resultCount: 0,
+      evaluationCount: 0,
       runCount: 0,
       current: normalized === args.currentBenchmarkFingerprint,
     };
@@ -4436,10 +4102,10 @@ function buildBenchmarkFingerprintOptions(args: {
       option.subjectCount += 1;
     }
   }
-  for (const result of args.results) {
-    const option = ensure(result.benchmarkFingerprint);
+  for (const evaluation of args.evaluations) {
+    const option = ensure(evaluation.benchmarkFingerprint);
     if (option) {
-      option.resultCount += 1;
+      option.evaluationCount += 1;
     }
   }
   for (const run of args.runs) {
@@ -4454,7 +4120,7 @@ function buildBenchmarkFingerprintOptions(args: {
       return left.current ? -1 : 1;
     }
     return right.subjectCount - left.subjectCount ||
-      right.resultCount - left.resultCount ||
+      right.evaluationCount - left.evaluationCount ||
       right.runCount - left.runCount ||
       left.fingerprint.localeCompare(right.fingerprint);
   });
@@ -4466,89 +4132,6 @@ function formatCount(value: number, noun: string): string {
 
 function formatCriterionCount(value: number): string {
   return `${value} ${value === 1 ? "criterion" : "criteria"}`;
-}
-
-function formatRunOutcomeLabel(
-  outcome: RunOutcome | undefined,
-  status: RunStatus,
-): string {
-  if (outcome === "ok") {
-    return "ok";
-  }
-  if (outcome === "error") {
-    return "error";
-  }
-  if (outcome === "cancelled") {
-    return "cancelled";
-  }
-  return status;
-}
-
-function formatRunWorkflow(workflow: RunSummary["workflow"]): string {
-  switch (workflow) {
-    case "eval":
-      return "Eval";
-    case "improve":
-      return "Improve";
-    default:
-      return workflow;
-  }
-}
-
-function formatRunPhaseStatus(run: RunSummary): string {
-  if (run.status === "queued") {
-    return "queued";
-  }
-  if (run.status === "running") {
-    return run.workflow === "improve" ? "improving" : "evaluating";
-  }
-  if (run.outcome === "error") {
-    return "error";
-  }
-  if (run.outcome === "cancelled") {
-    return "cancelled";
-  }
-  switch (run.stoppedReason) {
-    case "budget_exhausted":
-      return "budget exhausted";
-    case "dry_run":
-      return "dry run";
-    case "cancelled":
-      return "cancelled";
-    case "completed":
-      return "completed";
-    default:
-      return run.status;
-  }
-}
-
-function runStatusTone(run: RunSummary): BadgeTone {
-  if (run.outcome === "error") {
-    return "destructive";
-  }
-  if (run.status === "queued" || run.status === "running") {
-    return "warning";
-  }
-  if (run.outcome === "ok" || run.stoppedReason === "completed") {
-    return "success";
-  }
-  return "outline";
-}
-
-function RunStatusBadge({ run }: { run: RunSummary }) {
-  const tone = badgeToneProps(runStatusTone(run));
-  return (
-    <Badge variant={tone.variant} className={tone.className}>
-      {formatRunOutcomeLabel(run.outcome, run.status)}
-    </Badge>
-  );
-}
-
-function formatBenchmarkFingerprint(value: string | null): string {
-  if (!value) {
-    return "not recorded";
-  }
-  return shortDigest(value);
 }
 
 function shortFingerprint(value: string | null | undefined): string {

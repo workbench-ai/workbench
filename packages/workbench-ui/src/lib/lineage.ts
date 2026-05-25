@@ -2,10 +2,15 @@ import ELK from "elkjs/lib/elk.bundled.js";
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
 
 import type {
+  EvaluationSummary,
   SubjectSummary,
-  RuntimeSnapshot,
+  BenchmarkSnapshot,
 } from "../types";
-import { formatSubjectSelectionLabel, formatMetricSummary, hasMetricValues, statusLabel } from "./format";
+import { formatSubjectSelectionLabel, statusLabel } from "./format";
+import {
+  buildLatestEvaluationBySubject,
+  resolveSubjectEvaluationDisplay,
+} from "./subject-evaluation-display";
 
 const elk = new ELK();
 
@@ -18,7 +23,8 @@ export interface LineageNodeData extends Record<string, unknown> {
   summary: SubjectSummary;
   active: boolean;
   statusText: string | null;
-  metricText: string | null;
+  scoreText: string;
+  sourceText: string;
 }
 
 export type LineageNode = Node<LineageNodeData, "subject">;
@@ -75,7 +81,7 @@ export function createLineageNodeDomAttributes(
 }
 
 export async function buildLineageFlow(
-  snapshot: RuntimeSnapshot,
+  snapshot: BenchmarkSnapshot,
 ): Promise<{
   nodes: LineageNode[];
   edges: LineageEdge[];
@@ -84,13 +90,22 @@ export async function buildLineageFlow(
     summaries: snapshot.summaries,
     activeId: snapshot.activeId,
   });
+  const latestEvaluationBySubject = buildLatestEvaluationBySubject(snapshot.evaluations);
   const nodes = lineage.nodes.map((node) => {
     const { summary, active } = node;
+    const latestEvaluation = latestEvaluationBySubject.get(summary.id) ?? null;
+    const evaluationDisplay = resolveSubjectEvaluationDisplay({
+      latestEvaluation,
+    });
     return {
       id: lineageSubjectNodeId(node.id),
       type: "subject",
       position: { x: 0, y: 0 },
-      data: buildLineageNodeData(summary, active),
+      data: buildLineageNodeData({
+        summary,
+        active,
+        latestEvaluation,
+      }),
       className: LINEAGE_NODE_CLASS_NAME,
       initialWidth: LINEAGE_NODE_WIDTH,
       initialHeight: LINEAGE_NODE_INITIAL_HEIGHT,
@@ -100,7 +115,7 @@ export async function buildLineageFlow(
       ariaLabel: formatSubjectSelectionLabel({
         summary,
         active,
-        details: [hasMetricValues(summary.metrics) ? formatMetricSummary(summary.metrics) : null],
+        details: [evaluationDisplay.ariaText],
       }),
       domAttributes: createLineageNodeDomAttributes({
         "data-testid": lineageNodeTestId(summary.id),
@@ -170,14 +185,22 @@ async function layoutLineageNodes<T extends LineageNodeData>(
   }));
 }
 
-function buildLineageNodeData(summary: SubjectSummary, active: boolean): LineageNodeData {
+function buildLineageNodeData(args: {
+  summary: SubjectSummary;
+  active: boolean;
+  latestEvaluation: EvaluationSummary | null;
+}): LineageNodeData {
+  const { summary, active } = args;
   const statusText = summary.status === "evaluated" ? null : statusLabel(summary.status);
-  const metricText = hasMetricValues(summary.metrics) ? formatMetricSummary(summary.metrics) : null;
+  const evaluationDisplay = resolveSubjectEvaluationDisplay({
+    latestEvaluation: args.latestEvaluation,
+  });
   return {
     summary,
     active,
     statusText,
-    metricText,
+    scoreText: evaluationDisplay.scoreText,
+    sourceText: evaluationDisplay.sourceText,
   };
 }
 

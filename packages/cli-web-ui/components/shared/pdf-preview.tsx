@@ -3,7 +3,7 @@ import { AlertCircle, Maximize2 } from "lucide-react";
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
 
 import { cn } from "../../lib/utils";
-import { Spinner } from "../ui/spinner";
+import { Skeleton } from "../ui/skeleton";
 
 // Keep the API and worker on the same installed pdfjs-dist version.
 const PDFJS_WORKER_SRC = new URL(
@@ -208,12 +208,10 @@ export function PdfPreview({
               ? "px-1"
               : "rounded-md border border-border/70 bg-muted/20 p-3",
           )}
+          aria-busy={status === "loading" ? "true" : undefined}
         >
           {status === "loading" ? (
-            <span className="inline-flex items-center gap-2">
-              <Spinner />
-              Rendering PDF preview...
-            </span>
+            <Skeleton className="h-4 w-48 max-w-full" />
           ) : status === "error" ? (
             <span className="inline-flex items-center gap-2 text-destructive">
               <AlertCircle className="h-4 w-4" />

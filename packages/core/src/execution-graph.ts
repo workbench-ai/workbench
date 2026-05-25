@@ -7,12 +7,12 @@ import type {
 } from "@workbench-ai/workbench-contract";
 
 import {
-  resolveTaskExecutionConfig,
+  resolveEngineCaseExecutionConfig,
   runtimeNetwork,
   runtimeResources,
   runtimeSandboxRef,
   type GenericRunSpec,
-  type GenericTaskSpec,
+  type GenericEngineCaseSpec,
   type WorkbenchRuntimeSpec,
 } from "./generic-spec.ts";
 
@@ -21,14 +21,14 @@ export interface CompileExecutionGraphInput {
   projectId: string;
   runId: string;
   subjectId: string;
-  trialIndex: number;
+  attemptIndex: number;
   sampleIndex?: number;
   caseId?: string;
-  task?: GenericTaskSpec;
+  engineCase?: GenericEngineCaseSpec;
   spec: GenericRunSpec;
   workflow?: "eval" | "improve";
   subjectRef?: string;
-  taskRef?: string;
+  caseRef?: string;
   environmentRef?: string;
 }
 
@@ -47,22 +47,21 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const sampleIndex = input.sampleIndex ?? 0;
   const caseId = input.caseId ?? "current";
   const subjectRef = input.subjectRef ?? `workbench://benchmarks/${input.projectId}/subjects/${input.subjectId}`;
-  const taskRef = input.taskRef ?? `workbench://benchmarks/${input.projectId}/tasks/${caseId}`;
-  if (!input.task) {
-    throw new Error("Execution graph compilation requires a task bundle.");
+  const caseRef = input.caseRef ?? `workbench://benchmarks/${input.projectId}/engine-cases/${caseId}`;
+  if (!input.engineCase) {
+    throw new Error("Execution graph compilation requires an engine case.");
   }
-  const task = input.task;
-  const executionConfig = resolveTaskExecutionConfig({
+  const engineCase = input.engineCase;
+  const executionConfig = resolveEngineCaseExecutionConfig({
     spec: input.spec,
-    task,
+    engineCase,
   });
 
   const nodes: WorkbenchExecutionGraphNode[] = [];
   const executions: WorkbenchExecutionSpec[] = [];
   const optimizerExecutionId = executionId(input, "improve", "current", 0);
   const optimizerOutputRef = `execution://${optimizerExecutionId}/subject_patch`;
-  const runnerAdapter = executionConfig.run;
-  const scorerAdapter = executionConfig.score;
+  const engineAdapter = input.spec.engineRun;
   if (workflow === "improve") {
     if (!input.spec.optimizer || !input.spec.improve) {
       throw new Error("Optimizer YAML is required for improve execution graphs.");
@@ -77,7 +76,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
       ],
       outputs: [outputContract("subject_patch", "workbench.subject_patch.v1")],
       metadata: {
-        trialIndex: input.trialIndex,
+        attemptIndex: input.attemptIndex,
         sampleIndex: 0,
         caseId: "current",
         benchmark: input.spec.benchmark.name,
@@ -89,26 +88,25 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   }
 
   const runSubjectRef = workflow === "improve" ? optimizerOutputRef : subjectRef;
-  const trialExecutionId = executionId(input, "trial", caseId, sampleIndex);
+  const attemptExecutionId = executionId(input, "attempt", caseId, sampleIndex);
   pushExecution(nodes, executions, createExecution({
     input,
-    purpose: "trial",
-    adapter: runnerAdapter,
+    purpose: "attempt",
+    adapter: engineAdapter,
     inputs: [
       inputRef("subject", runSubjectRef, "/workspace/input/subject", false),
-      inputRef("task", taskRef, "/workspace/input/task", false),
+      inputRef("case", caseRef, "/workspace/input/case", false),
     ],
-    outputs: [outputContract("scorecard", "workbench.scorecard.v1")],
+    outputs: [outputContract("result", "workbench.result.v1")],
     metadata: {
-      trialIndex: input.trialIndex,
+      attemptIndex: input.attemptIndex,
       sampleIndex,
       caseId,
-      task: task as unknown as Json,
-      scoreAdapter: scorerAdapter as unknown as Json,
+      engineCase: engineCase as unknown as Json,
       ...(executionConfig.environment.workdir ? { workdir: executionConfig.environment.workdir } : {}),
     },
     runtime: executionConfig.environment,
-    idOverride: trialExecutionId,
+    idOverride: attemptExecutionId,
   }), workflow === "improve" ? [optimizerExecutionId] : []);
 
   return { nodes, executions };
@@ -187,7 +185,7 @@ function executionId(
   const parts = [
     "exec",
     input.runId.replace(/[^a-z0-9_]/giu, "_"),
-    `trial_${String(input.trialIndex).padStart(3, "0")}`,
+    `attempt_${String(input.attemptIndex).padStart(3, "0")}`,
     `case_${caseKey}`,
     `sample_${String(sampleIndex).padStart(3, "0")}`,
     purpose,

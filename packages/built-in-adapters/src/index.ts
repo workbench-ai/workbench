@@ -4,6 +4,8 @@ export {
   builtinWorkbenchAdapterManifests,
   isWorkbenchBuiltInAdapterId,
   type WorkbenchBuiltInAdapterId,
+  type WorkbenchEngineHelperAdapterId,
+  type WorkbenchPublicBuiltInAdapterId,
 } from "./manifests.ts";
 export {
   executeWorkbenchBuiltInAdapterCommand,

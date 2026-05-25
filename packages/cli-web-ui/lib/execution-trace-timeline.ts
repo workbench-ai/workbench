@@ -144,37 +144,12 @@ export interface ExecutionTimelineGroup {
   title: string;
   status: TraceSpan["status"] | null;
   startedAt: string;
-  endedAt: string | null;
   durationMs: number;
-  rowCount: number;
-  defaultExpanded: boolean;
   rows: ExecutionTimelineRow[];
-}
-
-export interface ExecutionStageMapSegment {
-  id: string;
-  targetRowId: string;
-  label: string;
-  tone: BadgeTone;
-  startedAt: string;
-  durationMs: number | null;
-  flexWeight: number;
-  title: string;
-  detail: string | null;
-}
-
-export interface ExecutionStageMap {
-  id: string;
-  title: string;
-  status: TraceSpan["status"] | null;
-  durationMs: number;
-  defaultExpanded: boolean;
-  segments: ExecutionStageMapSegment[];
 }
 
 export interface ExecutionTimeline {
   groups: ExecutionTimelineGroup[];
-  stageMaps: ExecutionStageMap[];
 }
 
 interface StageContext {
@@ -202,9 +177,6 @@ interface OutputTimeline {
   liveAt: string | null;
   liveDurationMs: number | null;
 }
-
-const STEP_MAP_MIN_WEIGHT = 1.25;
-const STEP_MAP_MAX_WEIGHT = 24;
 
 export function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
@@ -244,18 +216,11 @@ export function formatDuration(durationMs: number): string {
   return `${(durationMs / 1_000).toFixed(durationMs >= 10_000 ? 0 : 1)}s`;
 }
 
-export function truncateLabel(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return `${value.slice(0, maxLength - 3)}...`;
-}
-
 export function buildExecutionTraceTimeline(
   input: ExecutionTraceTimelineInput | null | undefined,
 ): ExecutionTimeline {
   if (!input?.trace) {
-    return { groups: [], stageMaps: [] };
+    return { groups: [] };
   }
 
   const attemptNumber =
@@ -324,7 +289,6 @@ export function buildExecutionTraceTimeline(
   );
 
   const groups: ExecutionTimelineGroup[] = [];
-  const stageMaps: ExecutionStageMap[] = [];
 
   for (const key of groupOrder) {
     const groupSpans = spansByGroup.get(key) ?? [];
@@ -427,31 +391,18 @@ export function buildExecutionTraceTimeline(
       stage.durationMs ?? deriveGroupDurationFromRows(finalizedRows);
     const groupStartedAt =
       stage.startedAt ?? finalizedRows[0]?.at ?? new Date(0).toISOString();
-    const groupEndedAt =
-      stage.endedAt ?? finalizedRows.at(-1)?.at ?? finalizedRows[0]?.at ?? null;
 
     groups.push({
       id: stage.key,
       title: stage.title,
       status: stage.status,
       startedAt: groupStartedAt,
-      endedAt: groupEndedAt,
       durationMs: groupDurationMs,
-      rowCount: finalizedRows.length,
-      defaultExpanded: true,
       rows: finalizedRows,
-    });
-    stageMaps.push({
-      id: stage.key,
-      title: stage.title,
-      status: stage.status,
-      durationMs: groupDurationMs,
-      defaultExpanded: true,
-      segments: buildStageMapSegments(finalizedRows, groupEndedAt),
     });
   }
 
-  return { groups, stageMaps };
+  return { groups };
 }
 
 function buildTurnRows(args: {
@@ -476,7 +427,7 @@ function buildTurnRows(args: {
       kind: "user",
       label: "User",
       tone: "outline",
-      title: truncateLabel(firstLine(prompt), 64),
+      title: firstLine(prompt),
       body: prompt,
       detail: null,
       format: promptFormat,
@@ -545,7 +496,7 @@ function buildTurnRows(args: {
           kind: "agent",
           label: "Agent",
           tone: "accent",
-          title: truncateLabel(firstLine(outputTimeline.finalText), 64),
+          title: firstLine(outputTimeline.finalText),
           body: outputTimeline.finalText,
           detail: null,
           format: "markdown",
@@ -567,7 +518,7 @@ function buildTurnRows(args: {
             kind: "agent",
             label: "Agent",
             tone: "accent",
-            title: truncateLabel(firstLine(outputTimeline.liveText), 64),
+            title: firstLine(outputTimeline.liveText),
             body: outputTimeline.liveText,
             detail: null,
             format: "markdown",
@@ -817,7 +768,7 @@ function buildSpanRow(
       kind: timelineKind,
       label,
       tone: timelineKind === "error" ? "destructive" : "secondary",
-      title: truncateLabel(span.title, 64),
+      title: span.title,
       body,
       detail: detail === body ? null : detail,
       format: "text",
@@ -842,7 +793,7 @@ function buildSpanRow(
     kind: timelineKind,
     label: rowLabelForKind(timelineKind),
     tone: toneForRowKind(timelineKind, span.status),
-    title: truncateLabel(span.title, 64),
+    title: span.title,
     body,
     detail: detail === body ? null : detail,
     format: "text",
@@ -881,7 +832,7 @@ function buildEventRow(
       timelineKind,
       timelineKind === "error" ? "failed" : null,
     ),
-    title: truncateLabel(firstLine(event.message), 64),
+    title: firstLine(event.message),
     body,
     detail: detail === body ? null : detail,
     format: "text",
@@ -892,33 +843,6 @@ function buildEventRow(
     durationMs: null,
     usage: null,
     live: false,
-  });
-}
-
-function buildStageMapSegments(
-  rows: ExecutionTimelineRow[],
-  stageEndedAt: string | null,
-): ExecutionStageMapSegment[] {
-  return rows.map((row, index) => {
-    const nextRow = rows[index + 1] ?? null;
-    const derivedDurationMs =
-      row.durationMs ??
-      deriveSegmentDuration(row.at, nextRow?.at ?? stageEndedAt ?? null);
-    const detailParts = [row.detail, row.usage?.label].filter(
-      (value): value is string => Boolean(value),
-    );
-
-    return {
-      id: `${row.id}:segment`,
-      targetRowId: row.anchorId,
-      label: row.label,
-      tone: toneForStageSegment(row),
-      startedAt: row.at,
-      durationMs: derivedDurationMs,
-      flexWeight: durationToWeight(derivedDurationMs),
-      title: row.title,
-      detail: detailParts.length > 0 ? detailParts.join(" · ") : null,
-    };
   });
 }
 
@@ -1233,8 +1157,8 @@ function summarizeSpan(span: TraceSpan, events: TraceEvent[]): string | null {
       readStringAttribute(span.attributes, "path"),
       readStringAttribute(span.attributes, "pattern"),
       readStringAttribute(span.attributes, "tool_input_preview"),
-      span.title,
       latestMeaningfulEventMessage(span, events),
+      span.title,
       readStringAttribute(span.attributes, "tool_operation"),
       readStringAttribute(span.attributes, "tool_raw_name"),
       readStringAttribute(span.attributes, "tool_name"),
@@ -1330,44 +1254,6 @@ function rowKindOrder(kind: ExecutionTimelineRowKind): number {
   }
 }
 
-function toneForStageSegment(row: ExecutionTimelineRow): BadgeTone {
-  switch (row.kind) {
-    case "user":
-    case "agent":
-      return "accent";
-    case "tool":
-      return "secondary";
-    case "write":
-      return "success";
-    case "error":
-      return "destructive";
-    case "note":
-      return row.status === "warning" ? "warning" : "outline";
-    case "session":
-    default:
-      return "outline";
-  }
-}
-
-function deriveSegmentDuration(
-  currentAt: string,
-  nextAt: string | null,
-): number | null {
-  if (!nextAt) {
-    return null;
-  }
-  const durationMs = durationBetween(currentAt, nextAt);
-  return durationMs > 0 ? durationMs : null;
-}
-
-function durationToWeight(durationMs: number | null): number {
-  if (durationMs == null || durationMs <= 0) {
-    return STEP_MAP_MIN_WEIGHT;
-  }
-  const seconds = durationMs / 1_000;
-  return Math.max(STEP_MAP_MIN_WEIGHT, Math.min(seconds, STEP_MAP_MAX_WEIGHT));
-}
-
 function deriveGroupDurationFromRows(rows: ExecutionTimelineRow[]): number {
   const firstAt = rows[0]?.at ?? null;
   const lastAt = rows.at(-1)?.at ?? null;
@@ -1442,7 +1328,7 @@ function formatStageTitle(
     return "Execution activity";
   }
   const label = capitalize(formatLabel(stageId));
-  return stageRunIndex === null ? label : `${label} · run ${stageRunIndex + 1}`;
+  return stageRunIndex === null ? label : `${label} · pass ${stageRunIndex + 1}`;
 }
 
 function dominantGroupStatus(spans: TraceSpan[]): TraceSpan["status"] {
@@ -1629,16 +1515,4 @@ function stableUnique(values: string[]): string[] {
 
 function formatCount(value: number): string {
   return value.toLocaleString();
-}
-
-export function describeTimelineStageMeta(
-  group: ExecutionTimelineGroup,
-): string {
-  const parts = [
-    `${group.rowCount} ${group.rowCount === 1 ? "step" : "steps"}`,
-  ];
-  if (group.durationMs > 0) {
-    parts.push(formatDuration(group.durationMs));
-  }
-  return parts.join(" · ");
 }

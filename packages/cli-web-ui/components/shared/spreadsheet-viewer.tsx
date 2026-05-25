@@ -30,7 +30,7 @@ import {
 } from "../../lib/spreadsheet-viewer-grid";
 import {
   decodeCellAddress,
-  expandSheetExtentToCoverViewport,
+  expandSheetExtentToFitViewport,
   expandSheetExtentToIncludeCell,
   getBaseSheetExtent,
   getCellAddress,
@@ -408,11 +408,9 @@ export function SpreadsheetViewer({
     syncViewportMetrics(container);
     setSheetExtents((current) => {
       const baseExtent = current[activeSheetName] ?? getBaseSheetExtent(activeSheet);
-      const nextExtent = expandSheetExtentToCoverViewport(
+      const nextExtent = expandSheetExtentToFitViewport(
         baseExtent,
         {
-          scrollLeft: container.scrollLeft,
-          scrollTop: container.scrollTop,
           clientWidth: container.clientWidth,
           clientHeight: container.clientHeight,
           rowHeaderWidth: GRID_ROW_HEADER_WIDTH,

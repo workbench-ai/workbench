@@ -157,7 +157,7 @@ describe("spreadsheet viewer interactions", () => {
     expect(container.querySelector("[data-testid='col-header-f']")).not.toBeNull();
   });
 
-  test("scroll-driven viewport growth materializes new rows without growing the mounted DOM unboundedly or snapping back", async () => {
+  test("scrolling near the workbook edge does not materialize unbounded blank rows", async () => {
     await act(async () => {
       root = createRoot(container);
       root.render(createElement(SpreadsheetViewer, {
@@ -201,9 +201,10 @@ describe("spreadsheet viewer interactions", () => {
 
     expect(scrollCalls).toHaveLength(baselineScrollCalls);
     expect(container.querySelectorAll("[data-testid^='row-header-']").length).toBeLessThan(40);
-    expect(container.querySelectorAll("[data-testid^='col-header-']")).toHaveLength(5);
+    expect(container.querySelectorAll("[data-testid^='col-header-']")).toHaveLength(3);
     expect(container.querySelector("[data-testid='row-window-top-spacer']")).not.toBeNull();
-    expect(container.querySelector("[data-testid='row-header-49']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='row-header-46']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='row-header-49']")).toBeNull();
   });
 });
 

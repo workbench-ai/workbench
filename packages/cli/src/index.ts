@@ -9,31 +9,36 @@ import YAML from "yaml";
 
 import {
   createSubjectFilePreview,
-  createSyntheticProposalJob as createRuntimeSyntheticProposalJob,
+  createBaselineSubjectJob as createRuntimeBaselineSubjectJob,
+  evaluationScorecardId,
   executeWorkbenchExecutionJob,
+  engineResolveBindingForSpec,
   filterSubjectSourceFiles,
   workbenchExecutionPurpose,
   createWorkbenchAdapterAuthBundle,
-  createProposalTraceInputFiles,
+  createSubjectEvaluationTraceInputFiles,
+  createSubjectRevisionTraceInputFiles,
   DOCKER_SANDBOX_BACKEND,
   localWorkbenchAdapterAuthStore,
   materializeWorkbenchRunResult,
   normalizeSurfaceFiles,
   planWorkbenchExecutionJobsForPurpose,
   runWorkbenchExecutionDag,
+  resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml,
   summarizeSubjectFiles,
   validateWorkbenchRunEnvelope,
   validateWorkbenchResolvedSourceYaml,
   parseWorkbenchAdapterAuthTarget,
-  readWorkbenchSpecDockerfilePath,
   type SubjectRecord,
+  type EngineResolveBinding,
   type WorkbenchExecutionRuntimeInput,
   type HostedWorkbenchJob,
   type Json,
   type RunSummary,
   type RuntimeEvent,
   type SurfaceSnapshotFile,
+  type WorkbenchEngineCase,
   type WorkbenchExecutionDagCapacity,
   type WorkbenchAdapterAuthBundle,
   type WorkbenchAdapterAuthTarget,
@@ -52,6 +57,14 @@ import {
   type WorkbenchAdapterOperation,
   type WorkbenchAdapterOperationRequest,
 } from "@workbench-ai/workbench-protocol";
+import {
+  builtinLocalTraceAdapter,
+  builtinLocalTraceAdapters,
+  sortLocalTraceRefs,
+  type AgentReadableTraceDigest,
+  type LocalTraceAdapter,
+  type LocalTraceRef,
+} from "@workbench-ai/workbench-built-in-adapters/local-traces";
 
 import {
   commandUsage,
@@ -66,17 +79,19 @@ import {
   type InitSubjectKind,
 } from "./init-scaffold.js";
 import {
-  builtinAdapterManifests,
+  defaultAdapterManifests,
   composeRuntimeDockerfileWithAdapters,
-  resolveBuiltinWorkbenchAdapter,
+  resolveDefaultWorkbenchAdapter,
   resolveProjectAdapterSource,
   resolveWorkbenchAdaptersForProject,
   WORKBENCH_ADAPTER_MANIFEST_FILE,
   type ResolvedWorkbenchAdapter,
 } from "./adapter-project.js";
+import { createAdapterCommandEnv } from "./adapter-command-env.js";
 import {
   appendLocalRun,
   loadLocalArchive,
+  loadLocalArchiveIndex,
   materializeSubjectRoot,
   readLocalSubject,
   readLocalSubjectFiles,
@@ -134,13 +149,6 @@ interface WorkbenchOrigin {
   linkedAt: string;
 }
 
-interface HostedForkRef {
-  projectId?: string;
-  ownerUsername?: string;
-  benchmarkName?: string;
-  sourceRevisionId?: string;
-}
-
 interface CliRuntimeOptions {}
 
 type HostedRunWorkflow = "eval" | "improve";
@@ -154,6 +162,16 @@ function getCliVersion(): string {
 
 interface HostedTarget {
   projectId: string;
+  owner?: string;
+  projectName?: string;
+  dir: string;
+  baseUrl: string;
+  origin?: WorkbenchOrigin | null;
+}
+
+interface HostedDryRunTarget {
+  projectRef: string;
+  projectId?: string;
   owner?: string;
   projectName?: string;
   dir: string;
@@ -175,9 +193,7 @@ interface HostedProjectSummary {
 
 interface WorkbenchResourceUrls {
   benchmark: string;
-  run?: string;
   subjectEvaluation?: string;
-  traces?: string;
 }
 
 interface WorkbenchCheckPlan {
@@ -195,8 +211,8 @@ interface WorkbenchCheckPlan {
   optimizer: {
     edits: string[];
   } | null;
-  tasks: {
-    source: WorkbenchAdapterSummary;
+  engine: {
+    resolver: WorkbenchAdapterSummary;
     path: string;
     cases: number;
     files: number;
@@ -204,8 +220,7 @@ interface WorkbenchCheckPlan {
   environment: {
     dockerfile: string;
     network: {
-      egress: "none" | "allowlist" | "open";
-      allow?: string[];
+      egress: "none" | "open";
     };
     resources: {
       cpu: number;
@@ -217,7 +232,7 @@ interface WorkbenchCheckPlan {
   adapters: {
     improve: WorkbenchAdapterSummary | null;
     run: WorkbenchAdapterSummary;
-    score: WorkbenchAdapterSummary;
+    engine: WorkbenchAdapterSummary;
     sources: WorkbenchAdapterSourceSummary[];
   };
 }
@@ -235,8 +250,8 @@ interface WorkbenchAdapterSourceSummary {
   kind: string;
   declaredSource: string;
   resolvedSource: string;
-  stability: "builtin" | "local" | "pinned" | "floating";
-  overridesBuiltin?: boolean;
+  stability: "default" | "local" | "pinned" | "floating";
+  overridesDefault?: boolean;
 }
 
 type HostedFile = WorkspaceSnapshotFile;
@@ -251,9 +266,11 @@ interface HostedRunRecord {
   status: string;
   workflow?: HostedRunWorkflow;
   subjectId: string | null;
+  activeSubjectId?: string | null;
+  outputSubjectId?: string | null;
   jobCount?: number;
-  trialsRequested?: number;
-  trialsExecuted?: number;
+  attemptsRequested?: number;
+  attemptsExecuted?: number;
   samples?: number;
   completedJobCount?: number;
   failedJobCount?: number;
@@ -350,9 +367,6 @@ export async function runCli(
     if (argv[0] === "improve") {
       return await localRun(argv.slice(1), io, runtimeOptions);
     }
-    if (argv[0] === "checkpoint") {
-      return await localCheckpoint(argv.slice(1), io);
-    }
     if (argv[0] === "restore") {
       return await localRestore(argv.slice(1), io);
     }
@@ -364,6 +378,9 @@ export async function runCli(
     }
     if (argv[0] === "adapters") {
       return await runAdaptersCommand(argv.slice(1), io);
+    }
+    if (argv[0] === "traces") {
+      return await runTracesCommand(argv.slice(1), io);
     }
     if (argv[0] === "cloud") {
       return await runCloudCommand(argv.slice(1), io);
@@ -397,7 +414,8 @@ export async function runCli(
         `${JSON.stringify({ ok: false, error: message }, null, 2)}\n`,
       );
     } else {
-      io.stderr.write(`${message}\n\n${rootUsage}\n`);
+      const usage = commandUsage(commandPathForHelp(argv)) ?? rootUsage;
+      io.stderr.write(`${message}\n\n${usage}\n`);
     }
     return error instanceof UsageError || error instanceof WorkspaceSnapshotError ? 2 : 1;
   }
@@ -410,8 +428,17 @@ function commandPathForHelp(argv: readonly string[]): string {
   if (positionals[0] === "cloud") {
     return positionals.slice(0, 3).join(" ");
   }
-  if (positionals[0] === "adapters" && positionals[1] === "test") {
-    return "adapters test";
+  if (
+    positionals[0] === "adapters" &&
+    ["create", "list", "inspect", "test"].includes(positionals[1] ?? "")
+  ) {
+    return positionals.slice(0, 2).join(" ");
+  }
+  if (
+    positionals[0] === "traces" &&
+    ["collect", "list", "show"].includes(positionals[1] ?? "")
+  ) {
+    return positionals.slice(0, 2).join(" ");
   }
   if (positionals[0] === "auth" || positionals[0] === "remote") {
     return positionals.slice(0, 2).join(" ");
@@ -448,8 +475,6 @@ async function runCloudCommand(
       return await runWatch(rest, io);
     case "logs":
       return await runLogs(rest, io);
-    case "fork":
-      return await forkProject(rest, io);
     case "star":
       return await starProject(rest, io, true);
     case "unstar":
@@ -501,21 +526,29 @@ async function localDevOpen(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "host", "port", "no-open", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "host", "port", "run", "no-open", "json"]));
   if (parsed.positionals.length > 1) {
     throw new UsageError("workbench open accepts at most one source file or directory argument.");
   }
   const workspace = resolveSourceDir(parsed);
   const host = readOptionalStringFlag(parsed.flags.host, "host") ?? "127.0.0.1";
   const port = parsePortFlag(parsed.flags.port);
+  const requestedRunId = asOptionalString(parsed.flags.run);
+  const snapshot = await loadLocalArchiveIndex(workspace);
+  const latestRunId = snapshot.runs.at(-1)?.id ?? null;
+  const runId = requestedRunId ?? latestRunId;
+  if (requestedRunId && !snapshot.runs.some((run) => run.id === requestedRunId)) {
+    throw new UsageError(`Run not found: ${requestedRunId}`);
+  }
   const server = await startLocalWorkbenchDevServer({
     workspace,
     host,
     port,
   });
+  const url = localDevOpenUrl(server.url, snapshot, runId);
   const result = {
     ok: true,
-    url: server.url,
+    url,
     workspaceRoot: path.resolve(workspace),
     note: LOCAL_DEV_OPEN_LIFECYCLE_NOTE,
   };
@@ -527,7 +560,7 @@ async function localDevOpen(
       `Workbench open: ${value.url}\nWorkspace: ${value.workspaceRoot}\n${value.note}`,
   );
   if (parsed.flags["no-open"] !== true) {
-    await openBrowser(server.url).catch(() => undefined);
+    await openBrowser(url).catch(() => undefined);
   }
   await waitForDevOpenShutdown(server);
   return 0;
@@ -558,7 +591,6 @@ async function localInit(argv: readonly string[], io: CliIo): Promise<number> {
     parsed,
     new Set([
       "skill",
-      "pipeline",
       "command",
       "agent",
       "from",
@@ -668,11 +700,11 @@ function buildWorkbenchCheckPlan(source: LocalProjectSource): WorkbenchCheckPlan
           edits: [...source.spec.optimizer.edits],
         }
       : null,
-    tasks: {
-      source: adapterSummary(source.taskSource),
-      path: source.taskFingerprintPath,
-      cases: source.taskIds.length,
-      files: source.taskSourceFiles.length,
+    engine: {
+      resolver: adapterSummary(source.engineResolve),
+      path: source.engineResolveFingerprintPath,
+      cases: source.caseIds.length,
+      files: source.engineResolveFiles.length,
     },
     environment: {
       dockerfile: source.dockerfilePath,
@@ -682,7 +714,7 @@ function buildWorkbenchCheckPlan(source: LocalProjectSource): WorkbenchCheckPlan
     adapters: {
       improve: source.spec.improve ? adapterSummary(source.spec.improve) : null,
       run: adapterSummary(source.spec.run),
-      score: adapterSummary(source.spec.score),
+      engine: adapterSummary(source.spec.engineRun),
       sources: source.adapters.map(adapterSourceSummary),
     },
   };
@@ -695,9 +727,7 @@ function formatWorkbenchCheckPlan(
   const edits = plan.optimizer?.edits.length
     ? plan.optimizer.edits.join(", ")
     : "-";
-  const network = plan.environment.network.egress === "allowlist"
-    ? `allowlist (${plan.environment.network.allow?.join(", ") ?? ""})`
-    : plan.environment.network.egress;
+  const network = plan.environment.network.egress;
   const resources = plan.environment.resources;
   return [
     `Spec is valid${warningSuffix}.`,
@@ -706,9 +736,9 @@ function formatWorkbenchCheckPlan(
     `Source: ${plan.source.files} file(s) (${plan.source.yaml.join(", ")}, ${plan.source.dockerfile})`,
     `Subject files: ${plan.subject.filesPath} (${plan.subject.files} file(s))`,
     `Optimizer edits: ${edits}`,
-    `Tasks: ${plan.tasks.cases} case(s) from ${formatAdapterSummary(plan.tasks.source)} at ${plan.tasks.path} (${plan.tasks.files} file(s))`,
+    `Engine cases: ${plan.engine.cases} case(s) from ${formatAdapterSummary(plan.engine.resolver)} at ${plan.engine.path} (${plan.engine.files} file(s))`,
     `Environment: ${plan.environment.dockerfile}, network ${network}, ${resources.cpu} CPU, ${resources.memoryGb}GB RAM, ${resources.timeoutMinutes}m timeout`,
-    `Execution: improve ${plan.adapters.improve ? formatAdapterSummary(plan.adapters.improve) : "not configured"}, run ${formatAdapterSummary(plan.adapters.run)}, score ${formatAdapterSummary(plan.adapters.score)}`,
+    `Execution: improve ${plan.adapters.improve ? formatAdapterSummary(plan.adapters.improve) : "not configured"}, subject ${formatAdapterSummary(plan.adapters.run)}, engine ${formatAdapterSummary(plan.adapters.engine)}`,
     ...adapterSourceLines(plan.adapters.sources),
   ].join("\n");
 }
@@ -752,12 +782,12 @@ function adapterSourceSummary(adapter: ResolvedWorkbenchAdapter): WorkbenchAdapt
     declaredSource: adapter.declaredSource,
     resolvedSource: adapter.source,
     stability: adapter.stability,
-    ...(adapter.overridesBuiltin ? { overridesBuiltin: true } : {}),
+    ...(adapter.overridesDefault ? { overridesDefault: true } : {}),
   };
 }
 
 function adapterSourceLines(sources: readonly WorkbenchAdapterSourceSummary[]): string[] {
-  const external = sources.filter((source) => source.kind !== "builtin");
+  const external = sources.filter((source) => source.kind !== "default");
   if (external.length === 0) {
     return [];
   }
@@ -767,7 +797,7 @@ function adapterSourceLines(sources: readonly WorkbenchAdapterSourceSummary[]): 
 }
 
 function formatAdapterSourceSummary(source: WorkbenchAdapterSourceSummary): string {
-  const override = source.overridesBuiltin ? " overrides built-in" : "";
+  const override = source.overridesDefault ? " overrides default" : "";
   return `${source.id} ${source.stability}${override} ${formatAdapterResolution(source)}`;
 }
 
@@ -787,19 +817,7 @@ function truncateCommand(command: string): string {
 
 function runtimeNetworkSummary(configValue: unknown): WorkbenchCheckPlan["environment"]["network"] {
   const network = readRecord(configValue) ?? {};
-  const egress = network.egress === "none" || network.egress === "allowlist"
-    ? network.egress
-    : "open";
-  if (egress !== "allowlist") {
-    return { egress };
-  }
-  const allow = Array.isArray(network.allow)
-    ? network.allow.flatMap((entry) => typeof entry === "string" ? [entry] : [])
-    : [];
-  return {
-    egress,
-    allow,
-  };
+  return { egress: network.egress === "none" ? "none" : "open" };
 }
 
 function runtimeResourceSummary(configValue: unknown): WorkbenchCheckPlan["environment"]["resources"] {
@@ -830,6 +848,8 @@ async function localRun(
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "optimizer", "from", "budget", "samples", "json"]));
+  const budget = parsePositiveInt(parsed.flags.budget, 1, "budget");
+  const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
   const sourceArg = resolveSourceDir(parsed);
   const projectSource = await readLocalProjectSource(sourceArg, {
     optimizerPath: asOptionalString(parsed.flags.optimizer),
@@ -840,13 +860,11 @@ async function localRun(
   }
   const executionProject = await resolveLocalProjectForExecution(workspace, projectSource.specSource);
   const { spec, adapterManifests } = executionProject;
-  const budget = parsePositiveInt(parsed.flags.budget, 1, "budget");
-  const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
-  const taskSourceFiles = normalizeSurfaceFiles(projectSource.taskSourceFiles);
-  const taskBundles = projectSource.taskBundles;
-  const caseIds = taskBundles.map((bundle) => bundle.id);
+  const engineResolveFiles = normalizeSurfaceFiles(projectSource.engineResolveFiles);
+  const engineCases = projectSource.engineCases;
+  const caseIds = engineCases.map((bundle) => bundle.id);
   if (caseIds.length === 0) {
-    throw new UsageError("Task source must emit at least one task bundle.");
+    throw new UsageError("Engine resolver must emit at least one case.");
   }
   requireValidRunEnvelope({
     workflow: "improve",
@@ -854,9 +872,10 @@ async function localRun(
     samples,
     caseCount: caseIds.length,
   });
-  const environmentRef = await ensureLocalDockerfileEnvironment(
+  const environmentRefs = await ensureLocalDockerfileEnvironments(
     workspace,
     spec,
+    engineCases,
   );
   const benchmarkFingerprint = await readLocalBenchmarkFingerprint(workspace);
   const runId = `run_local_${Date.now().toString(36)}`;
@@ -887,8 +906,8 @@ async function localRun(
   ];
   const devCapacity = await localDevelopmentCapacity(workspace);
   const runTraceJobs: HostedWorkbenchJob[] = [];
-  const trials = budget;
-  for (let trialIndex = 0; trialIndex < trials; trialIndex += 1) {
+  const attempts = budget;
+  for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
     snapshot = await loadLocalArchive(workspace);
     const activeSubject = readLocalSubject(snapshot, currentBaseId);
     const baseFiles = filterSubjectSourceFiles(
@@ -899,73 +918,78 @@ async function localRun(
         "Subject snapshot must include at least one file.",
       );
     }
-    const proposalTraceFiles = createProposalTraceInputFiles({
-      runId,
-      jobs: runTraceJobs,
-      events,
-    });
-    const subjectId = `subject_${runId.replace(/^run_/u, "")}_${String(trialIndex + 1).padStart(3, "0")}`;
-    const plannedProposal = planWorkbenchExecutionJobsForPurpose({
+    const subjectRevisionTraceFiles = [
+      ...createSubjectEvaluationTraceInputFiles({ subject: activeSubject }),
+      ...createSubjectRevisionTraceInputFiles({
+        runId,
+        jobs: runTraceJobs,
+        events,
+      }),
+    ];
+    const subjectId = `subject_${runId.replace(/^run_/u, "")}_${String(attemptIndex + 1).padStart(3, "0")}`;
+    const plannedSubjectRevision = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "local",
       projectId: "local",
       runId,
       subjectId,
-      trialIndex,
+      attemptIndex,
       samples,
       caseIds,
-      taskBundles,
+      engineCases,
       spec,
       workflow: "improve",
       purpose: "improve",
       now: new Date().toISOString(),
       baseFiles,
-      traceFiles: proposalTraceFiles,
-      environmentRef,
+      traceFiles: subjectRevisionTraceFiles,
+      ...(environmentRefs.defaultRef ? { environmentRef: environmentRefs.defaultRef } : {}),
       baseId: activeSubject.id,
     })[0]!;
-    const proposalJobs = await executeLocalDevelopmentDag({
-      jobs: [plannedProposal],
+    const subjectRevisionJobs = await executeLocalDevelopmentDag({
+      jobs: [plannedSubjectRevision],
       spec,
       adapterManifests,
+      adapterFiles: normalizeSurfaceFiles(projectSource.adapterFiles),
       baseFiles,
-      taskSourceFiles,
-      taskBundles,
-      traceFiles: proposalTraceFiles,
+      engineResolveFiles,
+      engineCases,
+      traceFiles: subjectRevisionTraceFiles,
       capacity: devCapacity,
     });
-    const proposed = proposalJobs[0]!;
-    const completedJobs: HostedWorkbenchJob[] = [proposed];
-    if (proposed.status === "succeeded") {
-      const proposedFiles =
-        completedJobOutputFiles(proposed).length > 0
+    const subjectRevision = subjectRevisionJobs[0]!;
+    const completedJobs: HostedWorkbenchJob[] = [subjectRevision];
+    if (subjectRevision.status === "succeeded") {
+      const subjectRevisionFiles =
+        completedJobOutputFiles(subjectRevision).length > 0
           ? normalizeSurfaceFiles(
-              completedJobOutputFiles(proposed).filter(
+              completedJobOutputFiles(subjectRevision).filter(
                 (file) => !file.path.startsWith(".workbench/"),
               ),
             )
           : baseFiles;
-      const trialJobs = planWorkbenchExecutionJobsForPurpose({
+      const attemptJobs = planWorkbenchExecutionJobsForPurpose({
         ownerUserId: "local",
         projectId: "local",
         runId,
         subjectId,
-        trialIndex,
+        attemptIndex,
         samples,
         now: new Date().toISOString(),
         caseIds,
-        taskBundles,
+        engineCases,
         spec,
-        environmentRef,
+        environmentRefsByCase: environmentRefs.byCase,
         workflow: "improve",
-        purpose: "trial",
+        purpose: "attempt",
       });
       const dagJobs = await executeLocalDevelopmentDag({
-        jobs: [proposed, ...trialJobs],
+        jobs: [subjectRevision, ...attemptJobs],
         spec,
         adapterManifests,
-        baseFiles: proposedFiles,
-        taskSourceFiles,
-        taskBundles,
+        adapterFiles: normalizeSurfaceFiles(projectSource.adapterFiles),
+        baseFiles: subjectRevisionFiles,
+        engineResolveFiles,
+        engineCases,
         capacity: devCapacity,
       });
       completedJobs.splice(0, completedJobs.length, ...dagJobs);
@@ -1037,14 +1061,13 @@ async function localRun(
     finishedAt,
     durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
     optimizer: formatSpecOptimizer(spec),
-	    score: spec.score.use,
+    engineRun: spec.engineRun.use,
     strategy: "greedy",
     budget,
     repairBudget: 0,
-    trialsRequested: budget,
-    trialsExecuted: budget,
+    attemptsRequested: budget,
+    attemptsExecuted: budget,
     samples,
-    sampleConcurrency: 1,
     stoppedReason: "budget_exhausted",
     outcome: failedJobCount > 0 ? "error" : "ok",
   };
@@ -1053,7 +1076,7 @@ async function localRun(
       runId,
       detail: {
         outcome: run.outcome ?? null,
-        trialsExecuted: run.trialsExecuted,
+        attemptsExecuted: run.attemptsExecuted,
         durationMs: run.durationMs ?? null,
       },
     }),
@@ -1071,7 +1094,7 @@ async function localRun(
     completedJobCount,
     failedJobCount,
     failedJobs,
-    localView: localDevViewHint(workspace),
+    localView: localDevViewHint(workspace, runId),
   };
   writeOutput(result, parsed, io, () => {
     const metricValue =
@@ -1179,17 +1202,17 @@ async function localEvaluateSubject(
   void runtimeOptions;
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "subject", "samples", "json"]));
+  const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
   const sourceArg = resolveSourceDir(parsed);
   const projectSource = await readLocalProjectSource(sourceArg);
   const workspace = projectSource.dir;
   const executionProject = await resolveLocalProjectForExecution(workspace, projectSource.specSource);
   const { spec, adapterManifests } = executionProject;
-  const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
-  const taskSourceFiles = normalizeSurfaceFiles(projectSource.taskSourceFiles);
-  const taskBundles = projectSource.taskBundles;
-  const caseIds = taskBundles.map((bundle) => bundle.id);
+  const engineResolveFiles = normalizeSurfaceFiles(projectSource.engineResolveFiles);
+  const engineCases = projectSource.engineCases;
+  const caseIds = engineCases.map((bundle) => bundle.id);
   if (caseIds.length === 0) {
-    throw new UsageError("Task source must emit at least one task bundle.");
+    throw new UsageError("Engine resolver must emit at least one case.");
   }
   requireValidRunEnvelope({
     workflow: "eval",
@@ -1197,9 +1220,10 @@ async function localEvaluateSubject(
     samples,
     caseCount: caseIds.length,
   });
-  const environmentRef = await ensureLocalDockerfileEnvironment(
+  const environmentRefs = await ensureLocalDockerfileEnvironments(
     workspace,
     spec,
+    engineCases,
   );
   let snapshot = await loadLocalArchive(workspace);
   const benchmarkFingerprint = await readLocalBenchmarkFingerprint(workspace);
@@ -1219,39 +1243,40 @@ async function localEvaluateSubject(
   const runId = `eval_local_${Date.now().toString(36)}`;
   const evaluatedSubjectId = subjectId;
   const startedAt = new Date().toISOString();
-  const proposal = createRuntimeSyntheticProposalJob({
+  const baseline = createRuntimeBaselineSubjectJob({
     ownerUserId: "local",
     projectId: "local",
     runId,
     subjectId: evaluatedSubjectId,
-    trialIndex: 0,
+    attemptIndex: 0,
     files,
     now: startedAt,
     baseId: null,
   });
-  const completedJobs: HostedWorkbenchJob[] = [proposal];
-  const trialJobs = planWorkbenchExecutionJobsForPurpose({
+  const completedJobs: HostedWorkbenchJob[] = [baseline];
+  const attemptJobs = planWorkbenchExecutionJobsForPurpose({
     ownerUserId: "local",
     projectId: "local",
     runId,
     subjectId: evaluatedSubjectId,
-    trialIndex: 0,
+    attemptIndex: 0,
     samples,
     now: startedAt,
     caseIds,
-    taskBundles,
+    engineCases,
     spec,
-    environmentRef,
+    environmentRefsByCase: environmentRefs.byCase,
     workflow: "eval",
-    purpose: "trial",
+    purpose: "attempt",
   });
   const dagJobs = await executeLocalDevelopmentDag({
-    jobs: [proposal, ...trialJobs],
+    jobs: [baseline, ...attemptJobs],
     spec,
     adapterManifests,
+    adapterFiles: normalizeSurfaceFiles(projectSource.adapterFiles),
     baseFiles: files,
-    taskSourceFiles,
-    taskBundles,
+    engineResolveFiles,
+    engineCases,
     capacity: await localDevelopmentCapacity(workspace),
   });
   completedJobs.splice(0, completedJobs.length, ...dagJobs);
@@ -1293,14 +1318,13 @@ async function localEvaluateSubject(
     finishedAt,
     durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
     optimizer: "none",
-	    score: spec.score.use,
+    engineRun: spec.engineRun.use,
     strategy: "direct",
     budget: 1,
     repairBudget: 0,
-    trialsRequested: 1,
-    trialsExecuted: 1,
+    attemptsRequested: 1,
+    attemptsExecuted: 1,
     samples,
-    sampleConcurrency: 1,
     stoppedReason: "completed",
     outcome: materialized.failedJobCount > 0 ? "error" : "ok",
   }, []);
@@ -1309,28 +1333,58 @@ async function localEvaluateSubject(
   const evaluation = materialized.evaluations[0] ?? null;
   const result = {
     ok: materialized.failedJobCount === 0,
+    runId,
     evaluation,
-    resultId: evaluation?.id ?? null,
+    evaluationId: evaluation?.id ?? null,
     subjectId: evaluatedSubjectId,
     completedJobCount: materialized.completedJobCount,
     failedJobCount: materialized.failedJobCount,
-    localView: localDevViewHint(workspace),
+    localView: localDevViewHint(workspace, runId),
   };
   writeOutput(
     result,
     parsed,
     io,
-    ({ resultId, subjectId: evaluatedSubjectId }) =>
-      `Evaluation ${resultId ?? runId} finished for ${evaluatedSubjectId}.\nOpen local view: ${result.localView.command}\n${result.localView.note}`,
+    ({ evaluationId, subjectId: evaluatedSubjectId }) =>
+      `Evaluation ${evaluationId ?? runId} finished for ${evaluatedSubjectId}.\nOpen local view: ${result.localView.command}\n${result.localView.note}`,
   );
   return materialized.failedJobCount === 0 ? 0 : 1;
 }
 
-function localDevViewHint(workspace: string): LocalDevViewHint {
+function localDevViewHint(workspace: string, runId?: string | null): LocalDevViewHint {
+  const runFlag = runId ? ` --run ${shellQuote(runId)}` : "";
   return {
-    command: `workbench open --dir ${shellQuote(path.resolve(workspace))}`,
+    command: `workbench open --dir ${shellQuote(path.resolve(workspace))}${runFlag}`,
     note: LOCAL_DEV_OPEN_LIFECYCLE_NOTE,
   };
+}
+
+function localDevOpenUrl(
+  baseUrl: string,
+  snapshot: {
+    evaluations: Array<{
+      id: string;
+      runId: string;
+      subjectId: string;
+    }>;
+  },
+  runId?: string | null,
+): string {
+  if (!runId) {
+    return baseUrl;
+  }
+  const evaluation = snapshot.evaluations
+    .slice()
+    .reverse()
+    .find((entry) => entry.runId === runId);
+  if (!evaluation) {
+    return new URL("subjects", baseUrl).toString();
+  }
+  const params = new URLSearchParams({ evaluation: evaluation.id });
+  return new URL(
+    `subjects/${encodeURIComponent(evaluation.subjectId)}?${params.toString()}`,
+    baseUrl,
+  ).toString();
 }
 
 async function readLocalBenchmarkFingerprint(workspace: string): Promise<string> {
@@ -1357,34 +1411,6 @@ function authoredBenchmarkSourceFiles(projectSource: LocalProjectSource): Surfac
   }];
 }
 
-function checkpointSubjectFingerprint(files: readonly SurfaceSnapshotFile[]): string {
-  const hash = createHash("sha256");
-  hash.update("workbench-checkpoint-subject-v1\0");
-  hashSurfaceFiles(hash, files);
-  return hash.digest("hex");
-}
-
-function hashSurfaceFiles(
-  hash: ReturnType<typeof createHash>,
-  files: readonly {
-    path: string;
-    content: string;
-    encoding?: "utf8" | "base64";
-    executable?: boolean;
-  }[],
-): void {
-  for (const file of files.slice().sort((left, right) => left.path.localeCompare(right.path))) {
-    hash.update("\0file\0");
-    hash.update(file.path);
-    hash.update("\0");
-    hash.update(file.encoding ?? "utf8");
-    hash.update("\0");
-    hash.update(file.content);
-    hash.update("\0");
-    hash.update(file.executable ? "1" : "0");
-  }
-}
-
 function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, "'\\''")}'`;
 }
@@ -1406,9 +1432,10 @@ async function executeLocalDevelopmentDag(args: {
   jobs: readonly HostedWorkbenchJob[];
   spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>;
   adapterManifests: readonly ResolvedWorkbenchAdapter["manifest"][];
+  adapterFiles?: readonly SurfaceSnapshotFile[];
   baseFiles: readonly SurfaceSnapshotFile[];
-  taskSourceFiles: readonly SurfaceSnapshotFile[];
-  taskBundles: WorkbenchExecutionRuntimeInput["taskBundles"];
+  engineResolveFiles: readonly SurfaceSnapshotFile[];
+  engineCases: WorkbenchExecutionRuntimeInput["engineCases"];
   traceFiles?: readonly SurfaceSnapshotFile[];
   capacity: WorkbenchExecutionDagCapacity;
 }): Promise<HostedWorkbenchJob[]> {
@@ -1420,18 +1447,19 @@ async function executeLocalDevelopmentDag(args: {
   const result = await runWorkbenchExecutionDag({
     jobs: args.jobs,
     capacity: args.capacity,
-	    sandboxProvider: DOCKER_SANDBOX_BACKEND,
-	    executeJob: async (job) => {
-	      return await executeLocalDevelopmentJob({
-	        job,
-	        spec: args.spec,
-	        adapterManifests: args.adapterManifests,
-	        baseFiles: args.baseFiles,
-	        taskSourceFiles: args.taskSourceFiles,
-        taskBundles: args.taskBundles,
-	        ...(args.traceFiles ? { traceFiles: args.traceFiles } : {}),
-	      });
-	    },
+    sandboxProvider: DOCKER_SANDBOX_BACKEND,
+    executeJob: async (job) => {
+      return await executeLocalDevelopmentJob({
+        job,
+        spec: args.spec,
+        adapterManifests: args.adapterManifests,
+        ...(args.adapterFiles ? { adapterFiles: args.adapterFiles } : {}),
+        baseFiles: args.baseFiles,
+        engineResolveFiles: args.engineResolveFiles,
+        engineCases: args.engineCases,
+        ...(args.traceFiles ? { traceFiles: args.traceFiles } : {}),
+      });
+    },
     onJobFinished: (job) => {
       completedById.set(job.id, job);
     },
@@ -1485,13 +1513,44 @@ function isTerminalLocalJob(job: HostedWorkbenchJob): boolean {
   return job.status === "succeeded" || job.status === "failed" || job.status === "cancelled";
 }
 
+async function ensureLocalDockerfileEnvironments(
+  workspace: string,
+  spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
+  engineCases: readonly WorkbenchEngineCase[],
+): Promise<{ defaultRef: string; byCase: Map<string, string> }> {
+  const cache = new Map<string, Promise<string>>();
+  const ensure = (runtime: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>["environment"]) => {
+    const key = runtime.dockerfile;
+    const existing = cache.get(key);
+    if (existing) {
+      return existing;
+    }
+    const pending = ensureLocalDockerfileEnvironment(workspace, spec, runtime);
+    cache.set(key, pending);
+    return pending;
+  };
+  const defaultRef = await ensure(spec.environment);
+  const byCase = new Map<string, string>();
+  for (const engineCase of engineCases) {
+    const runtime = resolveEngineCaseExecutionConfig({
+      spec,
+      engineCase: engineCase.case,
+    }).environment;
+    byCase.set(engineCase.id, await ensure(runtime));
+  }
+  return { defaultRef, byCase };
+}
+
 async function ensureLocalDockerfileEnvironment(
   workspace: string,
   spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
-): Promise<string | undefined> {
-  const dockerfilePath = readWorkbenchSpecDockerfilePath(spec);
+  runtime: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>["environment"],
+): Promise<string> {
+  const dockerfilePath = runtime.dockerfile;
   const absoluteDockerfile = resolveProjectPath(workspace, dockerfilePath);
-  const rawDockerfile = await fs.readFile(absoluteDockerfile, "utf8");
+  const rawDockerfile = await fs.readFile(absoluteDockerfile, "utf8").catch((error: unknown) => {
+    throw error;
+  });
   const adapters = await resolveWorkbenchAdaptersForProject(workspace, spec);
   const dockerfile = await composeRuntimeDockerfileWithAdapters(
     rawDockerfile,
@@ -1532,21 +1591,52 @@ async function spawnOutput(
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, [...args], {
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout = appendProcessOutput(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = appendProcessOutput(stderr, chunk);
     });
     child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("close", (code, signal) => {
       if (code === 0) {
         resolve();
       } else {
+        const output = formatProcessOutput({ stdout, stderr });
         reject(
           new Error(
-            `${command} ${args.join(" ")} exited with status ${code ?? "unknown"}.`,
+            `${command} ${args.join(" ")} exited with status ${code ?? signal ?? "unknown"}.${output}`,
           ),
         );
       }
     });
   });
+}
+
+const PROCESS_OUTPUT_TAIL_CHARS = 16_000;
+
+function appendProcessOutput(current: string, chunk: unknown): string {
+  const next = current + String(chunk);
+  return next.length > PROCESS_OUTPUT_TAIL_CHARS
+    ? next.slice(next.length - PROCESS_OUTPUT_TAIL_CHARS)
+    : next;
+}
+
+function formatProcessOutput(args: { stdout: string; stderr: string }): string {
+  const sections: string[] = [];
+  const stderr = args.stderr.trim();
+  const stdout = args.stdout.trim();
+  if (stderr.length > 0) {
+    sections.push(`stderr:\n${stderr}`);
+  }
+  if (stdout.length > 0) {
+    sections.push(`stdout:\n${stdout}`);
+  }
+  return sections.length > 0 ? `\n${sections.join("\n")}` : "";
 }
 
 function safeDockerTagSegment(value: string): string {
@@ -1565,53 +1655,6 @@ function requireValidRunEnvelope(
   if (issue) {
     throw new UsageError(issue);
   }
-}
-
-async function localCheckpoint(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  const workspace = resolveDir(parsed);
-  const projectSource = await readLocalProjectSource(workspace);
-  const spec = projectSource.spec;
-  const subjectRoot = spec.subject.files.path;
-  let snapshot = await loadLocalArchive(workspace);
-  const previous = snapshot.activeId
-    ? readLocalSubject(snapshot, snapshot.activeId)
-    : null;
-  const files = normalizeSurfaceFiles(
-    await readSnapshotFiles(resolveProjectPath(workspace, subjectRoot)),
-  );
-  const now = new Date().toISOString();
-  const subject: SubjectRecord = {
-    id: `chk_${Date.now().toString(36)}`,
-    ordinal: snapshot.subjects.length,
-    benchmarkFingerprint: await readLocalBenchmarkFingerprint(workspace),
-    subjectFingerprint: checkpointSubjectFingerprint(files),
-    createdAt: now,
-    ...(previous ? { baseId: previous.id } : {}),
-    referenceIds: [],
-    status: "checkpointed",
-    fileChanges: files.map((file) => file.path),
-  };
-  snapshot = upsertLocalSubject(snapshot, subject, files);
-  snapshot = setLocalActive(snapshot, subject.id);
-  await saveLocalArchive(workspace, snapshot);
-  writeOutput(
-    {
-      ok: true,
-      activeBefore: previous?.id ?? null,
-      activeAfter: subject.id,
-      changedPaths: subject.fileChanges,
-    },
-    parsed,
-    io,
-    () =>
-      `Checkpointed ${subject.id} with ${subject.fileChanges.length} file(s).`,
-  );
-  return 0;
 }
 
 async function localRestore(
@@ -1772,7 +1815,7 @@ async function localRunList(
     (runs) =>
       runs
         .map((run) =>
-          `${run.id}\t${run.workflow}\t${run.status}\t${run.outcome ?? "pending"}\t${run.trialsExecuted ?? 0}/${run.trialsRequested ?? 0}`
+          `${run.id}\t${run.workflow}\t${run.status}\t${run.outcome ?? "pending"}\t${run.attemptsExecuted ?? 0}/${run.attemptsRequested ?? 0}`
         )
         .join("\n") || "No runs.",
   );
@@ -1804,7 +1847,7 @@ async function localRunShow(
         `outcome\t${record.outcome ?? "pending"}`,
         `started\t${record.startedAt}`,
         ...(record.finishedAt ? [`finished\t${record.finishedAt}`] : []),
-        `trials\t${record.trialsExecuted ?? 0}/${record.trialsRequested ?? 0}`,
+        `attempts\t${record.attemptsExecuted ?? 0}/${record.attemptsRequested ?? 0}`,
         `samples\t${record.samples ?? 0}`,
       ].join("\n"),
   );
@@ -1845,6 +1888,289 @@ async function runAdaptersCommand(
     default:
       throw new UsageError(`Unknown command: adapters ${argv.join(" ")}`);
   }
+}
+
+async function runTracesCommand(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const command = argv[0];
+  const rest = argv.slice(1);
+  switch (command) {
+    case "collect":
+      return await localTraceCollect(rest, io);
+    case "list":
+      return await localTraceList(rest, io);
+    case "show":
+      return await localTraceShow(rest, io);
+    default:
+      throw new UsageError(`Unknown command: traces ${argv.join(" ")}`);
+  }
+}
+
+interface LocalTraceQuery {
+  selectedAdapters: LocalTraceAdapter[];
+  adapterById: Map<string, LocalTraceAdapter>;
+  workspaceRoot?: string;
+  since?: Date;
+}
+
+interface LocalTraceWindowQuery extends LocalTraceQuery {
+  limit: number;
+}
+
+interface LocalTraceSelection {
+  refs: LocalTraceRef[];
+  adapterById: Map<string, LocalTraceAdapter>;
+  limitPerProvider: number;
+  limitedProviders: string[];
+}
+
+interface LocalTraceCollectionSummary {
+  ok: true;
+  traceCount: number;
+  limitPerProvider: number;
+  limitedProviders: string[];
+  providers: Record<string, number>;
+  traces: AgentReadableTraceDigest[];
+}
+
+interface LocalTraceArtifactPreview {
+  tools: string[];
+  commands: string[];
+  files: string[];
+  urls: string[];
+  errors: string[];
+}
+
+interface LocalTraceListItem {
+  provider: string;
+  traceId: string;
+  source: AgentReadableTraceDigest["source"];
+  sessionId?: string;
+  title?: string;
+  workspaceRoot?: string;
+  startedAt?: string;
+  endedAt?: string;
+  updatedAt?: string;
+  goal?: string;
+  counts: AgentReadableTraceDigest["counts"];
+  artifacts: LocalTraceArtifactPreview;
+}
+
+interface LocalTraceListSummary {
+  ok: true;
+  traceCount: number;
+  limitPerProvider: number;
+  limitedProviders: string[];
+  providers: Record<string, number>;
+  traces: LocalTraceListItem[];
+}
+
+interface LocalTraceShowSummary {
+  ok: true;
+  trace: AgentReadableTraceDigest;
+}
+
+const DEFAULT_LOCAL_TRACE_LIMIT = 3;
+const LOCAL_TRACE_WINDOW_FLAGS = new Set(["providers", "since", "workspace", "limit", "json"]);
+const LOCAL_TRACE_SHOW_FLAGS = new Set(["providers", "since", "workspace", "json"]);
+
+async function localTraceCollect(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, LOCAL_TRACE_WINDOW_FLAGS);
+  rejectUnexpectedPositionals(parsed, "workbench traces collect", 0);
+  const selection = await discoverLocalTraceSelection(readLocalTraceWindowQuery(parsed));
+  const traces = await readLocalTraceDigests(selection);
+
+  const summary: LocalTraceCollectionSummary = {
+    ok: true,
+    traceCount: traces.length,
+    limitPerProvider: selection.limitPerProvider,
+    limitedProviders: selection.limitedProviders,
+    providers: countLocalTraceProviders(traces),
+    traces,
+  };
+  writeOutput(summary, parsed, io, formatLocalTraceCollectionSummary);
+  return 0;
+}
+
+async function localTraceList(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, LOCAL_TRACE_WINDOW_FLAGS);
+  rejectUnexpectedPositionals(parsed, "workbench traces list", 0);
+  const selection = await discoverLocalTraceSelection(readLocalTraceWindowQuery(parsed));
+  const traces = await readLocalTraceDigests(selection);
+  const items = traces.map(localTraceListItem);
+  const summary: LocalTraceListSummary = {
+    ok: true,
+    traceCount: items.length,
+    limitPerProvider: selection.limitPerProvider,
+    limitedProviders: selection.limitedProviders,
+    providers: countLocalTraceProviders(items),
+    traces: items,
+  };
+  writeOutput(summary, parsed, io, formatLocalTraceListSummary);
+  return 0;
+}
+
+async function localTraceShow(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, LOCAL_TRACE_SHOW_FLAGS);
+  const traceId = parsed.positionals[0];
+  if (!traceId || parsed.positionals.length > 1) {
+    throw new UsageError("workbench traces show requires exactly one TRACE_ID.");
+  }
+  const query = readLocalTraceQuery(parsed);
+  const ref = (await discoverLocalTraceRefs(query, traceId))
+    .find((entry) => entry.traceId === traceId);
+  if (!ref) {
+    throw new UsageError(formatLocalTraceNotFound(traceId));
+  }
+  const trace = await readLocalTraceDigest(query, ref);
+  const summary: LocalTraceShowSummary = {
+    ok: true,
+    trace,
+  };
+  writeOutput(summary, parsed, io, formatLocalTraceShowSummary);
+  return 0;
+}
+
+function readLocalTraceQuery(parsed: ParsedArgs): LocalTraceQuery {
+  const providers = readOptionalStringFlag(parsed.flags.providers, "providers");
+  const workspace = readOptionalStringFlag(parsed.flags.workspace, "workspace");
+  const selectedAdapters = selectLocalTraceAdapters(providers);
+  const adapterById = new Map(selectedAdapters.map((adapter) => [adapter.id, adapter]));
+  const since = parseTraceSinceFlag(parsed.flags.since);
+  const workspaceRoot = workspace
+    ? path.resolve(workspace)
+    : undefined;
+  return {
+    selectedAdapters,
+    adapterById,
+    ...(workspaceRoot ? { workspaceRoot } : {}),
+    ...(since ? { since } : {}),
+  };
+}
+
+function readLocalTraceWindowQuery(parsed: ParsedArgs): LocalTraceWindowQuery {
+  return {
+    ...readLocalTraceQuery(parsed),
+    limit: parsePositiveInt(parsed.flags.limit, DEFAULT_LOCAL_TRACE_LIMIT, "limit"),
+  };
+}
+
+async function discoverLocalTraceSelection(query: LocalTraceWindowQuery): Promise<LocalTraceSelection> {
+  const discovered = await Promise.all(
+    query.selectedAdapters.map(async (adapter) => ({
+      adapter,
+      refs: await adapter.discoverLocalTraces({
+        env: process.env,
+        ...(query.workspaceRoot ? { workspaceRoot: query.workspaceRoot } : {}),
+        ...(query.since ? { since: query.since } : {}),
+        limit: query.limit + 1,
+      }),
+    })),
+  );
+  const limitedProviders: string[] = [];
+  const refs = sortLocalTraceRefs(
+    discovered.flatMap(({ adapter, refs: providerRefs }) => {
+      const sorted = sortLocalTraceRefs(providerRefs);
+      if (sorted.length > query.limit) {
+        limitedProviders.push(adapter.id);
+      }
+      return sorted.slice(0, query.limit);
+    }),
+  );
+  return {
+    refs,
+    adapterById: query.adapterById,
+    limitPerProvider: query.limit,
+    limitedProviders,
+  };
+}
+
+async function discoverLocalTraceRefs(
+  query: LocalTraceQuery,
+  traceId?: string,
+): Promise<LocalTraceRef[]> {
+  const discovered = await Promise.all(
+    query.selectedAdapters.map(async (adapter) => await adapter.discoverLocalTraces({
+      env: process.env,
+      ...(traceId ? { traceId } : {}),
+      ...(query.workspaceRoot ? { workspaceRoot: query.workspaceRoot } : {}),
+      ...(query.since ? { since: query.since } : {}),
+    })),
+  );
+  return sortLocalTraceRefs(discovered.flat());
+}
+
+async function readLocalTraceDigests(
+  selection: LocalTraceSelection,
+): Promise<AgentReadableTraceDigest[]> {
+  const traces: AgentReadableTraceDigest[] = [];
+  for (const ref of selection.refs) {
+    traces.push(await readLocalTraceDigest(selection, ref));
+  }
+  return traces;
+}
+
+async function readLocalTraceDigest(
+  query: Pick<LocalTraceQuery, "adapterById">,
+  ref: LocalTraceRef,
+): Promise<AgentReadableTraceDigest> {
+  const adapter = query.adapterById.get(ref.provider);
+  if (!adapter) {
+    throw new UsageError(`Unsupported local trace provider "${ref.provider}".`);
+  }
+  return await adapter.readLocalTraceDigest(ref, {
+    env: process.env,
+  });
+}
+
+function localTraceListItem(trace: AgentReadableTraceDigest): LocalTraceListItem {
+  return {
+    provider: trace.provider,
+    traceId: trace.traceId,
+    source: trace.source,
+    ...(trace.sessionId ? { sessionId: trace.sessionId } : {}),
+    ...(trace.title ? { title: trace.title } : {}),
+    ...(trace.workspaceRoot ? { workspaceRoot: trace.workspaceRoot } : {}),
+    ...(trace.startedAt ? { startedAt: trace.startedAt } : {}),
+    ...(trace.endedAt ? { endedAt: trace.endedAt } : {}),
+    ...(trace.updatedAt ? { updatedAt: trace.updatedAt } : {}),
+    ...(trace.goal ? { goal: trace.goal } : {}),
+    counts: trace.counts,
+    artifacts: localTraceArtifactPreview(trace),
+  };
+}
+
+function localTraceArtifactPreview(trace: AgentReadableTraceDigest): LocalTraceArtifactPreview {
+  return {
+    tools: trace.artifacts.tools.slice(0, 8),
+    commands: trace.artifacts.commands.slice(0, 5),
+    files: trace.artifacts.files.slice(0, 5),
+    urls: trace.artifacts.urls.slice(0, 3),
+    errors: trace.artifacts.errors.slice(0, 3),
+  };
+}
+
+function countLocalTraceProviders(
+  traces: readonly { provider: string }[],
+): Record<string, number> {
+  return traces.reduce<Record<string, number>>((counts, digest) => {
+    counts[digest.provider] = (counts[digest.provider] ?? 0) + 1;
+    return counts;
+  }, {});
 }
 
 async function adaptersCreate(argv: readonly string[], io: CliIo): Promise<number> {
@@ -1896,14 +2222,14 @@ async function adaptersList(argv: readonly string[], io: CliIo): Promise<number>
     ? await resolveWorkbenchAdaptersForProject(dir, projectSource.spec)
     : [];
   const projectAdaptersById = new Map(projectAdapters.map((adapter) => [adapter.manifest.id, adapter]));
-  const builtins = builtinAdapterManifests()
+  const defaults = defaultAdapterManifests()
     .filter((manifest) => !projectAdaptersById.has(manifest.id))
     .map((manifest) => ({
       id: manifest.id,
-      declaredSource: `builtin:${manifest.id}`,
-      resolvedSource: `builtin:${manifest.id}`,
-      kind: "builtin",
-      stability: "builtin",
+      declaredSource: `default:${manifest.id}`,
+      resolvedSource: `default:${manifest.id}`,
+      kind: "default",
+      stability: "default",
       installed: false,
       operations: adapterOperationCommands(manifest.operations),
     }));
@@ -1916,9 +2242,9 @@ async function adaptersList(argv: readonly string[], io: CliIo): Promise<number>
       stability: adapter.stability,
       installed: true,
       operations: adapterOperationCommands(adapter.manifest.operations),
-      ...(adapter.overridesBuiltin ? { overridesBuiltin: true } : {}),
+      ...(adapter.overridesDefault ? { overridesDefault: true } : {}),
     }));
-  const adapters = [...builtins, ...project].sort((left, right) => left.id.localeCompare(right.id));
+  const adapters = [...defaults, ...project].sort((left, right) => left.id.localeCompare(right.id));
   writeOutput(
     { ok: true, adapters },
     parsed,
@@ -1931,11 +2257,11 @@ async function adaptersList(argv: readonly string[], io: CliIo): Promise<number>
           resolvedSource: string;
           stability: string;
           installed: boolean;
-          overridesBuiltin?: boolean;
+          overridesDefault?: boolean;
         }>;
       };
       return value.adapters.map((adapter) =>
-        `${adapter.id}\t${adapter.installed ? "installed" : "available"}\t${adapter.stability}${adapter.overridesBuiltin ? " override" : ""}\t${formatAdapterResolution(adapter)}`
+        `${adapter.id}\t${adapter.installed ? "installed" : "available"}\t${adapter.stability}${adapter.overridesDefault ? " override" : ""}\t${formatAdapterResolution(adapter)}`
       ).join("\n");
     },
   );
@@ -1958,9 +2284,9 @@ async function adaptersInspect(argv: readonly string[], io: CliIo): Promise<numb
     projectAdapters.find((entry) =>
       entry.manifest.id === id || entry.declaredSource === id || entry.source === id
     ) ??
-    resolveBuiltinWorkbenchAdapter(id);
+    resolveDefaultWorkbenchAdapter(id);
   if (!adapter) {
-    throw new UsageError(`Adapter ${id} is not installed or built in.`);
+    throw new UsageError(`Adapter ${id} is not installed or available in the default catalog.`);
   }
   writeOutput(
     {
@@ -1972,7 +2298,7 @@ async function adaptersInspect(argv: readonly string[], io: CliIo): Promise<numb
     (record) => {
       const value = record as { adapter: ReturnType<typeof adapterRecordForOutput> };
       const setup = value.adapter.setup.length > 0 ? value.adapter.setup.join("; ") : "none";
-      const override = value.adapter.overridesBuiltin ? "overrides built-in" : value.adapter.kind;
+      const override = value.adapter.overridesDefault ? "overrides default" : value.adapter.kind;
       const operations = Object.entries(value.adapter.operations)
         .map(([operation, command]) => `${operation}: ${command}`)
         .join("; ");
@@ -2059,11 +2385,11 @@ async function resolveAdapterForAdaptersTest(
   if (isAdapterSourceTarget(target)) {
     return await resolveProjectAdapterSource(dir, target);
   }
-  const builtin = resolveBuiltinWorkbenchAdapter(target);
-  if (builtin) {
-    return builtin;
+  const defaultAdapter = resolveDefaultWorkbenchAdapter(target);
+  if (defaultAdapter) {
+    return defaultAdapter;
   }
-  throw new UsageError(`Adapter ${target} is not installed, built in, or resolvable as a source.`);
+  throw new UsageError(`Adapter ${target} is not installed, available in the default catalog, or resolvable as a source.`);
 }
 
 function isAdapterSourceTarget(target: string): boolean {
@@ -2100,6 +2426,7 @@ async function runAdapterTestReplay(args: {
     const commandOutput = await runAdapterCommandForTest({
       adapter: args.adapter,
       cwd: adapterCommandCwd(args.adapter, args.dir),
+      workspaceRoot: args.dir,
       requestPath: runtimeRequestPath,
       outputRoot,
     });
@@ -2140,10 +2467,17 @@ function adapterCommandCwd(adapter: ResolvedWorkbenchAdapter, fallback: string):
 async function runAdapterCommandForTest(args: {
   adapter: ResolvedWorkbenchAdapter;
   cwd: string;
+  workspaceRoot: string;
   requestPath: string;
   outputRoot: string;
 }): Promise<{ stdout: string; stderr: string }> {
-  const env = adapterTestEnv(args.requestPath, args.outputRoot);
+  const adapterRoot = args.adapter.root ?? args.cwd;
+  const env = adapterTestEnv({
+    requestPath: args.requestPath,
+    outputRoot: args.outputRoot,
+    workspaceRoot: args.workspaceRoot,
+    adapterRoot,
+  });
   const command = workbenchAdapterOperationCommand(args.adapter.manifest, normalizeWorkbenchAdapterOperationRequest(
     JSON.parse(await fs.readFile(args.requestPath, "utf8")) as unknown,
   ).operation);
@@ -2155,23 +2489,21 @@ async function runAdapterCommandForTest(args: {
   });
 }
 
-function adapterTestEnv(
-  requestPath: string,
-  outputRoot: string,
-): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string" && !key.startsWith("WORKBENCH_")) {
-      env[key] = value;
-    }
-  }
-  env.PATH = process.env.PATH
-    ? `${process.env.PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
-    : "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-  env.WORKBENCH_ADAPTER_REQUEST = requestPath;
-  env.WORKBENCH_OUTPUT = outputRoot;
-  env.WORKBENCH_RESULT = workbenchAdapterOperationResultPath(outputRoot);
-  return env;
+function adapterTestEnv(args: {
+  requestPath: string;
+  outputRoot: string;
+  workspaceRoot: string;
+  adapterRoot: string;
+}): NodeJS.ProcessEnv {
+  return createAdapterCommandEnv({
+    workspaceRoot: args.workspaceRoot,
+    adapterRoot: args.adapterRoot,
+    extraEnv: {
+      WORKBENCH_ADAPTER_REQUEST: args.requestPath,
+      WORKBENCH_OUTPUT: args.outputRoot,
+      WORKBENCH_RESULT: workbenchAdapterOperationResultPath(args.outputRoot),
+    },
+  });
 }
 
 async function validateAdapterTestOutputs(
@@ -2198,7 +2530,7 @@ function adapterRecordForOutput(adapter: ResolvedWorkbenchAdapter): {
   operations: Record<string, string>;
   setup: string[];
   slots: Record<string, unknown>;
-  overridesBuiltin?: boolean;
+  overridesDefault?: boolean;
   auth?: unknown;
   integrity?: string;
   manifestHash: string;
@@ -2213,7 +2545,7 @@ function adapterRecordForOutput(adapter: ResolvedWorkbenchAdapter): {
     operations: adapterOperationCommands(adapter.manifest.operations),
     setup: [...adapter.manifest.setup],
     slots: adapter.manifest.slots ?? {},
-    ...(adapter.overridesBuiltin ? { overridesBuiltin: true } : {}),
+    ...(adapter.overridesDefault ? { overridesDefault: true } : {}),
     ...(adapter.manifest.auth !== undefined ? { auth: adapter.manifest.auth } : {}),
     ...(adapter.integrity ? { integrity: adapter.integrity } : {}),
     manifestHash: adapter.manifestHash,
@@ -2237,13 +2569,11 @@ function createAdapterScaffoldFiles(id: string): Array<{
   const command = `workbench-adapter-${id}`;
   const manifest = [
     `id: ${id}`,
-    "protocol: workbench.adapter.v2",
+    "protocol: workbench.adapter.v3",
     "setup:",
     "  - npm install --global .",
     "operations:",
     "  subject.run: {}",
-    "  trial.score: {}",
-    "  subject.improve: {}",
     "",
   ].join("\n");
   const packageJson = `${JSON.stringify({
@@ -2265,29 +2595,21 @@ const request = requestPath && fs.existsSync(requestPath)
   ? JSON.parse(fs.readFileSync(requestPath, "utf8"))
   : {};
 fs.mkdirSync(outputRoot, { recursive: true });
-const operation = request.operation || "trial.score";
+const operation = request.operation || "subject.run";
 const resultPath = process.env.WORKBENCH_RESULT || request.paths?.result || path.join(outputRoot, "workbench-result.json");
 
 let value;
-if (operation === "trial.score") {
-  value = {
-    score: 1,
-    summary: "${id} accepted the trial output.",
-  };
-} else if (operation === "subject.improve") {
-  value = {
-    files: [],
-    fileChanges: [],
-    summary: "${id} did not propose changes.",
-  };
-} else if (operation === "subject.run") {
-  const task = request.context?.task?.text || "No task text was provided.";
+if (operation === "subject.run") {
+  const task = request.context?.case?.prompt || "No case prompt was provided.";
   fs.writeFileSync(path.join(outputRoot, "adapter-output.txt"), [
     "adapter: ${id}",
     "task:",
     task,
     "",
   ].join("\\n"));
+} else {
+  console.error("${id} only implements subject.run.");
+  process.exit(2);
 }
 
 fs.writeFileSync(resultPath, JSON.stringify({
@@ -2301,7 +2623,7 @@ fs.writeFileSync(resultPath, JSON.stringify({
   const readme = [
     `# ${id}`,
     "",
-    "This is a Workbench adapter. It receives a JSON request at `WORKBENCH_ADAPTER_REQUEST` and writes phase outputs under `WORKBENCH_OUTPUT`.",
+    "This is a Workbench adapter. It receives a JSON request at `WORKBENCH_ADAPTER_REQUEST` and writes operation outputs under `WORKBENCH_OUTPUT`.",
     "",
     "Validate the manifest with `workbench adapters test PATH`. Replay a request fixture with `workbench adapters test PATH --request adapter-request.json --output out/adapter-test`.",
     "",
@@ -2377,13 +2699,9 @@ async function authStatus(argv: readonly string[], io: CliIo): Promise<number> {
   rejectUnknownFlags(parsed, new Set(["dir", "json"]));
   const config = await loadConfig();
   const baseUrl = await effectiveBaseUrl();
-  const profile = config.accessToken
-    ? await apiRequest<{ profile?: { username?: string; displayName?: string; email?: string } | null }>(
-        "/api/workbench/profile",
-      ).catch(() => ({ profile: null }))
-    : { profile: null };
+  const profileStatus = await readWorkbenchProfileStatus(config);
   const adapterStatuses = await localWorkbenchAdapterAuthStore().listStatus();
-  const hostedAuth = config.accessToken
+  const hostedAuth = profileStatus.authenticated
     ? await readHostedAdapterAuthStatuses().catch((error: unknown) => ({
         adapters: [],
         error: error instanceof Error ? error.message : String(error),
@@ -2402,8 +2720,8 @@ async function authStatus(argv: readonly string[], io: CliIo): Promise<number> {
     ok: true,
     workbench: {
       baseUrl,
-      authenticated: Boolean(config.accessToken),
-      username: profile.profile?.username ?? null,
+      authenticated: profileStatus.authenticated,
+      username: profileStatus.profile?.username ?? null,
     },
     adapterStatuses,
     hostedAuth,
@@ -2516,7 +2834,7 @@ function requiredAuthTargetsForSpec(
     [
       ...(spec.improve ? [spec.improve] : []),
       spec.run,
-      spec.score,
+      spec.engineRun,
     ],
     manifests,
   ).map((target) => ({
@@ -2938,7 +3256,7 @@ async function runShellCommand(args: {
 }): Promise<{ stdout: string; stderr: string }> {
   const label = args.errorLabel ?? args.command;
   return await new Promise((resolve, reject) => {
-    const child = spawn("sh", ["-lc", args.command], {
+    const child = spawn("sh", ["-c", args.command], {
       cwd: args.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: args.env,
@@ -3045,35 +3363,11 @@ async function pushBenchmark(
       );
       return 0;
     }
-    const response = await apiRequest<{ benchmark: HostedProjectSummary & {
-      ownerUsername?: string;
-      sourceFingerprint?: string;
-      currentSpecVersionId?: string;
-    } }>(
-      "/api/workbench/benchmarks",
-      {
-        method: "POST",
-        body: hostedProjectSourceRequest(source),
-      },
+    const { project, publishedProject, origin: nextOrigin } = await createHostedBenchmarkFromSource({
       baseUrl,
-    );
-    const project = response.benchmark;
-    const publishedProject =
-      visibility === "public"
-        ? (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
-            projectApiPath(project.id!, "/publish"),
-            { method: "PUT" },
-            baseUrl,
-          )).benchmark
-        : project;
-    const nextOrigin = await writeWorkbenchOrigin(dir, {
-      baseUrl,
-      owner: publishedProject.ownerUsername ?? project.ownerUsername ?? "",
-      project: publishedProject.name ?? project.name ?? source.spec.name,
-      projectId: publishedProject.id ?? project.id!,
-      writable: true,
-      sourceRevisionId: publishedProject.currentSpecVersionId ?? project.currentSpecVersionId,
-      sourceFingerprint: publishedProject.sourceFingerprint ?? project.sourceFingerprint,
+      dir,
+      source,
+      visibility,
     });
     writeOutput(
       {
@@ -3108,9 +3402,66 @@ async function pushBenchmark(
     throw new UsageError("Missing hosted benchmark. Run workbench push from a source directory.");
   }
   if (!origin.writable) {
-    throw new UsageError(
-      "Cannot push to a read-only benchmark clone. Run workbench cloud fork to create a writable benchmark fork.",
+    const upstream = upstreamFromOrigin(origin);
+    if (dryRun) {
+      writeOutput(
+        {
+          ok: true,
+          dryRun: true,
+          action: "create",
+          dir,
+          baseUrl,
+          benchmarkName: source.spec.name,
+          tag: asOptionalString(parsed.flags.tag) ?? null,
+          visibility,
+          sourceFileCount: sourceFileCount(source),
+          upstream: upstream ?? null,
+        },
+        parsed,
+        io,
+        () => `Would create a writable benchmark from read-only origin ${origin.owner}/${origin.project}.`,
+      );
+      return 0;
+    }
+    const { project, publishedProject, origin: nextOrigin } = await createHostedBenchmarkFromSource({
+      baseUrl,
+      dir,
+      source,
+      visibility,
+      upstream,
+    });
+    writeOutput(
+      {
+        ok: true,
+        action: "create",
+        benchmark: publishedProject,
+        tag: asOptionalString(parsed.flags.tag) ?? null,
+        visibility,
+        origin: nextOrigin,
+        upstream: upstream ?? null,
+        urls: buildWorkbenchResourceUrls({
+          baseUrl,
+          projectId: publishedProject.id ?? project.id!,
+          owner: nextOrigin.owner,
+          projectName: nextOrigin.project,
+        }),
+      },
+      parsed,
+      io,
+      (record) => {
+        const value = record as {
+          origin: WorkbenchOrigin;
+          urls: WorkbenchResourceUrls;
+          upstream?: WorkbenchOrigin["upstream"] | null;
+        };
+        return [
+          `Pushed ${value.origin.owner}/${value.origin.project} (${value.origin.projectId}).`,
+          ...(value.upstream ? [`Upstream: ${value.upstream.owner}/${value.upstream.project}`] : []),
+          `Open benchmark: ${value.urls.benchmark}`,
+        ].join("\n");
+      },
     );
+    return 0;
   }
   if (dryRun) {
     writeOutput(
@@ -3194,6 +3545,63 @@ async function pushBenchmark(
     },
   );
   return 0;
+}
+
+async function createHostedBenchmarkFromSource(args: {
+  baseUrl: string;
+  dir: string;
+  source: LocalProjectSource;
+  visibility: "private" | "public";
+  upstream?: WorkbenchOrigin["upstream"];
+}): Promise<{
+  project: HostedProjectSummary;
+  publishedProject: HostedProjectSummary;
+  origin: WorkbenchOrigin;
+}> {
+  const response = await apiRequest<{ benchmark: HostedProjectSummary & {
+    ownerUsername?: string;
+    sourceFingerprint?: string;
+    currentSpecVersionId?: string;
+  } }>(
+    "/api/workbench/benchmarks",
+    {
+      method: "POST",
+      body: hostedProjectSourceRequest(args.source),
+    },
+    args.baseUrl,
+  );
+  const project = response.benchmark;
+  const publishedProject =
+    args.visibility === "public"
+      ? (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
+          projectApiPath(project.id!, "/publish"),
+          { method: "PUT" },
+          args.baseUrl,
+        )).benchmark
+      : project;
+  const origin = await writeWorkbenchOrigin(args.dir, {
+    baseUrl: args.baseUrl,
+    owner: publishedProject.ownerUsername ?? project.ownerUsername ?? "",
+    project: publishedProject.name ?? project.name ?? args.source.spec.name,
+    projectId: publishedProject.id ?? project.id!,
+    writable: true,
+    sourceRevisionId: publishedProject.currentSpecVersionId ?? project.currentSpecVersionId,
+    sourceFingerprint: publishedProject.sourceFingerprint ?? project.sourceFingerprint,
+    ...(args.upstream ? { upstream: args.upstream } : {}),
+  });
+  return { project, publishedProject, origin };
+}
+
+function upstreamFromOrigin(origin: WorkbenchOrigin): WorkbenchOrigin["upstream"] | undefined {
+  if (!origin.owner || !origin.project || !origin.projectId || !origin.sourceRevisionId) {
+    return undefined;
+  }
+  return {
+    owner: origin.owner,
+    project: origin.project,
+    projectId: origin.projectId,
+    sourceRevisionId: origin.sourceRevisionId,
+  };
 }
 
 function readBenchmarkVisibility(value: string | boolean | undefined): "private" | "public" {
@@ -3487,96 +3895,15 @@ async function remoteRemove(
     throw new UsageError("workbench remote remove accepts: origin.");
   }
   const originPath = workbenchOriginPath(resolveDir(parsed));
+  const existed = await fileIsReadable(originPath);
   await fs.rm(originPath, { force: true });
   writeOutput(
-    { ok: true, remote: "origin", removed: originPath },
+    { ok: true, remote: "origin", removed: existed, path: originPath },
     parsed,
     io,
-    () => `Removed origin (${originPath}).`,
-  );
-  return 0;
-}
-
-async function forkProject(argv: readonly string[], io: CliIo): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["json"]));
-  const ref = readRequiredBenchmarkRef(parsed);
-  if (parsed.positionals.length > 2) {
-    throw new UsageError("workbench cloud fork accepts OWNER/BENCHMARK[@REF] and an optional fork name.");
-  }
-  const baseUrl = await effectiveBaseUrl();
-  const response = await apiRequest<{ benchmark: HostedProjectSummary & {
-    id: string;
-    name: string;
-    ownerUsername: string;
-    currentSpecVersionId?: string;
-    sourceFingerprint?: string;
-    forkedFrom?: HostedForkRef;
-  } }>(
-    `${publicProjectApiPath(ref)}/fork`,
-    {
-      method: "POST",
-      body: { name: parsed.positionals[1] },
-    },
-    baseUrl,
-  );
-  const benchmark = response.benchmark;
-  const currentDir = resolveDir(parsed);
-  const currentOrigin = await readWorkbenchOrigin(currentDir);
-  const outputDir = parsed.positionals[1] ?? (
-    currentOrigin &&
-      !currentOrigin.writable &&
-      currentOrigin.owner === ref.owner &&
-      currentOrigin.project === ref.project
-      ? currentDir
-      : benchmark.name
-  );
-  const filesResponse = await apiRequest<HostedSourceResponse>(
-    projectApiPath(benchmark.id, "/source"),
-    {},
-    baseUrl,
-  );
-  await syncSourceFiles(outputDir, filesResponse.files);
-  const origin = await writeWorkbenchOrigin(outputDir, {
-    baseUrl,
-    owner: benchmark.ownerUsername,
-    project: benchmark.name,
-    projectId: benchmark.id,
-    writable: true,
-    sourceRevisionId: filesResponse.benchmark?.currentSpecVersionId ?? benchmark.currentSpecVersionId,
-    sourceFingerprint: filesResponse.benchmark?.sourceFingerprint ?? benchmark.sourceFingerprint,
-    upstream: originUpstreamFromForkedFrom(benchmark.forkedFrom),
-  });
-  const urls = buildWorkbenchResourceUrls({
-    baseUrl,
-    projectId: benchmark.id,
-    owner: benchmark.ownerUsername,
-    projectName: benchmark.name,
-  });
-  writeOutput(
-    {
-      ok: true,
-      benchmark,
-      origin,
-      outputDir,
-      files: filesResponse.files.length,
-      urls,
-    },
-    parsed,
-    io,
-    (record) => {
-      const value = record as {
-        benchmark: { ownerUsername: string; name: string; id: string };
-        outputDir: string;
-        files: number;
-        urls: WorkbenchResourceUrls;
-      };
-      return [
-        `Forked ${formatBenchmarkRef(ref)} to ${value.benchmark.ownerUsername}/${value.benchmark.name} (${value.benchmark.id}).`,
-        `Local checkout: ${value.outputDir} (${value.files} file(s)).`,
-        `Open benchmark: ${value.urls.benchmark}`,
-      ].join("\n");
-    },
+    () => existed
+      ? `Removed origin (${originPath}).`
+      : `No origin configured (${originPath}).`,
   );
   return 0;
 }
@@ -3607,25 +3934,6 @@ async function starProject(
     },
   );
   return 0;
-}
-
-function originUpstreamFromForkedFrom(
-  forkedFrom: HostedForkRef | undefined,
-): WorkbenchOrigin["upstream"] | undefined {
-  if (
-    !forkedFrom?.projectId ||
-    !forkedFrom.ownerUsername ||
-    !forkedFrom.benchmarkName ||
-    !forkedFrom.sourceRevisionId
-  ) {
-    return undefined;
-  }
-  return {
-    owner: forkedFrom.ownerUsername,
-    project: forkedFrom.benchmarkName,
-    projectId: forkedFrom.projectId,
-    sourceRevisionId: forkedFrom.sourceRevisionId,
-  };
 }
 
 async function startHostedWorkflow(
@@ -3707,12 +4015,30 @@ async function startHostedWorkflow(
     parsed.flags.watch === true
       ? parseOptionalPositiveInt(parsed.flags["timeout-ms"], "timeout-ms")
       : undefined;
+  const dryRun = parsed.flags["dry-run"] === true;
+  if (dryRun) {
+    const target = await resolveHostedDryRunTarget(parsed, { sourceDir: projectSource.dir });
+    writeOutput(
+      {
+        ok: true,
+        dryRun: true,
+        projectRef: target.projectRef,
+        ...(target.projectId ? { projectId: target.projectId } : {}),
+        dir: target.dir,
+        baseUrl: target.baseUrl,
+        request,
+      },
+      parsed,
+      io,
+      () => `Would start hosted ${workflow} for ${target.projectRef}.`,
+    );
+    return 0;
+  }
   const target = await resolveHostedTarget(parsed, {
     requireProjectIdentity: true,
     sourceDir: projectSource.dir,
   });
-  const dryRun = parsed.flags["dry-run"] === true;
-  if (workflow === "improve" && !dryRun) {
+  if (workflow === "improve") {
     request.subjectId = await ensureHostedImproveBaseSubject({
       parsed,
       target,
@@ -3721,22 +4047,6 @@ async function startHostedWorkflow(
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
     });
-  }
-  if (dryRun) {
-    writeOutput(
-      {
-        ok: true,
-        dryRun: true,
-        projectId: target.projectId,
-        dir: target.dir,
-        baseUrl: target.baseUrl,
-        request,
-      },
-      parsed,
-      io,
-      () => `Would start hosted ${workflow} for ${target.projectId}.`,
-    );
-    return 0;
   }
   const response = await apiRequest<{ run: HostedRunRecord }>(
     projectApiPath(target.projectId, "/runs"),
@@ -3917,17 +4227,15 @@ async function benchmarkDelete(
   }
   const originPath = workbenchOriginPath(dir);
   const baseUrl = await effectiveBaseUrl(origin?.baseUrl);
-  const project = await resolveRemoteProject(projectRef, baseUrl);
-  const projectId = project.id;
-  const projectName = project.name;
-  const originProjectDeleted = origin ? origin.projectId === projectId : false;
   if (parsed.flags["dry-run"] === true) {
+    const originProjectDeleted = originMatchesProjectRef(origin, projectRef);
     writeOutput(
       {
         ok: true,
         dryRun: true,
-        projectId,
-        ...(projectName ? { projectName } : {}),
+        projectRef,
+        ...(isRemoteProjectId(projectRef) ? { projectId: projectRef } : {}),
+        ...(originProjectDeleted && origin?.project ? { projectName: origin.project } : {}),
         baseUrl,
         ...(originProjectDeleted ? { originPath } : {}),
       },
@@ -3935,11 +4243,15 @@ async function benchmarkDelete(
       io,
       () =>
         originProjectDeleted
-          ? `Would delete hosted benchmark ${formatProjectRef(project)} and remove local origin ${originPath}.`
-          : `Would delete hosted benchmark ${formatProjectRef(project)}.`,
+          ? `Would delete hosted benchmark ${projectRef} and remove local origin ${originPath}.`
+          : `Would delete hosted benchmark ${projectRef}.`,
     );
     return 0;
   }
+  const project = await resolveRemoteProject(projectRef, baseUrl);
+  const projectId = project.id;
+  const projectName = project.name;
+  const originProjectDeleted = origin ? origin.projectId === projectId : false;
   await apiRequest<{ deleted: boolean }>(
     projectApiPath(projectId),
     { method: "DELETE" },
@@ -4272,7 +4584,7 @@ async function runCancel(argv: readonly string[], io: CliIo): Promise<number> {
     const value = record as HostedRunRecord;
     return [
       `Cancelled run ${value.id}; status ${value.status}; outcome ${value.outcome ?? "cancelled"}.`,
-      `Open run: ${value.urls?.run ?? buildWorkbenchResourceUrls(target, { runId: value.id }).run}`,
+      `Open benchmark: ${value.urls?.benchmark ?? buildWorkbenchResourceUrls(target).benchmark}`,
     ].join("\n");
   });
   return 0;
@@ -4419,7 +4731,7 @@ function buildWorkbenchWebUrl(
     return benchmarkUrl;
   }
   if (ref.startsWith("run_")) {
-    return buildWorkbenchResourceUrls(target, { runId: ref }).run!;
+    return benchmarkUrl;
   }
   return buildWorkbenchResourceUrls(target, { subjectId: ref }).subjectEvaluation!;
 }
@@ -4464,6 +4776,57 @@ async function resolveHostedTarget(
     baseUrl,
     origin,
   };
+}
+
+async function resolveHostedDryRunTarget(
+  parsed: ParsedArgs,
+  options: { sourceArg?: string; sourceDir?: string } = {},
+): Promise<HostedDryRunTarget> {
+  if (options.sourceArg !== undefined && parsed.flags.dir !== undefined) {
+    throw new UsageError("Use either --dir or SOURCE, not both.");
+  }
+  const dir = options.sourceDir
+    ? path.resolve(options.sourceDir)
+    : resolveDir(parsed, options.sourceArg);
+  const origin = await readWorkbenchOrigin(dir);
+  const explicitProject = asOptionalString(parsed.flags.benchmark);
+  const baseUrl = await effectiveBaseUrl(origin?.baseUrl);
+  if (explicitProject) {
+    if (isRemoteProjectId(explicitProject)) {
+      return {
+        projectRef: explicitProject,
+        projectId: explicitProject,
+        dir,
+        baseUrl,
+        origin,
+      };
+    }
+    const ref = parseBenchmarkRef(explicitProject);
+    return {
+      projectRef: formatBenchmarkRef(ref),
+      owner: ref.owner,
+      projectName: ref.project,
+      dir,
+      baseUrl,
+      origin,
+    };
+  }
+  if (origin?.projectId) {
+    return {
+      projectRef: origin.owner && origin.project
+        ? `${origin.owner}/${origin.project}`
+        : origin.projectId,
+      projectId: origin.projectId,
+      ...(origin.owner ? { owner: origin.owner } : {}),
+      ...(origin.project ? { projectName: origin.project } : {}),
+      dir,
+      baseUrl,
+      origin,
+    };
+  }
+  throw new UsageError(
+    "Missing hosted benchmark. Run workbench push, workbench clone, or pass --benchmark OWNER/BENCHMARK.",
+  );
 }
 
 async function resolveOpenTarget(
@@ -4521,12 +4884,13 @@ function buildWorkbenchResourceUrls(
   const projectRef = `${encodeURIComponent(target.owner)}/${encodeURIComponent(target.projectName)}`;
   const benchmark = `${target.baseUrl}/benchmarks/${projectRef}`;
   const urls: WorkbenchResourceUrls = { benchmark };
-  if (refs.runId) {
-    urls.run = `${benchmark}/runs/${encodeURIComponent(refs.runId)}`;
-    urls.traces = urls.run;
-  }
   if (refs.subjectId) {
-    urls.subjectEvaluation = `${benchmark}/subject/${encodeURIComponent(refs.subjectId)}/evaluation`;
+    const evaluationId = refs.runId
+      ? evaluationScorecardId(refs.runId, refs.subjectId)
+      : null;
+    urls.subjectEvaluation = evaluationId
+      ? `${benchmark}/subjects/${encodeURIComponent(refs.subjectId)}?evaluation=${encodeURIComponent(evaluationId)}`
+      : `${benchmark}/subjects/${encodeURIComponent(refs.subjectId)}`;
   }
   return urls;
 }
@@ -4621,6 +4985,23 @@ function formatProjectRef(project: { id: string; name?: string }): string {
   return project.name ? `${project.name} (${project.id})` : project.id;
 }
 
+function originMatchesProjectRef(
+  origin: WorkbenchOrigin | null | undefined,
+  projectRef: string,
+): boolean {
+  if (!origin) {
+    return false;
+  }
+  if (origin.projectId === projectRef) {
+    return true;
+  }
+  if (!projectRef.includes("/")) {
+    return false;
+  }
+  const ref = parseBenchmarkRef(projectRef);
+  return origin.owner === ref.owner && origin.project === ref.project;
+}
+
 function withRunUrls(
   target: HostedTarget,
   run: HostedRunRecord,
@@ -4629,7 +5010,7 @@ function withRunUrls(
     ...run,
     urls: buildWorkbenchResourceUrls(target, {
       runId: run.id,
-      subjectId: run.subjectId,
+      subjectId: run.outputSubjectId ?? run.subjectId,
     }),
   };
 }
@@ -4645,13 +5026,30 @@ function withRunDetailUrls(
   jobs: HostedRunJobRecord[];
   urls: WorkbenchResourceUrls;
 } {
-  const subjectId = detail.run.subjectId ?? detail.jobs.find((job) => job.subjectId)?.subjectId ?? null;
-  const run = withRunUrls(target, { ...detail.run, subjectId });
+  const subjectId = hostedRunEvaluationSubjectId(detail.run, detail.jobs);
+  const run = withRunUrls(target, {
+    ...detail.run,
+    outputSubjectId: detail.run.outputSubjectId ?? subjectId,
+  });
   return {
     run,
     jobs: detail.jobs,
     urls: run.urls ?? buildWorkbenchResourceUrls(target, { runId: run.id }),
   };
+}
+
+function hostedRunEvaluationSubjectId(
+  run: HostedRunRecord,
+  jobs: readonly HostedRunJobRecord[] = [],
+): string | null {
+  if (run.outputSubjectId) {
+    return run.outputSubjectId;
+  }
+  const attemptSubjects = jobs
+    .filter((job) => readRunJobPurpose(job) === "attempt")
+    .map((job) => job.subjectId)
+    .filter((subjectId): subjectId is string => Boolean(subjectId));
+  return attemptSubjects.at(-1) ?? run.subjectId ?? null;
 }
 
 function sourceFileCount(source: LocalProjectSource): number {
@@ -4661,10 +5059,12 @@ function sourceFileCount(source: LocalProjectSource): number {
 function hostedProjectSourceRequest(source: LocalProjectSource): {
   source: string;
   subjectFiles: HostedFile[];
-  taskFiles: HostedFile[];
+  engineResolveFiles: HostedFile[];
+  engineResolveBinding: EngineResolveBinding;
   adapterFiles: HostedFile[];
   dockerfile: string;
   runtimeDockerfile: string;
+  runtimeFiles: HostedFile[];
   network: "off" | "on";
   resources: Partial<{
     cpu: number;
@@ -4677,26 +5077,34 @@ function hostedProjectSourceRequest(source: LocalProjectSource): {
   return {
     source: source.specSource,
     subjectFiles: source.subjectFiles,
-    taskFiles: hostedTaskFiles(source),
+    engineResolveFiles: hostedEngineResolveFiles(source),
+    engineResolveBinding: engineResolveBindingForSpec(source.spec),
     adapterFiles: source.adapterFiles,
     dockerfile: source.dockerfile,
     runtimeDockerfile: source.runtimeDockerfile,
+    runtimeFiles: source.dockerfileFiles,
     network,
     resources,
   };
 }
 
-function hostedTaskFiles(source: LocalProjectSource): HostedFile[] {
+function hostedEngineResolveFiles(source: LocalProjectSource): HostedFile[] {
   return [
-    ...source.taskSourceFiles,
+    ...source.engineResolveFiles,
     {
       path: WORKBENCH_ADAPTER_RESULT_FILE,
       content: `${JSON.stringify({
         protocol: WORKBENCH_ADAPTER_RESULT_PROTOCOL,
-        operation: "tasks.resolve",
+        operation: "engine.resolve",
         ok: true,
         value: {
-          tasks: source.taskBundles,
+          cases: source.engineCases,
+          ...(source.engineResolveEnvironment
+            ? { environment: source.engineResolveEnvironment }
+            : {}),
+        },
+        feedback: {
+          path: source.engineResolveFingerprintPath,
         },
       }, null, 2)}\n`,
     },
@@ -4768,13 +5176,16 @@ async function watchHostedRun(args: {
 }
 
 function formatHostedRunResult(run: HostedRunRecord): string {
-  const summary = `Run ${run.id} reached ${run.status}; ${run.outcome ? `outcome ${run.outcome}; ` : ""}subject ${run.subjectId ?? "pending"}; ${run.completedJobCount ?? 0}/${run.jobCount ?? 0} jobs completed.`;
+  const subjectId = run.outputSubjectId ?? run.subjectId;
+  const activeDetail = run.activeSubjectId && subjectId && run.activeSubjectId !== subjectId
+    ? `; active ${run.activeSubjectId}`
+    : "";
+  const summary = `Run ${run.id} reached ${run.status}; ${run.outcome ? `outcome ${run.outcome}; ` : ""}subject ${subjectId ?? "pending"}${activeDetail}; ${run.completedJobCount ?? 0}/${run.jobCount ?? 0} jobs completed.`;
   return [
     run.error ? `${summary}\nError: ${run.error}` : summary,
-    ...(run.urls?.run ? [`Open run: ${run.urls.run}`] : []),
     ...(run.urls?.subjectEvaluation
       ? [`Open evaluation: ${run.urls.subjectEvaluation}`]
-      : []),
+      : [`Open benchmark: ${run.urls?.benchmark ?? ""}`].filter(Boolean)),
   ].join("\n");
 }
 
@@ -4782,9 +5193,12 @@ function formatHostedRunStarted(
   run: HostedRunRecord,
   fallbackWorkflow: HostedRunWorkflow,
 ): string {
+  const subjectId = run.outputSubjectId ?? run.subjectId;
   return [
-    `Started ${run.workflow ?? fallbackWorkflow} run ${run.id}; ${run.subjectId ? `subject ${run.subjectId}` : `${run.jobCount ?? 0} jobs queued`}.`,
-    ...(run.urls?.run ? [`Open run: ${run.urls.run}`] : []),
+    `Started ${run.workflow ?? fallbackWorkflow} run ${run.id}; ${subjectId ? `subject ${subjectId}` : `${run.jobCount ?? 0} jobs queued`}.`,
+    ...(run.urls?.subjectEvaluation
+      ? [`Open evaluation: ${run.urls.subjectEvaluation}`]
+      : run.urls?.benchmark ? [`Open benchmark: ${run.urls.benchmark}`] : []),
     "",
   ].join("\n");
 }
@@ -4798,13 +5212,16 @@ function formatRunDetail(record: unknown): string {
   const { run, jobs, urls } = detail;
   const cost = sumJobCostUsd(jobs);
   const firstFailedJob = jobs.find((job) => job.status === "failed" && job.error);
-  const subjectId = run.subjectId ?? jobs.find((job) => job.subjectId)?.subjectId ?? null;
+  const subjectId = hostedRunEvaluationSubjectId(run, jobs);
   return [
     `Run ${run.id}: ${run.status}${run.outcome ? ` (${run.outcome})` : ""}`,
     `Workflow: ${run.workflow ?? "improve"}`,
     `Subject: ${subjectId ?? "pending"}`,
+    ...(run.activeSubjectId && subjectId && run.activeSubjectId !== subjectId
+      ? [`Active subject: ${run.activeSubjectId}`]
+      : []),
     `Samples: ${run.samples ?? 0}`,
-    `Trials: ${run.trialsExecuted ?? 0}/${run.trialsRequested ?? run.trialsExecuted ?? 0}`,
+    `Attempts: ${run.attemptsExecuted ?? 0}/${run.attemptsRequested ?? run.attemptsExecuted ?? 0}`,
     `Jobs: ${run.completedJobCount ?? jobs.filter(isTerminalRunJob).length}/${run.jobCount ?? jobs.length} completed${run.failedJobCount ? `; ${run.failedJobCount} failed` : ""}`,
     ...(typeof run.durationMs === "number"
       ? [`Duration: ${formatDurationMs(run.durationMs)}`]
@@ -4813,8 +5230,9 @@ function formatRunDetail(record: unknown): string {
     ...(firstFailedJob?.error
       ? [`First failed job ${firstFailedJob.id}: ${firstFailedJob.error}`]
       : []),
-    `Open run: ${urls.run ?? urls.benchmark}`,
-    ...(urls.subjectEvaluation ? [`Open evaluation: ${urls.subjectEvaluation}`] : []),
+    ...(urls.subjectEvaluation
+      ? [`Open evaluation: ${urls.subjectEvaluation}`]
+      : [`Open benchmark: ${urls.benchmark}`]),
     ...(jobs.length > 0 ? ["", "Jobs:", ...jobs.map(formatRunJobLine)] : []),
   ].join("\n");
 }
@@ -4854,7 +5272,7 @@ function costUsdFromUsage(value: unknown): number {
   if (direct !== null) {
     return direct;
   }
-  return ["total", "optimizer", "runner", "scorer"].reduce((sum, key) => {
+  return ["total", "optimizer", "runner", "engine"].reduce((sum, key) => {
     const nested = readRecord(usage[key]);
     return sum + (readFiniteNumber(nested?.costUsd) ?? 0);
   }, 0);
@@ -5004,6 +5422,41 @@ async function effectiveBaseUrl(preferred?: string): Promise<string> {
       config.baseUrl ??
       DEFAULT_BASE_URL,
   );
+}
+
+async function readWorkbenchProfileStatus(
+  config: WorkbenchConfig,
+): Promise<{
+  authenticated: boolean;
+  profile: { username?: string; displayName?: string; email?: string } | null;
+}> {
+  if (!config.accessToken) {
+    return { authenticated: false, profile: null };
+  }
+  const baseUrl = await effectiveBaseUrl(config.baseUrl);
+  try {
+    const response = await fetch(`${baseUrl}/api/workbench/profile`, {
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.accessToken}`,
+      },
+    });
+    if (response.status === 401 || response.status === 403) {
+      return { authenticated: false, profile: null };
+    }
+    if (!response.ok) {
+      return { authenticated: true, profile: null };
+    }
+    const payload = await response.json() as {
+      profile?: { username?: string; displayName?: string; email?: string } | null;
+    };
+    return {
+      authenticated: true,
+      profile: payload.profile ?? null,
+    };
+  } catch {
+    return { authenticated: true, profile: null };
+  }
 }
 
 function readOptionalSubjectId(parsed: ParsedArgs): string | undefined {
@@ -5290,7 +5743,7 @@ function readInitSelection(parsed: ParsedArgs): {
   kind: InitSubjectKind;
   name: string;
 } {
-  const selections = (["skill", "pipeline", "command"] as const).flatMap(
+  const selections = (["skill", "command"] as const).flatMap(
     (kind) =>
       parsed.flags[kind] === undefined
         ? []
@@ -5298,7 +5751,7 @@ function readInitSelection(parsed: ParsedArgs): {
   );
   if (selections.length !== 1) {
     throw new UsageError(
-      "Specify exactly one of --skill NAME, --pipeline NAME, or --command NAME.",
+      "Specify exactly one of --skill NAME or --command NAME.",
     );
   }
   const { kind, value } = selections[0]!;
@@ -5315,7 +5768,7 @@ function readInitAgent(
   const agent = asOptionalString(parsed.flags.agent);
   if (kind === "command") {
     if (agent) {
-      throw new UsageError("--agent applies only to --skill and --pipeline.");
+      throw new UsageError("--agent applies only to --skill.");
     }
     return undefined;
   }
@@ -5342,6 +5795,223 @@ function readOptionalStringFlag(
     throw new UsageError(`--${name} requires a value.`);
   }
   return value;
+}
+
+function selectLocalTraceAdapters(rawProviders: string | undefined): LocalTraceAdapter[] {
+  const available = builtinLocalTraceAdapters();
+  if (!rawProviders) {
+    return available;
+  }
+  const requested = rawProviders
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (requested.length === 0) {
+    throw new UsageError("--providers must include at least one provider id.");
+  }
+  return [...new Set(requested)].map((id) => {
+    const adapter = builtinLocalTraceAdapter(id);
+    if (!adapter) {
+      throw new UsageError(
+        `Unsupported local trace provider "${id}". Supported providers: ${available.map((entry) => entry.id).join(", ")}.`,
+      );
+    }
+    return adapter;
+  });
+}
+
+function parseTraceSinceFlag(value: string | boolean | undefined): Date | undefined {
+  if (value == null || value === false) {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new UsageError("--since requires an ISO timestamp or a relative value like 30d.");
+  }
+  const raw = value.trim();
+  const relative = /^(\d+)([dhm])$/iu.exec(raw);
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unit = relative[2]?.toLowerCase();
+    const multiplier = unit === "d"
+      ? 86_400_000
+      : unit === "h"
+        ? 3_600_000
+        : 60_000;
+    return new Date(Date.now() - amount * multiplier);
+  }
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new UsageError("--since must be an ISO timestamp or a relative value like 30d, 12h, or 90m.");
+  }
+  return parsed;
+}
+
+function formatLocalTraceCollectionSummary(
+  summary: LocalTraceCollectionSummary,
+): string {
+  const providerLines = Object.entries(summary.providers)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([provider, count]) => `${provider}: ${count}`)
+    .join(", ");
+  const lines = [
+    `Collected ${summary.traceCount} local trace ${summary.traceCount === 1 ? "digest" : "digests"}.`,
+    providerLines ? `Providers: ${providerLines}` : "Providers: none",
+  ];
+  const limitLine = formatLocalTraceLimitLine(summary);
+  if (limitLine) {
+    lines.push(limitLine);
+  }
+  lines.push("Run `workbench traces list` to inspect trace ids, or use --json to print full trace digests.");
+  return lines.join("\n");
+}
+
+function formatLocalTraceListSummary(
+  summary: LocalTraceListSummary,
+): string {
+  const providerLines = Object.entries(summary.providers)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([provider, count]) => `${provider}: ${count}`)
+    .join(", ");
+  const lines = [
+    `Found ${summary.traceCount} local trace ${summary.traceCount === 1 ? "match" : "matches"}.`,
+    providerLines ? `Providers: ${providerLines}` : "Providers: none",
+  ];
+  const limitLine = formatLocalTraceLimitLine(summary);
+  if (limitLine) {
+    lines.push(limitLine);
+  }
+  if (summary.traces.length === 0) {
+    lines.push("", "No local traces matched the selected filters.");
+  } else {
+    lines.push("", ...summary.traces.flatMap(formatLocalTraceListItem));
+  }
+  lines.push("", "Run `workbench traces show TRACE_ID --json` to print one full trace digest.");
+  return lines.join("\n");
+}
+
+function formatLocalTraceListItem(
+  trace: LocalTraceListItem,
+  index: number,
+): string[] {
+  const title = formatOneLine(trace.title ?? trace.goal ?? trace.traceId, 96);
+  const lines = [
+    `${index + 1}. ${trace.provider}\t${formatLocalTraceTimestamp(trace)}\t${title}`,
+    `   id: ${trace.traceId}`,
+  ];
+  if (trace.workspaceRoot) {
+    lines.push(`   workspace: ${trace.workspaceRoot}`);
+  }
+  if (trace.goal && trace.goal !== trace.title) {
+    lines.push(`   goal: ${formatOneLine(trace.goal, 140)}`);
+  }
+  lines.push(`   counts: ${formatLocalTraceCounts(trace.counts)}`);
+  const artifactLine = formatLocalTraceArtifactPreview(trace.artifacts);
+  if (artifactLine) {
+    lines.push(`   artifacts: ${artifactLine}`);
+  }
+  return lines;
+}
+
+function formatLocalTraceShowSummary(
+  summary: LocalTraceShowSummary,
+): string {
+  const { trace } = summary;
+  const lines = [
+    `${trace.provider} trace`,
+    `id: ${trace.traceId}`,
+    `updated: ${formatLocalTraceTimestamp(trace)}`,
+  ];
+  if (trace.workspaceRoot) {
+    lines.push(`workspace: ${trace.workspaceRoot}`);
+  }
+  if (trace.title) {
+    lines.push(`title: ${formatOneLine(trace.title, 180)}`);
+  }
+  if (trace.goal) {
+    lines.push(`goal: ${formatOneLine(trace.goal, 220)}`);
+  }
+  lines.push(
+    `counts: ${formatLocalTraceCounts(trace.counts)}`,
+    `source: ${trace.source.path}`,
+  );
+  const artifactLine = formatLocalTraceArtifactPreview(localTraceArtifactPreview(trace));
+  if (artifactLine) {
+    lines.push(`artifacts: ${artifactLine}`);
+  }
+  const preview = formatLocalTraceTimelinePreview(trace);
+  if (preview.length > 0) {
+    lines.push("", "Timeline preview:", ...preview);
+  }
+  lines.push("", "Run with --json to print the full trace digest.");
+  return lines.join("\n");
+}
+
+function formatLocalTraceTimelinePreview(trace: AgentReadableTraceDigest): string[] {
+  return trace.timeline.slice(0, 8).flatMap((entry) => {
+    if (entry.type === "tool") {
+      const name = entry.tool?.name ? ` ${entry.tool.name}` : "";
+      const command = entry.tool?.command ? `: ${formatOneLine(entry.tool.command, 140)}` : "";
+      return [`  - tool${name}${command}`];
+    }
+    const text = entry.text ? `: ${formatOneLine(entry.text, 140)}` : "";
+    return [`  - ${entry.type}${text}`];
+  });
+}
+
+function formatLocalTraceArtifactPreview(artifacts: LocalTraceArtifactPreview): string {
+  return [
+    artifacts.tools.length > 0 ? `tools=${artifacts.tools.join(", ")}` : "",
+    artifacts.commands.length > 0 ? `commands=${artifacts.commands.length}` : "",
+    artifacts.files.length > 0 ? `files=${artifacts.files.length}` : "",
+    artifacts.urls.length > 0 ? `urls=${artifacts.urls.length}` : "",
+    artifacts.errors.length > 0 ? `errors=${artifacts.errors.length}` : "",
+  ].filter(Boolean).join("; ");
+}
+
+function formatLocalTraceCounts(counts: AgentReadableTraceDigest["counts"]): string {
+  return `${counts.userMessages} user, ${counts.assistantMessages} assistant, ${counts.toolEvents} tool, ${counts.errors} error`;
+}
+
+function formatLocalTraceTimestamp(trace: {
+  updatedAt?: string;
+  endedAt?: string;
+  startedAt?: string;
+}): string {
+  return trace.updatedAt ?? trace.endedAt ?? trace.startedAt ?? "unknown";
+}
+
+function formatLocalTraceLimitLine(summary: {
+  limitPerProvider: number;
+  limitedProviders: string[];
+}): string | null {
+  if (summary.limitedProviders.length === 0) {
+    return null;
+  }
+  const unit = summary.limitPerProvider === 1 ? "trace" : "traces";
+  return `Limited to latest ${summary.limitPerProvider} ${unit} per provider; more matching traces exist for ${formatInlineList(summary.limitedProviders)}. Rerun with --limit N to include more.`;
+}
+
+function formatLocalTraceNotFound(
+  traceId: string,
+): string {
+  return `Local trace not found: ${traceId}. Check the trace id and any selected --providers, --workspace, or --since filters.`;
+}
+
+function formatOneLine(value: string, maxChars: number): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return normalized.length <= maxChars
+    ? normalized
+    : `${normalized.slice(0, Math.max(1, maxChars - 3)).trimEnd()}...`;
+}
+
+function formatInlineList(values: readonly string[]): string {
+  if (values.length <= 1) {
+    return values[0] ?? "";
+  }
+  if (values.length === 2) {
+    return `${values[0]} and ${values[1]}`;
+  }
+  return `${values.slice(0, -1).join(", ")}, and ${values.at(-1)}`;
 }
 
 function parsePositiveInt(
@@ -5490,13 +6160,13 @@ async function resolveLocalProjectForExecution(
   const spec = resolveWorkbenchResolvedSourceYaml(source);
   const adapters = await resolveWorkbenchAdaptersForProject(workspace, spec);
   const adapterManifests = adapters.map((adapter) => adapter.manifest);
-  return {
-    spec: applyDefaultWorkbenchAdapterAuthProfiles(
-      spec,
-      adapterManifests,
-    ) as ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
-    adapterManifests,
-  };
+	  return {
+	    spec: applyDefaultWorkbenchAdapterAuthProfiles(
+	      spec as unknown as Record<string, unknown>,
+	      adapterManifests,
+	    ) as unknown as ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
+	    adapterManifests,
+	  };
 }
 
 function completedJobOutputFiles(

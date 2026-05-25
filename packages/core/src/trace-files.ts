@@ -59,12 +59,12 @@ export function workbenchTraceRunDirectory(args: {
   return `${WORKBENCH_TRACE_ROOT}/${workbenchTraceRunDirectoryName(args)}`;
 }
 
-export function workbenchTracePhaseDirectory(args: {
+export function workbenchTraceExecutionDirectory(args: {
   sequence: number;
   runId: string;
-  phase: WorkbenchExecutionPurpose;
+  purpose: WorkbenchExecutionPurpose;
 }): string {
-  return `${workbenchTraceRunDirectory(args)}/${String(tracePhaseSequence(args.phase)).padStart(6, "0")}-${args.phase}`;
+  return `${workbenchTraceRunDirectory(args)}/${String(tracePurposeSequence(args.purpose)).padStart(6, "0")}-${args.purpose}`;
 }
 
 export function workbenchTraceRunDirectoryName(args: {
@@ -110,11 +110,11 @@ function sanitizeTracePathSegment(value: string): string {
   return sanitized || "run";
 }
 
-function tracePhaseSequence(phase: WorkbenchExecutionPurpose): number {
-	  if (phase === "improve") {
-	    return 1;
-	  }
-	  return 2;
+function tracePurposeSequence(purpose: WorkbenchExecutionPurpose): number {
+  if (purpose === "improve") {
+    return 1;
+  }
+  return 2;
 }
 
 function normalizeRelativePath(filePath: string): string {

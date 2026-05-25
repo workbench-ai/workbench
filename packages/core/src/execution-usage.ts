@@ -34,7 +34,7 @@ const NUMERIC_USAGE_FIELDS = [
 const USAGE_ROLES = [
   "optimizer",
   "runner",
-  "scorer",
+  "engine",
 ] as const satisfies readonly ExecutionRole[];
 
 type NumericUsageField = typeof NUMERIC_USAGE_FIELDS[number];
@@ -42,7 +42,7 @@ type NumericUsageField = typeof NUMERIC_USAGE_FIELDS[number];
 export function extractExecutionUsageFromTrace(
   trace: unknown,
   provider: { model?: string },
-  harnessId: string,
+  providerId: string,
   events: readonly unknown[] = [],
 ): UsageSummary | undefined {
   const usage = selectBestExecutionUsage([
@@ -52,7 +52,7 @@ export function extractExecutionUsageFromTrace(
     ...usageRecordsFromAgentEvents(events),
   ].map((record) =>
     normalizeExecutionUsage(record.usage, {
-      provider: harnessId,
+      provider: providerId,
       model: provider.model,
     }),
   ));
@@ -86,18 +86,18 @@ export function completeUsageSummary(
   }
   const optimizer = usage.optimizer ? normalizeExecutionUsage(usage.optimizer) : undefined;
   const runner = usage.runner ? normalizeExecutionUsage(usage.runner) : undefined;
-  const scorer = usage.scorer ? normalizeExecutionUsage(usage.scorer) : undefined;
+  const engine = usage.engine ? normalizeExecutionUsage(usage.engine) : undefined;
   const roleTotal = mergeExecutionUsage([
     optimizer,
     runner,
-    scorer,
+    engine,
   ]);
   const total = roleTotal ?? normalizeExecutionUsage(usage.total);
   return compactUsageSummary({
     ...(total ? { total } : {}),
     ...(optimizer ? { optimizer } : {}),
     ...(runner ? { runner } : {}),
-    ...(scorer ? { scorer } : {}),
+    ...(engine ? { engine } : {}),
   });
 }
 
@@ -106,12 +106,12 @@ export function normalizeUsageSummary(value: unknown): UsageSummary | undefined 
   const total = normalizeExecutionUsage(record.total);
   const optimizer = normalizeExecutionUsage(record.optimizer);
   const runner = normalizeExecutionUsage(record.runner);
-  const scorer = normalizeExecutionUsage(record.scorer);
+  const engine = normalizeExecutionUsage(record.engine);
   return completeUsageSummary({
     ...(total ? { total } : {}),
     ...(optimizer ? { optimizer } : {}),
     ...(runner ? { runner } : {}),
-    ...(scorer ? { scorer } : {}),
+    ...(engine ? { engine } : {}),
   });
 }
 
@@ -129,7 +129,7 @@ export function mergeUsageSummaries(
     total: mergeExecutionUsage(entries.map((entry) => entry.total)),
     optimizer: mergeExecutionUsage(entries.map((entry) => entry.optimizer)),
     runner: mergeExecutionUsage(entries.map((entry) => entry.runner)),
-    scorer: mergeExecutionUsage(entries.map((entry) => entry.scorer)),
+    engine: mergeExecutionUsage(entries.map((entry) => entry.engine)),
   });
 }
 
@@ -138,11 +138,11 @@ export function mergeUsageRoles(
 ): UsageSummary | undefined {
   const optimizer = completeUsageSummary(roles.optimizer);
   const runner = completeUsageSummary(roles.runner);
-  const scorer = completeUsageSummary(roles.scorer);
+  const engine = completeUsageSummary(roles.engine);
   return completeUsageSummary({
     optimizer: optimizer?.optimizer ?? optimizer?.total,
     runner: runner?.runner ?? runner?.total,
-    scorer: scorer?.scorer ?? scorer?.total,
+    engine: engine?.engine ?? engine?.total,
   });
 }
 

@@ -1,3 +1,6 @@
+import {
+  isWorkbenchExecutionNetworkEgress,
+} from "@workbench-ai/workbench-contract";
 import type {
   WorkbenchExecutionRuntimeInput,
 } from "../execution-runtime-types.ts";
@@ -148,7 +151,7 @@ function isSandboxBackendCapabilities(value: unknown): value is SandboxBackendDe
     typeof record.filesystemDiff === "boolean" &&
     typeof record.fileCapabilities === "boolean" &&
     Array.isArray(record.networkPolicy) &&
-    record.networkPolicy.every((policy) => policy === "none" || policy === "open" || policy === "allowlist");
+    record.networkPolicy.every(isWorkbenchExecutionNetworkEgress);
 }
 
 function assertPositiveResource(value: unknown, label: string): asserts value is number {

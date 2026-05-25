@@ -49,7 +49,7 @@ export function InspectorDialogShell({
 
         <div
           className={cn(
-            "min-h-0 overflow-hidden px-4 py-4 sm:px-6 sm:py-6",
+            "min-h-0 overflow-x-hidden overflow-y-hidden px-4 py-4 sm:px-6 sm:py-6",
             bodyClassName,
           )}
           data-testid={bodyTestId}

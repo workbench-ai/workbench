@@ -1,7 +1,8 @@
-import type {
-  HostedWorkbenchJob,
-  Json,
-  WorkbenchExecutionSpec,
+import {
+  WORKBENCH_EXECUTION_NETWORK_EGRESS_VALUES,
+  type HostedWorkbenchJob,
+  type Json,
+  type WorkbenchExecutionSpec,
 } from "@workbench-ai/workbench-contract";
 import {
   createHash,
@@ -76,7 +77,7 @@ export function createDockerSandboxBackendDescriptor(
       snapshots: true,
       interactiveExec: false,
       filesystemDiff: false,
-      networkPolicy: ["none", "open"],
+      networkPolicy: WORKBENCH_EXECUTION_NETWORK_EGRESS_VALUES,
       fileCapabilities: true,
     },
   };
@@ -252,8 +253,6 @@ async function runDockerSandboxExecution(
   await execFileAsync("docker", ["rm", "-f", containerName], { maxBuffer: 1024 * 1024 }).catch(() => undefined);
   const tmpfsArgs = [
     tmpfsDockerArg(DOCKER_DEFAULT_WORKSPACE, sandboxUid, sandboxGid, tmpfsSize),
-    tmpfsDockerArg("/tests", sandboxUid, sandboxGid, tmpfsSize),
-    tmpfsDockerArg("/logs", sandboxUid, sandboxGid, tmpfsSize),
     ...(workspaceRoot !== DOCKER_DEFAULT_WORKSPACE
       ? [tmpfsDockerArg(workspaceRoot, sandboxUid, sandboxGid, tmpfsSize)]
       : []),
@@ -284,8 +283,6 @@ async function runDockerSandboxExecution(
     "HOME=/tmp",
     "--env",
     "USER=workbench",
-    "--env",
-    "WORKBENCH_IN_DOCKER_SANDBOX=1",
     "--env",
     `WORKBENCH_WORKSPACE_ROOT=${workspaceRoot}`,
     "--env",
@@ -349,8 +346,6 @@ function dockerExecutionWorkspaceRoot(execution: WorkbenchExecutionSpec): string
 function isSafeDockerWorkspaceRoot(value: string): boolean {
   return value.startsWith("/") &&
     value !== "/" &&
-    value !== "/tests" &&
-    value !== "/logs" &&
     value !== DOCKER_RUNTIME_MOUNT &&
     value !== "/workbench-execution" &&
     !value.startsWith(`${DOCKER_RUNTIME_MOUNT}/`) &&
@@ -448,18 +443,14 @@ function runDockerSandboxProcess(
 }
 
 function dockerNetworkConfigForExecution(execution: WorkbenchExecutionSpec): Record<string, Json> {
-  if (execution.policy.network.egress === "none") {
-    return { mode: "none", egress: "none", allowlistEnforced: true };
+  switch (execution.policy.network.egress) {
+    case "none":
+      return { mode: "none", egress: "none" };
+    case "open":
+      return { mode: "bridge", egress: "open" };
+    default:
+      throw new Error(`Unsupported Docker network egress policy ${String(execution.policy.network.egress)}.`);
   }
-  if (execution.policy.network.egress === "open") {
-    return { mode: "bridge", egress: "open", allowlistEnforced: true };
-  }
-  return {
-    mode: "bridge",
-    egress: "allowlist",
-    allow: [...(execution.policy.network.allow ?? [])],
-    allowlistEnforced: false,
-  };
 }
 
 function dockerContainerName(sandboxId: string): string {

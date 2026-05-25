@@ -25,7 +25,10 @@ vi.mock("../spreadsheet-viewer", () => ({
   parseSpreadsheetViewerWorkbook: parseSpreadsheetViewerWorkbookMock,
 }));
 
-import { SpreadsheetFilePreview } from "../components/shared/spreadsheet-file-preview";
+import {
+  SpreadsheetFilePreview,
+  clearSpreadsheetFilePreviewCache,
+} from "../components/shared/spreadsheet-file-preview";
 import type { FilePreviewData } from "../lib/file-preview";
 
 describe("spreadsheet file preview", () => {
@@ -36,6 +39,7 @@ describe("spreadsheet file preview", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = null;
+    clearSpreadsheetFilePreviewCache();
     parseSpreadsheetViewerWorkbookMock.mockClear();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   });

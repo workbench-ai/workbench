@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
@@ -22,6 +23,45 @@ describe.runIf(process.env.WORKBENCH_PACKAGING_TEST === "1")("packaged Workbench
     expect(result.stdout).toContain("workbench improve [SOURCE] [--dir DIR]");
     expect(result.stdout).toContain("workbench open [SOURCE] [--dir DIR]");
     expect(result.stdout).toContain("workbench cloud benchmarks|runs|subjects <command> [options]");
+  });
+
+  test("built binary resolves built-in adapter commands without package-manager PATH", () => {
+    const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const bin = path.join(packageRoot, "dist", "workbench.js");
+    const root = mkdtempSync(path.join(os.tmpdir(), "workbench-packaged-check-"));
+    const workspace = path.join(root, "bench");
+    try {
+      const init = spawnSync(
+        process.execPath,
+        [bin, "init", workspace, "--skill", "packaged-check", "--agent", "codex", "--json"],
+        {
+          cwd: packageRoot,
+          encoding: "utf8",
+        },
+      );
+      expect(init.status).toBe(0);
+
+      const check = spawnSync(
+        process.execPath,
+        [bin, "check", "--dir", workspace, "--json"],
+        {
+          cwd: packageRoot,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: "/usr/bin:/bin",
+          },
+        },
+      );
+
+      expect(check.status).toBe(0);
+      expect(JSON.parse(check.stdout)).toMatchObject({
+        ok: true,
+        errors: [],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("built local browser assets are self-contained", () => {

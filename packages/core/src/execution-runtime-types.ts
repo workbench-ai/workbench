@@ -8,7 +8,7 @@ import type {
 
 import type {
   GenericRunSpec,
-  WorkbenchTaskBundle,
+  WorkbenchEngineCase,
 } from "./generic-spec.ts";
 import type {
   WorkbenchExecutionProgressTarget,
@@ -18,7 +18,9 @@ import type {
 } from "./adapter-auth.ts";
 import type {
   WorkbenchAdapterOperation,
+  WorkbenchAdapterOperationExecutor,
   WorkbenchAdapterManifest,
+  WorkbenchRuntimeControlOperationSequenceRequest,
 } from "@workbench-ai/workbench-protocol";
 
 export interface WorkbenchExecutionRuntimeInput {
@@ -27,8 +29,9 @@ export interface WorkbenchExecutionRuntimeInput {
   environmentVersion?: Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "sourceHash" | "spec">;
   environmentDockerfile?: string;
   baseFiles: readonly SurfaceSnapshotFile[];
-  taskSourceFiles: readonly SurfaceSnapshotFile[];
-  taskBundles: readonly WorkbenchTaskBundle[];
+  engineResolveFiles: readonly SurfaceSnapshotFile[];
+  engineCases: readonly WorkbenchEngineCase[];
+  adapterFiles?: readonly SurfaceSnapshotFile[];
   traceFiles?: readonly SurfaceSnapshotFile[];
   now?: string;
   adapterAuthProfiles?: readonly WorkbenchAdapterAuthBundle[];
@@ -36,17 +39,20 @@ export interface WorkbenchExecutionRuntimeInput {
   adapterAuthRoot?: string;
   adapterAuthRequest?: Json;
   adapterAuthEnv?: Record<string, string>;
+  adapterRuntimeEnv?: Record<string, string>;
   progress?: WorkbenchExecutionProgressTarget;
   runtimeRegistry?: string;
   pullImages?: boolean;
   workdir?: string;
   workspaceRoot?: string;
+  runtimeControlOperation?: WorkbenchRuntimeControlOperationSequenceRequest;
 }
 
-export interface WorkbenchWorkloadPhaseCommand {
-  kind: "optimizer" | "runner" | "scorer";
+export interface WorkbenchWorkloadStepCommand {
+  kind: "optimizer" | "subject" | "engine";
   label: string;
   operation: WorkbenchAdapterOperation;
+  executor: WorkbenchAdapterOperationExecutor;
   adapter?: WorkbenchAdapterInvocation;
   command?: string;
   okExitCodes?: number[];

@@ -105,12 +105,12 @@ describe("workbench execution DAG scheduler", () => {
   });
 
   test("terminal prerequisite jobs satisfy queued dependents without re-execution", async () => {
-    const proposal = succeededJob(testJob("proposal"));
-    const runner = testJob("runner", ["proposal"]);
+    const subjectRevision = succeededJob(testJob("subject-revision"));
+    const runner = testJob("runner", ["subject-revision"]);
     const started: string[] = [];
 
     const result = await runWorkbenchExecutionDag({
-      jobs: [proposal, runner],
+      jobs: [subjectRevision, runner],
       sandboxProvider: DOCKER_SANDBOX_BACKEND,
       capacity: { cpu: 1, memoryGb: 1, diskGb: 1 },
       executeJob: async (job) => {
@@ -142,7 +142,7 @@ function testJob(
       dependsOn: [...dependsOn],
       execution: {
         id: `exec_${id}`,
-        purpose: id.startsWith("score") ? "trial" : "trial",
+        purpose: id.startsWith("score") ? "attempt" : "attempt",
         policy: {
           resources: {
             cpu: 1,

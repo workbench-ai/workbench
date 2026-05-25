@@ -16,7 +16,11 @@ import {
   type WorkbenchAdapterOperationRequirement,
   type WorkbenchAdapterManifest,
 } from "@workbench-ai/workbench-protocol";
-import type { resolveWorkbenchResolvedSourceYaml } from "@workbench-ai/workbench-core";
+import {
+  composeRuntimeDockerfileWithAdapterInstallers,
+  engineResolveInvocationForSpec,
+  type resolveWorkbenchResolvedSourceYaml,
+} from "@workbench-ai/workbench-core";
 
 export const WORKBENCH_ADAPTER_MANIFEST_FILE = "workbench.adapter.yaml";
 
@@ -25,9 +29,9 @@ const execFileAsync = promisify(execFile);
 export interface ResolvedWorkbenchAdapter {
   source: string;
   declaredSource: string;
-  kind: "builtin" | "path" | "npm" | "git";
-  stability: "builtin" | "local" | "pinned" | "floating";
-  overridesBuiltin?: boolean;
+  kind: "default" | "path" | "npm" | "git";
+  stability: "default" | "local" | "pinned" | "floating";
+  overridesDefault?: boolean;
   manifest: WorkbenchAdapterManifest;
   root?: string;
   files?: WorkbenchAdapterSourceFile[];
@@ -44,13 +48,13 @@ export interface WorkbenchAdapterSourceFile {
 
 type GenericSpec = ReturnType<typeof resolveWorkbenchResolvedSourceYaml>;
 
-export function builtinAdapterManifests(): WorkbenchAdapterManifest[] {
+export function defaultAdapterManifests(): WorkbenchAdapterManifest[] {
   return builtinWorkbenchAdapterManifests();
 }
 
-export function resolveBuiltinWorkbenchAdapter(id: string): ResolvedWorkbenchAdapter | null {
+export function resolveDefaultWorkbenchAdapter(id: string): ResolvedWorkbenchAdapter | null {
   const manifest = builtinWorkbenchAdapterManifest(id);
-  return manifest ? resolvedBuiltinAdapter(manifest) : null;
+  return manifest ? resolvedDefaultAdapter(manifest) : null;
 }
 
 export async function resolveWorkbenchAdaptersForProject(
@@ -59,20 +63,20 @@ export async function resolveWorkbenchAdaptersForProject(
 ): Promise<ResolvedWorkbenchAdapter[]> {
   const adapters = new Map<string, ResolvedWorkbenchAdapter>();
   for (const id of topLevelAdapterIds(spec)) {
-    const builtin = resolveBuiltinWorkbenchAdapter(id);
-    if (builtin) {
-      adapters.set(id, builtin);
+    const defaultAdapter = resolveDefaultWorkbenchAdapter(id);
+    if (defaultAdapter) {
+      adapters.set(id, defaultAdapter);
     }
   }
   for (const source of spec.adapters) {
     const adapter = await resolveProjectAdapterSource(dir, source);
     const existing = adapters.get(adapter.manifest.id);
-    const override = adapterOverridesBuiltin(adapter);
+    const override = adapterOverridesDefault(adapter);
     const resolvedAdapter = {
       ...adapter,
-      ...(override ? { overridesBuiltin: true } : {}),
+      ...(override ? { overridesDefault: true } : {}),
     };
-    if (existing?.kind === "builtin") {
+    if (existing?.kind === "default") {
       adapters.set(adapter.manifest.id, resolvedAdapter);
       continue;
     }
@@ -91,9 +95,9 @@ export async function resolveWorkbenchAdaptersForProject(
       if (adapters.has(id)) {
         continue;
       }
-      const builtin = resolveBuiltinWorkbenchAdapter(id);
-      if (builtin) {
-        adapters.set(id, builtin);
+      const defaultAdapter = resolveDefaultWorkbenchAdapter(id);
+      if (defaultAdapter) {
+        adapters.set(id, defaultAdapter);
         discovered = true;
         continue;
       }
@@ -142,41 +146,24 @@ export async function composeRuntimeDockerfileWithAdapters(
   dockerfile: string,
   adapters: readonly ResolvedWorkbenchAdapter[],
 ): Promise<string> {
-  const installAdapters = adapters.filter((adapter) =>
-    adapter.manifest.setup.length > 0 || (adapter.files?.length ?? 0) > 0
+  return composeRuntimeDockerfileWithAdapterInstallers(
+    dockerfile,
+    adapters.map((adapter) => ({
+      id: adapter.manifest.id,
+      source: adapter.source,
+      setup: adapter.manifest.setup,
+      files: adapter.files,
+    })),
   );
-  if (installAdapters.length === 0) {
-    return dockerfile;
-  }
-  const lines = [
-    dockerfile.trimEnd(),
-    "",
-    "# Workbench adapter setup. The benchmark Dockerfile owns task dependencies;",
-    "# adapter manifests own adapter runtime dependencies.",
-    "USER root",
-  ];
-  for (const adapter of installAdapters) {
-    lines.push("");
-    lines.push(`# Adapter: ${adapter.manifest.id} (${adapter.source})`);
-    if ((adapter.files?.length ?? 0) > 0) {
-      lines.push(...adapterSourceDockerfileLines(adapter));
-      lines.push(`WORKDIR /opt/workbench-adapters/${adapter.manifest.id}`);
-    }
-    for (const command of adapter.manifest.setup) {
-      lines.push(`RUN ${command}`);
-    }
-  }
-  lines.push("WORKDIR /workspace", "");
-  return lines.join("\n");
 }
 
-function resolvedBuiltinAdapter(manifest: WorkbenchAdapterManifest): ResolvedWorkbenchAdapter {
+function resolvedDefaultAdapter(manifest: WorkbenchAdapterManifest): ResolvedWorkbenchAdapter {
   const manifestHash = sha256(JSON.stringify(manifest));
   return {
-    source: `builtin:${manifest.id}`,
-    declaredSource: `builtin:${manifest.id}`,
-    kind: "builtin",
-    stability: "builtin",
+    source: `default:${manifest.id}`,
+    declaredSource: `default:${manifest.id}`,
+    kind: "default",
+    stability: "default",
     manifest: {
       ...manifest,
       operations: JSON.parse(JSON.stringify(manifest.operations)) as WorkbenchAdapterManifest["operations"],
@@ -188,8 +175,8 @@ function resolvedBuiltinAdapter(manifest: WorkbenchAdapterManifest): ResolvedWor
   };
 }
 
-function adapterOverridesBuiltin(adapter: ResolvedWorkbenchAdapter): boolean {
-  return adapter.kind !== "builtin" && builtinWorkbenchAdapterManifest(adapter.manifest.id) !== null;
+function adapterOverridesDefault(adapter: ResolvedWorkbenchAdapter): boolean {
+  return adapter.kind !== "default" && builtinWorkbenchAdapterManifest(adapter.manifest.id) !== null;
 }
 
 async function resolveNpmAdapterSource(source: string): Promise<ResolvedWorkbenchAdapter> {
@@ -354,19 +341,20 @@ function gitSourceStability(ref: string | null): ResolvedWorkbenchAdapter["stabi
 }
 
 function topLevelAdapterIds(spec: GenericSpec): string[] {
-  return [...new Set([
-    ...(spec.improve ? [spec.improve.use] : []),
-    spec.run.use,
-    spec.score.use,
-  ])];
+  return [...new Set(rootAdapterInvocations(spec).map((invocation) => invocation.use))];
 }
 
 function rootAdapterOperationRequirements(spec: GenericSpec): WorkbenchAdapterOperationRequirement[] {
   return [
-    ...(spec.improve ? [{ invocation: spec.improve, operation: "subject.improve" as const }] : []),
+    { invocation: engineResolveInvocationForSpec(spec), operation: "engine.resolve" as const },
+    { invocation: spec.engineRun, operation: "engine.run" as const },
+    ...(spec.improve ? [{ invocation: spec.improve, operation: "optimizer.improve" as const }] : []),
     { invocation: spec.run, operation: "subject.run" as const },
-    { invocation: spec.score, operation: "trial.score" as const },
   ];
+}
+
+function rootAdapterInvocations(spec: GenericSpec): WorkbenchAdapterOperationRequirement["invocation"][] {
+  return rootAdapterOperationRequirements(spec).map((requirement) => requirement.invocation);
 }
 
 function requiredAdapterIds(
@@ -381,17 +369,6 @@ function requiredAdapterIds(
     ids.add(requirement.invocation.use);
   }
   return [...ids];
-}
-
-function adapterSourceDockerfileLines(adapter: ResolvedWorkbenchAdapter): string[] {
-  const root = `/opt/workbench-adapters/${adapter.manifest.id}`;
-  const lines = [`RUN mkdir -p ${shellWord(root)}`];
-  for (const file of adapter.files ?? []) {
-    const destination = `${root}/${file.path}`;
-    const encoded = Buffer.from(file.content, "utf8").toString("base64");
-    lines.push(`RUN mkdir -p ${shellWord(path.posix.dirname(destination))} && printf '%s' ${shellWord(encoded)} | base64 -d > ${shellWord(destination)}${file.executable ? ` && chmod 755 ${shellWord(destination)}` : ""}`);
-  }
-  return lines;
 }
 
 async function readAdapterSourceFiles(
@@ -434,10 +411,6 @@ async function readAdapterSourceFiles(
 
 function normalizeSourcePath(value: string): string {
   return value.replace(/\\/gu, "/").replace(/^\.?\//u, "");
-}
-
-function shellWord(value: string): string {
-  return `'${value.replace(/'/gu, "'\"'\"'")}'`;
 }
 
 async function execFileUtf8(

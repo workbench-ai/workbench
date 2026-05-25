@@ -5,14 +5,14 @@ import type {
   WorkbenchSubjectPatch,
   WorkbenchExecutionOutputContract,
   WorkbenchExecutionSpec,
-  WorkbenchScorecard,
+  WorkbenchResult,
 } from "@workbench-ai/workbench-contract";
 
 import { normalizeUsageSummary } from "./execution-usage.ts";
 
 export interface WorkbenchExecutionOutputPayloads {
   subjectPatch?: WorkbenchSubjectPatch;
-  scorecard?: WorkbenchScorecard;
+  result?: WorkbenchResult;
 }
 
 export function validateWorkbenchExecutionOutputPayloads(
@@ -42,8 +42,8 @@ export function validateWorkbenchExecutionOutputPayloads(
       case "workbench.subject_patch.v1":
         validated.subjectPatch = normalizeSubjectPatch(payload, execution, contract, issues);
         break;
-      case "workbench.scorecard.v1":
-        validated.scorecard = normalizeScorecard(payload, execution, contract, issues);
+      case "workbench.result.v1":
+        validated.result = normalizeResult(payload, execution, contract, issues);
         break;
       default:
         break;
@@ -111,6 +111,7 @@ export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExe
 
   const outputNames = new Set<string>();
   const expectedOutput = expectedOutputForPurpose(execution.purpose);
+  const isRuntimeControlExecution = execution.metadata.runtimeControl === true;
   for (const output of execution.outputs) {
     if (outputNames.has(output.name)) {
       issues.push(`Execution ${execution.id} declares duplicate output ${output.name}.`);
@@ -125,7 +126,7 @@ export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExe
       issues.push(`Execution ${execution.id} cannot declare ${output.schema} for purpose ${execution.purpose}.`);
     }
   }
-  if (expectedOutput !== null && !outputNames.has(expectedOutput)) {
+  if (expectedOutput !== null && !outputNames.has(expectedOutput) && !isRuntimeControlExecution) {
     issues.push(`Execution ${execution.id} missing required output ${expectedOutput} for purpose ${execution.purpose}.`);
   }
 
@@ -135,9 +136,6 @@ export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExe
       issues.push(`Execution ${execution.id} policy.resources.${name} must be a positive number.`);
     }
   }
-  if (execution.policy.network.egress === "allowlist" && (!execution.policy.network.allow || execution.policy.network.allow.length === 0)) {
-    issues.push(`Execution ${execution.id} allowlist network policy must include at least one allowed host.`);
-  }
 
   return issues;
 }
@@ -146,8 +144,8 @@ function expectedInputsForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): R
   if (purpose === "improve") {
     return new Set(["subject", "traces"]);
   }
-  if (purpose === "trial") {
-    return new Set(["subject", "task"]);
+  if (purpose === "attempt") {
+    return new Set(["subject", "case"]);
   }
   return new Set();
 }
@@ -156,8 +154,8 @@ function expectedOutputForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): s
   if (purpose === "improve") {
     return "subject_patch";
   }
-  if (purpose === "trial") {
-    return "scorecard";
+  if (purpose === "attempt") {
+    return "result";
   }
   return null;
 }
@@ -176,8 +174,8 @@ function outputAllowedForPurpose(
   if (purpose === "improve") {
     return output.schema === "workbench.subject_patch.v1";
   }
-  if (purpose === "trial") {
-    return output.schema === "workbench.scorecard.v1";
+  if (purpose === "attempt") {
+    return output.schema === "workbench.result.v1";
   }
   return false;
 }
@@ -215,12 +213,12 @@ function normalizeSubjectPatch(
   };
 }
 
-function normalizeScorecard(
+function normalizeResult(
   value: Json,
   execution: WorkbenchExecutionSpec,
   contract: WorkbenchExecutionOutputContract,
   issues: string[],
-): WorkbenchScorecard {
+): WorkbenchResult {
   void execution;
   const record = readRecord(value, contract.name, issues);
   const score = readFiniteNumber(record?.score, `${contract.name}.score`, issues);
@@ -321,13 +319,10 @@ function normalizeCaseCriteria(
     if (!record || !criterionId || score === null) {
       return [];
     }
-    const pass = record.pass === undefined
-      ? score >= 0.5
-      : typeof record.pass === "boolean"
-        ? record.pass
-        : null;
+    const pass = typeof record.pass === "boolean" ? record.pass : null;
     if (pass === null) {
       issues.push(`${itemLabel}.pass must be a boolean.`);
+      return [];
     }
     const errors = record.errors === undefined
       ? []
@@ -344,7 +339,7 @@ function normalizeCaseCriteria(
       criterion_id: criterionId,
       label: typeof record.label === "string" ? record.label : criterionId,
       score,
-      pass: pass ?? false,
+      pass,
       ...(errors && errors.length > 0 ? { errors } : {}),
       ...(rationale ? { rationale } : {}),
     }];
