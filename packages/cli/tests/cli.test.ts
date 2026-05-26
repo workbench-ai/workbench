@@ -863,17 +863,17 @@ describe("workbench CLI", () => {
     expect(onboardingSource).toContain("workbench --version");
     expect(onboardingSource).toContain("workbench clone official/three-statement-demo");
     expect(onboardingSource).toContain("workbench check");
-    expect(onboardingSource).toContain("workbench eval subjects/current --samples 1");
     expect(onboardingSource).toContain("workbench push");
     expect(onboardingSource).toContain("workbench cloud improve subjects/current");
     expect(onboardingSource).toContain("--optimizer optimizers/current.yaml");
     expect(onboardingSource).toContain("--budget 1 --samples 1 --watch");
+    expect(onboardingSource).not.toContain("workbench eval subjects/current --samples 1");
     expect(onboardingSource).not.toContain("workbench cloud open official/three-statement-demo");
     expect(onboardingSource).not.toContain("workbench auth connect codex --method oauth");
     expect(onboardingSource).not.toContain("workbench whoami --json # provider status");
     expect(cliDocs).toContain("workbench init [DIR] --skill NAME --agent ADAPTER");
     expect(cliDocs).toContain("workbench clone official/three-statement-demo");
-    expect(cliDocs).toContain("workbench eval subjects/current --samples 1");
+    expect(cliDocs).not.toContain("workbench eval subjects/current --samples 1");
     expect(cliDocs).toContain("workbench improve --budget 1 --samples 1");
     expect(cliDocs).toContain("workbench cloud improve subjects/current --optimizer optimizers/current.yaml --budget 1 --samples 1 --watch");
     expect(cliDocs).toContain("workbench cloud improve subjects/codex --base SUBJECT_ID --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
@@ -881,7 +881,7 @@ describe("workbench CLI", () => {
     expect(cliDocs).toContain("subject files are declared explicitly with `files: { path: files }`");
     expect(skill).toContain("workbench init --skill my-eval --agent codex");
     expect(skill).toContain("workbench clone official/three-statement-demo");
-    expect(skill).toContain("workbench eval subjects/current --samples 1");
+    expect(skill).not.toContain("workbench eval subjects/current --samples 1");
     expect(skill).toContain("workbench improve --budget 1 --samples 1");
     expect(skill).toContain("workbench cloud improve subjects/current --optimizer optimizers/current.yaml --budget 1 --samples 1 --watch");
     expect(skill).toContain("workbench cloud improve subjects/codex --base subject_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
@@ -889,6 +889,7 @@ describe("workbench CLI", () => {
     expect(skill).toContain("workbench open --json --no-open");
     expect(agentYaml).toContain("official/three-statement-demo");
     expect(agentYaml).toContain("workbench check");
+    expect(agentYaml).not.toContain("run a local eval");
     expect(agentYaml).toContain("push the checkout");
     expect(manifest.skills[0]?.useCases.join("\n")).toContain("workbench init --skill NAME --agent ADAPTER");
     expect(manifest.skills[0]?.useCases.join("\n")).toContain("official/three-statement-demo");
@@ -1391,9 +1392,11 @@ describe("workbench CLI", () => {
     expect(skillBenchmark).toContain("engine:\n  use: workbench");
     expect(skillBenchmark).not.toContain("use: path");
     expect(skillBenchmark).toContain("environment:\n      dockerfile: environment/Dockerfile");
-    expect(skillSubject).toContain("run:\n  use: codex");
+    expect(skillBenchmark).toContain("judge:\n          use: codex\n          with:\n            model: gpt-5.5");
+    expect(skillSubject).toContain("run:\n  use: codex\n  with:\n    model: gpt-5.5");
     expect(skillSubject).toContain("prepare:\n  command: sh input/subject/prepare.sh");
     expect(skillOptimizer).toContain("edits:\n  - SKILL.md");
+    expect(skillOptimizer).toContain("improve:\n  use: codex\n  with:\n    model: gpt-5.5");
     expect(await readFile(path.join(skillWorkspace, "subjects", "codex", "files", "SKILL.md"), "utf8")).toContain("name: invoice-review");
     expect(await readFile(path.join(skillWorkspace, "subjects", "codex", "files", "prepare.sh"), "utf8")).toContain("cp -R input/subject/. .");
     expect(await readFile(path.join(skillWorkspace, "tasks", "task-001", "tests", "rubric.md"), "utf8")).toContain("Reward complete");
@@ -1415,6 +1418,8 @@ describe("workbench CLI", () => {
 
     await expect(readFile(path.join(customAgentWorkspace, "subjects", "my-agent", "subject.yaml"), "utf8"))
       .resolves.toContain("run:\n  use: my-agent");
+    await expect(readFile(path.join(customAgentWorkspace, "subjects", "my-agent", "subject.yaml"), "utf8"))
+      .resolves.not.toContain("model: gpt-5.5");
 
     for (const workspace of [skillWorkspace, commandWorkspace]) {
       const checkIo = createIo();
@@ -3342,7 +3347,9 @@ await fs.writeFile(resultPath, JSON.stringify({
   });
 
   test("push creates a writable hosted benchmark from a read-only public clone origin", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "workbench-readonly-push-home-"));
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-readonly-push-"));
+    vi.stubEnv("HOME", home);
     expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
     await mkdir(path.join(root, ".workbench"), { recursive: true });
     await writeFile(
@@ -3417,6 +3424,106 @@ await fs.writeFile(resultPath, JSON.stringify({
       url: "http://workbench.test/api/workbench/benchmarks",
       method: "POST",
     });
+  });
+
+  test("push updates a read-only public clone origin when the signed-in user owns it", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "workbench-readonly-owner-push-home-"));
+    const root = await mkdtemp(path.join(os.tmpdir(), "workbench-readonly-owner-push-"));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    await mkdir(path.join(home, ".workbench"), { recursive: true });
+    await writeFile(path.join(home, ".workbench", "workbench.json"), JSON.stringify({
+      baseUrl: "http://workbench.test",
+      accessToken: "test-token",
+    }));
+    expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
+    await mkdir(path.join(root, ".workbench"), { recursive: true });
+    await writeFile(
+      path.join(root, ".workbench", "origin.json"),
+      JSON.stringify({
+        projectId: "wb_officialdemo",
+        owner: "official",
+        project: "demo",
+        baseUrl: "http://workbench.test",
+        writable: false,
+        sourceRevisionId: "spec_0001",
+        sourceFingerprint: "fp_0001",
+        linkedAt: new Date(0).toISOString(),
+      }),
+      "utf8",
+    );
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      requests.push({
+        url,
+        method: init?.method ?? "GET",
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+      });
+      if (url === "http://workbench.test/api/workbench/profile") {
+        return Response.json({
+          profile: {
+            username: "official",
+            email: "sunyanlee@gmail.com",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_officialdemo/source" && init?.method === "PUT") {
+        return Response.json({
+          changed: false,
+          sourceFingerprint: "fp_official",
+          benchmark: {
+            id: "wb_officialdemo",
+            ownerUsername: "official",
+            name: "demo",
+            currentSpecVersionId: "spec_0002",
+            sourceFingerprint: "fp_official",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_officialdemo/publish" && init?.method === "PUT") {
+        return Response.json({
+          benchmark: {
+            id: "wb_officialdemo",
+            ownerUsername: "official",
+            name: "demo",
+            currentSpecVersionId: "spec_0002",
+            sourceFingerprint: "fp_official",
+          },
+        });
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    const exitCode = await runCli(["push", "--dir", root, "--json"], io);
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      action: "update",
+      changed: false,
+      origin: {
+        projectId: "wb_officialdemo",
+        owner: "official",
+        project: "demo",
+        writable: true,
+        sourceRevisionId: "spec_0002",
+        sourceFingerprint: "fp_official",
+      },
+      urls: {
+        benchmark: "http://workbench.test/benchmarks/official/demo",
+      },
+    });
+    expect(JSON.parse(await readFile(path.join(root, ".workbench", "origin.json"), "utf8"))).toMatchObject({
+      writable: true,
+      owner: "official",
+      project: "demo",
+    });
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET http://workbench.test/api/workbench/profile",
+      "PUT http://workbench.test/api/workbench/benchmarks/wb_officialdemo/source",
+      "PUT http://workbench.test/api/workbench/benchmarks/wb_officialdemo/publish",
+    ]);
   });
 
   test("push lets hosted benchmark identity enforce name conflicts", async () => {
@@ -3987,6 +4094,82 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(requests.filter((r) => r === "POST http://workbench.test/api/workbench/environments")).toEqual([]);
   });
 
+  test("reuses an evaluated active subject before hosted improve", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-hosted-improve-active-"));
+    expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
+
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    const requests: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      requests.push({
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc" && (init?.method ?? "GET") === "GET") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+            activeSubjectId: "subject_active",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/subjects") {
+        return Response.json({
+          subjects: [{
+            id: "subject_active",
+            status: "evaluated",
+            eval: { metric: 1 },
+          }],
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        return Response.json({
+          run: {
+            id: "run_improve",
+            workflow: body.workflow,
+            status: "queued",
+            subjectId: body.subjectId,
+            jobCount: 1,
+          },
+        }, { status: 201 });
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    const exitCode = await runCli([
+      "cloud",
+      "improve",
+      commandSubjectSpecPath(workspace),
+      "--optimizer",
+      commandOptimizerSpecPath(workspace),
+      "--benchmark",
+      "wb_123456789abc",
+      "--json",
+    ], io);
+
+    expect(exitCode).toBe(0);
+    expect(requests.map((request) => request.url)).toEqual([
+      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
+      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
+      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/subjects",
+      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
+    ]);
+    expect(requests.at(-1)?.body).toMatchObject({
+      workflow: "improve",
+      subjectId: "subject_active",
+      optimizerSource: expect.stringContaining("improve:"),
+    });
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      id: "run_improve",
+      workflow: "improve",
+      subjectId: "subject_active",
+    });
+  });
+
   test("watches hosted runs without an implicit timeout", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-watch-"));
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
@@ -4047,6 +4230,69 @@ await fs.writeFile(resultPath, JSON.stringify({
       urls: {
         subjectEvaluation: "http://workbench.test/benchmarks/alice/demo/subjects/subject_123?evaluation=eval_run_123_subject_123",
       },
+    });
+  });
+
+  test("keeps watching hosted runs across transient gateway errors", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-watch-transient-"));
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    let polls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs/run_123") {
+        polls += 1;
+        if (polls === 2) {
+          return new Response("<html><body>Bad Gateway</body></html>", {
+            status: 502,
+            statusText: "Bad Gateway",
+          });
+        }
+        return Response.json({
+          run: {
+            id: "run_123",
+            workflow: "eval",
+            status: polls < 4 ? "running" : "finished",
+            outcome: "ok",
+            subjectId: "subject_123",
+            completedJobCount: polls < 4 ? 0 : 1,
+            failedJobCount: 0,
+            jobCount: 1,
+            attemptsExecuted: polls < 4 ? 0 : 1,
+            samples: 1,
+          },
+        });
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    const exitCode = await runCli([
+      "cloud",
+      "watch",
+      "run_123",
+      "--dir",
+      workspace,
+      "--benchmark",
+      "wb_123456789abc",
+      "--interval-ms",
+      "1",
+      "--json",
+    ], io);
+
+    expect(exitCode).toBe(0);
+    expect(polls).toBe(4);
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      id: "run_123",
+      status: "finished",
+      outcome: "ok",
     });
   });
 

@@ -961,14 +961,13 @@ export function materializeWorkbenchRunResult(args: {
       (left, right) =>
         left.index - right.index || left.id.localeCompare(right.id),
     );
-    const evalRecord = createEvaluationRecord(subjectId, samples);
+    const subjectName = normalizedSubjectDisplayName(args.spec.subject.name);
+    const evalRecord = createEvaluationRecord(subjectId, subjectName, samples);
     const usage = mergeUsageSummaries([
       subjectRevision.usage,
       ...samples.map((sample) => sample.usage),
     ]);
-    const metrics = evaluationMeanMetrics(
-      createEvaluationRecord(subjectId, samples),
-    );
+    const metrics = evaluationMeanMetrics(evalRecord);
     const attemptIndex = subjectRevision.attemptIndex;
     const evaluationTraces = [
       ...outputs.flatMap(({ output }) => output.traces),
@@ -998,6 +997,7 @@ export function materializeWorkbenchRunResult(args: {
     }
     const record: SubjectRecord = {
       id: subjectId,
+      ...(subjectName ? { name: subjectName } : {}),
       ordinal: args.existingSubjectCount + subjects.length,
       benchmarkFingerprint: args.benchmarkFingerprint,
       subjectFingerprint: args.subjectFingerprint ?? materializedSubjectFingerprint(args.spec, subjectRevision.files),
@@ -1122,6 +1122,7 @@ function createEvaluationScorecard(args: {
     benchmarkFingerprint: args.benchmarkFingerprint,
     subjectFingerprint: args.subject.subjectFingerprint,
     subjectId: args.subject.id,
+    ...(args.subject.name ? { subjectName: args.subject.name } : {}),
     createdAt: args.createdAt,
     updatedAt: evaluation.finishedAt ?? args.createdAt,
     status: evaluation.status,
@@ -4647,9 +4648,20 @@ function compareSampleOutputs(
 
 function createEvaluationRecord(
   subjectId: string,
+  subjectName: string | null,
   rawSamples: EvaluationSampleRecord[],
 ): EvaluationRecord {
-  const samples = mergeEvaluationSampleRecords(rawSamples);
+  const samples = mergeEvaluationSampleRecords(rawSamples).map((sample) =>
+    subjectName
+      ? {
+          ...sample,
+          subject: {
+            ...sample.subject,
+            label: subjectName,
+          },
+        }
+      : sample,
+  );
   const startedAt = minTimestamp(
     samples.flatMap((sample) => (sample.startedAt ? [sample.startedAt] : [])),
   );
@@ -4671,6 +4683,7 @@ function createEvaluationRecord(
     subject: {
       id: subjectId,
       kind: "subject",
+      ...(subjectName ? { label: subjectName } : {}),
     },
     status:
       samples.length > 0 && completedSampleCount === samples.length
@@ -4691,6 +4704,11 @@ function createEvaluationRecord(
     ...(cases ? { cases } : {}),
     samples,
   };
+}
+
+function normalizedSubjectDisplayName(value: string | undefined): string | null {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
 }
 
 function aggregateSampleMetrics(

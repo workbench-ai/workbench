@@ -107,6 +107,7 @@ import {
 import {
   formatDurationMs,
   formatMetricValue,
+  formatSubjectDisplayName,
   formatTimestamp,
   shortId,
   statusLabel,
@@ -118,6 +119,7 @@ import {
   createSubjectsRoute,
   createBenchmarkRoute,
   parseWorkbenchLocation,
+  parseWorkbenchRoute,
   type SubjectDialog,
   type SubjectView,
   type WorkbenchPersistentSearchParams,
@@ -255,6 +257,8 @@ function readDesktopDetailLeftPercent(): number {
 export interface WorkbenchWorkspaceProps {
   apiBasePath: string;
   routeBasePath?: string;
+  initialPath?: string;
+  initialSearch?: string;
   persistentSearchParams?: WorkbenchPersistentSearchParams;
   headerControls?: ReactNode;
   brandHref?: string;
@@ -263,14 +267,23 @@ export interface WorkbenchWorkspaceProps {
 export function WorkbenchWorkspace({
   apiBasePath,
   routeBasePath = "/workbench",
+  initialPath = "/",
+  initialSearch = "",
   persistentSearchParams = EMPTY_PERSISTENT_SEARCH_PARAMS,
   headerControls,
   brandHref,
 }: WorkbenchWorkspaceProps) {
   const apiPath = useMemo(() => createApiPathResolver(apiBasePath), [apiBasePath]);
-  const [route, navigate] = useWorkbenchRoute(routeBasePath, persistentSearchParams);
+  const [route, navigate] = useWorkbenchRoute(
+    routeBasePath,
+    persistentSearchParams,
+    initialPath,
+    initialSearch,
+  );
   const [snapshot, setSnapshot] = useState<BenchmarkSnapshot | null>(null);
   const [specDocument, setSpecDocument] = useState<AuthoredWorkbenchSourceDocument | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(true);
+  const [specLoading, setSpecLoading] = useState(true);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
   const [recordState, setRecordState] = useState<SubjectRecordState>({
@@ -311,25 +324,30 @@ export function WorkbenchWorkspace({
   const [desktopDetailLeftPercent, setDesktopDetailLeftPercent] = useState(readDesktopDetailLeftPercent);
   const benchmarkSurfaceFillsBody = benchmarkSurfaceTab === "files";
   const shouldLoadBenchmarkSourceFiles = benchmarkSurfaceTab === "files";
-  const snapshotLoading = snapshot === null && snapshotError === null;
-  const specLoading = specDocument === null && specError === null;
 
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
+    setSnapshotLoading(true);
+    setSnapshotError(null);
 
     async function loadSnapshot() {
       try {
-        const next = await requestJson<BenchmarkSnapshot>(apiPath("/api/snapshot"));
+        const next = await requestJson<BenchmarkSnapshot>(apiPath("/api/snapshot"), {
+          signal: controller.signal,
+        });
         if (cancelled) {
           return;
         }
         startTransition(() => {
           setSnapshot(next);
           setSnapshotError(null);
+          setSnapshotLoading(false);
         });
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && !controller.signal.aborted) {
           setSnapshotError(toMessage(error));
+          setSnapshotLoading(false);
         }
       }
     }
@@ -338,6 +356,7 @@ export function WorkbenchWorkspace({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [apiPath]);
 
@@ -439,7 +458,11 @@ export function WorkbenchWorkspace({
   const prefersCompactWorkspaceLayout = useMediaQuery(COMPACT_WORKSPACE_LAYOUT_MEDIA_QUERY);
 
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
+    setSpecLoading(true);
+    setSpecError(null);
+
     const params = new URLSearchParams();
     if (scopedBenchmarkFingerprint) {
       params.set("fingerprint", scopedBenchmarkFingerprint);
@@ -449,6 +472,7 @@ export function WorkbenchWorkspace({
       try {
         const next = await requestJson<AuthoredWorkbenchSourceDocument>(
           apiPath(`/api/spec${params.size ? `?${params.toString()}` : ""}`),
+          { signal: controller.signal },
         );
         if (cancelled) {
           return;
@@ -456,10 +480,12 @@ export function WorkbenchWorkspace({
         startTransition(() => {
           setSpecDocument(next);
           setSpecError(null);
+          setSpecLoading(false);
         });
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && !controller.signal.aborted) {
           setSpecError(toMessage(error));
+          setSpecLoading(false);
         }
       }
     }
@@ -467,6 +493,7 @@ export function WorkbenchWorkspace({
     void loadSpec();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [apiPath, scopedBenchmarkFingerprint]);
 
@@ -1335,11 +1362,14 @@ function createApiPathResolver(apiBasePath: string): (pathname: string) => strin
 function useWorkbenchRoute(
   routeBasePath: string,
   persistentSearchParams: WorkbenchPersistentSearchParams,
+  initialPath: string,
+  initialSearch: string,
 ): [WorkbenchRoute, (route: WorkbenchRoute, options?: { replace?: boolean }) => void] {
-  const [route, setRoute] = useState<WorkbenchRoute>(() => parseWorkbenchLocation({
-    pathname: typeof window === "undefined" ? "/" : window.location.pathname,
-    search: typeof window === "undefined" ? "" : window.location.search,
-  }, routeBasePath));
+  const [route, setRoute] = useState<WorkbenchRoute>(() =>
+    parseWorkbenchRoute({
+      pathname: initialPath,
+      search: initialSearch,
+    }));
 
   useEffect(() => {
     const readCurrentRoute = () => parseWorkbenchLocation({
@@ -1455,7 +1485,7 @@ function objectPaneTitle(args: {
   if (!args.selectedSubjectSummary) {
     return "Subject";
   }
-  return shortId(args.selectedSubjectSummary.id) ?? args.selectedSubjectSummary.id;
+  return formatSubjectDisplayName(args.selectedSubjectSummary);
 }
 
 function WorkbenchBreadcrumbs({
@@ -1483,7 +1513,7 @@ function WorkbenchBreadcrumbs({
 
   const terminalLabel = route.kind === "subject"
     ? selectedSubjectSummary
-      ? shortId(selectedSubjectSummary.id) ?? selectedSubjectSummary.id
+      ? formatSubjectDisplayName(selectedSubjectSummary)
       : "Subject"
     : route.kind === "evaluations"
         ? "Evaluations"
@@ -2817,7 +2847,7 @@ function EvaluationSummaryTable({
                 >
                   <TableCell className="font-medium">
                     {showSubject
-                      ? formatSubjectDisplayName(evaluation.subjectId)
+                      ? formatSubjectDisplayName(evaluation)
                       : formatEvaluationDisplayName(evaluation)}
                   </TableCell>
                   <TableCell>{statusLabel(evaluation.status)}</TableCell>
@@ -3463,10 +3493,6 @@ function resolveScorecardCaseRows(scorecard: EvaluationScorecard): EvaluationCas
       split: caseStats.split ?? null,
     };
   }).sort((left, right) => left.label.localeCompare(right.label));
-}
-
-function formatSubjectDisplayName(subjectId: string): string {
-  return shortId(subjectId) ?? subjectId;
 }
 
 function formatEvaluationDisplayName(evaluation: EvaluationSummary): string {

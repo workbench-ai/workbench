@@ -15,12 +15,55 @@ type WorkbenchDisplayStatus =
 
 interface SubjectSelectionLabelOptions {
   summary: SubjectSummary;
+  baseSummary?: SubjectSummary | null;
   active?: boolean;
   details?: Array<string | null | undefined>;
 }
 
+type SubjectDisplayInput =
+  | string
+  | Pick<SubjectSummary, "id" | "name">
+  | Pick<EvaluationSummary, "subjectId" | "subjectName">
+  | null
+  | undefined;
+
 export function shortId(value: string | null | undefined): string | null {
   return value ? value.slice(0, 12) : null;
+}
+
+export function formatSubjectDisplayName(subject: SubjectDisplayInput): string {
+  if (!subject) {
+    return "Unknown subject";
+  }
+  if (typeof subject === "string") {
+    return shortId(subject) ?? subject;
+  }
+  const name =
+    "name" in subject
+      ? normalizedDisplayName(subject.name)
+      : "subjectName" in subject
+        ? normalizedDisplayName(subject.subjectName)
+        : null;
+  if (name) {
+    return name;
+  }
+  const id =
+    "id" in subject
+      ? subject.id
+      : "subjectId" in subject
+        ? subject.subjectId
+        : null;
+  return shortId(id) ?? id ?? "Unknown subject";
+}
+
+export function formatSubjectSecondaryLabel(
+  summary: SubjectSummary,
+  baseSummary?: SubjectSummary | null,
+): string {
+  const baseId = summary.baseId && summary.baseId !== summary.id ? summary.baseId : null;
+  return baseId
+    ? `From ${baseSummary ? formatSubjectDisplayName(baseSummary) : shortId(baseId) ?? baseId}`
+    : "Initial";
 }
 
 export function formatWorkspaceLabel(value: string | null | undefined): string {
@@ -108,30 +151,27 @@ export function formatMetricSummary(metrics: Record<string, number> | undefined)
     .join(" · ");
 }
 
-export function formatEvaluationSubjectLabel(
-  subjectId: string | null | undefined,
-): string {
-  if (!subjectId) {
-    return "Unknown subject";
-  }
-  return shortId(subjectId) ?? subjectId;
-}
-
 export function formatSubjectSelectionLabel({
   summary,
+  baseSummary = null,
   active = false,
   details = [],
 }: SubjectSelectionLabelOptions): string {
-  const baseId = summary.baseId && summary.baseId !== summary.id ? summary.baseId : null;
   return [
-    shortId(summary.id) ?? summary.id,
-    baseId ? `From ${shortId(baseId)}` : "Genesis subject",
+    formatSubjectDisplayName(summary),
+    `Subject ID ${shortId(summary.id) ?? summary.id}`,
+    formatSubjectSecondaryLabel(summary, baseSummary),
     statusLabel(summary.status),
     ...details,
     active ? "active subject" : null,
   ]
     .filter(Boolean)
     .join(". ");
+}
+
+function normalizedDisplayName(value: string | null | undefined): string | null {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
 }
 
 export function statusLabel(

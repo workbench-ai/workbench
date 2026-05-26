@@ -73,7 +73,7 @@ describe("subject lineage", () => {
 
     expect(flow.nodes).toHaveLength(1);
     expect(flow.edges).toEqual([]);
-    expect(formatSubjectSelectionLabel({ summary })).toContain("Genesis subject");
+    expect(formatSubjectSelectionLabel({ summary })).toContain("Initial");
   });
 
   test("keeps explicit improve parent edges", async () => {

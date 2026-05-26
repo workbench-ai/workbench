@@ -131,6 +131,7 @@ export function createCodexHarnessDefinition(
         strategy: "secret_ref" as const,
         ref: "OPENAI_API_KEY",
       },
+      model: "gpt-5.5",
       config: {},
     },
     capabilities: {

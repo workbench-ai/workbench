@@ -11,19 +11,18 @@ The public project model is intentionally small:
 
 ## Public Demo Flow
 
-Use this path for the public three-statement demo. The public benchmark can be cloned and run locally without a Workbench Cloud account. Sign in only when you are ready to push your local checkout and run hosted auto-improvement.
+Use this path for the public three-statement demo. The public benchmark can be cloned and validated without a Workbench Cloud account. Sign in only when you are ready to push your local checkout and run hosted auto-improvement.
 
 ```bash
 workbench clone official/three-statement-demo
 cd three-statement-demo
 workbench check
-workbench eval subjects/current --samples 1
 workbench login
 workbench push
 workbench cloud improve subjects/current --optimizer optimizers/current.yaml --budget 1 --samples 1 --watch
 ```
 
-The cloned public demo uses `subjects/current` and `optimizers/current.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. When a checkout came from a public benchmark, `workbench push` creates a writable hosted benchmark under the signed-in user and keeps the original benchmark as upstream metadata in `.workbench/origin.json`.
+The cloned public demo uses `subjects/current` and `optimizers/current.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. When a checkout came from a public benchmark, `workbench push` creates a writable hosted benchmark under the signed-in user and keeps the original benchmark as upstream metadata in `.workbench/origin.json`. If the signed-in user owns the public origin, `workbench push` updates that benchmark instead.
 
 ## Provider Selection
 
@@ -65,7 +64,7 @@ workbench cloud eval subjects/codex --samples 1 --watch --json
 workbench cloud open --json --no-open
 ```
 
-`workbench push` creates or updates a hosted benchmark version and writes `.workbench/origin.json`. Run it only after `workbench check` and a bounded local smoke eval pass. Hosted commands return URLs in JSON output; open those URLs when an embedded browser is available.
+`workbench push` creates or updates a hosted benchmark version and writes `.workbench/origin.json`. Run it after `workbench check`; use a bounded local smoke eval first when local adapter auth and sandbox execution are already configured. Hosted commands return URLs in JSON output; open those URLs when an embedded browser is available.
 
 ## Remote Sync And Collaboration
 
@@ -76,7 +75,7 @@ workbench pull
 workbench cloud star official/three-statement-demo
 ```
 
-`workbench fetch` downloads remote source into `.workbench/fetch` without changing project files. `workbench pull` updates managed project files from the origin. `workbench push` creates a writable hosted benchmark when the current origin is a read-only public clone, and updates the hosted benchmark after that. `workbench remote remove origin --json` is idempotent and reports `removed: true` only when an origin file existed.
+`workbench fetch` downloads remote source into `.workbench/fetch` without changing project files. `workbench pull` updates managed project files from the origin. `workbench push` creates a writable hosted benchmark when the current origin is a read-only public clone, updates the read-only origin when the signed-in user owns it, and updates the hosted benchmark after that. `workbench remote remove origin --json` is idempotent and reports `removed: true` only when an origin file existed.
 
 ## Adapter Auth
 

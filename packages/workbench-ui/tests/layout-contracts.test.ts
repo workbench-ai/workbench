@@ -480,8 +480,10 @@ describe("workbench browser layout contracts", () => {
 
     expect(appSource).not.toContain('components/ui/spinner');
     expect(appSource).toContain('./components/loading-states');
-    expect(appSource).toContain("const snapshotLoading = snapshot === null && snapshotError === null");
-    expect(appSource).toContain("const specLoading = specDocument === null && specError === null");
+    expect(appSource).toContain("const [snapshotLoading, setSnapshotLoading] = useState(true)");
+    expect(appSource).toContain("const [specLoading, setSpecLoading] = useState(true)");
+    expect(appSource).toContain("setSnapshotLoading(true)");
+    expect(appSource).toContain("setSpecLoading(true)");
     expect(loadingStatesSource).toContain('components/ui/skeleton');
     expect(loadingStatesSource).toContain('data-testid="benchmark-loading-state"');
     expect(loadingStatesSource).toContain('data-testid="source-yaml-loading"');

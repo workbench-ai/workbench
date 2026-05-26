@@ -5,6 +5,8 @@ import {
   formatDurationMs,
   formatMetricSummary,
   formatMetricValue,
+  formatSubjectDisplayName,
+  formatSubjectSecondaryLabel,
   formatWorkspaceLabel,
   hasMetricValues,
   shortId,
@@ -15,6 +17,54 @@ describe("format helpers", () => {
     expect(shortId("subject-1234567890")).toBe("subject-1234");
     expect(shortId(null)).toBeNull();
     expect(shortId(undefined)).toBeNull();
+  });
+
+  test("subject display names prefer authored names over generated ids", () => {
+    expect(formatSubjectDisplayName({
+      id: "subject_abc123456789",
+      name: "Codex GPT-5.5",
+    })).toBe("Codex GPT-5.5");
+    expect(formatSubjectDisplayName({
+      subjectId: "subject_def123456789",
+      subjectName: "Codex GPT-5.4 Mini",
+    })).toBe("Codex GPT-5.4 Mini");
+    expect(formatSubjectDisplayName({ id: "subject_abc123456789" })).toBe("subject_abc1");
+  });
+
+  test("subject secondary labels use plain workflow language", () => {
+    expect(formatSubjectSecondaryLabel({
+      id: "subject_base",
+      name: "Baseline",
+      ordinal: 0,
+      benchmarkFingerprint: "benchmark",
+      subjectFingerprint: "fingerprint",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+    })).toBe("Initial");
+    expect(formatSubjectSecondaryLabel({
+      id: "subject_child",
+      name: "Improved",
+      baseId: "subject_base",
+      ordinal: 1,
+      benchmarkFingerprint: "benchmark",
+      subjectFingerprint: "fingerprint",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+    }, {
+      id: "subject_base",
+      name: "Baseline",
+      ordinal: 0,
+      benchmarkFingerprint: "benchmark",
+      subjectFingerprint: "fingerprint",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+    })).toBe("From Baseline");
   });
 
   test("formatWorkspaceLabel returns the trailing folder name", () => {

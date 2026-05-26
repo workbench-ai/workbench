@@ -11,7 +11,7 @@ import { memo, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent 
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
 import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
-import { shortId } from "../lib/format";
+import { formatSubjectDisplayName } from "../lib/format";
 import {
   buildLineageFlow,
   createLineageNodeDomAttributes,
@@ -209,7 +209,7 @@ const SubjectNode = memo(function SubjectNode(props: NodeProps<LineageNode>) {
           ) : null}
         </div>
         <div className="min-w-0 truncate font-medium leading-5 text-foreground">
-          {shortId(summary.id) ?? summary.id}
+          {formatSubjectDisplayName(summary)}
         </div>
         {flowData.active ? (
           <div className="text-[11px] leading-4 text-primary">Active</div>

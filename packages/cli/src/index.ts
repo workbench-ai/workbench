@@ -186,6 +186,7 @@ interface HostedProjectSummary {
   visibility?: "private" | "public";
   currentSpecVersionId?: string;
   sourceFingerprint?: string;
+  activeSubjectId?: string | null;
   starCount?: number;
   runs?: unknown[];
   subjects?: unknown[];
@@ -235,6 +236,18 @@ interface WorkbenchCheckPlan {
     engine: WorkbenchAdapterSummary;
     sources: WorkbenchAdapterSourceSummary[];
   };
+}
+
+class WorkbenchApiRequestError extends Error {
+  readonly status: number;
+  readonly body: string;
+
+  constructor(status: number, message: string, body: string) {
+    super(message);
+    this.name = "WorkbenchApiRequestError";
+    this.status = status;
+    this.body = body;
+  }
 }
 
 interface WorkbenchAdapterSummary {
@@ -3402,66 +3415,69 @@ async function pushBenchmark(
     throw new UsageError("Missing hosted benchmark. Run workbench push from a source directory.");
   }
   if (!origin.writable) {
-    const upstream = upstreamFromOrigin(origin);
-    if (dryRun) {
+    const signedInUsername = dryRun ? null : await readAuthenticatedWorkbenchUsername(baseUrl);
+    if (signedInUsername !== origin.owner) {
+      const upstream = upstreamFromOrigin(origin);
+      if (dryRun) {
+        writeOutput(
+          {
+            ok: true,
+            dryRun: true,
+            action: "create",
+            dir,
+            baseUrl,
+            benchmarkName: source.spec.name,
+            tag: asOptionalString(parsed.flags.tag) ?? null,
+            visibility,
+            sourceFileCount: sourceFileCount(source),
+            upstream: upstream ?? null,
+          },
+          parsed,
+          io,
+          () => `Would create a writable benchmark from read-only origin ${origin.owner}/${origin.project}.`,
+        );
+        return 0;
+      }
+      const { project, publishedProject, origin: nextOrigin } = await createHostedBenchmarkFromSource({
+        baseUrl,
+        dir,
+        source,
+        visibility,
+        upstream,
+      });
       writeOutput(
         {
           ok: true,
-          dryRun: true,
           action: "create",
-          dir,
-          baseUrl,
-          benchmarkName: source.spec.name,
+          benchmark: publishedProject,
           tag: asOptionalString(parsed.flags.tag) ?? null,
           visibility,
-          sourceFileCount: sourceFileCount(source),
+          origin: nextOrigin,
           upstream: upstream ?? null,
+          urls: buildWorkbenchResourceUrls({
+            baseUrl,
+            projectId: publishedProject.id ?? project.id!,
+            owner: nextOrigin.owner,
+            projectName: nextOrigin.project,
+          }),
         },
         parsed,
         io,
-        () => `Would create a writable benchmark from read-only origin ${origin.owner}/${origin.project}.`,
+        (record) => {
+          const value = record as {
+            origin: WorkbenchOrigin;
+            urls: WorkbenchResourceUrls;
+            upstream?: WorkbenchOrigin["upstream"] | null;
+          };
+          return [
+            `Pushed ${value.origin.owner}/${value.origin.project} (${value.origin.projectId}).`,
+            ...(value.upstream ? [`Upstream: ${value.upstream.owner}/${value.upstream.project}`] : []),
+            `Open benchmark: ${value.urls.benchmark}`,
+          ].join("\n");
+        },
       );
       return 0;
     }
-    const { project, publishedProject, origin: nextOrigin } = await createHostedBenchmarkFromSource({
-      baseUrl,
-      dir,
-      source,
-      visibility,
-      upstream,
-    });
-    writeOutput(
-      {
-        ok: true,
-        action: "create",
-        benchmark: publishedProject,
-        tag: asOptionalString(parsed.flags.tag) ?? null,
-        visibility,
-        origin: nextOrigin,
-        upstream: upstream ?? null,
-        urls: buildWorkbenchResourceUrls({
-          baseUrl,
-          projectId: publishedProject.id ?? project.id!,
-          owner: nextOrigin.owner,
-          projectName: nextOrigin.project,
-        }),
-      },
-      parsed,
-      io,
-      (record) => {
-        const value = record as {
-          origin: WorkbenchOrigin;
-          urls: WorkbenchResourceUrls;
-          upstream?: WorkbenchOrigin["upstream"] | null;
-        };
-        return [
-          `Pushed ${value.origin.owner}/${value.origin.project} (${value.origin.projectId}).`,
-          ...(value.upstream ? [`Upstream: ${value.upstream.owner}/${value.upstream.project}`] : []),
-          `Open benchmark: ${value.urls.benchmark}`,
-        ].join("\n");
-      },
-    );
-    return 0;
   }
   if (dryRun) {
     writeOutput(
@@ -3590,6 +3606,12 @@ async function createHostedBenchmarkFromSource(args: {
     ...(args.upstream ? { upstream: args.upstream } : {}),
   });
   return { project, publishedProject, origin };
+}
+
+async function readAuthenticatedWorkbenchUsername(baseUrl: string): Promise<string | null> {
+  const config = await loadConfig();
+  const status = await readWorkbenchProfileStatus({ ...config, baseUrl });
+  return status.authenticated ? status.profile?.username ?? null : null;
 }
 
 function upstreamFromOrigin(origin: WorkbenchOrigin): WorkbenchOrigin["upstream"] | undefined {
@@ -4094,21 +4116,19 @@ async function ensureHostedImproveBaseSubject(args: {
   timeoutMs?: number;
 }): Promise<string> {
   if (args.subjectId) {
-    const response = await apiRequest<{
-      subjects: Array<{ id: string; status?: string; eval?: unknown }>;
-    }>(
-      projectApiPath(args.target.projectId, "/subjects"),
-      {},
-      args.target.baseUrl,
-    );
-    const subject = response.subjects.find((entry) => entry.id === args.subjectId);
+    const subject = await readHostedSubjectSummary(args.target, args.subjectId);
     if (!subject) {
       throw new UsageError(
         `Base subject ${args.subjectId} was not found for the current benchmark.`,
       );
     }
-    if (subject && (subject.status === "evaluated" || subject.eval != null)) {
+    if (hostedSubjectIsEvaluated(subject)) {
       return args.subjectId;
+    }
+  } else {
+    const activeSubject = await readEvaluatedActiveHostedSubject(args.target);
+    if (activeSubject) {
+      return activeSubject.id;
     }
   }
   const response = await apiRequest<{ run: HostedRunRecord }>(
@@ -4137,6 +4157,44 @@ async function ensureHostedImproveBaseSubject(args: {
     throw new UsageError(`Parent subject eval ${watched.id} did not produce a subject.`);
   }
   return watched.subjectId;
+}
+
+interface HostedSubjectSummary {
+  id: string;
+  status?: string;
+  eval?: unknown;
+}
+
+async function readHostedSubjectSummary(
+  target: HostedTarget,
+  subjectId: string,
+): Promise<HostedSubjectSummary | null> {
+  const response = await apiRequest<{ subjects: HostedSubjectSummary[] }>(
+    projectApiPath(target.projectId, "/subjects"),
+    {},
+    target.baseUrl,
+  );
+  return response.subjects.find((entry) => entry.id === subjectId) ?? null;
+}
+
+async function readEvaluatedActiveHostedSubject(
+  target: HostedTarget,
+): Promise<HostedSubjectSummary | null> {
+  const response = await apiRequest<{ benchmark: HostedProjectSummary }>(
+    projectApiPath(target.projectId),
+    {},
+    target.baseUrl,
+  );
+  const activeSubjectId = response.benchmark.activeSubjectId;
+  if (!activeSubjectId) {
+    return null;
+  }
+  const subject = await readHostedSubjectSummary(target, activeSubjectId);
+  return subject && hostedSubjectIsEvaluated(subject) ? subject : null;
+}
+
+function hostedSubjectIsEvaluated(subject: HostedSubjectSummary): boolean {
+  return subject.status === "evaluated" || subject.eval != null;
 }
 
 async function benchmarkList(
@@ -5157,11 +5215,25 @@ async function watchHostedRun(args: {
     args.timeoutMs === undefined ? undefined : Date.now() + args.timeoutMs;
   let lastRun: HostedRunRecord | null = null;
   while (true) {
-    const response = await apiRequest<{ run: HostedRunRecord }>(
-      projectApiPath(args.target.projectId, `/runs/${encodeURIComponent(args.runId)}`),
-      {},
-      args.target.baseUrl,
-    );
+    let response: { run: HostedRunRecord };
+    try {
+      response = await apiRequest<{ run: HostedRunRecord }>(
+        projectApiPath(args.target.projectId, `/runs/${encodeURIComponent(args.runId)}`),
+        {},
+        args.target.baseUrl,
+      );
+    } catch (error) {
+      if (isTransientApiRequestError(error)) {
+        if (deadline !== undefined && Date.now() > deadline) {
+          throw new Error(
+            `Timed out waiting for run ${args.runId}; last status was ${lastRun?.status ?? "unknown"} and the latest poll failed with ${error.message}.`,
+          );
+        }
+        await sleep(args.intervalMs);
+        continue;
+      }
+      throw error;
+    }
     lastRun = response.run;
     if (response.run.status === "finished") {
       return response.run;
@@ -5511,9 +5583,11 @@ async function apiRequest<T>(
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(
+    throw new WorkbenchApiRequestError(
+      response.status,
       readResponseError(text) ||
-        `Request failed with status ${response.status}.`,
+        `Request failed with status ${response.status}${response.statusText ? ` ${response.statusText}` : ""}.`,
+      text,
     );
   }
   return (await response.json()) as T;
@@ -5662,8 +5736,17 @@ function readResponseError(text: string): string {
         ? body.error
         : "";
   } catch {
-    return text;
+    const trimmed = text.trim();
+    if (trimmed.startsWith("<")) {
+      return "";
+    }
+    return trimmed;
   }
+}
+
+function isTransientApiRequestError(error: unknown): error is WorkbenchApiRequestError {
+  return error instanceof WorkbenchApiRequestError
+    && (error.status === 408 || error.status === 429 || error.status >= 500);
 }
 
 function readOAuthError(text: string): string {

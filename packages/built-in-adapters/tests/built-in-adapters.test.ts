@@ -156,6 +156,12 @@ describe("built-in Workbench adapters", () => {
     expect(result.usage.runner.provider).toBe("openai/codex");
   });
 
+  test("defaults Codex agent turns to the supported Workbench model", async () => {
+    const { codexHarness } = await import("@workbench-ai/agent-driver-openai-codex");
+
+    expect(codexHarness().manifest.defaults.model).toBe("gpt-5.5");
+  });
+
   test("executes rubric criteria as bounded parallel judge turns and aggregates weighted metrics", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-rubric-"));
     const criteria = [{

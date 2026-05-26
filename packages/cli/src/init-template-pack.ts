@@ -112,6 +112,7 @@ function skillBenchmarkSpec(name: string, agent: InitAgent): string {
     "        parallelism: 2",
     "        judge:",
     `          use: ${agent}`,
+    ...agentDefaultWithLines(agent, "          "),
     "        criteria:",
     "          - id: task_fit",
     "            description: The response follows the task prompt and uses the skill's workflow.",
@@ -133,6 +134,7 @@ function skillSubjectSpec(name: string, agent: InitAgent): string {
     "  command: sh input/subject/prepare.sh",
     "run:",
     `  use: ${agent}`,
+    ...agentDefaultWithLines(agent, "  "),
     "",
   ].join("\n");
 }
@@ -146,8 +148,19 @@ function optimizerSpec(name: string, editablePath: string, agent: InitAgent): st
     `  - ${editablePath}`,
     "improve:",
     `  use: ${agent}`,
+    ...agentDefaultWithLines(agent, "  "),
     "",
   ].join("\n");
+}
+
+function agentDefaultWithLines(agent: InitAgent, indent: string): string[] {
+  if (agent !== "codex") {
+    return [];
+  }
+  return [
+    `${indent}with:`,
+    `${indent}  model: gpt-5.5`,
+  ];
 }
 
 function commandBenchmarkSpec(name: string): string {

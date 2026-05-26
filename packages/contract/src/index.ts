@@ -306,6 +306,7 @@ export interface EvaluationSummary {
   benchmarkFingerprint: string;
   subjectFingerprint: string;
   subjectId: string;
+  subjectName?: string;
   createdAt: string;
   updatedAt: string;
   status: EvaluationStatus;
@@ -324,6 +325,7 @@ export interface EvaluationScorecard extends EvaluationSummary {
 
 export interface SubjectSummary {
   id: string;
+  name?: string;
   ordinal: number;
   benchmarkFingerprint: string;
   subjectFingerprint: string;
@@ -911,6 +913,7 @@ export interface HostedWorkbenchJob {
   startedAt?: string;
   finishedAt?: string;
   leaseUntil?: string;
+  wakeupLeaseUntil?: string;
   hostId?: string;
   workerId?: string;
   claimTokenHash?: string;

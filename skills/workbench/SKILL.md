@@ -26,13 +26,12 @@ When the user asks to try the Workbench demo, start from the public three-statem
 workbench clone official/three-statement-demo
 cd three-statement-demo
 workbench check
-workbench eval subjects/current --samples 1
 workbench login
 workbench push
 workbench cloud improve subjects/current --optimizer optimizers/current.yaml --budget 1 --samples 1 --watch
 ```
 
-The public benchmark is readable without Workbench Cloud login. It starts with three cases and an empty skill frontmatter. Its cloned paths are `subjects/current` and `optimizers/current.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. When a checkout came from a public benchmark, `workbench push` creates a writable hosted benchmark under the signed-in user and records the original benchmark as upstream metadata. Stop cleanly when login or OAuth requires user approval.
+The public benchmark is readable without Workbench Cloud login. It starts with three cases and an empty skill frontmatter. Its cloned paths are `subjects/current` and `optimizers/current.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. When a checkout came from a public benchmark, `workbench push` creates a writable hosted benchmark under the signed-in user and records the original benchmark as upstream metadata. If the signed-in user owns the public origin, `workbench push` updates that benchmark instead. Stop cleanly when login or OAuth requires user approval.
 
 ## Provider And Auth
 
@@ -79,7 +78,7 @@ Skip `workbench auth connect ...` when `workbench whoami --json` already shows t
 
 ## Cloud Deployment Flow
 
-After `workbench check` and a bounded local eval pass, push and run hosted smoke workflows:
+After `workbench check`, push and run hosted smoke workflows. Run a bounded local eval first when local adapter auth and sandbox execution are already configured:
 
 ```bash
 workbench login

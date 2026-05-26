@@ -668,11 +668,14 @@ describe("Workbench runtime generic execution", () => {
 
     expect(materialized.activeSubjectId).toBe(subjectId);
     expect(materialized.subjects).toHaveLength(1);
+    expect(materialized.subjects[0]?.name).toBe("runtime-generic-execution");
     expect(materialized.subjects[0]?.metrics?.score).toBe(0.91);
     expect(materialized.subjects[0]?.eval?.samples[0]?.cases).toBeUndefined();
     expect(materialized.evaluations[0]?.evaluation.cases).toBeUndefined();
     expect(materialized.completedJobCount).toBe(2);
     expect(materialized.evaluations[0]?.evaluation.subject.id).toBe(subjectId);
+    expect(materialized.evaluations[0]?.subjectName).toBe("runtime-generic-execution");
+    expect(materialized.evaluations[0]?.evaluation.subject.label).toBe("runtime-generic-execution");
   });
 
   test("materializes only subject source files into subject snapshots", () => {

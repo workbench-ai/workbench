@@ -91,8 +91,10 @@ export async function buildLineageFlow(
     activeId: snapshot.activeId,
   });
   const latestEvaluationBySubject = buildLatestEvaluationBySubject(snapshot.evaluations);
+  const summaryById = new Map(snapshot.summaries.map((summary) => [summary.id, summary]));
   const nodes = lineage.nodes.map((node) => {
     const { summary, active } = node;
+    const baseSummary = summary.baseId ? summaryById.get(summary.baseId) ?? null : null;
     const latestEvaluation = latestEvaluationBySubject.get(summary.id) ?? null;
     const evaluationDisplay = resolveSubjectEvaluationDisplay({
       latestEvaluation,
@@ -114,6 +116,7 @@ export async function buildLineageFlow(
       ariaRole: "button",
       ariaLabel: formatSubjectSelectionLabel({
         summary,
+        baseSummary,
         active,
         details: [evaluationDisplay.ariaText],
       }),
