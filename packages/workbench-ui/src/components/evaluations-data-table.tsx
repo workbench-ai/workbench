@@ -65,11 +65,11 @@ export function EvaluationsDataTable({
   );
 
   return (
-    <Table data-testid="evaluations-table" className="min-w-[640px] table-fixed">
+    <Table data-testid="evaluations-table" className="min-w-[760px] table-auto">
       <TableHeader>
         <TableRow>
           <TableHead
-            className="w-[36%]"
+            className="min-w-[18rem]"
             aria-sort={formatAriaSort(sortState.key === "label" ? sortState.direction : false)}
           >
             <SortableHeader
@@ -81,7 +81,7 @@ export function EvaluationsDataTable({
           {columns.map((descriptor) => (
             <TableHead
               key={descriptor.id}
-              className="w-[16%]"
+              className="min-w-[8rem]"
               aria-sort={formatAriaSort(sortState.key === descriptor.id ? sortState.direction : false)}
             >
               <SortableHeader
@@ -95,7 +95,7 @@ export function EvaluationsDataTable({
               />
             </TableHead>
           ))}
-          <TableHead className="w-[14%]">Samples</TableHead>
+          <TableHead className="min-w-[7rem]">Samples</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -105,13 +105,13 @@ export function EvaluationsDataTable({
             className={onSelectEvaluation ? "cursor-pointer" : undefined}
             onClick={onSelectEvaluation ? () => onSelectEvaluation(evaluation.id) : undefined}
           >
-            <TableCell className="min-w-0">
-              <span className="min-w-0 break-words font-medium text-foreground [overflow-wrap:anywhere]">
+            <TableCell className="min-w-[18rem] align-top whitespace-normal">
+              <span className="break-words font-medium text-foreground [overflow-wrap:anywhere]">
                 {evaluation.label}
               </span>
             </TableCell>
             {columns.map((descriptor) => (
-              <TableCell key={descriptor.id} className="text-muted-foreground">
+              <TableCell key={descriptor.id} className="align-top text-muted-foreground">
                 {formatEvaluationMetricStats(
                   descriptor,
                   getEvaluationMetricStats(evaluation, descriptor),
@@ -119,7 +119,7 @@ export function EvaluationsDataTable({
                 )}
               </TableCell>
             ))}
-            <TableCell className="text-muted-foreground">
+            <TableCell className="align-top text-muted-foreground">
               {evaluation.completedSampleCount}/{evaluation.sampleCount}
               {evaluation.errorSampleCount > 0 ? ` error ${evaluation.errorSampleCount}` : ""}
             </TableCell>

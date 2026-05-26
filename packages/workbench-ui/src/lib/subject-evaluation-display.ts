@@ -1,10 +1,9 @@
 import type { EvaluationSummary } from "../types";
-import { formatMetricValue, shortId, statusLabel } from "./format";
+import { formatMetricValue, statusLabel } from "./format";
 
 export interface SubjectEvaluationDisplay {
   evaluation: EvaluationSummary | null;
   scoreText: string;
-  sourceText: string;
   ariaText: string;
 }
 
@@ -29,8 +28,7 @@ export function resolveSubjectEvaluationDisplay(args: {
     return {
       evaluation: null,
       scoreText: "No score",
-      sourceText: "No evaluation yet",
-      ariaText: "No latest evaluation score",
+      ariaText: "No evaluation score",
     };
   }
 
@@ -38,14 +36,11 @@ export function resolveSubjectEvaluationDisplay(args: {
   const scoreText = Number.isFinite(score)
     ? `Score ${formatMetricValue(score as number)}`
     : "Score not recorded";
-  const evaluationLabel = shortId(evaluation.id) ?? evaluation.id;
-  const sourceText = `Latest evaluation ${evaluationLabel}`;
   const statusText = statusLabel(evaluation.status);
   return {
     evaluation,
     scoreText,
-    sourceText,
-    ariaText: `${scoreText} from ${sourceText}, ${statusText}`,
+    ariaText: `${scoreText}, ${statusText}`,
   };
 }
 

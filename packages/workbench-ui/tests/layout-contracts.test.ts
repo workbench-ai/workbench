@@ -406,7 +406,7 @@ describe("workbench browser layout contracts", () => {
     expect(graphSource).toContain("truncate");
   });
 
-  test("evaluation chart cards use native chart labeling without custom tick chrome", () => {
+  test("evaluation chart cards share non-truncating category axis labels", () => {
     const appSource = readFileSync(
       new URL("../src/app.tsx", import.meta.url),
       "utf8",
@@ -420,16 +420,23 @@ describe("workbench browser layout contracts", () => {
       "utf8",
     );
 
-    expect(chartSource).toContain('interval="preserveStartEnd"');
+    expect(chartSource).toContain("buildEvaluationCategoryAxisLayout");
+    expect(chartSource).toContain("wrapEvaluationCategoryAxisLabel");
+    expect(chartSource).toContain("categoryAxisLayout.hasLongLabels");
+    expect(chartSource).toContain("function EvaluationCategoryAxisTick");
+    expect(chartSource).toContain("<EvaluationCategoryAxisTick");
+    expect(chartSource).toContain("width={categoryAxisLayout.yAxisWidth}");
+    expect(chartSource).toContain("height={layout.xAxisHeight}");
+    expect(chartSource).toContain("interval={0}");
     expect(chartSource).toContain("minTickGap={16}");
-    expect(chartSource).toContain("tickFormatter={formatEvaluationAxisTickLabel}");
-    expect(chartSource).toContain("function formatEvaluationAxisTickLabel");
+    expect(chartSource).not.toContain("formatEvaluationAxisTickLabel");
+    expect(chartSource).not.toContain("EVALUATION_AXIS_TICK_MAX_CHARS");
     expect(chartSource).toContain("padding={{ left: 24, right: 24 }}");
     expect(chartSource).toContain('CardContent className="w-full min-w-0 max-w-full"');
     expect(chartSource).toContain('barCategoryGap="20%"');
     expect(chartSource).toContain("VERTICAL_BAR_CHART_THRESHOLD");
     expect(chartSource).toContain('layout="vertical"');
-    expect(chartSource).toContain("data.length * VERTICAL_BAR_ROW_HEIGHT + 72");
+    expect(chartSource).toContain("data.length * categoryAxisLayout.rowHeight + 72");
     expect(chartSource).toContain("function evaluationMetricAxisDomain");
     expect(chartSource).toContain("entry.value >= 0 && entry.value <= 1");
     expect(chartSource).toContain("!aspect-auto");
@@ -451,11 +458,8 @@ describe("workbench browser layout contracts", () => {
     expect(chartSource).not.toContain('className="h-80 w-full min-w-0 overflow-hidden"');
     expect(chartSource).not.toContain("overflow-x-auto overflow-y-visible");
     expect(chartSource).not.toContain("lg:grid-cols-3");
-    expect(chartSource).not.toContain("function EvaluationAxisTick");
-    expect(chartSource).not.toContain("<EvaluationAxisTick");
     expect(chartSource).not.toContain("shouldShowEvaluationAxisLabels");
     expect(chartSource).not.toContain("BAR_CHART_LABEL_VIEWPORT_QUERY");
-    expect(chartSource).not.toContain("wrapEvaluationAxisLabel");
     expect(chartSource).not.toContain("VariantAxisTick");
     expect(chartSource).not.toContain("wrapVariantAxisLabel");
   });

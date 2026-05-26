@@ -87,7 +87,6 @@ export function SubjectList({
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                 <span className="font-medium text-foreground">{evaluationDisplay.scoreText}</span>
-                <span className="text-muted-foreground">{evaluationDisplay.sourceText}</span>
                 {isActive ? (
                   <span className="inline-flex items-center gap-1 text-primary">
                     <GitBranchIcon className="size-3.5" />

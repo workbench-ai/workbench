@@ -44,7 +44,7 @@ export function parseWorkbenchRoute(locationLike: {
   search: string;
 }): WorkbenchRoute {
   const normalizedPath = normalizePathname(locationLike.pathname);
-  const segments = normalizedPath.split("/").filter(Boolean);
+  const segments = normalizedPath.split("/").filter(Boolean).map(decodePathSegment);
   const searchParams = new URLSearchParams(locationLike.search);
 
   if (segments.length === 0) {
@@ -302,6 +302,14 @@ function normalizePathname(pathname: string): string {
     return "/";
   }
   return pathname.startsWith("/") ? pathname : `/${pathname}`;
+}
+
+function decodePathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 function stripRouteBasePath(pathname: string, routeBasePath: string): string {

@@ -96,6 +96,7 @@ import {
 } from "./components/loading-states";
 import { LineageGraph } from "./components/lineage-graph";
 import { StatusBadge } from "./components/status-badge";
+import { SubjectComparisonFilter, type SubjectFilterOption } from "./components/subject-comparison-filter";
 import { SurfaceSection } from "./components/surface-section";
 import { requestJson, toMessage } from "./lib/api";
 import { pickDefaultSubjectFile } from "./lib/subject-file-preference";
@@ -2231,8 +2232,44 @@ function SubjectsIndexSurface({
   onViewChange: (view: "archive" | "lineage") => void;
   onSelectSubject: (subjectId: string) => void;
 }) {
+  const subjectFilterOptions = useMemo(
+    () => currentBenchmarkSummaries
+      .map((summary): SubjectFilterOption => ({
+        id: summary.id,
+        label: formatSubjectDisplayName(summary),
+      }))
+      .sort((left, right) => left.label.localeCompare(right.label)),
+    [currentBenchmarkSummaries],
+  );
+  const allSubjectIds = useMemo(
+    () => subjectFilterOptions.map((option) => option.id),
+    [subjectFilterOptions],
+  );
+  const [selectedSubjectIds, setSelectedSubjectIds] = useState<Set<string> | null>(null);
+  const selectedSubjectIdSet = useMemo(() => {
+    if (selectedSubjectIds === null) {
+      return new Set(allSubjectIds);
+    }
+
+    const availableSubjectIds = new Set(allSubjectIds);
+    return new Set(
+      [...selectedSubjectIds].filter((subjectId) => availableSubjectIds.has(subjectId)),
+    );
+  }, [allSubjectIds, selectedSubjectIds]);
+  const filteredSubjectSummaries = useMemo(
+    () => selectedSubjectIdSet.size === subjectFilterOptions.length
+      ? currentBenchmarkSummaries
+      : currentBenchmarkSummaries.filter((summary) => selectedSubjectIdSet.has(summary.id)),
+    [currentBenchmarkSummaries, selectedSubjectIdSet, subjectFilterOptions.length],
+  );
+  const filteredEvaluations = useMemo(
+    () => selectedSubjectIdSet.size === subjectFilterOptions.length
+      ? currentBenchmarkEvaluations
+      : currentBenchmarkEvaluations.filter((evaluation) => selectedSubjectIdSet.has(evaluation.subjectId)),
+    [currentBenchmarkEvaluations, selectedSubjectIdSet, subjectFilterOptions.length],
+  );
   const scopedActiveId =
-    snapshot?.activeId && currentBenchmarkSummaries.some((summary) => summary.id === snapshot.activeId)
+    snapshot?.activeId && filteredSubjectSummaries.some((summary) => summary.id === snapshot.activeId)
       ? snapshot.activeId
       : null;
   const scopedSnapshot = useMemo(
@@ -2241,19 +2278,19 @@ function SubjectsIndexSurface({
           ...snapshot,
           activeId: scopedActiveId,
           currentBenchmarkFingerprint:
-            currentBenchmarkSummaries[0]?.benchmarkFingerprint ??
-            currentBenchmarkEvaluations[0]?.benchmarkFingerprint ??
+            filteredSubjectSummaries[0]?.benchmarkFingerprint ??
+            filteredEvaluations[0]?.benchmarkFingerprint ??
             currentBenchmarkRuns[0]?.benchmarkFingerprint ??
             null,
-          summaries: currentBenchmarkSummaries,
-          evaluations: currentBenchmarkEvaluations,
+          summaries: filteredSubjectSummaries,
+          evaluations: filteredEvaluations,
           runs: currentBenchmarkRuns,
         }
       : null,
     [
-      currentBenchmarkEvaluations,
       currentBenchmarkRuns,
-      currentBenchmarkSummaries,
+      filteredEvaluations,
+      filteredSubjectSummaries,
       scopedActiveId,
       snapshot,
     ],
@@ -2270,22 +2307,49 @@ function SubjectsIndexSurface({
         }}
         className="flex min-h-0 min-w-0 flex-1 flex-col gap-4"
       >
-        <TabsList variant="line" aria-label="Subject index views" className="self-start">
-          <TabsTrigger value="archive">
-            <FolderOpenIcon data-icon="inline-start" />
-            Archive
-          </TabsTrigger>
-          <TabsTrigger value="lineage">
-            <GitBranchIcon data-icon="inline-start" />
-            Lineage
-          </TabsTrigger>
-        </TabsList>
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+          <TabsList variant="line" aria-label="Subject index views" className="min-w-0">
+            <TabsTrigger value="archive">
+              <FolderOpenIcon data-icon="inline-start" />
+              Archive
+            </TabsTrigger>
+            <TabsTrigger value="lineage">
+              <GitBranchIcon data-icon="inline-start" />
+              Lineage
+            </TabsTrigger>
+          </TabsList>
+          {subjectFilterOptions.length > 1 ? (
+            <SubjectComparisonFilter
+              options={subjectFilterOptions}
+              selectedSubjectIds={selectedSubjectIdSet}
+              testId="subjects-subject-filter"
+              onSelectAll={() => setSelectedSubjectIds(null)}
+              onClear={() => setSelectedSubjectIds(new Set())}
+              onToggleSubject={(subjectId, checked) => {
+                setSelectedSubjectIds((current) => {
+                  const next = new Set(
+                    current === null ? allSubjectIds : [...current],
+                  );
+                  if (checked) {
+                    next.add(subjectId);
+                  } else {
+                    next.delete(subjectId);
+                  }
+                  return next.size === allSubjectIds.length ? null : next;
+                });
+              }}
+            />
+          ) : null}
+        </div>
 
-        <TabsContent value="archive" className="mt-0 min-h-0 min-w-0 flex-1">
+        <TabsContent
+          value="archive"
+          className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+        >
           <ScrollableObjectSurface>
             <SubjectsArchiveSurface
-              summaries={currentBenchmarkSummaries}
-              evaluations={currentBenchmarkEvaluations}
+              summaries={filteredSubjectSummaries}
+              evaluations={filteredEvaluations}
               activeId={scopedActiveId}
               snapshotError={snapshotError}
               loading={snapshotLoading}
@@ -2295,7 +2359,10 @@ function SubjectsIndexSurface({
           </ScrollableObjectSurface>
         </TabsContent>
 
-        <TabsContent value="lineage" className="mt-0 min-h-0 min-w-0 flex-1">
+        <TabsContent
+          value="lineage"
+          className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+        >
           <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col p-1">
             <SubjectsLineageSurface
               snapshot={scopedSnapshot}

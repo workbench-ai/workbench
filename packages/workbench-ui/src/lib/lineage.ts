@@ -24,7 +24,6 @@ export interface LineageNodeData extends Record<string, unknown> {
   active: boolean;
   statusText: string | null;
   scoreText: string;
-  sourceText: string;
 }
 
 export type LineageNode = Node<LineageNodeData, "subject">;
@@ -203,7 +202,6 @@ function buildLineageNodeData(args: {
     active,
     statusText,
     scoreText: evaluationDisplay.scoreText,
-    sourceText: evaluationDisplay.sourceText,
   };
 }
 

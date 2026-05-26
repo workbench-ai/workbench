@@ -1,7 +1,6 @@
 import * as React from "react";
-import { ChartColumnIcon, ChevronDownIcon, ListFilterIcon } from "lucide-react";
+import { ChartColumnIcon } from "lucide-react";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
-import { Button } from "@workbench-ai/cli-web-ui/components/ui/button";
 import {
   Card,
   CardAction,
@@ -9,16 +8,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@workbench-ai/cli-web-ui/components/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@workbench-ai/cli-web-ui/components/ui/dropdown-menu";
 
 import { formatSubjectDisplayName } from "../lib/format";
 import { buildEvaluationMetricDescriptors } from "../lib/evaluation-metrics";
@@ -28,6 +17,7 @@ import type {
 } from "../types";
 import { EvaluationCharts } from "./evaluation-charts";
 import { EvaluationsDataTable } from "./evaluations-data-table";
+import { SubjectComparisonFilter, type SubjectFilterOption } from "./subject-comparison-filter";
 
 export function EvaluationsDetail({
   evaluations,
@@ -99,6 +89,7 @@ export function EvaluationsDetail({
               <SubjectComparisonFilter
                 options={subjectOptions}
                 selectedSubjectIds={selectedSubjectIdSet}
+                testId="evaluations-subject-filter"
                 onSelectAll={() => setSelectedSubjectIds(null)}
                 onClear={() => setSelectedSubjectIds(new Set())}
                 onToggleSubject={(subjectId, checked) => {
@@ -148,95 +139,6 @@ export function EvaluationsDetail({
   );
 }
 
-interface SubjectFilterOption {
-  id: string;
-  label: string;
-}
-
-function SubjectComparisonFilter({
-  options,
-  selectedSubjectIds,
-  onSelectAll,
-  onClear,
-  onToggleSubject,
-}: {
-  options: SubjectFilterOption[];
-  selectedSubjectIds: Set<string>;
-  onSelectAll: () => void;
-  onClear: () => void;
-  onToggleSubject: (subjectId: string, checked: boolean) => void;
-}) {
-  const selectedCount = selectedSubjectIds.size;
-  const totalCount = options.length;
-  const buttonLabel = selectedCount === totalCount
-    ? `All ${totalCount}`
-    : selectedCount === 0
-      ? "None"
-      : `${selectedCount} of ${totalCount}`;
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          aria-label={`Filter comparison subjects: ${buttonLabel}`}
-          data-testid="evaluations-subject-filter"
-        >
-          <ListFilterIcon data-icon="inline-start" aria-hidden="true" />
-          <span>Subjects: {buttonLabel}</span>
-          <ChevronDownIcon data-icon="inline-end" aria-hidden="true" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-72">
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>Comparison subjects</DropdownMenuLabel>
-          <DropdownMenuItem
-            disabled={selectedCount === totalCount}
-            onSelect={(event) => {
-              event.preventDefault();
-              onSelectAll();
-            }}
-          >
-            Select all
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={selectedCount === 0}
-            onSelect={(event) => {
-              event.preventDefault();
-              onClear();
-            }}
-          >
-            Clear
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuGroup>
-          {options.map((option) => (
-            <DropdownMenuCheckboxItem
-              key={option.id}
-              checked={selectedSubjectIds.has(option.id)}
-              onCheckedChange={(checked) => {
-                onToggleSubject(option.id, checked === true);
-              }}
-              onSelect={(event) => event.preventDefault()}
-              className="items-start py-2"
-            >
-              <span className="grid min-w-0 gap-0.5">
-                <span className="truncate font-medium">{option.label}</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {formatSubjectFilterId(option.id)}
-                </span>
-              </span>
-            </DropdownMenuCheckboxItem>
-          ))}
-        </DropdownMenuGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 function toLabeledEvaluation(evaluation: EvaluationSummary): LabeledEvaluationSummary {
   return {
     ...evaluation,
@@ -259,13 +161,6 @@ function buildSubjectFilterOptions(
   return [...optionsById.values()].sort((left, right) =>
     left.label.localeCompare(right.label),
   );
-}
-
-function formatSubjectFilterId(subjectId: string): string {
-  if (subjectId.length <= 18) {
-    return subjectId;
-  }
-  return `${subjectId.slice(0, 8)}...${subjectId.slice(-8)}`;
 }
 
 function formatEvaluationLabel(

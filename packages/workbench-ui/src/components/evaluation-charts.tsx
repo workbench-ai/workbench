@@ -27,6 +27,12 @@ import {
 } from "@workbench-ai/cli-web-ui/components/ui/toggle-group";
 
 import {
+  buildEvaluationCategoryAxisLayout,
+  EVALUATION_CATEGORY_AXIS_LINE_HEIGHT,
+  wrapEvaluationCategoryAxisLabel,
+  type EvaluationCategoryAxisLayout,
+} from "../lib/evaluation-chart-labels";
+import {
   buildEvaluationMetricData,
   buildEvaluationTradeoffData,
   buildEvaluationTradeoffPairs,
@@ -42,9 +48,7 @@ import type {
   LabeledEvaluationSummary,
 } from "../types";
 
-const EVALUATION_AXIS_TICK_MAX_CHARS = 12;
 const VERTICAL_BAR_CHART_THRESHOLD = 8;
-const VERTICAL_BAR_ROW_HEIGHT = 34;
 const VERTICAL_BAR_CHART_MIN_HEIGHT = 288;
 
 export function EvaluationCharts({
@@ -100,6 +104,10 @@ function EvaluationMetricBarChart({
     () => buildEvaluationMetricData(evaluations, descriptor),
     [evaluations, descriptor],
   );
+  const categoryAxisLayout = React.useMemo(
+    () => buildEvaluationCategoryAxisLayout(data.map((entry) => entry.evaluationLabel)),
+    [data],
+  );
   const chartConfig = React.useMemo(
     () => ({
       value: {
@@ -109,9 +117,10 @@ function EvaluationMetricBarChart({
     }) satisfies ChartConfig,
     [descriptor, index],
   );
-  const useVerticalLayout = data.length > VERTICAL_BAR_CHART_THRESHOLD;
+  const useVerticalLayout =
+    data.length > VERTICAL_BAR_CHART_THRESHOLD || categoryAxisLayout.hasLongLabels;
   const chartHeight = useVerticalLayout
-    ? Math.max(VERTICAL_BAR_CHART_MIN_HEIGHT, data.length * VERTICAL_BAR_ROW_HEIGHT + 72)
+    ? Math.max(VERTICAL_BAR_CHART_MIN_HEIGHT, data.length * categoryAxisLayout.rowHeight + 72)
     : VERTICAL_BAR_CHART_MIN_HEIGHT;
   const axisDomain = evaluationMetricAxisDomain(data, descriptor);
   const tooltip = (
@@ -181,11 +190,17 @@ function EvaluationMetricBarChart({
                 <YAxis
                   type="category"
                   dataKey="evaluationLabel"
-                  tickFormatter={formatEvaluationAxisTickLabel}
+                  interval={0}
+                  tick={(
+                    <EvaluationCategoryAxisTick
+                      orientation="y"
+                      maxCharsPerLine={categoryAxisLayout.yAxisMaxCharsPerLine}
+                    />
+                  )}
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  width={128}
+                  width={categoryAxisLayout.yAxisWidth}
                 />
                 {tooltip}
                 {bar}
@@ -203,7 +218,7 @@ function EvaluationMetricBarChart({
                 }}
               >
                 <CartesianGrid vertical={false} />
-                <EvaluationXAxis />
+                <EvaluationXAxis layout={categoryAxisLayout} />
                 <YAxis
                   type="number"
                   name={descriptor.label}
@@ -239,36 +254,68 @@ function evaluationMetricAxisDomain(
   return data.every((entry) => entry.value >= 0 && entry.value <= 1) ? [0, 1] : undefined;
 }
 
-function EvaluationXAxis() {
+function EvaluationXAxis({
+  layout,
+}: {
+  layout: EvaluationCategoryAxisLayout;
+}) {
   return (
     <XAxis
       dataKey="evaluationLabel"
-      interval="preserveStartEnd"
+      interval={0}
       minTickGap={16}
       padding={{ left: 24, right: 24 }}
-      tickFormatter={formatEvaluationAxisTickLabel}
+      tick={(
+        <EvaluationCategoryAxisTick
+          orientation="x"
+          maxCharsPerLine={layout.xAxisMaxCharsPerLine}
+        />
+      )}
       tickLine={false}
       axisLine={false}
       tickMargin={10}
-      height={36}
+      height={layout.xAxisHeight}
     />
   );
 }
 
-function formatEvaluationAxisTickLabel(value: string): string {
-  const normalized = value.trim();
-  if (!normalized) {
-    return "";
-  }
+function EvaluationCategoryAxisTick({
+  maxCharsPerLine,
+  orientation,
+  payload,
+  x = 0,
+  y = 0,
+}: {
+  maxCharsPerLine: number;
+  orientation: "x" | "y";
+  payload?: { value?: number | string };
+  x?: number;
+  y?: number;
+}) {
+  const label = String(payload?.value ?? "");
+  const lines = wrapEvaluationCategoryAxisLabel(label, maxCharsPerLine);
+  const firstLineY = orientation === "y"
+    ? -((lines.length - 1) * EVALUATION_CATEGORY_AXIS_LINE_HEIGHT) / 2
+    : EVALUATION_CATEGORY_AXIS_LINE_HEIGHT;
 
-  const plusParts = normalized.split(/\s+\+\s+/u).filter(Boolean);
-  const label = plusParts.length > 1
-    ? plusParts.slice(1).join(" + ")
-    : normalized;
-  if (label.length <= EVALUATION_AXIS_TICK_MAX_CHARS) {
-    return label;
-  }
-  return `${label.slice(0, EVALUATION_AXIS_TICK_MAX_CHARS - 3)}...`;
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text
+        className="fill-muted-foreground"
+        textAnchor={orientation === "y" ? "end" : "middle"}
+      >
+        {lines.map((line, index) => (
+          <tspan
+            key={`${line}-${index}`}
+            x={0}
+            y={firstLineY + index * EVALUATION_CATEGORY_AXIS_LINE_HEIGHT}
+          >
+            {line}
+          </tspan>
+        ))}
+      </text>
+    </g>
+  );
 }
 
 function EvaluationTradeoffChart({

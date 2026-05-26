@@ -119,8 +119,8 @@ describe("subject lineage", () => {
     ));
 
     expect(flow.nodes[0]?.data.scoreText).toBe("Score 0.88");
-    expect(flow.nodes[0]?.data.sourceText).toBe("Latest evaluation eval_new");
+    expect(flow.nodes[0]?.data.sourceText).toBeUndefined();
     expect(flow.nodes[0]?.data.metricText).toBeUndefined();
-    expect(flow.nodes[0]?.ariaLabel).toContain("Score 0.88 from Latest evaluation eval_new");
+    expect(flow.nodes[0]?.ariaLabel).toContain("Score 0.88, completed");
   });
 });

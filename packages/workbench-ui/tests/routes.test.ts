@@ -102,6 +102,36 @@ describe("workbench location routes", () => {
     });
   });
 
+  test("decodes subject ids after a URL round trip", () => {
+    expect(
+      buildWorkbenchLocationHref(
+        createSubjectRoute({
+          subjectId: "Claude Opus A",
+          view: "overview",
+        }),
+        "/",
+      ),
+    ).toBe("/subjects/Claude%20Opus%20A");
+
+    expect(
+      parseWorkbenchLocation(
+        {
+          pathname: "/subjects/Claude%20Opus%20A",
+          search: "",
+        },
+        "/",
+      ),
+    ).toEqual({
+      kind: "subject",
+      subjectId: "Claude Opus A",
+      view: "overview",
+      filePath: null,
+      directoryPath: null,
+      previewMode: "rendered",
+      dialog: null,
+    });
+  });
+
   test("parses and serializes subject manifest routes", () => {
     expect(
       parseWorkbenchLocation(

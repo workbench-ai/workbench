@@ -217,14 +217,6 @@ const SubjectNode = memo(function SubjectNode(props: NodeProps<LineageNode>) {
         <div className="min-w-0 truncate text-[11px] font-medium leading-4 text-foreground">
           {flowData.scoreText}
         </div>
-        {flowData.sourceText ? (
-          <div
-            className="min-w-0 truncate text-[11px] leading-4 text-muted-foreground"
-            title={flowData.sourceText}
-          >
-            {flowData.sourceText}
-          </div>
-        ) : null}
       </div>
     </>
   );
