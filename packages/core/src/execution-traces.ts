@@ -187,10 +187,10 @@ export function traceSessionLabel(
 ): string {
   const innerPath = traceSessionInnerPath(filePath);
   if (innerPath === "runner/session") {
-    return "Subject runner";
+    return "Candidate run";
   }
-  if (innerPath === "optimizer/session") {
-    return "Optimizer";
+  if (innerPath === "improver/session") {
+    return "Improver";
   }
   const parts = innerPath
     .split("/")
@@ -273,7 +273,7 @@ function traceFilePrefix(filePath: string, index: number): string {
 }
 
 function traceFileDisplayOrder(filePath: string): number {
-  if (filePath.includes("/runner/") || filePath.includes("/optimizer/")) {
+  if (filePath.includes("/runner/") || filePath.includes("/improver/")) {
     return 0;
   }
   return 1;
@@ -287,8 +287,8 @@ function traceRoleForFilePath(
   if (filePath.includes("/runner/")) {
     return "runner";
   }
-  if (filePath.includes("/optimizer/") || purpose === "improve") {
-    return "optimizer";
+  if (filePath.includes("/improver/") || purpose === "improve") {
+    return "improver";
   }
   if (filePath.includes("/engine/")) {
     return "engine";
@@ -300,7 +300,7 @@ function traceSessionInnerPath(filePath: string): string {
   const withoutTraceFile = filePath.replace(/\/trace\.json$/u, "");
   const markerIndexes = [
     withoutTraceFile.indexOf("/runner/"),
-    withoutTraceFile.indexOf("/optimizer/"),
+    withoutTraceFile.indexOf("/improver/"),
     withoutTraceFile.indexOf("/engine/"),
   ].filter((index) => index >= 0);
   const firstMarker = Math.min(...markerIndexes);

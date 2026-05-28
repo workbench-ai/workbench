@@ -1,5 +1,5 @@
 import type {
-  SubjectCaseReview,
+  CandidateCaseReview,
   HostedWorkbenchJob,
   HostedWorkbenchJobStatus,
   Json,
@@ -12,20 +12,20 @@ import type {
 
 import { mergeWorkbenchExecutionTracesByJob } from "./execution-traces.ts";
 
-export function buildSubjectCaseExecutionRefs(args: {
+export function buildCandidateCaseExecutionRefs(args: {
   jobs: readonly HostedWorkbenchJob[];
-  subjectId: string;
+  candidateId: string;
   caseId: string;
   sampleIndex?: number;
-}): SubjectCaseReview["executions"] {
+}): CandidateCaseReview["executions"] {
   const groups = new Map<string, HostedWorkbenchJob[]>();
   for (const job of args.jobs) {
     const kind = readWorkbenchExecutionPurpose(job);
-    const jobSubjectId =
-      job.subjectId ?? readWorkbenchExecutionMetadataString(job, "subjectId");
+    const jobCandidateId =
+      job.candidateId ?? readWorkbenchExecutionMetadataString(job, "candidateId");
     const jobCaseId = readWorkbenchExecutionMetadataString(job, "caseId");
     if (
-      jobSubjectId === args.subjectId &&
+      jobCandidateId === args.candidateId &&
       kind === "attempt" &&
       caseReviewCaseIdsMatch(jobCaseId, args.caseId) &&
       caseReviewSampleIndicesMatch(
@@ -45,7 +45,7 @@ export function buildSubjectCaseExecutionRefs(args: {
 
   const executions = [...groups.values()]
     .map((group) => group.slice().sort(compareWorkbenchExecutionJobs))
-    .flatMap((group): SubjectCaseReview["executions"] => {
+    .flatMap((group): CandidateCaseReview["executions"] => {
       const first = group[0];
       if (!first) {
         return [];
@@ -79,7 +79,7 @@ export function buildSubjectCaseExecutionRefs(args: {
         ...optionalNumber("attemptIndex", readWorkbenchExecutionMetadataNumber(first, "attemptIndex")),
       }];
     })
-    .sort(compareSubjectCaseExecutions);
+    .sort(compareCandidateCaseExecutions);
   return selectCurrentExecutionRun(executions);
 }
 
@@ -107,7 +107,7 @@ export function buildWorkbenchExecutionEvidence(args: {
     const key = [
       job.runId,
       purpose,
-      job.subjectId ?? readWorkbenchExecutionMetadataString(job, "subjectId") ?? "",
+      job.candidateId ?? readWorkbenchExecutionMetadataString(job, "candidateId") ?? "",
       readWorkbenchExecutionMetadataString(job, "caseId") ?? "",
       readWorkbenchExecutionMetadataNumber(job, "sampleIndex") ?? "",
       readWorkbenchExecutionMetadataNumber(job, "attemptIndex") ?? "",
@@ -151,7 +151,7 @@ export function buildWorkbenchExecutionEvidence(args: {
         status: resolveWorkbenchJobGroupStatus(group),
         jobIds,
         executionIds,
-        ...(first.subjectId ? { subjectId: first.subjectId } : {}),
+        ...(first.candidateId ? { candidateId: first.candidateId } : {}),
         ...optionalString("caseId", readWorkbenchExecutionMetadataString(first, "caseId")),
         ...optionalNumber("sampleIndex", readWorkbenchExecutionMetadataNumber(first, "sampleIndex")),
         ...optionalNumber("attemptIndex", readWorkbenchExecutionMetadataNumber(first, "attemptIndex")),
@@ -210,7 +210,7 @@ export function readWorkbenchExecutionMetadataNumber(
 }
 
 export function isWorkbenchExecutionActive(
-  execution: SubjectCaseReview["executions"][number],
+  execution: CandidateCaseReview["executions"][number],
 ): boolean {
   return execution.status === "queued" || execution.status === "running";
 }
@@ -271,8 +271,8 @@ function caseReviewSampleIndicesMatch(
 }
 
 function selectCurrentExecutionRun(
-  executions: SubjectCaseReview["executions"],
-): SubjectCaseReview["executions"] {
+  executions: CandidateCaseReview["executions"],
+): CandidateCaseReview["executions"] {
   if (executions.length <= 1) {
     return executions;
   }
@@ -285,9 +285,9 @@ function selectCurrentExecutionRun(
     : executions;
 }
 
-function compareSubjectCaseExecutions(
-  left: SubjectCaseReview["executions"][number],
-  right: SubjectCaseReview["executions"][number],
+function compareCandidateCaseExecutions(
+  left: CandidateCaseReview["executions"][number],
+  right: CandidateCaseReview["executions"][number],
 ): number {
   return (
     executionKindOrder(left.kind) - executionKindOrder(right.kind) ||
@@ -297,8 +297,8 @@ function compareSubjectCaseExecutions(
 }
 
 function compareExecutionRecency(
-  left: SubjectCaseReview["executions"][number],
-  right: SubjectCaseReview["executions"][number],
+  left: CandidateCaseReview["executions"][number],
+  right: CandidateCaseReview["executions"][number],
 ): number {
   return readExecutionRecencyMs(right) - readExecutionRecencyMs(left);
 }
@@ -352,7 +352,7 @@ function traceRoleForPurpose(
   purpose: WorkbenchExecutionSpec["purpose"],
 ): WorkbenchExecutionEventRole {
   if (purpose === "improve") {
-    return "optimizer";
+    return "improver";
   }
   return "engine";
 }
@@ -367,7 +367,7 @@ function executionKindOrder(kind: string | null): number {
   return 3;
 }
 
-function readExecutionRecencyMs(execution: SubjectCaseReview["executions"][number]): number {
+function readExecutionRecencyMs(execution: CandidateCaseReview["executions"][number]): number {
   return (
     parseTimestampMs(execution.finishedAt) ??
     parseTimestampMs(execution.startedAt) ??
@@ -408,14 +408,14 @@ function parseTimestampMs(value: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function optionalString<K extends keyof WorkbenchExecutionEvidence | keyof SubjectCaseReview["executions"][number]>(
+function optionalString<K extends keyof WorkbenchExecutionEvidence | keyof CandidateCaseReview["executions"][number]>(
   key: K,
   value: string | null | undefined,
 ): Partial<Record<K, string>> {
   return value ? { [key]: value } as Partial<Record<K, string>> : {};
 }
 
-function optionalNumber<K extends keyof WorkbenchExecutionEvidence | keyof SubjectCaseReview["executions"][number]>(
+function optionalNumber<K extends keyof WorkbenchExecutionEvidence | keyof CandidateCaseReview["executions"][number]>(
   key: K,
   value: number | null | undefined,
 ): Partial<Record<K, number>> {

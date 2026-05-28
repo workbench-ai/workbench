@@ -5,7 +5,7 @@ import type {
   Json,
   UsageSummary,
   WorkbenchResult,
-  WorkbenchSubjectPatch,
+  WorkbenchCandidatePatch,
 } from "@workbench-ai/workbench-contract";
 
 import {
@@ -39,7 +39,7 @@ export interface WorkbenchAdapterOperationRequest {
       name?: string;
       description?: string;
     };
-    subject?: {
+    candidate?: {
       id?: string;
       path?: string;
       prepare?: {
@@ -52,7 +52,7 @@ export interface WorkbenchAdapterOperationRequest {
         command?: string;
       };
     };
-    optimizer?: {
+    improve?: {
       edits?: string[];
     };
     attempt?: {
@@ -71,7 +71,7 @@ export interface WorkbenchAdapterOperationRequest {
     result: string;
     case?: string;
     traces?: string;
-    subject?: string;
+    candidate?: string;
     enginePrivate?: string;
   };
 }
@@ -79,7 +79,7 @@ export interface WorkbenchAdapterOperationRequest {
 export type WorkbenchAdapterOperationResultValue =
   | WorkbenchEngineResolveResult
   | WorkbenchResult
-  | WorkbenchSubjectPatch
+  | WorkbenchCandidatePatch
   | Json
   | null;
 
@@ -117,7 +117,7 @@ export function normalizeWorkbenchAdapterOperationRequest(
     "workspace",
     "output",
     "result",
-    "subject",
+    "candidate",
     "case",
     "traces",
     "enginePrivate",
@@ -142,7 +142,7 @@ export function normalizeWorkbenchAdapterOperationRequest(
       result: requiredString(paths.result, "adapter request paths.result"),
       ...(typeof paths.case === "string" ? { case: paths.case } : {}),
       ...(typeof paths.traces === "string" ? { traces: paths.traces } : {}),
-      ...(typeof paths.subject === "string" ? { subject: paths.subject } : {}),
+      ...(typeof paths.candidate === "string" ? { candidate: paths.candidate } : {}),
       ...(typeof paths.enginePrivate === "string" ? { enginePrivate: paths.enginePrivate } : {}),
     },
   };
@@ -228,8 +228,8 @@ function normalizeOperationResultValue(
   if (operation === "engine.run") {
     return normalizeResult(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
   }
-  if (operation === "optimizer.improve") {
-    return normalizeSubjectPatch(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
+  if (operation === "candidate.improve") {
+    return normalizeCandidatePatch(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
   }
   if (value === undefined || value === null) {
     return null;
@@ -243,8 +243,8 @@ function normalizeAdapterRequestContext(
   const record = requiredJsonRecord(value, "adapter request context");
   return {
     ...(record.benchmark !== undefined ? { benchmark: normalizeBenchmarkContext(record.benchmark) } : {}),
-    ...(record.subject !== undefined ? { subject: normalizeSubjectContext(record.subject) } : {}),
-    ...(record.optimizer !== undefined ? { optimizer: normalizeOptimizerContext(record.optimizer) } : {}),
+    ...(record.candidate !== undefined ? { candidate: normalizeCandidateContext(record.candidate) } : {}),
+    ...(record.improve !== undefined ? { improve: normalizeImproveContext(record.improve) } : {}),
     ...(record.attempt !== undefined ? { attempt: normalizeAttemptContext(record.attempt) } : {}),
     ...(record.case !== undefined ? { case: normalizeCaseContext(record.case) } : {}),
   };
@@ -258,29 +258,29 @@ function normalizeBenchmarkContext(value: unknown): NonNullable<NonNullable<Work
   };
 }
 
-function normalizeSubjectContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["subject"]> {
-  const record = requiredJsonRecord(value, "adapter request context.subject");
+function normalizeCandidateContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["candidate"]> {
+  const record = requiredJsonRecord(value, "adapter request context.candidate");
   return {
     ...(typeof record.id === "string" ? { id: record.id } : {}),
     ...(typeof record.path === "string" ? { path: record.path } : {}),
-    ...(record.prepare !== undefined ? { prepare: normalizeSubjectPrepareContext(record.prepare) } : {}),
-    ...(record.run !== undefined ? { run: normalizeContextInvocation(record.run, "adapter request context.subject.run") } : {}),
+    ...(record.prepare !== undefined ? { prepare: normalizeCandidatePrepareContext(record.prepare) } : {}),
+    ...(record.run !== undefined ? { run: normalizeContextInvocation(record.run, "adapter request context.candidate.run") } : {}),
   };
 }
 
-function normalizeSubjectPrepareContext(
+function normalizeCandidatePrepareContext(
   value: unknown,
-): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["subject"]>["prepare"]> {
-  const record = requiredJsonRecord(value, "adapter request context.subject.prepare");
+): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["candidate"]>["prepare"]> {
+  const record = requiredJsonRecord(value, "adapter request context.candidate.prepare");
   return {
-    command: requiredString(record.command, "adapter request context.subject.prepare.command"),
+    command: requiredString(record.command, "adapter request context.candidate.prepare.command"),
   };
 }
 
 function normalizeContextInvocation(
   value: unknown,
   label: string,
-): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["subject"]>["run"]> {
+): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["candidate"]>["run"]> {
   const record = requiredJsonRecord(value, label);
   const use = requiredString(record.use, `${label}.use`);
   return {
@@ -291,8 +291,8 @@ function normalizeContextInvocation(
   };
 }
 
-function normalizeOptimizerContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["optimizer"]> {
-  const record = requiredJsonRecord(value, "adapter request context.optimizer");
+function normalizeImproveContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["improve"]> {
+  const record = requiredJsonRecord(value, "adapter request context.improve");
   return {
     edits: Array.isArray(record.edits)
       ? record.edits.filter((entry): entry is string => typeof entry === "string")
@@ -332,7 +332,7 @@ function normalizeResult(value: unknown, label: string): WorkbenchResult {
   };
 }
 
-function normalizeSubjectPatch(value: unknown, label: string): WorkbenchSubjectPatch {
+function normalizeCandidatePatch(value: unknown, label: string): WorkbenchCandidatePatch {
   const record = requiredJsonRecord(value, label);
   if (!Array.isArray(record.files)) {
     throw new Error(`${label}.files must be an array.`);
@@ -341,7 +341,7 @@ function normalizeSubjectPatch(value: unknown, label: string): WorkbenchSubjectP
     throw new Error(`${label}.fileChanges must be a string array.`);
   }
   return {
-    files: record.files as unknown as WorkbenchSubjectPatch["files"],
+    files: record.files as unknown as WorkbenchCandidatePatch["files"],
     fileChanges: [...record.fileChanges],
     ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
     ...(record.feedback !== undefined ? { feedback: record.feedback as Json } : {}),

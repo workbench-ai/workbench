@@ -8,16 +8,17 @@ import { Writable } from "node:stream";
 import YAML from "yaml";
 
 import {
-  createSubjectFilePreview,
-  createBaselineSubjectJob as createRuntimeBaselineSubjectJob,
+  createCandidateFilePreview,
+  createBaselineCandidateJob as createRuntimeBaselineCandidateJob,
   evaluationScorecardId,
+  evaluationMeanMetrics,
   executeWorkbenchExecutionJob,
   engineResolveBindingForSpec,
-  filterSubjectSourceFiles,
+  filterCandidateSourceFiles,
   workbenchExecutionPurpose,
+  workbenchRunExecutionFingerprint,
   createWorkbenchAdapterAuthBundle,
-  createSubjectEvaluationTraceInputFiles,
-  createSubjectRevisionTraceInputFiles,
+  createOptimizerTraceInputFiles,
   DOCKER_SANDBOX_BACKEND,
   localWorkbenchAdapterAuthStore,
   materializeWorkbenchRunResult,
@@ -26,11 +27,12 @@ import {
   runWorkbenchExecutionDag,
   resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml,
-  summarizeSubjectFiles,
+  summarizeCandidateFiles,
   validateWorkbenchRunEnvelope,
   validateWorkbenchResolvedSourceYaml,
   parseWorkbenchAdapterAuthTarget,
-  type SubjectRecord,
+  type CandidateRecord,
+  type EvaluationScorecard,
   type EngineResolveBinding,
   type WorkbenchExecutionRuntimeInput,
   type HostedWorkbenchJob,
@@ -76,7 +78,7 @@ import { startLocalWorkbenchDevServer } from "./dev-open-server.js";
 import {
   createWorkbenchInitScaffold,
   type InitAgent,
-  type InitSubjectKind,
+  type InitCandidateKind,
 } from "./init-scaffold.js";
 import {
   defaultAdapterManifests,
@@ -89,16 +91,17 @@ import {
 } from "./adapter-project.js";
 import { createAdapterCommandEnv } from "./adapter-command-env.js";
 import {
-  appendLocalRun,
   loadLocalArchive,
   loadLocalArchiveIndex,
-  materializeSubjectRoot,
-  readLocalSubject,
-  readLocalSubjectFiles,
+  materializeCandidateRoot,
+  readLocalCandidate,
+  readLocalCandidateFiles,
+  readLocalJobs,
   saveLocalArchive,
   saveLocalJobs,
   setLocalActive,
-  upsertLocalSubject,
+  upsertLocalRun,
+  upsertLocalCandidate,
   upsertLocalEvaluation,
 } from "./local-archive.js";
 import {
@@ -113,7 +116,7 @@ import {
 } from "./project-source.js";
 import {
   localBenchmarkFingerprint,
-  localSubjectFingerprint,
+  localCandidateFingerprint,
 } from "./benchmark-fingerprint.js";
 
 interface CliIo {
@@ -186,15 +189,15 @@ interface HostedProjectSummary {
   visibility?: "private" | "public";
   currentSpecVersionId?: string;
   sourceFingerprint?: string;
-  activeSubjectId?: string | null;
+  activeCandidateId?: string | null;
   starCount?: number;
   runs?: unknown[];
-  subjects?: unknown[];
+  candidates?: unknown[];
 }
 
 interface WorkbenchResourceUrls {
   benchmark: string;
-  subjectEvaluation?: string;
+  candidateEvaluation?: string;
 }
 
 interface WorkbenchCheckPlan {
@@ -205,11 +208,14 @@ interface WorkbenchCheckPlan {
     yaml: string[];
     dockerfile: string;
   };
-  subject: {
+  candidate: {
+    name: string;
+    selectedRunId: string;
+    runCount: number;
     filesPath: string;
     files: number;
   };
-  optimizer: {
+  improve: {
     edits: string[];
   } | null;
   engine: {
@@ -278,10 +284,13 @@ interface HostedRunRecord {
   id: string;
   status: string;
   workflow?: HostedRunWorkflow;
-  subjectId: string | null;
-  activeSubjectId?: string | null;
-  outputSubjectId?: string | null;
+  candidateId: string | null;
+  candidateRunId?: string;
+  candidateRunName?: string;
+  activeCandidateId?: string | null;
+  outputCandidateId?: string | null;
   jobCount?: number;
+  budget?: number;
   attemptsRequested?: number;
   attemptsExecuted?: number;
   samples?: number;
@@ -291,6 +300,7 @@ interface HostedRunRecord {
   outcome?: "ok" | "error" | "cancelled" | string | null;
   stoppedReason?: string;
   error?: string;
+  input?: Json;
   urls?: WorkbenchResourceUrls;
 }
 
@@ -299,7 +309,7 @@ interface HostedRunJobRecord {
   runId?: string;
   kind?: string;
   status: string;
-  subjectId?: string;
+  candidateId?: string;
   startedAt?: string;
   finishedAt?: string;
   updatedAt?: string;
@@ -375,7 +385,10 @@ export async function runCli(
       return await runRemoteCommand(argv.slice(1), io);
     }
     if (argv[0] === "eval") {
-      return await localEvaluateSubject(argv.slice(1), io, runtimeOptions);
+      return await localEvaluateCandidate(argv.slice(1), io, runtimeOptions);
+    }
+    if (argv[0] === "retry") {
+      return await localRetry(argv.slice(1), io, runtimeOptions);
     }
     if (argv[0] === "improve") {
       return await localRun(argv.slice(1), io, runtimeOptions);
@@ -406,14 +419,14 @@ export async function runCli(
         return await localRunList(rest, io);
       case "runs show":
         return await localRunShow(rest, io);
-      case "subjects list":
-        return await localSubjectList(rest, io);
-      case "subjects show":
-        return await localSubjectShow(rest, io);
-      case "subjects files":
-        return await localSubjectFiles(rest, io);
-      case "subjects preview":
-        return await localSubjectPreview(rest, io);
+      case "candidates list":
+        return await localCandidateList(rest, io);
+      case "candidates show":
+        return await localCandidateShow(rest, io);
+      case "candidates files":
+        return await localCandidateFiles(rest, io);
+      case "candidates preview":
+        return await localCandidatePreview(rest, io);
       default:
         break;
     }
@@ -463,7 +476,7 @@ function commandPathForHelp(argv: readonly string[]): string {
     return positionals.slice(0, 2).join(" ");
   }
   if (
-    positionals[0] === "subjects" &&
+    positionals[0] === "candidates" &&
     ["list", "show", "files", "preview"].includes(positionals[1] ?? "")
   ) {
     return positionals.slice(0, 2).join(" ");
@@ -480,6 +493,8 @@ async function runCloudCommand(
   switch (command) {
     case "eval":
       return await startHostedWorkflow("eval", rest, io);
+    case "retry":
+      return await retryHostedWorkflow(rest, io);
     case "improve":
       return await startHostedWorkflow("improve", rest, io);
     case "open":
@@ -515,20 +530,20 @@ async function runCloudCommand(
       return await runShow(subRest, io);
     case "runs cancel":
       return await runCancel(subRest, io);
-    case "subjects list":
-      return await subjectList(subRest, io);
-    case "subjects show":
-      return await subjectShow(subRest, io);
-    case "subjects files":
-      return await subjectFiles(subRest, io);
-    case "subjects preview":
-      return await subjectPreview(subRest, io);
-    case "subjects pull":
-      return await subjectExport(subRest, io);
-    case "subjects publish":
-      return await subjectVisibility(subRest, io, "public");
-    case "subjects unpublish":
-      return await subjectVisibility(subRest, io, "private");
+    case "candidates list":
+      return await candidateList(subRest, io);
+    case "candidates show":
+      return await candidateShow(subRest, io);
+    case "candidates files":
+      return await candidateFiles(subRest, io);
+    case "candidates preview":
+      return await candidatePreview(subRest, io);
+    case "candidates pull":
+      return await candidateExport(subRest, io);
+    case "candidates publish":
+      return await candidateVisibility(subRest, io, "public");
+    case "candidates unpublish":
+      return await candidateVisibility(subRest, io, "private");
     default:
       throw new UsageError(`Unknown command: cloud ${argv.join(" ")}`);
   }
@@ -637,7 +652,7 @@ async function localInit(argv: readonly string[], io: CliIo): Promise<number> {
       specPath,
       kind: scaffold.kind,
       name: scaffold.name,
-      subjectRoot: scaffold.subjectRoot,
+      candidateRoot: scaffold.candidateRoot,
     },
     parsed,
     io,
@@ -697,20 +712,20 @@ function buildWorkbenchCheckPlan(source: LocalProjectSource): WorkbenchCheckPlan
       files: sourceFileCount(source),
       yaml: [
         path.relative(source.dir, source.benchmarkPath) || "benchmark.yaml",
-        path.relative(source.dir, source.subjectSpecPath) || "subject YAML",
-        ...(source.optimizerSource !== undefined
-          ? [path.relative(source.dir, source.optimizerPath ?? "") || "optimizer YAML"]
-          : []),
+        path.relative(source.dir, source.candidateSpecPath) || "candidate YAML",
       ],
       dockerfile: source.dockerfilePath,
     },
-    subject: {
-      filesPath: source.spec.subject.files.path,
-      files: source.subjectFiles.length,
+    candidate: {
+      name: source.spec.candidate.name,
+      selectedRunId: source.spec.candidate.selectedRunId,
+      runCount: Object.keys(source.spec.candidate.runs).length,
+      filesPath: source.spec.candidate.files.path,
+      files: source.candidateFiles.length,
     },
-    optimizer: source.spec.optimizer
+    improve: source.spec.candidate.improve
       ? {
-          edits: [...source.spec.optimizer.edits],
+          edits: [...source.spec.candidate.improve.edits],
         }
       : null,
     engine: {
@@ -737,8 +752,8 @@ function formatWorkbenchCheckPlan(
   plan: WorkbenchCheckPlan,
   warningSuffix: string,
 ): string {
-  const edits = plan.optimizer?.edits.length
-    ? plan.optimizer.edits.join(", ")
+  const edits = plan.improve?.edits.length
+    ? plan.improve.edits.join(", ")
     : "-";
   const network = plan.environment.network.egress;
   const resources = plan.environment.resources;
@@ -747,11 +762,12 @@ function formatWorkbenchCheckPlan(
     `Benchmark: ${plan.benchmarkName}`,
     `Description: ${plan.benchmarkDescription}`,
     `Source: ${plan.source.files} file(s) (${plan.source.yaml.join(", ")}, ${plan.source.dockerfile})`,
-    `Subject files: ${plan.subject.filesPath} (${plan.subject.files} file(s))`,
-    `Optimizer edits: ${edits}`,
+    `Candidate: ${plan.candidate.name} (${plan.candidate.runCount} run(s), selected ${plan.candidate.selectedRunId})`,
+    `Candidate files: ${plan.candidate.filesPath} (${plan.candidate.files} file(s))`,
+    `Improve edits: ${edits}`,
     `Engine cases: ${plan.engine.cases} case(s) from ${formatAdapterSummary(plan.engine.resolver)} at ${plan.engine.path} (${plan.engine.files} file(s))`,
     `Environment: ${plan.environment.dockerfile}, network ${network}, ${resources.cpu} CPU, ${resources.memoryGb}GB RAM, ${resources.timeoutMinutes}m timeout`,
-    `Execution: improve ${plan.adapters.improve ? formatAdapterSummary(plan.adapters.improve) : "not configured"}, subject ${formatAdapterSummary(plan.adapters.run)}, engine ${formatAdapterSummary(plan.adapters.engine)}`,
+    `Execution: improve ${plan.adapters.improve ? formatAdapterSummary(plan.adapters.improve) : "not configured"}, candidate run ${formatAdapterSummary(plan.adapters.run)}, engine ${formatAdapterSummary(plan.adapters.engine)}`,
     ...adapterSourceLines(plan.adapters.sources),
   ].join("\n");
 }
@@ -854,22 +870,289 @@ function splitWorkspaceError(error: unknown): string[] {
   return message.split(/\n+/u).map((entry) => entry.trim()).filter(Boolean);
 }
 
+interface LocalRetryTarget {
+  sourceId: string;
+  sourceKind: "evaluation" | "run";
+  workflow: HostedRunWorkflow;
+  candidateId: string;
+  candidateRunId: string;
+  samples: number;
+  budget?: number;
+  preserveActiveId: string | null;
+}
+
+interface RetryEvaluationSummary {
+  id: string;
+  runId: string;
+  candidateId: string;
+  candidateRunId?: string;
+  status: string;
+  sampleCount: number;
+  errorSampleCount: number;
+}
+
+interface RetryCommandResult {
+  ok: boolean;
+  retried: {
+    id: string;
+    kind: "evaluation" | "run";
+    workflow: HostedRunWorkflow;
+  };
+  runId?: string | null;
+  evaluationId?: string | null;
+  candidateId?: string | null;
+  activeCandidateId?: string | null;
+  localView?: LocalDevViewHint;
+  run?: HostedRunRecord;
+  urls?: WorkbenchResourceUrls;
+  failedJobCount?: number;
+  error?: string;
+}
+
+async function localRetry(
+  argv: readonly string[],
+  io: CliIo,
+  runtimeOptions: CliRuntimeOptions,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench retry", 1);
+  const targetId = parsed.positionals[0];
+  if (!targetId) {
+    throw new UsageError("Missing required TARGET_ID.");
+  }
+  const workspace = resolveDir(parsed);
+  const target = await resolveLocalRetryTarget(workspace, targetId);
+  const captured = createCapturingIo(io);
+  const code = target.workflow === "eval"
+    ? await localEvaluateCandidate([
+        "--dir",
+        workspace,
+        "--candidate",
+        target.candidateId,
+        "--runs",
+        target.candidateRunId,
+        "--samples",
+        String(target.samples),
+        "--json",
+      ], captured.io, runtimeOptions)
+    : await localRun([
+        "--dir",
+        workspace,
+        "--from",
+        target.candidateId,
+        "--runs",
+        target.candidateRunId,
+        "--budget",
+        String(target.budget ?? 1),
+        "--samples",
+        String(target.samples),
+        "--json",
+      ], captured.io, runtimeOptions);
+  const commandOutput = parseCapturedJson(captured.stdoutText());
+  await preserveLocalActiveCandidate(workspace, target.preserveActiveId);
+  const outputRecord = readRecord(commandOutput) ?? {};
+  const result: RetryCommandResult = {
+    ok: code === 0 && outputRecord.ok !== false,
+    retried: {
+      id: target.sourceId,
+      kind: target.sourceKind,
+      workflow: target.workflow,
+    },
+  };
+  assignRetryResultString(result, "runId", outputRecord.runId);
+  assignRetryResultString(result, "evaluationId", outputRecord.evaluationId);
+  assignRetryResultString(result, "candidateId", outputRecord.candidateId);
+  assignRetryResultString(result, "activeCandidateId", outputRecord.activeCandidateId);
+  const localView = localRetryViewHint(outputRecord.localView);
+  if (localView) {
+    result.localView = localView;
+  }
+  const failedJobCount = numberValue(outputRecord.failedJobCount);
+  if (failedJobCount !== null) {
+    result.failedJobCount = failedJobCount;
+  }
+  const error = stringValue(outputRecord.error);
+  if (error) {
+    result.error = error;
+  }
+  writeOutput(result, parsed, io, formatRetryCommandResult);
+  return code;
+}
+
+async function resolveLocalRetryTarget(
+  workspace: string,
+  targetId: string,
+): Promise<LocalRetryTarget> {
+  const snapshot = await loadLocalArchive(workspace);
+  const evaluation = snapshot.evaluations.find((entry) => entry.id === targetId);
+  if (evaluation) {
+    const run = snapshot.runs.find((entry) => entry.id === evaluation.runId) ?? null;
+    return localEvaluationRetryTarget(snapshot, evaluation, run, "evaluation", targetId);
+  }
+  const run = snapshot.runs.find((entry) => entry.id === targetId);
+  if (!run) {
+    throw new UsageError(`Run or evaluation not found: ${targetId}`);
+  }
+  if (run.status !== "finished") {
+    throw new UsageError(`Run ${run.id} is ${run.status}; wait for it to finish before retrying.`);
+  }
+  if (!runSummaryFailed(run)) {
+    throw new UsageError(`Run ${run.id} did not fail; use workbench ${run.workflow} to intentionally run it again.`);
+  }
+  if (run.workflow === "eval") {
+    const evaluations = snapshot.evaluations.filter((entry) => entry.runId === run.id);
+    if (evaluations.length !== 1) {
+      throw new UsageError(
+        evaluations.length === 0
+          ? `Run ${run.id} has no evaluation record to retry.`
+          : `Run ${run.id} has multiple evaluations; retry a specific evaluation id instead.`,
+      );
+    }
+    return localEvaluationRetryTarget(snapshot, evaluations[0]!, run, "run", targetId);
+  }
+  const candidateRunId = run.candidateRunId;
+  if (!run.candidateId || !candidateRunId) {
+    throw new UsageError(`Run ${run.id} is missing retry metadata; use workbench improve --from with an explicit candidate id.`);
+  }
+  return {
+    sourceId: targetId,
+    sourceKind: "run",
+    workflow: "improve",
+    candidateId: run.candidateId,
+    candidateRunId,
+    samples: run.samples,
+    budget: run.budget,
+    preserveActiveId: snapshot.activeId,
+  };
+}
+
+function localEvaluationRetryTarget(
+  snapshot: { activeId: string | null; candidates: CandidateRecord[] },
+  evaluation: EvaluationScorecard,
+  run: RunSummary | null,
+  sourceKind: "evaluation" | "run",
+  sourceId: string,
+): LocalRetryTarget {
+  if (!evaluationScorecardFailed(evaluation, run)) {
+    throw new UsageError(`Evaluation ${evaluation.id} did not fail; use workbench eval to intentionally run it again.`);
+  }
+  if (!snapshot.candidates.some((entry) => entry.id === evaluation.candidateId)) {
+    throw new UsageError(`Candidate not found for evaluation ${evaluation.id}: ${evaluation.candidateId}`);
+  }
+  const candidateRunId = evaluation.candidateRunId ?? run?.candidateRunId;
+  if (!candidateRunId) {
+    throw new UsageError(`Evaluation ${evaluation.id} is missing its candidate run configuration.`);
+  }
+  return {
+    sourceId,
+    sourceKind,
+    workflow: "eval",
+    candidateId: evaluation.candidateId,
+    candidateRunId,
+    samples: evaluation.sampleCount || run?.samples || 1,
+    preserveActiveId: snapshot.activeId,
+  };
+}
+
+async function preserveLocalActiveCandidate(
+  workspace: string,
+  activeId: string | null,
+): Promise<void> {
+  let snapshot = await loadLocalArchive(workspace);
+  if (activeId && !snapshot.candidates.some((candidate) => candidate.id === activeId)) {
+    return;
+  }
+  if (snapshot.activeId === activeId) {
+    return;
+  }
+  snapshot = setLocalActive(snapshot, activeId);
+  await saveLocalArchive(workspace, snapshot);
+}
+
+function evaluationScorecardFailed(
+  evaluation: RetryEvaluationSummary,
+  run: { outcome?: string | null } | null,
+): boolean {
+  return evaluation.errorSampleCount > 0 ||
+    evaluation.status !== "completed" ||
+    runSummaryFailed(run);
+}
+
+function runSummaryFailed(
+  run: { outcome?: string | null } | null,
+): boolean {
+  return run?.outcome === "error" || run?.outcome === "cancelled";
+}
+
+function createCapturingIo(io: CliIo): { io: CliIo; stdoutText: () => string } {
+  const chunks: string[] = [];
+  const stdout = new class extends Writable {
+    override _write(
+      chunk: unknown,
+      _encoding: BufferEncoding,
+      callback: (error?: Error | null) => void,
+    ): void {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
+      callback();
+    }
+  }();
+  return {
+    io: {
+      stdin: io.stdin,
+      stdout,
+      stderr: io.stderr,
+    },
+    stdoutText: () => chunks.join(""),
+  };
+}
+
+function parseCapturedJson(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return {};
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return { output: trimmed };
+  }
+}
+
+function localRetryViewHint(value: unknown): LocalDevViewHint | undefined {
+  const record = readRecord(value);
+  const command = stringValue(record?.command);
+  const note = stringValue(record?.note);
+  return command && note ? { command, note } : undefined;
+}
+
+function assignRetryResultString(
+  result: RetryCommandResult,
+  key: "runId" | "evaluationId" | "candidateId" | "activeCandidateId",
+  value: unknown,
+): void {
+  const normalized = stringValue(value);
+  if (normalized) {
+    result[key] = normalized;
+  }
+}
+
 async function localRun(
   argv: readonly string[],
   io: CliIo,
   runtimeOptions: CliRuntimeOptions,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "optimizer", "from", "budget", "samples", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "runs", "from", "budget", "samples", "rerun", "json"]));
   const budget = parsePositiveInt(parsed.flags.budget, 1, "budget");
   const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
   const sourceArg = resolveSourceDir(parsed);
   const projectSource = await readLocalProjectSource(sourceArg, {
-    optimizerPath: asOptionalString(parsed.flags.optimizer),
+    runId: singleRequestedRunId(asOptionalString(parsed.flags.runs), "workbench improve"),
   });
   const workspace = projectSource.dir;
-  if (!projectSource.spec.optimizer) {
-    throw new UsageError("Optimizer YAML is required for workbench improve.");
+  if (!projectSource.spec.improve || !projectSource.spec.candidate.improve) {
+    throw new UsageError("Candidate improve configuration is required for workbench improve.");
   }
   const executionProject = await resolveLocalProjectForExecution(workspace, projectSource.specSource);
   const { spec, adapterManifests } = executionProject;
@@ -891,10 +1174,8 @@ async function localRun(
     engineCases,
   );
   const benchmarkFingerprint = await readLocalBenchmarkFingerprint(workspace);
-  const runId = `run_local_${Date.now().toString(36)}`;
-  const startedAt = new Date().toISOString();
-  let snapshot = await loadLocalArchive(workspace);
-  const baseSubject = await ensureLocalImproveBaseSubject({
+  const executionFingerprint = localRunExecutionFingerprint(projectSource);
+  const baseCandidate = await ensureLocalImproveBaseCandidate({
     parsed,
     sourceArg,
     workspace,
@@ -903,9 +1184,52 @@ async function localRun(
     io,
     runtimeOptions,
   });
-  let currentBaseId = baseSubject.id;
+  let snapshot = await loadLocalArchive(workspace);
+  if (parsed.flags.rerun !== true) {
+    const reusableRun = findReusableLocalImproveRun(snapshot.runs, {
+      benchmarkFingerprint,
+      candidateId: baseCandidate.id,
+      candidateRunId: projectSource.spec.candidate.selectedRunId,
+      executionFingerprint,
+      budget,
+      samples,
+    });
+    if (reusableRun) {
+      const evaluation = snapshot.evaluations.find((entry) => entry.runId === reusableRun.id) ?? null;
+      const outputCandidateId = reusableRun.outputCandidateId ?? reusableRun.candidateId ?? baseCandidate.id;
+      const outputCandidate = readLocalCandidate(snapshot, outputCandidateId);
+      const activeCandidate = snapshot.activeId
+        ? readLocalCandidate(snapshot, snapshot.activeId)
+        : null;
+      const result = {
+        ok: true,
+        reused: true,
+        runId: reusableRun.id,
+        evaluationId: evaluation?.id ?? null,
+        outputCandidateId,
+        outputCandidate,
+        activeCandidateId: snapshot.activeId,
+        activeCandidate,
+        completedJobCount: 0,
+        failedJobCount: 0,
+        localView: localDevViewHint(workspace, reusableRun.id),
+      };
+      writeOutput(
+        result,
+        parsed,
+        io,
+        () => `Reused improve run ${reusableRun.id}. Use --rerun to intentionally run it again.`,
+      );
+      return 0;
+    }
+  }
+  const runId = `run_local_${Date.now().toString(36)}`;
+  const startedAt = new Date().toISOString();
+  let currentBaseId = baseCandidate.id;
+  let outputCandidateId: string | null = null;
   let completedJobCount = 0;
   let failedJobCount = 0;
+  let attemptsExecuted = 0;
   const failedJobs: Array<{
     id: string;
     purpose: string | null;
@@ -917,34 +1241,63 @@ async function localRun(
       detail: { budget, samples, strategy: "greedy" },
     }),
   ];
+  const runningRun: RunSummary = {
+    id: runId,
+    workflow: "improve",
+    benchmarkFingerprint,
+    status: "running",
+    candidateId: baseCandidate.id,
+    candidateRunId: projectSource.spec.candidate.selectedRunId,
+    candidateRunName: projectSource.spec.candidate.selectedRunName,
+    startedAt,
+    improver: formatSpecImprover(spec),
+    engineRun: spec.engineRun.use,
+    strategy: "greedy",
+    budget,
+    repairBudget: 0,
+    attemptsRequested: budget,
+    attemptsExecuted: 0,
+    samples,
+    executionFingerprint,
+    activeCandidateId: snapshot.activeId,
+    outputCandidateId: null,
+  };
+  snapshot = upsertLocalRun(snapshot, runningRun, events);
+  await saveLocalArchive(workspace, snapshot);
+  try {
   const devCapacity = await localDevelopmentCapacity(workspace);
+  const baselineTraceJobs = selectLocalOptimizerBaselineTraceJobs(
+    snapshot,
+    await readLocalJobs(workspace),
+    {
+      benchmarkFingerprint,
+      candidateId: baseCandidate.id,
+      candidateRunId: projectSource.spec.candidate.selectedRunId,
+      executionFingerprint,
+    },
+  );
   const runTraceJobs: HostedWorkbenchJob[] = [];
   const attempts = budget;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
     snapshot = await loadLocalArchive(workspace);
-    const activeSubject = readLocalSubject(snapshot, currentBaseId);
-    const baseFiles = filterSubjectSourceFiles(
-      readLocalSubjectFiles(snapshot, activeSubject.id),
+    const activeCandidate = readLocalCandidate(snapshot, currentBaseId);
+    const baseFiles = filterCandidateSourceFiles(
+      readLocalCandidateFiles(snapshot, activeCandidate.id),
     );
     if (baseFiles.length === 0) {
       throw new UsageError(
-        "Subject snapshot must include at least one file.",
+        "Candidate snapshot must include at least one file.",
       );
     }
-    const subjectRevisionTraceFiles = [
-      ...createSubjectEvaluationTraceInputFiles({ subject: activeSubject }),
-      ...createSubjectRevisionTraceInputFiles({
-        runId,
-        jobs: runTraceJobs,
-        events,
-      }),
-    ];
-    const subjectId = `subject_${runId.replace(/^run_/u, "")}_${String(attemptIndex + 1).padStart(3, "0")}`;
-    const plannedSubjectRevision = planWorkbenchExecutionJobsForPurpose({
+    const candidateRevisionTraceFiles = createOptimizerTraceInputFiles({
+      jobs: [...baselineTraceJobs, ...runTraceJobs],
+    });
+    const candidateId = `candidate_${runId.replace(/^run_/u, "")}_${String(attemptIndex + 1).padStart(3, "0")}`;
+    const plannedCandidateRevision = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "local",
       projectId: "local",
       runId,
-      subjectId,
+      candidateId,
       attemptIndex,
       samples,
       caseIds,
@@ -954,28 +1307,28 @@ async function localRun(
       purpose: "improve",
       now: new Date().toISOString(),
       baseFiles,
-      traceFiles: subjectRevisionTraceFiles,
+      traceFiles: candidateRevisionTraceFiles,
       ...(environmentRefs.defaultRef ? { environmentRef: environmentRefs.defaultRef } : {}),
-      baseId: activeSubject.id,
+      baseId: activeCandidate.id,
     })[0]!;
-    const subjectRevisionJobs = await executeLocalDevelopmentDag({
-      jobs: [plannedSubjectRevision],
+    const candidateRevisionJobs = await executeLocalDevelopmentDag({
+      jobs: [plannedCandidateRevision],
       spec,
       adapterManifests,
       adapterFiles: normalizeSurfaceFiles(projectSource.adapterFiles),
       baseFiles,
       engineResolveFiles,
       engineCases,
-      traceFiles: subjectRevisionTraceFiles,
+      traceFiles: candidateRevisionTraceFiles,
       capacity: devCapacity,
     });
-    const subjectRevision = subjectRevisionJobs[0]!;
-    const completedJobs: HostedWorkbenchJob[] = [subjectRevision];
-    if (subjectRevision.status === "succeeded") {
-      const subjectRevisionFiles =
-        completedJobOutputFiles(subjectRevision).length > 0
+    const candidateRevision = candidateRevisionJobs[0]!;
+    const completedJobs: HostedWorkbenchJob[] = [candidateRevision];
+    if (candidateRevision.status === "succeeded") {
+      const candidateRevisionFiles =
+        completedJobOutputFiles(candidateRevision).length > 0
           ? normalizeSurfaceFiles(
-              completedJobOutputFiles(subjectRevision).filter(
+              completedJobOutputFiles(candidateRevision).filter(
                 (file) => !file.path.startsWith(".workbench/"),
               ),
             )
@@ -984,7 +1337,7 @@ async function localRun(
         ownerUserId: "local",
         projectId: "local",
         runId,
-        subjectId,
+        candidateId,
         attemptIndex,
         samples,
         now: new Date().toISOString(),
@@ -996,11 +1349,11 @@ async function localRun(
         purpose: "attempt",
       });
       const dagJobs = await executeLocalDevelopmentDag({
-        jobs: [subjectRevision, ...attemptJobs],
+        jobs: [candidateRevision, ...attemptJobs],
         spec,
         adapterManifests,
         adapterFiles: normalizeSurfaceFiles(projectSource.adapterFiles),
-        baseFiles: subjectRevisionFiles,
+        baseFiles: candidateRevisionFiles,
         engineResolveFiles,
         engineCases,
         capacity: devCapacity,
@@ -1016,30 +1369,31 @@ async function localRun(
       startedAt,
       spec,
       jobs: completedJobs,
-      previousSubject: activeSubject,
-      existingSubjectCount: snapshot.subjects.length,
+      previousCandidate: activeCandidate,
+      existingCandidateCount: snapshot.candidates.length,
     });
-    for (const subject of materialized.subjects) {
-      snapshot = upsertLocalSubject(
+    for (const candidate of materialized.candidates) {
+      outputCandidateId = candidate.id;
+      snapshot = upsertLocalCandidate(
         snapshot,
-        subject,
-        materialized.subjectFiles[subject.id] ?? [],
+        candidate,
+        materialized.candidateFiles[candidate.id] ?? [],
       );
       events.push(
-        createLocalEvent("subject_created", subject.createdAt, {
+        createLocalEvent("candidate_created", candidate.createdAt, {
           runId,
-          subjectId: subject.id,
-          baseId: subject.baseId,
-          status: subject.status,
-          metrics: subject.metrics,
+          candidateId: candidate.id,
+          baseId: candidate.baseId,
+          status: candidate.status,
+          metrics: evaluationMeanMetrics(candidate.eval),
         }),
       );
     }
     for (const evaluation of materialized.evaluations) {
       snapshot = upsertLocalEvaluation(snapshot, evaluation);
     }
-    snapshot = setLocalActive(snapshot, materialized.activeSubjectId);
-    currentBaseId = materialized.activeSubjectId ?? currentBaseId;
+    snapshot = setLocalActive(snapshot, materialized.activeCandidateId);
+    currentBaseId = materialized.activeCandidateId ?? currentBaseId;
     completedJobCount += materialized.completedJobCount;
     failedJobCount += materialized.failedJobCount;
     failedJobs.push(
@@ -1054,14 +1408,15 @@ async function localRun(
     events.push(
       createLocalEvent("active_changed", new Date().toISOString(), {
         runId,
-        subjectId: materialized.activeSubjectId ?? undefined,
-        activeId: materialized.activeSubjectId ?? undefined,
-        status: materialized.selectedSubject?.status,
-        metrics: materialized.selectedSubject?.metrics,
+        candidateId: materialized.activeCandidateId ?? undefined,
+        activeId: materialized.activeCandidateId ?? undefined,
+        status: materialized.selectedCandidate?.status,
+        metrics: evaluationMeanMetrics(materialized.selectedCandidate?.eval),
       }),
     );
     await saveLocalJobs(workspace, completedJobs);
     await saveLocalArchive(workspace, snapshot);
+    attemptsExecuted += 1;
   }
   snapshot = await loadLocalArchive(workspace);
   const finishedAt = new Date().toISOString();
@@ -1070,19 +1425,25 @@ async function localRun(
     workflow: "improve",
     benchmarkFingerprint,
     status: "finished",
+    candidateId: baseCandidate.id,
+    candidateRunId: projectSource.spec.candidate.selectedRunId,
+    candidateRunName: projectSource.spec.candidate.selectedRunName,
     startedAt,
     finishedAt,
     durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
-    optimizer: formatSpecOptimizer(spec),
+    improver: formatSpecImprover(spec),
     engineRun: spec.engineRun.use,
     strategy: "greedy",
     budget,
     repairBudget: 0,
     attemptsRequested: budget,
-    attemptsExecuted: budget,
+    attemptsExecuted,
     samples,
+    executionFingerprint,
     stoppedReason: "budget_exhausted",
     outcome: failedJobCount > 0 ? "error" : "ok",
+    activeCandidateId: snapshot.activeId,
+    outputCandidateId: outputCandidateId ?? snapshot.activeId,
   };
   events.push(
     createLocalEvent("run_finished", finishedAt, {
@@ -1094,24 +1455,29 @@ async function localRun(
       },
     }),
   );
-  snapshot = appendLocalRun(snapshot, run, events);
+  snapshot = upsertLocalRun(snapshot, run, events.slice(1));
   await saveLocalArchive(workspace, snapshot);
-  const selected = snapshot.activeId
-    ? readLocalSubject(snapshot, snapshot.activeId)
+  const outputCandidate = run.outputCandidateId
+    ? readLocalCandidate(snapshot, run.outputCandidateId)
+    : null;
+  const activeCandidate = snapshot.activeId
+    ? readLocalCandidate(snapshot, snapshot.activeId)
     : null;
   const result = {
     ok: failedJobCount === 0,
     runId,
-    activeSubjectId: snapshot.activeId,
-    selectedSubject: selected,
+    outputCandidateId: run.outputCandidateId,
+    outputCandidate,
+    activeCandidateId: snapshot.activeId,
+    activeCandidate,
     completedJobCount,
     failedJobCount,
     failedJobs,
     localView: localDevViewHint(workspace, runId),
   };
   writeOutput(result, parsed, io, () => {
-    const metricValue =
-      selected?.metrics?.score ?? "n/a";
+    const outputMetricValue = outputCandidate ? formatCandidateEvaluationScore(outputCandidate) : "n/a";
+    const activeMetricValue = activeCandidate ? formatCandidateEvaluationScore(activeCandidate) : "n/a";
     const firstFailure = result.failedJobs[0];
     const failureDetail = firstFailure
       ? `\nFirst failed job ${firstFailure.id}${firstFailure.purpose ? ` (${firstFailure.purpose})` : ""}: ${firstFailure.error}`
@@ -1119,12 +1485,25 @@ async function localRun(
     const viewDetail = failedJobCount === 0
       ? `\nOpen local view: ${result.localView.command}\n${result.localView.note}`
       : "";
-    return `Run ${runId} finished. Active subject: ${snapshot.activeId ?? "none"} (score: ${metricValue}).${failureDetail}${viewDetail}`;
+    return `Run ${runId} finished. Output candidate: ${formatLocalCandidateLabel(outputCandidate)} (score: ${outputMetricValue}). Active candidate: ${formatLocalCandidateLabel(activeCandidate)} (score: ${activeMetricValue}).${failureDetail}${viewDetail}`;
   });
   return failedJobCount === 0 ? 0 : 1;
+  } catch (error) {
+    await markLocalRunFailed({
+      workspace,
+      run: {
+        ...runningRun,
+        attemptsExecuted,
+        outputCandidateId,
+      },
+      startedAt,
+      error,
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
-async function ensureLocalImproveBaseSubject(args: {
+async function ensureLocalImproveBaseCandidate(args: {
   parsed: ParsedArgs;
   sourceArg: string;
   workspace: string;
@@ -1132,60 +1511,88 @@ async function ensureLocalImproveBaseSubject(args: {
   samples: number;
   io: CliIo;
   runtimeOptions: CliRuntimeOptions;
-}): Promise<SubjectRecord> {
+}): Promise<CandidateRecord> {
   let snapshot = await loadLocalArchive(args.workspace);
   const explicitBase = asOptionalString(args.parsed.flags.from);
   const benchmarkFingerprint = await readLocalBenchmarkFingerprint(args.workspace);
   if (explicitBase) {
-    let subject = readLocalSubject(snapshot, explicitBase);
-    if (subject.benchmarkFingerprint !== benchmarkFingerprint) {
+    let candidate = readLocalCandidate(snapshot, explicitBase);
+    if (candidate.benchmarkFingerprint !== benchmarkFingerprint) {
       throw new UsageError(
-        `Base subject ${explicitBase} belongs to benchmark ${subject.benchmarkFingerprint}, not ${benchmarkFingerprint}.`,
+        `Base candidate ${explicitBase} belongs to benchmark ${candidate.benchmarkFingerprint}, not ${benchmarkFingerprint}.`,
       );
     }
-    if (!subject.subjectFingerprint) {
-      throw new UsageError(`Base subject ${explicitBase} is missing a subject fingerprint.`);
+    if (!candidate.candidateFingerprint) {
+      throw new UsageError(`Base candidate ${explicitBase} is missing a candidate fingerprint.`);
     }
-    if (subject.status !== "evaluated" && !subject.eval) {
-      const code = await localEvaluateSubject(
-        ["--dir", args.workspace, "--subject", explicitBase, "--samples", String(args.samples), "--json"],
+    if (candidate.status !== "evaluated" && !candidate.eval) {
+      const code = await localEvaluateCandidate(
+        [
+          "--dir",
+          args.workspace,
+          "--candidate",
+          explicitBase,
+          "--runs",
+          args.projectSource.spec.candidate.selectedRunId,
+          "--samples",
+          String(args.samples),
+          ...(args.parsed.flags.rerun === true ? ["--rerun"] : []),
+          "--json",
+        ],
         createSilentIo(args.io),
         args.runtimeOptions,
       );
       if (code !== 0) {
-        throw new UsageError(`Base subject ${explicitBase} eval failed; improve was not started.`);
+        throw new UsageError(`Base candidate ${explicitBase} eval failed; improve was not started.`);
       }
       snapshot = await loadLocalArchive(args.workspace);
-      subject = readLocalSubject(snapshot, explicitBase);
+      candidate = readLocalCandidate(snapshot, explicitBase);
     }
-    return subject;
+    return candidate;
   }
 
-  const subjectFingerprint = localSubjectFingerprint(args.projectSource);
-  const existing = snapshot.subjects.find((subject) =>
-    subject.benchmarkFingerprint === benchmarkFingerprint &&
-    subject.subjectFingerprint === subjectFingerprint &&
-    (subject.status === "evaluated" || Boolean(subject.eval))
+  const candidateFingerprint = localCandidateFingerprint(args.projectSource);
+  const existing = snapshot.candidates.find((candidate) =>
+    candidate.benchmarkFingerprint === benchmarkFingerprint &&
+    candidate.candidateFingerprint === candidateFingerprint &&
+    (candidate.status === "evaluated" || Boolean(candidate.eval))
   );
   if (existing) {
     return existing;
   }
 
   const evalArgs = args.parsed.positionals.length > 0
-    ? [args.sourceArg, "--samples", String(args.samples), "--json"]
-    : ["--dir", args.workspace, "--samples", String(args.samples), "--json"];
-  const code = await localEvaluateSubject(evalArgs, createSilentIo(args.io), args.runtimeOptions);
+    ? [
+        args.sourceArg,
+        "--runs",
+        args.projectSource.spec.candidate.selectedRunId,
+        "--samples",
+        String(args.samples),
+        ...(args.parsed.flags.rerun === true ? ["--rerun"] : []),
+        "--json",
+      ]
+    : [
+        "--dir",
+        args.workspace,
+        "--runs",
+        args.projectSource.spec.candidate.selectedRunId,
+        "--samples",
+        String(args.samples),
+        ...(args.parsed.flags.rerun === true ? ["--rerun"] : []),
+        "--json",
+      ];
+  const code = await localEvaluateCandidate(evalArgs, createSilentIo(args.io), args.runtimeOptions);
   if (code !== 0) {
-    throw new UsageError("Parent subject eval failed; improve was not started.");
+    throw new UsageError("Parent candidate eval failed; improve was not started.");
   }
   snapshot = await loadLocalArchive(args.workspace);
-  const evaluated = snapshot.subjects.find((subject) =>
-    subject.benchmarkFingerprint === benchmarkFingerprint &&
-    subject.subjectFingerprint === subjectFingerprint &&
-    (subject.status === "evaluated" || Boolean(subject.eval))
+  const evaluated = snapshot.candidates.find((candidate) =>
+    candidate.benchmarkFingerprint === benchmarkFingerprint &&
+    candidate.candidateFingerprint === candidateFingerprint &&
+    (candidate.status === "evaluated" || Boolean(candidate.eval))
   );
   if (!evaluated) {
-    throw new UsageError("Parent subject eval did not produce an evaluated subject.");
+    throw new UsageError("Parent candidate eval did not produce an evaluated candidate.");
   }
   return evaluated;
 }
@@ -1207,17 +1614,86 @@ function createSilentIo(io: CliIo): CliIo {
   };
 }
 
-async function localEvaluateSubject(
+function selectLocalOptimizerBaselineTraceJobs(
+  snapshot: {
+    evaluations: readonly EvaluationScorecard[];
+    runs: readonly RunSummary[];
+  },
+  jobs: readonly HostedWorkbenchJob[],
+  target: {
+    benchmarkFingerprint: string;
+    candidateId: string;
+    candidateRunId: string;
+    executionFingerprint: string;
+  },
+): HostedWorkbenchJob[] {
+  const runById = new Map(snapshot.runs.map((run) => [run.id, run]));
+  const evaluation = snapshot.evaluations
+    .filter((entry) => {
+      const run = runById.get(entry.runId);
+      return entry.benchmarkFingerprint === target.benchmarkFingerprint &&
+        entry.candidateId === target.candidateId &&
+        entry.candidateRunId === target.candidateRunId &&
+        run?.executionFingerprint === target.executionFingerprint;
+    })
+    .sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt) ||
+      right.runId.localeCompare(left.runId),
+    )[0] ?? null;
+  if (!evaluation) {
+    return [];
+  }
+  return jobs.filter((job) => job.runId === evaluation.runId);
+}
+
+async function localEvaluateCandidate(
   argv: readonly string[],
   io: CliIo,
   runtimeOptions: CliRuntimeOptions,
 ): Promise<number> {
   void runtimeOptions;
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "subject", "samples", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "runs", "samples", "rerun", "json"]));
   const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
   const sourceArg = resolveSourceDir(parsed);
-  const projectSource = await readLocalProjectSource(sourceArg);
+  const runsFlag = asOptionalString(parsed.flags.runs);
+  const defaultProjectSource = await readLocalProjectSource(sourceArg);
+  const selectedRunIds = resolveCandidateRunSelection(defaultProjectSource, runsFlag);
+  if (selectedRunIds.length > 1) {
+    let failed = 0;
+    for (const runId of selectedRunIds) {
+      const args = [
+        "--dir",
+        defaultProjectSource.dir,
+        "--runs",
+        runId,
+        "--samples",
+        String(samples),
+        ...(readOptionalCandidateFlag(parsed) ? ["--candidate", readOptionalCandidateFlag(parsed)!] : []),
+        ...(parsed.flags.rerun === true ? ["--rerun"] : []),
+        "--json",
+      ];
+      const code = await localEvaluateCandidate(args, createSilentIo(io), runtimeOptions);
+      if (code !== 0) {
+        failed += 1;
+      }
+    }
+    writeOutput(
+      {
+        ok: failed === 0,
+        candidateId: defaultProjectSource.candidateName,
+        candidateRunIds: selectedRunIds,
+        failedRunCount: failed,
+      },
+      parsed,
+      io,
+      () => `Evaluated ${selectedRunIds.length} candidate run(s); ${failed} failed.`,
+    );
+    return failed === 0 ? 0 : 1;
+  }
+  const projectSource = selectedRunIds[0] === defaultProjectSource.candidateRunId
+    ? defaultProjectSource
+    : await readLocalProjectSource(sourceArg, { runId: selectedRunIds[0] });
   const workspace = projectSource.dir;
   const executionProject = await resolveLocalProjectForExecution(workspace, projectSource.specSource);
   const { spec, adapterManifests } = executionProject;
@@ -1240,42 +1716,109 @@ async function localEvaluateSubject(
   );
   let snapshot = await loadLocalArchive(workspace);
   const benchmarkFingerprint = await readLocalBenchmarkFingerprint(workspace);
-  const sourceSubjectFingerprint = localSubjectFingerprint(projectSource);
-  const explicitSubjectId = asOptionalString(parsed.flags.subject);
-  const existingSourceSubject = snapshot.subjects.find((subject) =>
-    subject.benchmarkFingerprint === benchmarkFingerprint &&
-    subject.subjectFingerprint === sourceSubjectFingerprint
+  const executionFingerprint = localRunExecutionFingerprint(projectSource);
+  const sourceCandidateFingerprint = localCandidateFingerprint(projectSource);
+  const explicitCandidateId = readOptionalCandidateFlag(parsed);
+  const existingSourceCandidate = snapshot.candidates.find((candidate) =>
+    candidate.benchmarkFingerprint === benchmarkFingerprint &&
+    candidate.candidateFingerprint === sourceCandidateFingerprint
   );
-  const subjectId = explicitSubjectId ?? existingSourceSubject?.id ?? `subject_${sourceSubjectFingerprint.slice(0, 12)}`;
-  const existingSubject = snapshot.subjects.find((subject) => subject.id === subjectId);
-  const files = filterSubjectSourceFiles(
-    existingSubject
-      ? readLocalSubjectFiles(snapshot, subjectId)
-      : normalizeSurfaceFiles(projectSource.subjectFiles),
+  const candidateId = explicitCandidateId ?? existingSourceCandidate?.id ?? `candidate_${sourceCandidateFingerprint.slice(0, 12)}`;
+  const existingCandidate = snapshot.candidates.find((candidate) => candidate.id === candidateId);
+  const activeCandidateIdBeforeEval = snapshot.activeId;
+  const selectedCandidateRunId = projectSource.spec.candidate.selectedRunId;
+  const files = filterCandidateSourceFiles(
+    existingCandidate
+      ? readLocalCandidateFiles(snapshot, candidateId)
+      : normalizeSurfaceFiles(projectSource.candidateFiles),
   );
+  const evaluationWork = parsed.flags.rerun !== true
+    ? await resolveLocalEvaluationWork(workspace, snapshot, {
+        benchmarkFingerprint,
+        candidateId,
+        candidateFingerprint: existingCandidate?.candidateFingerprint ?? sourceCandidateFingerprint,
+        candidateRunId: selectedCandidateRunId,
+        executionFingerprint,
+        samples,
+        caseIds,
+      })
+    : null;
+  const reusableEvaluation = evaluationWork?.reusableEvaluation ?? null;
+  if (reusableEvaluation) {
+    const result = {
+      ok: true,
+      reused: true,
+      runId: reusableEvaluation.runId,
+      evaluation: reusableEvaluation,
+      evaluationId: reusableEvaluation.id,
+      candidateId,
+      completedJobCount: 0,
+      failedJobCount: 0,
+      localView: localDevViewHint(workspace, reusableEvaluation.runId),
+    };
+    writeOutput(
+      result,
+      parsed,
+      io,
+      () => `Reused evaluation ${reusableEvaluation.id}. Use --rerun to intentionally run it again.`,
+    );
+    return 0;
+  }
+  const selectedPairs = evaluationWork?.missingPairs.length
+    ? evaluationWork.missingPairs
+    : allCaseSamplePairs(caseIds, samples);
   const runId = `eval_local_${Date.now().toString(36)}`;
-  const evaluatedSubjectId = subjectId;
+  const evaluatedCandidateId = candidateId;
   const startedAt = new Date().toISOString();
-  const baseline = createRuntimeBaselineSubjectJob({
+  const runStartedEvent = createLocalEvent("run_started", startedAt, {
+    runId,
+    candidateId: evaluatedCandidateId,
+    detail: { samples, strategy: "direct" },
+  });
+  const runningRun: RunSummary = {
+    id: runId,
+    workflow: "eval",
+    benchmarkFingerprint,
+    status: "running",
+    candidateId: evaluatedCandidateId,
+    candidateRunId: projectSource.spec.candidate.selectedRunId,
+    candidateRunName: projectSource.spec.candidate.selectedRunName,
+    startedAt,
+    improver: "none",
+    engineRun: spec.engineRun.use,
+    strategy: "direct",
+    budget: 1,
+    repairBudget: 0,
+    attemptsRequested: 1,
+    attemptsExecuted: 0,
+    samples,
+    executionFingerprint,
+    activeCandidateId: activeCandidateIdBeforeEval,
+    outputCandidateId: evaluatedCandidateId,
+  };
+  snapshot = upsertLocalRun(snapshot, runningRun, [runStartedEvent]);
+  await saveLocalArchive(workspace, snapshot);
+  try {
+  const baseline = createRuntimeBaselineCandidateJob({
     ownerUserId: "local",
     projectId: "local",
     runId,
-    subjectId: evaluatedSubjectId,
+    candidateId: evaluatedCandidateId,
     attemptIndex: 0,
     files,
     now: startedAt,
     baseId: null,
   });
-  const completedJobs: HostedWorkbenchJob[] = [baseline];
   const attemptJobs = planWorkbenchExecutionJobsForPurpose({
     ownerUserId: "local",
     projectId: "local",
     runId,
-    subjectId: evaluatedSubjectId,
+    candidateId: evaluatedCandidateId,
     attemptIndex: 0,
     samples,
     now: startedAt,
-    caseIds,
+    caseIds: orderedCaseIdsForPairs(caseIds, selectedPairs),
+    sampleIndexesByCase: sampleIndexesByCase(selectedPairs),
     engineCases,
     spec,
     environmentRefsByCase: environmentRefs.byCase,
@@ -1292,45 +1835,67 @@ async function localEvaluateSubject(
     engineCases,
     capacity: await localDevelopmentCapacity(workspace),
   });
-  completedJobs.splice(0, completedJobs.length, ...dagJobs);
+  const materializationJobs = [
+    ...(evaluationWork?.priorAttemptJobs ?? []),
+    ...dagJobs,
+  ];
+  const currentRunJobs = dagJobs.filter((job) => job.runId === runId);
+  const currentRunCompletedJobCount = currentRunJobs.filter((job) => job.status === "succeeded").length;
+  const currentRunFailedJobCount = currentRunJobs.filter((job) => job.status === "failed").length;
   const materialized = materializeWorkbenchRunResult({
     runId,
     benchmarkFingerprint,
     sourceYaml: projectSource.specSource,
     benchmarkSourceFiles: authoredBenchmarkSourceFiles(projectSource),
-    subjectFingerprint: existingSubject?.subjectFingerprint ?? sourceSubjectFingerprint,
-    ...(!existingSubject || existingSubject.subjectFingerprint === sourceSubjectFingerprint
-      ? { subjectSourceFiles: authoredSubjectSourceFiles(projectSource) }
+    candidateFingerprint: existingCandidate?.candidateFingerprint ?? sourceCandidateFingerprint,
+    ...(!existingCandidate || existingCandidate.candidateFingerprint === sourceCandidateFingerprint
+      ? { candidateSourceFiles: authoredCandidateSourceFiles(projectSource) }
       : {}),
     startedAt,
     spec,
-    jobs: completedJobs,
-    previousSubject: null,
-    existingSubjectCount: snapshot.subjects.length,
+    jobs: materializationJobs,
+    previousCandidate: existingCandidate ?? null,
+    existingCandidateCount: snapshot.candidates.length,
   });
-  for (const subjectRecord of materialized.subjects) {
-    snapshot = upsertLocalSubject(
+  for (const candidateRecord of materialized.candidates) {
+    snapshot = upsertLocalCandidate(
       snapshot,
-      subjectRecord,
-      materialized.subjectFiles[subjectRecord.id] ?? [],
+      candidateRecord,
+      materialized.candidateFiles[candidateRecord.id] ?? [],
     );
   }
-  if (materialized.activeSubjectId) {
-    snapshot = setLocalActive(snapshot, materialized.activeSubjectId);
+  if (materialized.activeCandidateId) {
+    snapshot = setLocalActive(snapshot, materialized.activeCandidateId);
   }
   for (const evaluation of materialized.evaluations) {
     snapshot = upsertLocalEvaluation(snapshot, evaluation);
   }
+  const activeCandidateId = activeCandidateIdBeforeEval ?? materialized.activeCandidateId ?? null;
   const finishedAt = new Date().toISOString();
-  snapshot = appendLocalRun(snapshot, {
+  if (activeCandidateId) {
+    snapshot = setLocalActive(snapshot, activeCandidateId);
+  }
+  const runFinishedEvent = createLocalEvent("run_finished", finishedAt, {
+    runId,
+    candidateId: evaluatedCandidateId,
+    detail: {
+      outcome: currentRunFailedJobCount > 0 ? "error" : "ok",
+      attemptsExecuted: 1,
+      durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
+    },
+  });
+  snapshot = upsertLocalRun(snapshot, {
     id: runId,
     workflow: "eval",
     benchmarkFingerprint,
     status: "finished",
+    candidateId: evaluatedCandidateId,
+    candidateRunId: projectSource.spec.candidate.selectedRunId,
+    candidateRunName: projectSource.spec.candidate.selectedRunName,
     startedAt,
     finishedAt,
     durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
-    optimizer: "none",
+    improver: "none",
     engineRun: spec.engineRun.use,
     strategy: "direct",
     budget: 1,
@@ -1338,30 +1903,292 @@ async function localEvaluateSubject(
     attemptsRequested: 1,
     attemptsExecuted: 1,
     samples,
+    executionFingerprint,
     stoppedReason: "completed",
-    outcome: materialized.failedJobCount > 0 ? "error" : "ok",
-  }, []);
-  await saveLocalJobs(workspace, completedJobs);
+    outcome: currentRunFailedJobCount > 0 ? "error" : "ok",
+    activeCandidateId,
+    outputCandidateId: evaluatedCandidateId,
+  }, [runFinishedEvent]);
+  await saveLocalJobs(workspace, currentRunJobs);
   await saveLocalArchive(workspace, snapshot);
   const evaluation = materialized.evaluations[0] ?? null;
   const result = {
-    ok: materialized.failedJobCount === 0,
+    ok: currentRunFailedJobCount === 0,
     runId,
     evaluation,
     evaluationId: evaluation?.id ?? null,
-    subjectId: evaluatedSubjectId,
-    completedJobCount: materialized.completedJobCount,
-    failedJobCount: materialized.failedJobCount,
+    candidateId: evaluatedCandidateId,
+    activeCandidateId,
+    completedJobCount: currentRunCompletedJobCount,
+    failedJobCount: currentRunFailedJobCount,
     localView: localDevViewHint(workspace, runId),
   };
   writeOutput(
     result,
     parsed,
     io,
-    ({ evaluationId, subjectId: evaluatedSubjectId }) =>
-      `Evaluation ${evaluationId ?? runId} finished for ${evaluatedSubjectId}.\nOpen local view: ${result.localView.command}\n${result.localView.note}`,
+    ({ evaluationId, candidateId }) =>
+      `Evaluation ${evaluationId ?? runId} finished for candidate ${candidateId}.\nOpen local view: ${result.localView.command}\n${result.localView.note}`,
   );
-  return materialized.failedJobCount === 0 ? 0 : 1;
+  return currentRunFailedJobCount === 0 ? 0 : 1;
+  } catch (error) {
+    await markLocalRunFailed({
+      workspace,
+      run: runningRun,
+      startedAt,
+      error,
+    }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function resolveLocalEvaluationWork(
+  workspace: string,
+  snapshot: {
+    evaluations: readonly EvaluationScorecard[];
+    runs: readonly RunSummary[];
+  },
+  target: {
+    benchmarkFingerprint: string;
+    candidateId: string;
+    candidateFingerprint: string;
+    candidateRunId: string;
+    executionFingerprint: string;
+    samples: number;
+    caseIds: readonly string[];
+  },
+): Promise<{
+  reusableEvaluation: EvaluationScorecard | null;
+  missingPairs: CaseSamplePair[];
+  priorAttemptJobs: HostedWorkbenchJob[];
+} | null> {
+  const runById = new Map(snapshot.runs.map((run) => [run.id, run]));
+  const matchingEvaluations = snapshot.evaluations.filter((evaluation) => {
+    const run = runById.get(evaluation.runId);
+    return evaluation.benchmarkFingerprint === target.benchmarkFingerprint &&
+      evaluation.candidateId === target.candidateId &&
+      evaluation.candidateFingerprint === target.candidateFingerprint &&
+      evaluation.candidateRunId === target.candidateRunId &&
+      run?.executionFingerprint === target.executionFingerprint;
+  });
+  const reusableEvaluation = matchingEvaluations
+    .filter((evaluation) =>
+      evaluation.status === "completed" &&
+      evaluation.errorSampleCount === 0 &&
+      evaluation.completedSampleCount >= target.samples
+    )
+    .sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt) ||
+      right.id.localeCompare(left.id),
+    )[0] ?? null;
+  if (reusableEvaluation) {
+    return {
+      reusableEvaluation,
+      missingPairs: [],
+      priorAttemptJobs: [],
+    };
+  }
+  const matchingRunIds = new Set(matchingEvaluations.map((evaluation) => evaluation.runId));
+  if (matchingRunIds.size === 0) {
+    return null;
+  }
+  const allPairs = allCaseSamplePairs(target.caseIds, target.samples);
+  const desiredKeys = new Set(allPairs.map(caseSamplePairKey));
+  const previousJobs = await readLocalJobs(workspace);
+  const priorAttemptJobsByPair = latestCompletedAttemptJobsByPair(
+    previousJobs.filter((job) =>
+      matchingRunIds.has(job.runId) &&
+      job.candidateId === target.candidateId
+    ),
+    desiredKeys,
+  );
+  const missingPairs = allPairs.filter((pair) => !priorAttemptJobsByPair.has(caseSamplePairKey(pair)));
+  if (missingPairs.length === allPairs.length) {
+    return null;
+  }
+  return {
+    reusableEvaluation: null,
+    missingPairs,
+    priorAttemptJobs: [...priorAttemptJobsByPair.values()],
+  };
+}
+
+async function markLocalRunFailed(args: {
+  workspace: string;
+  run: RunSummary;
+  startedAt: string;
+  error: unknown;
+}): Promise<void> {
+  const latest = await loadLocalArchive(args.workspace);
+  const current = latest.runs.find((run) => run.id === args.run.id);
+  if (current?.status === "finished") {
+    return;
+  }
+  const finishedAt = new Date().toISOString();
+  const message = errorMessage(args.error);
+  const failedRun: RunSummary = {
+    ...args.run,
+    status: "finished",
+    finishedAt,
+    durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(args.startedAt)),
+    outcome: "error",
+    error: message,
+  };
+  await saveLocalArchive(
+    args.workspace,
+    upsertLocalRun(latest, failedRun, [
+      createLocalEvent("run_finished", finishedAt, {
+        runId: args.run.id,
+        candidateId: args.run.candidateId ?? undefined,
+        detail: {
+          outcome: "error",
+          error: message,
+          attemptsExecuted: failedRun.attemptsExecuted,
+          durationMs: failedRun.durationMs ?? null,
+        },
+      }),
+    ]),
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+interface CaseSamplePair {
+  caseId: string;
+  sampleIndex: number;
+}
+
+function allCaseSamplePairs(
+  caseIds: readonly string[],
+  samples: number,
+): CaseSamplePair[] {
+  return caseIds.flatMap((caseId) =>
+    Array.from({ length: samples }, (_, sampleIndex) => ({
+      caseId,
+      sampleIndex,
+    })),
+  );
+}
+
+function orderedCaseIdsForPairs(
+  caseIds: readonly string[],
+  pairs: readonly CaseSamplePair[],
+): string[] {
+  const selected = new Set(pairs.map((pair) => pair.caseId));
+  return caseIds.filter((caseId) => selected.has(caseId));
+}
+
+function sampleIndexesByCase(
+  pairs: readonly CaseSamplePair[],
+): Map<string, number[]> {
+  const byCase = new Map<string, number[]>();
+  for (const pair of pairs) {
+    byCase.set(pair.caseId, [...(byCase.get(pair.caseId) ?? []), pair.sampleIndex]);
+  }
+  for (const [caseId, indexes] of byCase.entries()) {
+    byCase.set(caseId, [...new Set(indexes)].sort((left, right) => left - right));
+  }
+  return byCase;
+}
+
+function latestCompletedAttemptJobsByPair<T extends {
+  id: string;
+  status: string;
+  input?: Json;
+  finishedAt?: string;
+  updatedAt?: string;
+  startedAt?: string;
+  createdAt?: string;
+}>(
+  jobs: readonly T[],
+  desiredKeys: ReadonlySet<string>,
+): Map<string, T> {
+  const byPair = new Map<string, T>();
+  for (const job of jobs) {
+    if (job.status !== "succeeded" || executionPurposeFromJobInput(job.input) !== "attempt") {
+      continue;
+    }
+    const pair = caseSamplePairFromJob(job);
+    if (!pair) {
+      continue;
+    }
+    const key = caseSamplePairKey(pair);
+    if (!desiredKeys.has(key)) {
+      continue;
+    }
+    const previous = byPair.get(key);
+    if (!previous || compareJobRecency(job, previous) > 0) {
+      byPair.set(key, job);
+    }
+  }
+  return byPair;
+}
+
+function caseSamplePairFromJob(job: { input?: Json }): CaseSamplePair | null {
+  const input = readRecord(job.input);
+  const execution = readRecord(input?.execution);
+  const metadata = readRecord(execution?.metadata);
+  const caseId = stringValue(input?.caseId) ?? stringValue(metadata?.caseId);
+  const sampleIndex = integerValue(input?.sampleIndex) ?? integerValue(metadata?.sampleIndex);
+  return caseId && sampleIndex !== null
+    ? { caseId, sampleIndex }
+    : null;
+}
+
+function executionPurposeFromJobInput(inputValue: unknown): string | null {
+  const input = readRecord(inputValue);
+  const execution = readRecord(input?.execution);
+  return stringValue(execution?.purpose);
+}
+
+function caseSamplePairKey(pair: CaseSamplePair): string {
+  return `${pair.caseId}\0${pair.sampleIndex}`;
+}
+
+function compareJobRecency(
+  left: { finishedAt?: string; updatedAt?: string; startedAt?: string; createdAt?: string; id: string },
+  right: { finishedAt?: string; updatedAt?: string; startedAt?: string; createdAt?: string; id: string },
+): number {
+  return jobRecencyTimestamp(left).localeCompare(jobRecencyTimestamp(right)) ||
+    left.id.localeCompare(right.id);
+}
+
+function jobRecencyTimestamp(
+  job: { finishedAt?: string; updatedAt?: string; startedAt?: string; createdAt?: string },
+): string {
+  return job.finishedAt ?? job.updatedAt ?? job.startedAt ?? job.createdAt ?? "";
+}
+
+function findReusableLocalImproveRun(
+  runs: readonly RunSummary[],
+  target: {
+    benchmarkFingerprint: string;
+    candidateId: string;
+    candidateRunId: string;
+    executionFingerprint: string;
+    budget: number;
+    samples: number;
+  },
+): RunSummary | null {
+  return runs
+    .filter((run) =>
+      run.workflow === "improve" &&
+      run.benchmarkFingerprint === target.benchmarkFingerprint &&
+      run.candidateId === target.candidateId &&
+      run.candidateRunId === target.candidateRunId &&
+      run.executionFingerprint === target.executionFingerprint &&
+      run.budget === target.budget &&
+      run.samples === target.samples &&
+      run.status === "finished" &&
+      run.outcome === "ok" &&
+      Boolean(run.outputCandidateId)
+    )
+    .sort((left, right) =>
+      (right.finishedAt ?? right.startedAt).localeCompare(left.finishedAt ?? left.startedAt) ||
+      right.id.localeCompare(left.id),
+    )[0] ?? null;
 }
 
 function localDevViewHint(workspace: string, runId?: string | null): LocalDevViewHint {
@@ -1378,7 +2205,7 @@ function localDevOpenUrl(
     evaluations: Array<{
       id: string;
       runId: string;
-      subjectId: string;
+      candidateId: string;
     }>;
   },
   runId?: string | null,
@@ -1391,11 +2218,11 @@ function localDevOpenUrl(
     .reverse()
     .find((entry) => entry.runId === runId);
   if (!evaluation) {
-    return new URL("subjects", baseUrl).toString();
+    return new URL("candidates", baseUrl).toString();
   }
   const params = new URLSearchParams({ evaluation: evaluation.id });
   return new URL(
-    `subjects/${encodeURIComponent(evaluation.subjectId)}?${params.toString()}`,
+    `candidates/${encodeURIComponent(evaluation.candidateId)}?${params.toString()}`,
     baseUrl,
   ).toString();
 }
@@ -1404,12 +2231,19 @@ async function readLocalBenchmarkFingerprint(workspace: string): Promise<string>
   return localBenchmarkFingerprint(await readLocalProjectSource(workspace));
 }
 
-function authoredSubjectSourceFiles(projectSource: LocalProjectSource): SurfaceSnapshotFile[] {
+function localRunExecutionFingerprint(projectSource: LocalProjectSource): string {
+  return workbenchRunExecutionFingerprint({
+    sourceYaml: projectSource.specSource,
+    adapterFiles: normalizeSurfaceFiles(projectSource.adapterFiles),
+  });
+}
+
+function authoredCandidateSourceFiles(projectSource: LocalProjectSource): SurfaceSnapshotFile[] {
   return [{
-    path: path.relative(projectSource.dir, projectSource.subjectSpecPath).split(path.sep).join("/"),
+    path: path.relative(projectSource.dir, projectSource.candidateSpecPath).split(path.sep).join("/"),
     kind: "text",
     encoding: "utf8",
-    content: projectSource.subjectSource,
+    content: projectSource.candidateSource,
     executable: false,
   }];
 }
@@ -1675,22 +2509,22 @@ async function localRestore(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "subject", "dry-run", "yes", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "dry-run", "yes", "json"]));
   const workspace = resolveDir(parsed);
   const spec = await readLocalSpecIfValid(workspace);
   if (!spec) {
     throw new UsageError("restore requires a valid Workbench project.");
   }
-  const subjectRoot = spec.subject.files.path;
+  const candidateRoot = spec.candidate.files.path;
   const snapshot = await loadLocalArchive(workspace);
-  const subjectId = readSubjectIdFlag(parsed, snapshot);
-  const files = readLocalSubjectFiles(snapshot, subjectId);
+  const candidateId = readCandidateIdFlag(parsed, snapshot);
+  const files = readLocalCandidateFiles(snapshot, candidateId);
   if (parsed.flags["dry-run"] === true) {
     writeOutput(
-      { ok: true, subjectId, fileCount: files.length },
+      { ok: true, candidateId: candidateId, fileCount: files.length },
       parsed,
       io,
-      () => `Restore would write ${files.length} file(s) from ${subjectId}.`,
+      () => `Restore would write ${files.length} file(s) from ${candidateId}.`,
     );
     return 0;
   }
@@ -1699,23 +2533,23 @@ async function localRestore(
       "restore requires --dry-run to preview or --yes to apply source directory changes.",
     );
   }
-  const changedPaths = await materializeSubjectRoot(
+  const changedPaths = await materializeCandidateRoot(
     workspace,
-    subjectRoot,
+    candidateRoot,
     files,
   );
-  const next = setLocalActive(snapshot, subjectId);
+  const next = setLocalActive(snapshot, candidateId);
   await saveLocalArchive(workspace, next);
   writeOutput(
-    { ok: true, activeAfter: subjectId, changedPaths },
+    { ok: true, activeCandidateId: candidateId, changedPaths },
     parsed,
     io,
-    () => `Restored ${subjectId} to ${subjectRoot}.`,
+    () => `Restored ${candidateId} to ${candidateRoot}.`,
   );
   return 0;
 }
 
-async function localSubjectList(
+async function localCandidateList(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
@@ -1723,57 +2557,57 @@ async function localSubjectList(
   rejectUnknownFlags(parsed, new Set(["dir", "json"]));
   const snapshot = await loadLocalArchive(resolveDir(parsed));
   writeOutput(
-    snapshot.subjects,
+    snapshot.candidates,
     parsed,
     io,
-    (subjects) =>
-      subjects
+    (candidates) =>
+      candidates
         .map(
-          (subject) =>
-            `${subject.id}\t${subject.status}\tmetrics ${formatMetricSummary(subject.metrics)}${snapshot.activeId === subject.id ? "\tactive" : ""}`,
+          (candidate) =>
+            `${candidate.id}\t${candidate.status}\tevaluation ${formatCandidateEvaluationScore(candidate)}${snapshot.activeId === candidate.id ? "\tactive" : ""}`,
         )
-        .join("\n") || "No subjects.",
+        .join("\n") || "No candidates.",
   );
   return 0;
 }
 
-async function localSubjectShow(
+async function localCandidateShow(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "subject", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "json"]));
   const snapshot = await loadLocalArchive(resolveDir(parsed));
-  const subjectId = readSubjectIdFlag(parsed, snapshot);
-  const subject = readLocalSubject(snapshot, subjectId);
+  const candidateId = readCandidateIdFlag(parsed, snapshot);
+  const candidate = readLocalCandidate(snapshot, candidateId);
   writeOutput(
-    subject,
+    candidate,
     parsed,
     io,
     (record) =>
       [
         `${record.id}\t${record.status}`,
         `benchmark\t${record.benchmarkFingerprint}`,
-        `subject\t${record.subjectFingerprint}`,
-        `metrics\t${formatMetricSummary(record.metrics)}`,
+        `candidate\t${record.candidateFingerprint ?? record.candidateFingerprint}`,
+        `evaluation\t${formatCandidateEvaluationSummary(record)}`,
         ...(record.baseId ? [`base\t${record.baseId}`] : []),
       ].join("\n"),
   );
   return 0;
 }
 
-async function localSubjectFiles(
+async function localCandidateFiles(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "subject", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "json"]));
   const snapshot = await loadLocalArchive(resolveDir(parsed));
-  const subjectId = readSubjectIdFlag(parsed, snapshot);
-  const subject = readLocalSubject(snapshot, subjectId);
-  const files = summarizeSubjectFiles(
-    readLocalSubjectFiles(snapshot, subjectId),
-    subject.fileChanges,
+  const candidateId = readCandidateIdFlag(parsed, snapshot);
+  const candidate = readLocalCandidate(snapshot, candidateId);
+  const files = summarizeCandidateFiles(
+    readLocalCandidateFiles(snapshot, candidateId),
+    candidate.fileChanges,
   );
   writeOutput(
     files,
@@ -1787,16 +2621,16 @@ async function localSubjectFiles(
   return 0;
 }
 
-async function localSubjectPreview(
+async function localCandidatePreview(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "subject", "path", "output", "view", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "candidate", "path", "output", "view", "json"]));
   const snapshot = await loadLocalArchive(resolveDir(parsed));
-  const subjectId = readSubjectIdFlag(parsed, snapshot);
-  const preview = createSubjectFilePreview({
-    files: readLocalSubjectFiles(snapshot, subjectId),
+  const candidateId = readCandidateIdFlag(parsed, snapshot);
+  const preview = createCandidateFilePreview({
+    files: readLocalCandidateFiles(snapshot, candidateId),
     path: requireFlag(parsed, "path"),
     view: readPreviewMode(parsed),
   });
@@ -2586,7 +3420,7 @@ function createAdapterScaffoldFiles(id: string): Array<{
     "setup:",
     "  - npm install --global .",
     "operations:",
-    "  subject.run: {}",
+    "  candidate.run: {}",
     "",
   ].join("\n");
   const packageJson = `${JSON.stringify({
@@ -2608,11 +3442,11 @@ const request = requestPath && fs.existsSync(requestPath)
   ? JSON.parse(fs.readFileSync(requestPath, "utf8"))
   : {};
 fs.mkdirSync(outputRoot, { recursive: true });
-const operation = request.operation || "subject.run";
+const operation = request.operation || "candidate.run";
 const resultPath = process.env.WORKBENCH_RESULT || request.paths?.result || path.join(outputRoot, "workbench-result.json");
 
 let value;
-if (operation === "subject.run") {
+if (operation === "candidate.run") {
   const task = request.context?.case?.prompt || "No case prompt was provided.";
   fs.writeFileSync(path.join(outputRoot, "adapter-output.txt"), [
     "adapter: ${id}",
@@ -2621,7 +3455,7 @@ if (operation === "subject.run") {
     "",
   ].join("\\n"));
 } else {
-  console.error("${id} only implements subject.run.");
+  console.error("${id} only implements candidate.run.");
   process.exit(2);
 }
 
@@ -3023,7 +3857,7 @@ async function resolveAdapterForAuthTarget(
   const adapter = adapters.find((entry) => entry.manifest.id === target.adapterId);
   if (!adapter) {
     throw new UsageError(
-      `Adapter ${target.adapterId} is not used by this benchmark source. Add it to the benchmark, subject, or optimizer YAML before connecting auth.`,
+      `Adapter ${target.adapterId} is not used by this benchmark source. Add it to the benchmark or candidate YAML before connecting auth.`,
     );
   }
   if (!adapter.manifest.auth) {
@@ -3958,6 +4792,274 @@ async function starProject(
   return 0;
 }
 
+interface HostedRetryTarget {
+  sourceId: string;
+  sourceKind: "evaluation" | "run";
+  workflow: HostedRunWorkflow;
+  request: {
+    workflow: HostedRunWorkflow;
+    budget?: number;
+    samples: number;
+    candidateId?: string;
+    sourceYaml: string;
+    preserveActive?: boolean;
+    selectedSamples?: CaseSamplePair[];
+  };
+}
+
+interface HostedRunDetail {
+  run: HostedRunRecord;
+  jobs: HostedRunJobRecord[];
+}
+
+async function retryHostedWorkflow(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set([
+    "dir",
+    "benchmark",
+    "watch",
+    "interval-ms",
+    "timeout-ms",
+    "json",
+  ]));
+  rejectUnexpectedPositionals(parsed, "workbench cloud retry", 1);
+  const targetId = parsed.positionals[0];
+  if (!targetId) {
+    throw new UsageError("Missing required TARGET_ID.");
+  }
+  if (parsed.flags.watch !== true && (
+    parsed.flags["interval-ms"] !== undefined ||
+    parsed.flags["timeout-ms"] !== undefined
+  )) {
+    throw new UsageError("--interval-ms and --timeout-ms require --watch.");
+  }
+  const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
+  const retryTarget = await resolveHostedRetryTarget(target, targetId);
+  const watchIntervalMs =
+    parsed.flags.watch === true
+      ? parsePositiveInt(parsed.flags["interval-ms"], 1000, "interval-ms")
+      : undefined;
+  const watchTimeoutMs =
+    parsed.flags.watch === true
+      ? parseOptionalPositiveInt(parsed.flags["timeout-ms"], "timeout-ms")
+      : undefined;
+  const response = await apiRequest<{ run: HostedRunRecord }>(
+    projectApiPath(target.projectId, "/runs"),
+    {
+      method: "POST",
+      body: retryTarget.request,
+    },
+    target.baseUrl,
+  );
+  const startedRun = withRunUrls(target, response.run);
+  if (parsed.flags.watch === true) {
+    if (parsed.flags.json !== true) {
+      io.stdout.write(
+        `${formatHostedRunStarted(startedRun, retryTarget.workflow).trimEnd()}\n${HOSTED_WATCH_LIFECYCLE_NOTE}\n`,
+      );
+    }
+    const watched = await watchHostedRun({
+      parsed,
+      target,
+      runId: response.run.id,
+      intervalMs: watchIntervalMs ?? 1000,
+      timeoutMs: watchTimeoutMs,
+    });
+    const outputRun = withRunUrls(target, await withHostedRunFailureSummary(target, watched));
+    const result: RetryCommandResult = {
+      ok: hostedRunSucceeded(watched),
+      retried: {
+        id: retryTarget.sourceId,
+        kind: retryTarget.sourceKind,
+        workflow: retryTarget.workflow,
+      },
+      runId: outputRun.id,
+      candidateId: outputRun.outputCandidateId ?? outputRun.candidateId,
+      activeCandidateId: outputRun.activeCandidateId ?? null,
+      run: outputRun,
+      ...(outputRun.urls ? { urls: outputRun.urls } : {}),
+      ...(outputRun.failedJobCount !== undefined ? { failedJobCount: outputRun.failedJobCount } : {}),
+      ...(outputRun.error ? { error: outputRun.error } : {}),
+    };
+    writeOutput(result, parsed, io, formatRetryCommandResult);
+    return hostedRunSucceeded(watched) ? 0 : 1;
+  }
+  const result: RetryCommandResult = {
+    ok: true,
+    retried: {
+      id: retryTarget.sourceId,
+      kind: retryTarget.sourceKind,
+      workflow: retryTarget.workflow,
+    },
+    runId: startedRun.id,
+    candidateId: startedRun.outputCandidateId ?? startedRun.candidateId,
+    activeCandidateId: startedRun.activeCandidateId ?? null,
+    run: startedRun,
+    ...(startedRun.urls ? { urls: startedRun.urls } : {}),
+  };
+  writeOutput(result, parsed, io, formatRetryCommandResult);
+  return 0;
+}
+
+async function resolveHostedRetryTarget(
+  target: HostedTarget,
+  targetId: string,
+): Promise<HostedRetryTarget> {
+  if (targetId.startsWith("eval_")) {
+    return await resolveHostedEvaluationRetryTarget(target, targetId);
+  }
+  const detail = await readHostedRunDetail(target, targetId);
+  const run = detail.run;
+  if (run.status !== "finished") {
+    throw new UsageError(`Run ${run.id} is ${run.status}; wait for it to finish before retrying.`);
+  }
+  if (!hostedRunRecordFailed(run)) {
+    throw new UsageError(`Run ${run.id} did not fail; use workbench cloud ${run.workflow ?? "eval"} to intentionally run it again.`);
+  }
+  if (run.workflow === "eval") {
+    const candidateId = hostedRunEvaluationCandidateId(run, detail.jobs);
+    if (!candidateId) {
+      throw new UsageError(`Run ${run.id} has no candidate id to retry.`);
+    }
+    return {
+      sourceId: targetId,
+      sourceKind: "run",
+      workflow: "eval",
+      request: {
+        workflow: "eval",
+        samples: run.samples ?? 1,
+        candidateId,
+        sourceYaml: hostedRetrySourceYaml(run, run.id),
+        preserveActive: true,
+        ...retrySampleSelectionFromJobs(detail.jobs),
+      },
+    };
+  }
+  if (run.workflow === "improve") {
+    const baseCandidateId = stringValue(readRecord(run.input)?.baseCandidateId);
+    if (!baseCandidateId) {
+      throw new UsageError(`Run ${run.id} is missing its base candidate id.`);
+    }
+    return {
+      sourceId: targetId,
+      sourceKind: "run",
+      workflow: "improve",
+      request: {
+        workflow: "improve",
+        samples: run.samples ?? 1,
+        budget: run.budget ?? run.attemptsRequested ?? 1,
+        candidateId: baseCandidateId,
+        sourceYaml: hostedRetrySourceYaml(run, run.id),
+        preserveActive: true,
+      },
+    };
+  }
+  throw new UsageError(`Run ${run.id} has no retryable workflow.`);
+}
+
+async function resolveHostedEvaluationRetryTarget(
+  target: HostedTarget,
+  evaluationId: string,
+): Promise<HostedRetryTarget> {
+  const snapshot = await apiRequest<{
+    evaluations: RetryEvaluationSummary[];
+    runs: HostedRunRecord[];
+  }>(
+    projectApiPath(target.projectId, "/workbench/snapshot"),
+    {},
+    target.baseUrl,
+  );
+  const evaluation = snapshot.evaluations.find((entry) => entry.id === evaluationId);
+  if (!evaluation) {
+    throw new UsageError(`Hosted evaluation not found: ${evaluationId}`);
+  }
+  const run = snapshot.runs.find((entry) => entry.id === evaluation.runId) ?? null;
+  if (!evaluationScorecardFailed(evaluation, run)) {
+    throw new UsageError(`Evaluation ${evaluation.id} did not fail; use workbench cloud eval to intentionally run it again.`);
+  }
+  if (!run) {
+    throw new UsageError(`Evaluation ${evaluation.id} is missing its run record.`);
+  }
+  const detail = await readHostedRunDetail(target, run.id);
+  const detailedRun = detail.run;
+  return {
+    sourceId: evaluationId,
+    sourceKind: "evaluation",
+    workflow: "eval",
+    request: {
+      workflow: "eval",
+      samples: evaluation.sampleCount || detailedRun.samples || 1,
+      candidateId: evaluation.candidateId,
+      sourceYaml: hostedRetrySourceYaml(detailedRun, detailedRun.id),
+      preserveActive: true,
+      ...retrySampleSelectionFromJobs(detail.jobs),
+    },
+  };
+}
+
+function retrySampleSelectionFromJobs(
+  jobs: readonly HostedRunJobRecord[],
+): { selectedSamples: CaseSamplePair[] } | Record<string, never> {
+  const selectedSamples = uniqueCaseSamplePairs(
+    jobs
+      .filter((job) =>
+        job.status !== "succeeded" &&
+        executionPurposeFromJobInput(job.input) === "attempt"
+      )
+      .map(caseSamplePairFromJob)
+      .filter((pair): pair is CaseSamplePair => pair !== null),
+  );
+  return selectedSamples.length > 0
+    ? { selectedSamples }
+    : {};
+}
+
+function uniqueCaseSamplePairs(
+  pairs: readonly CaseSamplePair[],
+): CaseSamplePair[] {
+  const byKey = new Map<string, CaseSamplePair>();
+  for (const pair of pairs) {
+    byKey.set(caseSamplePairKey(pair), pair);
+  }
+  return [...byKey.values()].sort(
+    (left, right) =>
+      left.caseId.localeCompare(right.caseId) ||
+      left.sampleIndex - right.sampleIndex,
+  );
+}
+
+async function readHostedRunDetail(
+  target: HostedTarget,
+  runId: string,
+): Promise<HostedRunDetail> {
+  return await apiRequest<HostedRunDetail>(
+    projectApiPath(target.projectId, `/runs/${encodeURIComponent(runId)}`),
+    {},
+    target.baseUrl,
+  );
+}
+
+function hostedRetrySourceYaml(
+  run: { input?: Json },
+  runId: string,
+): string {
+  const sourceYaml = stringValue(readRecord(run.input)?.sourceYaml);
+  if (!sourceYaml) {
+    throw new UsageError(`Run ${runId} is missing its recorded source configuration.`);
+  }
+  return sourceYaml;
+}
+
+function hostedRunRecordFailed(run: HostedRunRecord): boolean {
+  return run.outcome === "error" ||
+    run.outcome === "cancelled" ||
+    (run.failedJobCount ?? 0) > 0 ||
+    Boolean(run.error);
+}
+
 async function startHostedWorkflow(
   workflow: HostedRunWorkflow,
   argv: readonly string[],
@@ -3968,9 +5070,10 @@ async function startHostedWorkflow(
     "dir",
     "benchmark",
     "base",
-    "optimizer",
+    "runs",
     "budget",
     "samples",
+    "rerun",
     "watch",
     "dry-run",
     "interval-ms",
@@ -3980,54 +5083,90 @@ async function startHostedWorkflow(
   if (parsed.positionals.length > 1) {
     throw new UsageError(`workbench cloud ${workflow} accepts at most one source file or directory argument.`);
   }
-  const optimizerPath = asOptionalString(parsed.flags.optimizer);
   const sourceArg = parsed.positionals[0] ?? asOptionalString(parsed.flags.dir) ?? process.cwd();
   if (parsed.positionals.length > 0 && parsed.flags.dir !== undefined) {
     throw new UsageError("Use either --dir or SOURCE, not both.");
   }
-  const baseSubjectId = asOptionalString(parsed.flags.base);
-  const request: {
-    workflow: HostedRunWorkflow;
-    budget?: number;
-    samples: number;
-    subjectId?: string;
-    subjectSource?: string;
-    optimizerSource?: string;
-    subjectFiles?: HostedFile[];
-    adapterFiles?: HostedFile[];
-  } =
-    workflow === "improve"
-      ? {
-          workflow,
-          budget: parsePositiveInt(parsed.flags.budget, 1, "budget"),
-          samples: parsePositiveInt(parsed.flags.samples, 1, "samples"),
-          ...(baseSubjectId ? { subjectId: baseSubjectId } : {}),
-        }
-      : {
-          workflow,
-          samples: parsePositiveInt(parsed.flags.samples, 1, "samples"),
-          ...(baseSubjectId ? { subjectId: baseSubjectId } : {}),
-        };
-  if (workflow === "improve" && !optimizerPath) {
-    throw new UsageError("workbench cloud improve requires --optimizer OPTIMIZER_YAML.");
-  }
+  const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
+  const budget = workflow === "improve"
+    ? parsePositiveInt(parsed.flags.budget, 1, "budget")
+    : undefined;
   if (parsed.flags.watch !== true && (
     parsed.flags["interval-ms"] !== undefined ||
     parsed.flags["timeout-ms"] !== undefined
   )) {
     throw new UsageError("--interval-ms and --timeout-ms require --watch.");
   }
-  const projectSource = await readLocalProjectSource(path.resolve(sourceArg), {
-    optimizerPath,
-  });
-  if (workflow === "eval") {
-    request.subjectSource = projectSource.subjectSource;
-    request.subjectFiles = projectSource.subjectFiles;
-    request.adapterFiles = projectSource.adapterFiles;
+  const runsFlag = asOptionalString(parsed.flags.runs);
+  const defaultProjectSource = await readLocalProjectSource(path.resolve(sourceArg));
+  const selectedRunIds = workflow === "eval"
+    ? resolveCandidateRunSelection(defaultProjectSource, runsFlag)
+    : [singleRequestedRunId(runsFlag, `workbench cloud ${workflow}`) ?? defaultProjectSource.candidateRunId];
+  if (workflow === "eval" && selectedRunIds.length > 1) {
+    let failed = 0;
+    const results: unknown[] = [];
+    for (const runId of selectedRunIds) {
+      const captured = createCapturingIo(io);
+      const code = await startHostedWorkflow(
+        workflow,
+        hostedWorkflowArgsForRun({
+          parsed,
+          sourceDir: defaultProjectSource.dir,
+          runId,
+        }),
+        captured.io,
+      );
+      if (code !== 0) {
+        failed += 1;
+      }
+      results.push(parseCapturedJson(captured.stdoutText()));
+    }
+    writeOutput(
+      {
+        ok: failed === 0,
+        candidateRunIds: selectedRunIds,
+        failedRunCount: failed,
+        results,
+      },
+      parsed,
+      io,
+      () => `Processed ${selectedRunIds.length} hosted candidate run(s); ${failed} failed.`,
+    );
+    return failed === 0 ? 0 : 1;
   }
-  if (workflow === "improve" && projectSource.optimizerSource) {
-    request.optimizerSource = projectSource.optimizerSource;
-    request.adapterFiles = projectSource.adapterFiles;
+  const baseCandidateId = asOptionalString(parsed.flags.base);
+  const request: {
+    workflow: HostedRunWorkflow;
+    budget?: number;
+    samples: number;
+    candidateId?: string;
+    sourceYaml?: string;
+    candidateFiles?: HostedFile[];
+    adapterFiles?: HostedFile[];
+    rerun?: boolean;
+  } =
+    workflow === "improve"
+      ? {
+          workflow,
+          budget,
+          samples,
+          ...(baseCandidateId ? { candidateId: baseCandidateId } : {}),
+        }
+      : {
+          workflow,
+          samples,
+          ...(baseCandidateId ? { candidateId: baseCandidateId } : {}),
+        };
+  const projectSource = selectedRunIds[0] === defaultProjectSource.candidateRunId
+    ? defaultProjectSource
+    : await readLocalProjectSource(path.resolve(sourceArg), { runId: selectedRunIds[0] });
+  request.sourceYaml = projectSource.specSource;
+  request.adapterFiles = projectSource.adapterFiles;
+  if (workflow === "eval" && !baseCandidateId) {
+    request.candidateFiles = projectSource.candidateFiles;
+  }
+  if (parsed.flags.rerun === true) {
+    request.rerun = true;
   }
   const watchIntervalMs =
     parsed.flags.watch === true
@@ -4061,16 +5200,18 @@ async function startHostedWorkflow(
     sourceDir: projectSource.dir,
   });
   if (workflow === "improve") {
-    request.subjectId = await ensureHostedImproveBaseSubject({
+    request.candidateId = await ensureHostedImproveBaseCandidate({
       parsed,
       target,
       samples: request.samples,
-      subjectId: baseSubjectId,
+      candidateId: baseCandidateId,
+      sourceYaml: projectSource.specSource,
+      adapterFiles: projectSource.adapterFiles,
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
     });
   }
-  const response = await apiRequest<{ run: HostedRunRecord }>(
+  const response = await apiRequest<{ run: HostedRunRecord; reused?: boolean }>(
     projectApiPath(target.projectId, "/runs"),
     {
       method: "POST",
@@ -4079,6 +5220,24 @@ async function startHostedWorkflow(
     target.baseUrl,
   );
   const startedRun = withRunUrls(target, response.run);
+  const startedRunOutput = response.reused === true
+    ? { ...startedRun, reused: true }
+    : startedRun;
+  if (response.reused === true && response.run.status === "finished") {
+    writeOutput(
+      {
+        ok: hostedRunSucceeded(response.run),
+        reused: true,
+        workflow,
+        runId: startedRun.id,
+        ...startedRun,
+      },
+      parsed,
+      io,
+      () => `Reused hosted ${workflow} ${startedRun.id}. Use --rerun to intentionally run it again.`,
+    );
+    return hostedRunSucceeded(response.run) ? 0 : 1;
+  }
   if (parsed.flags.watch === true) {
     if (parsed.flags.json !== true) {
       io.stdout.write(
@@ -4101,34 +5260,36 @@ async function startHostedWorkflow(
     );
     return hostedRunSucceeded(watched) ? 0 : 1;
   }
-  writeOutput(startedRun, parsed, io, (run) =>
+  writeOutput(startedRunOutput, parsed, io, (run) =>
     formatHostedRunStarted(run as HostedRunRecord, workflow).trimEnd(),
   );
   return 0;
 }
 
-async function ensureHostedImproveBaseSubject(args: {
+async function ensureHostedImproveBaseCandidate(args: {
   parsed: ParsedArgs;
   target: HostedTarget;
   samples: number;
-  subjectId?: string;
+  candidateId?: string;
+  sourceYaml: string;
+  adapterFiles: HostedFile[];
   intervalMs: number;
   timeoutMs?: number;
 }): Promise<string> {
-  if (args.subjectId) {
-    const subject = await readHostedSubjectSummary(args.target, args.subjectId);
-    if (!subject) {
+  if (args.candidateId) {
+    const candidate = await readHostedCandidateSummary(args.target, args.candidateId);
+    if (!candidate) {
       throw new UsageError(
-        `Base subject ${args.subjectId} was not found for the current benchmark.`,
+        `Base candidate ${args.candidateId} was not found for the current benchmark.`,
       );
     }
-    if (hostedSubjectIsEvaluated(subject)) {
-      return args.subjectId;
+    if (hostedCandidateIsEvaluated(candidate)) {
+      return args.candidateId;
     }
   } else {
-    const activeSubject = await readEvaluatedActiveHostedSubject(args.target);
-    if (activeSubject) {
-      return activeSubject.id;
+    const activeCandidate = await readEvaluatedActiveHostedCandidate(args.target);
+    if (activeCandidate) {
+      return activeCandidate.id;
     }
   }
   const response = await apiRequest<{ run: HostedRunRecord }>(
@@ -4138,7 +5299,9 @@ async function ensureHostedImproveBaseSubject(args: {
       body: {
         workflow: "eval",
         samples: args.samples,
-        ...(args.subjectId ? { subjectId: args.subjectId } : {}),
+        ...(args.candidateId ? { candidateId: args.candidateId } : {}),
+        sourceYaml: args.sourceYaml,
+        ...(args.adapterFiles.length > 0 ? { adapterFiles: args.adapterFiles } : {}),
       },
     },
     args.target.baseUrl,
@@ -4151,50 +5314,80 @@ async function ensureHostedImproveBaseSubject(args: {
     timeoutMs: args.timeoutMs,
   });
   if (!hostedRunSucceeded(watched)) {
-    throw new UsageError(`Parent subject eval ${watched.id} failed; improve was not started.`);
+    throw new UsageError(`Parent candidate eval ${watched.id} failed; improve was not started.`);
   }
-  if (!watched.subjectId) {
-    throw new UsageError(`Parent subject eval ${watched.id} did not produce a subject.`);
+  if (!watched.candidateId) {
+    throw new UsageError(`Parent candidate eval ${watched.id} did not produce a candidate.`);
   }
-  return watched.subjectId;
+  return watched.candidateId;
 }
 
-interface HostedSubjectSummary {
+function hostedWorkflowArgsForRun(args: {
+  parsed: ParsedArgs;
+  sourceDir: string;
+  runId: string;
+}): string[] {
+  const next = ["--dir", args.sourceDir, "--runs", args.runId, "--json"];
+  appendStringFlag(next, "benchmark", asOptionalString(args.parsed.flags.benchmark));
+  appendStringFlag(next, "base", asOptionalString(args.parsed.flags.base));
+  appendStringFlag(next, "samples", asOptionalString(args.parsed.flags.samples));
+  appendStringFlag(next, "budget", asOptionalString(args.parsed.flags.budget));
+  appendStringFlag(next, "interval-ms", asOptionalString(args.parsed.flags["interval-ms"]));
+  appendStringFlag(next, "timeout-ms", asOptionalString(args.parsed.flags["timeout-ms"]));
+  if (args.parsed.flags.watch === true) {
+    next.push("--watch");
+  }
+  if (args.parsed.flags["dry-run"] === true) {
+    next.push("--dry-run");
+  }
+  if (args.parsed.flags.rerun === true) {
+    next.push("--rerun");
+  }
+  return next;
+}
+
+function appendStringFlag(args: string[], name: string, value: string | undefined): void {
+  if (value !== undefined) {
+    args.push(`--${name}`, value);
+  }
+}
+
+interface HostedCandidateSummary {
   id: string;
   status?: string;
   eval?: unknown;
 }
 
-async function readHostedSubjectSummary(
+async function readHostedCandidateSummary(
   target: HostedTarget,
-  subjectId: string,
-): Promise<HostedSubjectSummary | null> {
-  const response = await apiRequest<{ subjects: HostedSubjectSummary[] }>(
-    projectApiPath(target.projectId, "/subjects"),
+  candidateId: string,
+): Promise<HostedCandidateSummary | null> {
+  const response = await apiRequest<{ candidates: HostedCandidateSummary[] }>(
+    projectApiPath(target.projectId, "/candidates"),
     {},
     target.baseUrl,
   );
-  return response.subjects.find((entry) => entry.id === subjectId) ?? null;
+  return response.candidates.find((entry) => entry.id === candidateId) ?? null;
 }
 
-async function readEvaluatedActiveHostedSubject(
+async function readEvaluatedActiveHostedCandidate(
   target: HostedTarget,
-): Promise<HostedSubjectSummary | null> {
+): Promise<HostedCandidateSummary | null> {
   const response = await apiRequest<{ benchmark: HostedProjectSummary }>(
     projectApiPath(target.projectId),
     {},
     target.baseUrl,
   );
-  const activeSubjectId = response.benchmark.activeSubjectId;
-  if (!activeSubjectId) {
+  const activeCandidateId = response.benchmark.activeCandidateId;
+  if (!activeCandidateId) {
     return null;
   }
-  const subject = await readHostedSubjectSummary(target, activeSubjectId);
-  return subject && hostedSubjectIsEvaluated(subject) ? subject : null;
+  const candidate = await readHostedCandidateSummary(target, activeCandidateId);
+  return candidate && hostedCandidateIsEvaluated(candidate) ? candidate : null;
 }
 
-function hostedSubjectIsEvaluated(subject: HostedSubjectSummary): boolean {
-  return subject.status === "evaluated" || subject.eval != null;
+function hostedCandidateIsEvaluated(candidate: HostedCandidateSummary): boolean {
+  return candidate.status === "evaluated" || candidate.eval != null;
 }
 
 async function benchmarkList(
@@ -4216,12 +5409,12 @@ async function benchmarkList(
         id: string;
         name: string;
         runCount: number;
-        subjectCount: number;
+        candidateCount: number;
       }>
     )
       .map(
         (project) =>
-          `${project.id}\t${project.name}\t${project.runCount} runs\t${project.subjectCount} subjects`,
+          `${project.id}\t${project.name}\t${project.runCount} runs\t${project.candidateCount} candidates`,
       )
       .join("\n");
   });
@@ -4255,9 +5448,9 @@ async function benchmarkShow(
       id: string;
       name: string;
       runs: unknown[];
-      subjects: unknown[];
+      candidates: unknown[];
     };
-    return `${record.name} (${record.id})\n${record.runs.length} runs\n${record.subjects.length} subjects`;
+    return `${record.name} (${record.id})\n${record.runs.length} runs\n${record.candidates.length} candidates`;
   });
   return 0;
 }
@@ -4397,77 +5590,76 @@ async function benchmarkStarred(
   return 0;
 }
 
-async function subjectList(
+async function candidateList(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud subjects list", 0);
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates list", 0);
   const target = await resolveHostedTarget(parsed);
-  const response = await apiRequest<{ subjects: unknown[] }>(
-    projectApiPath(target.projectId, "/subjects"),
+  const response = await apiRequest<{ candidates: unknown[] }>(
+    projectApiPath(target.projectId, "/candidates"),
     {},
     target.baseUrl,
   );
-  writeOutput(response.subjects, parsed, io, (subjects) => {
-    if ((subjects as unknown[]).length === 0) {
-      return "No subjects yet.";
+  writeOutput(response.candidates, parsed, io, (candidates) => {
+    if ((candidates as unknown[]).length === 0) {
+      return "No candidates yet.";
     }
     return (
-      subjects as Array<{
+      candidates as Array<{
         id: string;
         status: string;
-        metrics?: Record<string, number>;
         fileChanges?: string[];
       }>
     )
       .map(
-        (subject) =>
-          `${subject.id}\t${subject.status}\tmetrics ${formatMetricSummary(subject.metrics)}\t${subject.fileChanges?.length ?? 0} files`,
+        (candidate) =>
+          `${candidate.id}\t${candidate.status}\t${candidate.fileChanges?.length ?? 0} files`,
       )
       .join("\n");
   });
   return 0;
 }
 
-async function subjectShow(
+async function candidateShow(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud subjects show", 1);
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates show", 1);
   const target = await resolveHostedTarget(parsed);
-  const subjectId = readRequiredSubjectId(parsed);
-  const params = new URLSearchParams({ id: subjectId });
-  const subject = await apiRequest<unknown>(
+  const candidateId = readRequiredCandidateId(parsed);
+  const params = new URLSearchParams({ id: candidateId });
+  const candidate = await apiRequest<unknown>(
     projectApiPath(target.projectId, `/workbench/record?${params.toString()}`),
     {},
     target.baseUrl,
   );
-  writeOutput(subject, parsed, io, (record) => {
-    const value = record as { id?: string; status?: string; benchmarkFingerprint?: string; subjectFingerprint?: string };
+  writeOutput(candidate, parsed, io, (record) => {
+    const value = record as { id?: string; status?: string; benchmarkFingerprint?: string; candidateFingerprint?: string };
     return [
-      `${value.id ?? subjectId}\t${value.status ?? "unknown"}`,
+      `${value.id ?? candidateId}\t${value.status ?? "unknown"}`,
       ...(value.benchmarkFingerprint ? [`Benchmark version: ${shortDigest(value.benchmarkFingerprint)}`] : []),
-      ...(value.subjectFingerprint ? [`Subject digest: ${shortDigest(value.subjectFingerprint)}`] : []),
+      ...(value.candidateFingerprint ? [`Candidate digest: ${shortDigest(value.candidateFingerprint)}`] : []),
     ].join("\n");
   });
   return 0;
 }
 
-async function subjectFiles(
+async function candidateFiles(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud subjects files", 1);
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates files", 1);
   const target = await resolveHostedTarget(parsed);
-  const subjectId = readRequiredSubjectId(parsed);
+  const candidateId = readRequiredCandidateId(parsed);
   const response = await apiRequest<{ files: unknown[] }>(
-    projectApiPath(target.projectId, `/subjects/${encodeURIComponent(subjectId)}/files`),
+    projectApiPath(target.projectId, `/candidates/${encodeURIComponent(candidateId)}/files`),
     {},
     target.baseUrl,
   );
@@ -4483,15 +5675,15 @@ async function subjectFiles(
   return 0;
 }
 
-async function subjectPreview(
+async function candidatePreview(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "path", "output", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud subjects preview", 1);
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates preview", 1);
   const target = await resolveHostedTarget(parsed);
-  const subjectId = readRequiredSubjectId(parsed);
+  const candidateId = readRequiredCandidateId(parsed);
   const filePath = requireFlag(parsed, "path");
   const params = new URLSearchParams({ path: filePath });
   const response = await apiRequest<{
@@ -4503,7 +5695,7 @@ async function subjectPreview(
   }>(
     projectApiPath(
       target.projectId,
-      `/subjects/${encodeURIComponent(subjectId)}/files?${params.toString()}`,
+      `/candidates/${encodeURIComponent(candidateId)}/files?${params.toString()}`,
     ),
     {},
     target.baseUrl,
@@ -4525,18 +5717,18 @@ async function subjectPreview(
   return 0;
 }
 
-async function subjectExport(
+async function candidateExport(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "out", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud subjects pull", 1);
+  rejectUnexpectedPositionals(parsed, "workbench cloud candidates pull", 1);
   const target = await resolveHostedTarget(parsed);
-  const subjectId = readRequiredSubjectId(parsed);
+  const candidateId = readRequiredCandidateId(parsed);
   const outputDir = requireOutDir(parsed);
   const response = await apiRequest<{ files: HostedFile[] }>(
-    projectApiPath(target.projectId, `/subjects/${encodeURIComponent(subjectId)}/export`),
+    projectApiPath(target.projectId, `/candidates/${encodeURIComponent(candidateId)}/export`),
     {},
     target.baseUrl,
   );
@@ -4553,26 +5745,26 @@ async function subjectExport(
   return 0;
 }
 
-async function subjectVisibility(
+async function candidateVisibility(
   argv: readonly string[],
   io: CliIo,
   visibility: "private" | "public",
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, `workbench cloud subjects ${visibility === "public" ? "publish" : "unpublish"}`, 1);
+  rejectUnexpectedPositionals(parsed, `workbench cloud candidates ${visibility === "public" ? "publish" : "unpublish"}`, 1);
   const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
-  const subjectId = readRequiredSubjectId(parsed);
-  const response = await apiRequest<{ subject: unknown }>(
-    projectApiPath(target.projectId, `/subjects/${encodeURIComponent(subjectId)}/publish`),
+  const candidateId = readRequiredCandidateId(parsed);
+  const response = await apiRequest<{ candidate: unknown }>(
+    projectApiPath(target.projectId, `/candidates/${encodeURIComponent(candidateId)}/publish`),
     { method: visibility === "public" ? "PUT" : "DELETE" },
     target.baseUrl,
   );
   writeOutput(
-    { ok: true, visibility, subject: response.subject },
+    { ok: true, visibility, candidate: response.candidate },
     parsed,
     io,
-    () => `${visibility === "public" ? "Published" : "Unpublished"} subject ${subjectId}.`,
+    () => `${visibility === "public" ? "Published" : "Unpublished"} candidate ${candidateId}.`,
   );
   return 0;
 }
@@ -4596,11 +5788,11 @@ async function runList(argv: readonly string[], io: CliIo): Promise<number> {
         runs as Array<{
           id: string;
           status: string;
-          subjectId: string | null;
+          candidateId: string | null;
         }>
       )
         .map(
-          (run) => `${run.id}\t${run.status}\t${run.subjectId ?? "pending"}`,
+          (run) => `${run.id}\t${run.status}\t${run.candidateId ?? "pending"}`,
         )
         .join("\n") || "No runs.",
   );
@@ -4690,7 +5882,7 @@ async function runLogs(argv: readonly string[], io: CliIo): Promise<number> {
         runId: string;
         kind: string;
         status: string;
-        subjectId?: string;
+        candidateId?: string;
         error?: string;
       }>;
     }>(
@@ -4715,7 +5907,7 @@ async function runLogs(argv: readonly string[], io: CliIo): Promise<number> {
           runId: string;
           kind: string;
           status: string;
-          subjectId?: string;
+          candidateId?: string;
           error?: string;
         }>;
       };
@@ -4737,7 +5929,7 @@ function formatRunLogs(record: unknown): string {
       id: string;
       kind: string;
       status: string;
-      subjectId?: string;
+      candidateId?: string;
       error?: string;
     }>;
   };
@@ -4745,7 +5937,7 @@ function formatRunLogs(record: unknown): string {
     value.jobs
       .map(
         (job) =>
-          `${job.id}\t${job.kind}\t${job.status}\t${job.subjectId ?? "-"}${job.error ? `\t${job.error}` : ""}`,
+          `${job.id}\t${job.kind}\t${job.status}\t${job.candidateId ?? "-"}${job.error ? `\t${job.error}` : ""}`,
       )
       .join("\n") || `No jobs for ${value.runId}.`
   );
@@ -4791,7 +5983,7 @@ function buildWorkbenchWebUrl(
   if (ref.startsWith("run_")) {
     return benchmarkUrl;
   }
-  return buildWorkbenchResourceUrls(target, { subjectId: ref }).subjectEvaluation!;
+  return buildWorkbenchResourceUrls(target, { candidateId: ref }).candidateEvaluation!;
 }
 
 async function resolveHostedTarget(
@@ -4894,7 +6086,7 @@ async function resolveOpenTarget(
   if (
     ref &&
     !ref.startsWith("run_") &&
-    !ref.startsWith("subject_")
+    !ref.startsWith("candidate_")
   ) {
     const baseUrl = await effectiveBaseUrl();
     if (ref.includes("/")) {
@@ -4931,7 +6123,7 @@ function buildWorkbenchResourceUrls(
   target: Pick<HostedTarget, "baseUrl" | "projectId"> & { owner?: string; projectName?: string },
   refs: {
     runId?: string | null;
-    subjectId?: string | null;
+    candidateId?: string | null;
   } = {},
 ): WorkbenchResourceUrls {
   if (!target.owner || !target.projectName) {
@@ -4942,13 +6134,13 @@ function buildWorkbenchResourceUrls(
   const projectRef = `${encodeURIComponent(target.owner)}/${encodeURIComponent(target.projectName)}`;
   const benchmark = `${target.baseUrl}/benchmarks/${projectRef}`;
   const urls: WorkbenchResourceUrls = { benchmark };
-  if (refs.subjectId) {
+  if (refs.candidateId) {
     const evaluationId = refs.runId
-      ? evaluationScorecardId(refs.runId, refs.subjectId)
+      ? evaluationScorecardId(refs.runId, refs.candidateId)
       : null;
-    urls.subjectEvaluation = evaluationId
-      ? `${benchmark}/subjects/${encodeURIComponent(refs.subjectId)}?evaluation=${encodeURIComponent(evaluationId)}`
-      : `${benchmark}/subjects/${encodeURIComponent(refs.subjectId)}`;
+    urls.candidateEvaluation = evaluationId
+      ? `${benchmark}/candidates/${encodeURIComponent(refs.candidateId)}?evaluation=${encodeURIComponent(evaluationId)}`
+      : `${benchmark}/candidates/${encodeURIComponent(refs.candidateId)}`;
   }
   return urls;
 }
@@ -5068,7 +6260,7 @@ function withRunUrls(
     ...run,
     urls: buildWorkbenchResourceUrls(target, {
       runId: run.id,
-      subjectId: run.outputSubjectId ?? run.subjectId,
+      candidateId: run.outputCandidateId ?? run.candidateId,
     }),
   };
 }
@@ -5084,10 +6276,10 @@ function withRunDetailUrls(
   jobs: HostedRunJobRecord[];
   urls: WorkbenchResourceUrls;
 } {
-  const subjectId = hostedRunEvaluationSubjectId(detail.run, detail.jobs);
+  const candidateId = hostedRunEvaluationCandidateId(detail.run, detail.jobs);
   const run = withRunUrls(target, {
     ...detail.run,
-    outputSubjectId: detail.run.outputSubjectId ?? subjectId,
+    outputCandidateId: detail.run.outputCandidateId ?? candidateId,
   });
   return {
     run,
@@ -5096,18 +6288,18 @@ function withRunDetailUrls(
   };
 }
 
-function hostedRunEvaluationSubjectId(
+function hostedRunEvaluationCandidateId(
   run: HostedRunRecord,
   jobs: readonly HostedRunJobRecord[] = [],
 ): string | null {
-  if (run.outputSubjectId) {
-    return run.outputSubjectId;
+  if (run.outputCandidateId) {
+    return run.outputCandidateId;
   }
-  const attemptSubjects = jobs
+  const attemptCandidates = jobs
     .filter((job) => readRunJobPurpose(job) === "attempt")
-    .map((job) => job.subjectId)
-    .filter((subjectId): subjectId is string => Boolean(subjectId));
-  return attemptSubjects.at(-1) ?? run.subjectId ?? null;
+    .map((job) => job.candidateId)
+    .filter((candidateId): candidateId is string => Boolean(candidateId));
+  return attemptCandidates.at(-1) ?? run.candidateId ?? null;
 }
 
 function sourceFileCount(source: LocalProjectSource): number {
@@ -5116,7 +6308,7 @@ function sourceFileCount(source: LocalProjectSource): number {
 
 function hostedProjectSourceRequest(source: LocalProjectSource): {
   source: string;
-  subjectFiles: HostedFile[];
+  candidateFiles: HostedFile[];
   engineResolveFiles: HostedFile[];
   engineResolveBinding: EngineResolveBinding;
   adapterFiles: HostedFile[];
@@ -5134,7 +6326,7 @@ function hostedProjectSourceRequest(source: LocalProjectSource): {
   const { network, resources } = hostedEnvironmentOptions(source);
   return {
     source: source.specSource,
-    subjectFiles: source.subjectFiles,
+    candidateFiles: source.candidateFiles,
     engineResolveFiles: hostedEngineResolveFiles(source),
     engineResolveBinding: engineResolveBindingForSpec(source.spec),
     adapterFiles: source.adapterFiles,
@@ -5248,16 +6440,38 @@ async function watchHostedRun(args: {
 }
 
 function formatHostedRunResult(run: HostedRunRecord): string {
-  const subjectId = run.outputSubjectId ?? run.subjectId;
-  const activeDetail = run.activeSubjectId && subjectId && run.activeSubjectId !== subjectId
-    ? `; active ${run.activeSubjectId}`
+  const candidateId = run.outputCandidateId ?? run.candidateId;
+  const activeDetail = run.activeCandidateId && candidateId && run.activeCandidateId !== candidateId
+    ? `; active ${run.activeCandidateId}`
     : "";
-  const summary = `Run ${run.id} reached ${run.status}; ${run.outcome ? `outcome ${run.outcome}; ` : ""}subject ${subjectId ?? "pending"}${activeDetail}; ${run.completedJobCount ?? 0}/${run.jobCount ?? 0} jobs completed.`;
+  const summary = `Run ${run.id} reached ${run.status}; ${run.outcome ? `outcome ${run.outcome}; ` : ""}candidate ${candidateId ?? "pending"}${activeDetail}; ${run.completedJobCount ?? 0}/${run.jobCount ?? 0} jobs completed.`;
   return [
     run.error ? `${summary}\nError: ${run.error}` : summary,
-    ...(run.urls?.subjectEvaluation
-      ? [`Open evaluation: ${run.urls.subjectEvaluation}`]
+    ...(run.urls?.candidateEvaluation
+      ? [`Open evaluation: ${run.urls.candidateEvaluation}`]
       : [`Open benchmark: ${run.urls?.benchmark ?? ""}`].filter(Boolean)),
+  ].join("\n");
+}
+
+function formatRetryCommandResult(result: RetryCommandResult): string {
+  const run = result.run;
+  const runId = run?.id ?? result.runId ?? "unknown";
+  const scope = `${result.retried.kind} ${result.retried.id}`;
+  const verb = run
+    ? run.status === "finished" ? "finished as hosted run" : "started as hosted run"
+    : "finished as local run";
+  return [
+    `Retry of ${scope} ${verb} ${runId}.`,
+    ...(result.evaluationId ? [`Evaluation: ${result.evaluationId}`] : []),
+    ...(result.candidateId ? [`Candidate: ${result.candidateId}`] : []),
+    ...(result.failedJobCount ? [`Failed jobs: ${result.failedJobCount}`] : []),
+    ...(result.error ? [`Error: ${result.error}`] : []),
+    ...(result.localView
+      ? [`Open local view: ${result.localView.command}`, result.localView.note]
+      : []),
+    ...(result.urls?.candidateEvaluation
+      ? [`Open evaluation: ${result.urls.candidateEvaluation}`]
+      : result.urls?.benchmark ? [`Open benchmark: ${result.urls.benchmark}`] : []),
   ].join("\n");
 }
 
@@ -5265,11 +6479,11 @@ function formatHostedRunStarted(
   run: HostedRunRecord,
   fallbackWorkflow: HostedRunWorkflow,
 ): string {
-  const subjectId = run.outputSubjectId ?? run.subjectId;
+  const candidateId = run.outputCandidateId ?? run.candidateId;
   return [
-    `Started ${run.workflow ?? fallbackWorkflow} run ${run.id}; ${subjectId ? `subject ${subjectId}` : `${run.jobCount ?? 0} jobs queued`}.`,
-    ...(run.urls?.subjectEvaluation
-      ? [`Open evaluation: ${run.urls.subjectEvaluation}`]
+    `Started ${run.workflow ?? fallbackWorkflow} run ${run.id}; ${candidateId ? `candidate ${candidateId}` : `${run.jobCount ?? 0} jobs queued`}.`,
+    ...(run.urls?.candidateEvaluation
+      ? [`Open evaluation: ${run.urls.candidateEvaluation}`]
       : run.urls?.benchmark ? [`Open benchmark: ${run.urls.benchmark}`] : []),
     "",
   ].join("\n");
@@ -5284,13 +6498,13 @@ function formatRunDetail(record: unknown): string {
   const { run, jobs, urls } = detail;
   const cost = sumJobCostUsd(jobs);
   const firstFailedJob = jobs.find((job) => job.status === "failed" && job.error);
-  const subjectId = hostedRunEvaluationSubjectId(run, jobs);
+  const candidateId = hostedRunEvaluationCandidateId(run, jobs);
   return [
     `Run ${run.id}: ${run.status}${run.outcome ? ` (${run.outcome})` : ""}`,
     `Workflow: ${run.workflow ?? "improve"}`,
-    `Subject: ${subjectId ?? "pending"}`,
-    ...(run.activeSubjectId && subjectId && run.activeSubjectId !== subjectId
-      ? [`Active subject: ${run.activeSubjectId}`]
+    `Candidate: ${candidateId ?? "pending"}`,
+    ...(run.activeCandidateId && candidateId && run.activeCandidateId !== candidateId
+      ? [`Active candidate: ${run.activeCandidateId}`]
       : []),
     `Samples: ${run.samples ?? 0}`,
     `Attempts: ${run.attemptsExecuted ?? 0}/${run.attemptsRequested ?? run.attemptsExecuted ?? 0}`,
@@ -5302,8 +6516,8 @@ function formatRunDetail(record: unknown): string {
     ...(firstFailedJob?.error
       ? [`First failed job ${firstFailedJob.id}: ${firstFailedJob.error}`]
       : []),
-    ...(urls.subjectEvaluation
-      ? [`Open evaluation: ${urls.subjectEvaluation}`]
+    ...(urls.candidateEvaluation
+      ? [`Open evaluation: ${urls.candidateEvaluation}`]
       : [`Open benchmark: ${urls.benchmark}`]),
     ...(jobs.length > 0 ? ["", "Jobs:", ...jobs.map(formatRunJobLine)] : []),
   ].join("\n");
@@ -5314,7 +6528,7 @@ function formatRunJobLine(job: HostedRunJobRecord): string {
     job.id,
     readRunJobPurpose(job) ?? job.kind ?? "job",
     job.status,
-    job.subjectId ?? "-",
+    job.candidateId ?? "-",
     job.error ?? "",
   ].filter((value, index) => index < 4 || value !== "").join("\t");
 }
@@ -5344,7 +6558,7 @@ function costUsdFromUsage(value: unknown): number {
   if (direct !== null) {
     return direct;
   }
-  return ["total", "optimizer", "runner", "engine"].reduce((sum, key) => {
+  return ["total", "improver", "runner", "engine"].reduce((sum, key) => {
     const nested = readRecord(usage[key]);
     return sum + (readFiniteNumber(nested?.costUsd) ?? 0);
   }, 0);
@@ -5354,6 +6568,18 @@ function readRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return readFiniteNumber(value);
+}
+
+function integerValue(value: unknown): number | null {
+  return Number.isSafeInteger(value) ? value as number : null;
 }
 
 function readFiniteNumber(value: unknown): number | null {
@@ -5531,16 +6757,16 @@ async function readWorkbenchProfileStatus(
   }
 }
 
-function readOptionalSubjectId(parsed: ParsedArgs): string | undefined {
-  return asOptionalString(parsed.flags.subject) ?? parsed.positionals[0];
+function readOptionalCandidateId(parsed: ParsedArgs): string | undefined {
+  return asOptionalString(parsed.flags.candidate) ?? parsed.positionals[0];
 }
 
-function readRequiredSubjectId(parsed: ParsedArgs): string {
-  const subjectId = readOptionalSubjectId(parsed);
-  if (!subjectId) {
-    throw new UsageError("Missing required SUBJECT_ID.");
+function readRequiredCandidateId(parsed: ParsedArgs): string {
+  const candidateId = readOptionalCandidateId(parsed);
+  if (!candidateId) {
+    throw new UsageError("Missing required CANDIDATE_ID.");
   }
-  return subjectId;
+  return candidateId;
 }
 
 function readRequiredRunId(parsed: ParsedArgs): string {
@@ -5823,7 +7049,7 @@ function rejectUnexpectedPositionals(
 }
 
 function readInitSelection(parsed: ParsedArgs): {
-  kind: InitSubjectKind;
+  kind: InitCandidateKind;
   name: string;
 } {
   const selections = (["skill", "command"] as const).flatMap(
@@ -5846,7 +7072,7 @@ function readInitSelection(parsed: ParsedArgs): {
 
 function readInitAgent(
   parsed: ParsedArgs,
-  kind: InitSubjectKind,
+  kind: InitCandidateKind,
 ): InitAgent | undefined {
   const agent = asOptionalString(parsed.flags.agent);
   if (kind === "command") {
@@ -5865,6 +7091,43 @@ function asOptionalString(
   value: string | boolean | undefined,
 ): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function singleRequestedRunId(value: string | undefined, command: string): string | undefined {
+  if (!value || value.trim() === "") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed === "all" || trimmed.includes(",")) {
+    throw new UsageError(`${command} accepts one candidate run id for --runs; use workbench eval --runs all to evaluate every run.`);
+  }
+  return trimmed;
+}
+
+function resolveCandidateRunSelection(
+  source: LocalProjectSource,
+  value: string | undefined,
+): string[] {
+  const available = source.candidateRunIds;
+  if (available.length === 0) {
+    throw new UsageError("Candidate must declare at least one run.");
+  }
+  if (!value || value.trim() === "") {
+    return [source.candidateRunId];
+  }
+  const trimmed = value.trim();
+  if (trimmed === "all") {
+    return available;
+  }
+  const requested = [...new Set(trimmed.split(",").map((entry) => entry.trim()).filter(Boolean))];
+  if (requested.length === 0) {
+    throw new UsageError("--runs must include at least one run id or all.");
+  }
+  const missing = requested.filter((runId) => !available.includes(runId));
+  if (missing.length > 0) {
+    throw new UsageError(`Unknown candidate run(s): ${missing.join(", ")}. Available: ${available.join(", ")}.`);
+  }
+  return requested;
 }
 
 function readOptionalStringFlag(
@@ -6141,6 +7404,36 @@ function parsePortFlag(value: string | boolean | undefined): number {
   return port;
 }
 
+function formatCandidateEvaluationScore(
+  candidate: Pick<CandidateRecord, "eval">,
+): string {
+  const score = candidate.eval?.metrics?.score?.mean;
+  return typeof score === "number" && Number.isFinite(score)
+    ? formatMetricValue(score)
+    : "n/a";
+}
+
+function formatLocalCandidateLabel(
+  candidate: Pick<CandidateRecord, "id" | "name" | "version"> | null | undefined,
+): string {
+  if (!candidate) {
+    return "none";
+  }
+  const name = candidate.name?.trim() || candidate.id;
+  const displayName = candidate.version > 0
+    ? `${name} v${candidate.version}`
+    : name;
+  return `${displayName} (${candidate.id})`;
+}
+
+function formatCandidateEvaluationSummary(
+  candidate: Pick<CandidateRecord, "eval">,
+): string {
+  return formatMetricSummary(evaluationMeanMetrics(candidate.eval), {
+    limit: Number.POSITIVE_INFINITY,
+  });
+}
+
 function formatMetricSummary(
   metrics: Record<string, number> | undefined,
   options: { limit?: number } = {},
@@ -6193,11 +7486,11 @@ function isWorkbenchSourceYamlPath(filePath: string): boolean {
   return path.basename(filePath) === WORKBENCH_BENCHMARK_FILE;
 }
 
-function readSubjectIdFlag(
+function readCandidateIdFlag(
   parsed: ParsedArgs,
   snapshot: { activeId: string | null },
 ): string {
-  const explicit = asOptionalString(parsed.flags.subject) ?? asOptionalString(parsed.flags.subject);
+  const explicit = readOptionalCandidateFlag(parsed);
   if (explicit) {
     return explicit;
   }
@@ -6205,8 +7498,12 @@ function readSubjectIdFlag(
     return snapshot.activeId;
   }
   throw new UsageError(
-    "Missing required --subject; no active subject exists.",
+    "Missing required --candidate; no active candidate exists.",
   );
+}
+
+function readOptionalCandidateFlag(parsed: ParsedArgs): string | undefined {
+  return asOptionalString(parsed.flags.candidate);
 }
 
 function readPreviewMode(parsed: ParsedArgs): "diff" | "raw" | "rendered" {
@@ -6243,13 +7540,13 @@ async function resolveLocalProjectForExecution(
   const spec = resolveWorkbenchResolvedSourceYaml(source);
   const adapters = await resolveWorkbenchAdaptersForProject(workspace, spec);
   const adapterManifests = adapters.map((adapter) => adapter.manifest);
-	  return {
-	    spec: applyDefaultWorkbenchAdapterAuthProfiles(
-	      spec as unknown as Record<string, unknown>,
-	      adapterManifests,
-	    ) as unknown as ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
-	    adapterManifests,
-	  };
+  return {
+    spec: applyDefaultWorkbenchAdapterAuthProfiles(
+      spec as unknown as Record<string, unknown>,
+      adapterManifests,
+    ) as unknown as ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
+    adapterManifests,
+  };
 }
 
 function completedJobOutputFiles(
@@ -6348,10 +7645,10 @@ async function copyInitSeedIfProvided(
     });
 }
 
-function formatSpecOptimizer(
+function formatSpecImprover(
   spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>,
 ): string {
-  return spec.improve ? `adapter:${spec.improve.use}` : "optimizer not configured";
+  return spec.improve ? `adapter:${spec.improve.use}` : "improve not configured";
 }
 
 async function writeFiles(

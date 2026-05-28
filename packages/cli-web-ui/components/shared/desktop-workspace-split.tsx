@@ -1,6 +1,6 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { PanelRightCloseIcon, PanelRightOpenIcon } from "lucide-react";
-import type { PanelImperativeHandle } from "react-resizable-panels";
+import type { GroupImperativeHandle, Layout } from "react-resizable-panels";
 
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
@@ -50,6 +50,36 @@ function asPercent(value: number): string {
   return `${value}%`;
 }
 
+export function buildDesktopWorkspaceSplitLayout({
+  paneOpen,
+  primaryPercent,
+  minPrimaryPercent,
+  maxPrimaryPercent,
+  secondaryPaneId = "workspace-secondary-pane",
+}: Pick<
+  DesktopWorkspaceSplitProps,
+  "paneOpen" | "primaryPercent" | "minPrimaryPercent" | "maxPrimaryPercent"
+> & {
+  secondaryPaneId?: string;
+}): Layout {
+  if (!paneOpen) {
+    return {
+      [PRIMARY_PANEL_ID]: 100,
+      [secondaryPaneId]: 0,
+    };
+  }
+
+  const resolvedPrimaryPercent = clampPrimaryPercent(
+    primaryPercent,
+    minPrimaryPercent,
+    maxPrimaryPercent,
+  );
+  return {
+    [PRIMARY_PANEL_ID]: resolvedPrimaryPercent,
+    [secondaryPaneId]: 100 - resolvedPrimaryPercent,
+  };
+}
+
 export function DesktopWorkspaceSplitToggle({
   paneOpen,
   onClick,
@@ -92,39 +122,39 @@ export function DesktopWorkspaceSplit({
   separatorLabel = "Resize workspace pane",
   className,
 }: DesktopWorkspaceSplitProps) {
-  const primaryPanelRef = useRef<PanelImperativeHandle | null>(null);
-  const secondaryPanelRef = useRef<PanelImperativeHandle | null>(null);
-  const resolvedPrimaryPercent = clampPrimaryPercent(
-    primaryPercent,
-    minPrimaryPercent,
-    maxPrimaryPercent,
+  const groupRef = useRef<GroupImperativeHandle | null>(null);
+  const layout = useMemo(
+    () => buildDesktopWorkspaceSplitLayout({
+      paneOpen,
+      primaryPercent,
+      minPrimaryPercent,
+      maxPrimaryPercent,
+      secondaryPaneId,
+    }),
+    [
+      paneOpen,
+      primaryPercent,
+      minPrimaryPercent,
+      maxPrimaryPercent,
+      secondaryPaneId,
+    ],
   );
-  const resolvedSecondaryPercent = 100 - resolvedPrimaryPercent;
+  const resolvedPrimaryPercent = layout[PRIMARY_PANEL_ID] ?? 100;
+  const resolvedSecondaryPercent = layout[secondaryPaneId] ?? 0;
+  const primaryMinSize = paneOpen ? minPrimaryPercent : 100;
+  const primaryMaxSize = paneOpen ? maxPrimaryPercent : 100;
+  const secondaryMinSize = paneOpen ? 100 - maxPrimaryPercent : 0;
+  const secondaryMaxSize = paneOpen ? 100 - minPrimaryPercent : 0;
 
   useEffect(() => {
-    const primaryPanel = primaryPanelRef.current;
-    const secondaryPanel = secondaryPanelRef.current;
-    if (!primaryPanel || !secondaryPanel) {
-      return;
-    }
-
-    if (paneOpen) {
-      if (secondaryPanel.isCollapsed()) {
-        secondaryPanel.expand();
-      }
-      primaryPanel.resize(asPercent(resolvedPrimaryPercent));
-      return;
-    }
-
-    if (!secondaryPanel.isCollapsed()) {
-      secondaryPanel.collapse();
-    }
-    primaryPanel.resize("100%");
-  }, [paneOpen, resolvedPrimaryPercent]);
+    groupRef.current?.setLayout(layout);
+  }, [layout]);
 
   return (
     <ResizablePanelGroup
       orientation="horizontal"
+      defaultLayout={layout}
+      groupRef={groupRef}
       data-state={paneOpen ? "open" : "closed"}
       className={cn(
         "h-full min-h-0 min-w-0 overflow-hidden",
@@ -153,10 +183,9 @@ export function DesktopWorkspaceSplit({
       <ResizablePanel
         id={PRIMARY_PANEL_ID}
         data-workspace-split-panel="primary"
-        panelRef={primaryPanelRef}
         defaultSize={paneOpen ? asPercent(resolvedPrimaryPercent) : "100%"}
-        minSize={paneOpen ? asPercent(minPrimaryPercent) : "100%"}
-        maxSize={paneOpen ? asPercent(maxPrimaryPercent) : "100%"}
+        minSize={asPercent(primaryMinSize)}
+        maxSize={asPercent(primaryMaxSize)}
         className="min-h-0 min-w-0 overflow-hidden"
       >
         {primaryPane}
@@ -176,10 +205,9 @@ export function DesktopWorkspaceSplit({
       <ResizablePanel
         id={secondaryPaneId}
         data-workspace-split-panel="secondary"
-        panelRef={secondaryPanelRef}
         defaultSize={paneOpen ? asPercent(resolvedSecondaryPercent) : "0%"}
-        minSize={asPercent(100 - maxPrimaryPercent)}
-        maxSize={asPercent(100 - minPrimaryPercent)}
+        minSize={asPercent(secondaryMinSize)}
+        maxSize={asPercent(secondaryMaxSize)}
         collapsible
         collapsedSize="0%"
         className="min-h-0 min-w-0 overflow-hidden"

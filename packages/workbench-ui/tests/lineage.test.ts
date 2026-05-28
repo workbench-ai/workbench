@@ -1,13 +1,14 @@
 import { describe, expect, test } from "vitest";
 
 import { buildLineageFlow } from "../src/lib/lineage";
-import { formatSubjectSelectionLabel } from "../src/lib/format";
-import type { EvaluationSummary, SubjectSummary, BenchmarkSnapshot } from "../src/types";
+import { formatCandidateSelectionLabel } from "../src/lib/format";
+import type { EvaluationSummary, CandidateSummary, BenchmarkSnapshot } from "../src/types";
 
-function subject(id: string, overrides: Partial<SubjectSummary> = {}): SubjectSummary {
+function candidate(id: string, overrides: Partial<CandidateSummary> = {}): CandidateSummary {
   return {
     id,
-    ordinal: 0,
+    version: 1,
+    ordinal: 1,
     benchmarkFingerprint: "benchmark",
     createdAt: "2026-01-01T00:00:00.000Z",
     referenceIds: [],
@@ -19,7 +20,7 @@ function subject(id: string, overrides: Partial<SubjectSummary> = {}): SubjectSu
 
 function evaluation(
   id: string,
-  subjectId: string,
+  candidateId: string,
   updatedAt: string,
   score: number,
 ): EvaluationSummary {
@@ -27,8 +28,9 @@ function evaluation(
     id,
     runId: `run_${id}`,
     benchmarkFingerprint: "benchmark",
-    subjectFingerprint: `fingerprint_${subjectId}`,
-    subjectId,
+    candidateFingerprint: `fingerprint_${candidateId}`,
+    candidateId,
+    candidateVersion: 1,
     createdAt: updatedAt,
     updatedAt,
     status: "completed",
@@ -49,7 +51,7 @@ function evaluation(
 }
 
 function snapshot(
-  summaries: SubjectSummary[],
+  summaries: CandidateSummary[],
   evaluations: EvaluationSummary[] = [],
 ): BenchmarkSnapshot {
   return {
@@ -62,24 +64,24 @@ function snapshot(
   };
 }
 
-describe("subject lineage", () => {
+describe("candidate lineage", () => {
   test("ignores self references instead of rendering a self edge", async () => {
-    const summary = subject("subject_self", {
-      baseId: "subject_self",
-      referenceIds: ["subject_self"],
+    const summary = candidate("candidate_self", {
+      baseId: "candidate_self",
+      referenceIds: ["candidate_self"],
     });
 
     const flow = await buildLineageFlow(snapshot([summary]));
 
     expect(flow.nodes).toHaveLength(1);
     expect(flow.edges).toEqual([]);
-    expect(formatSubjectSelectionLabel({ summary })).toContain("Initial");
+    expect(formatCandidateSelectionLabel({ summary })).toContain("Initial");
   });
 
   test("keeps explicit improve parent edges", async () => {
     const flow = await buildLineageFlow(snapshot([
-      subject("subject_parent"),
-      subject("subject_child", { baseId: "subject_parent" }),
+      candidate("candidate_parent"),
+      candidate("candidate_child", { baseId: "candidate_parent" }),
     ]));
 
     expect(flow.edges.map((edge) => ({
@@ -87,40 +89,35 @@ describe("subject lineage", () => {
       target: edge.target,
     }))).toEqual([
       {
-        source: "subject:subject_parent",
-        target: "subject:subject_child",
+        source: "candidate:candidate_parent",
+        target: "candidate:candidate_child",
       },
     ]);
   });
 
   test("ignores benchmark references when building lineage", async () => {
     const flow = await buildLineageFlow(snapshot([
-      subject("subject_reference"),
-      subject("subject_child", { referenceIds: ["subject_reference"] }),
+      candidate("candidate_reference"),
+      candidate("candidate_child", { referenceIds: ["candidate_reference"] }),
     ]));
 
     expect(flow.edges).toEqual([]);
   });
 
-  test("shows latest evaluation score instead of subject metric dumps", async () => {
+  test("shows best evaluation rollup instead of candidate metric dumps", async () => {
     const flow = await buildLineageFlow(snapshot(
       [
-        subject("subject_latest", {
-          metrics: {
-            custom_long_name: 1,
-            score: 0.2,
-          },
-        }),
+        candidate("candidate_latest"),
       ],
       [
-        evaluation("eval_old", "subject_latest", "2026-01-01T00:00:00.000Z", 0.2),
-        evaluation("eval_new", "subject_latest", "2026-01-02T00:00:00.000Z", 0.88),
+        evaluation("eval_old", "candidate_latest", "2026-01-01T00:00:00.000Z", 0.2),
+        evaluation("eval_new", "candidate_latest", "2026-01-02T00:00:00.000Z", 0.88),
       ],
     ));
 
-    expect(flow.nodes[0]?.data.scoreText).toBe("Score 0.88");
+    expect(flow.nodes[0]?.data.scoreText).toBe("Best score 0.88");
     expect(flow.nodes[0]?.data.sourceText).toBeUndefined();
     expect(flow.nodes[0]?.data.metricText).toBeUndefined();
-    expect(flow.nodes[0]?.ariaLabel).toContain("Score 0.88, completed");
+    expect(flow.nodes[0]?.ariaLabel).toContain("Best score 0.88");
   });
 });

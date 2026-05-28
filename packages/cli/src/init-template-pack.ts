@@ -1,6 +1,6 @@
 import type {
   InitAgent,
-  InitSubjectKind,
+  InitCandidateKind,
   WorkbenchInitScaffoldFile,
 } from "./init-scaffold.js";
 
@@ -12,32 +12,31 @@ interface WorkbenchInitTemplateContext {
 }
 
 export interface WorkbenchInitTemplate {
-  kind: InitSubjectKind;
+  kind: InitCandidateKind;
   requiresAgent: boolean;
-  subjectRoot(context: WorkbenchInitTemplateContext): string;
+  candidateRoot(context: WorkbenchInitTemplateContext): string;
   seedFileTarget(context: WorkbenchInitTemplateContext): string;
   seedDirectoryTarget(context: WorkbenchInitTemplateContext): string;
   files(context: WorkbenchInitTemplateContext): WorkbenchInitScaffoldFile[];
 }
 
-export type WorkbenchInitTemplatePack = Record<InitSubjectKind, WorkbenchInitTemplate>;
+export type WorkbenchInitTemplatePack = Record<InitCandidateKind, WorkbenchInitTemplate>;
 
 export const defaultWorkbenchInitTemplatePack: WorkbenchInitTemplatePack = {
   skill: {
     kind: "skill",
     requiresAgent: true,
-    subjectRoot: ({ agent }) => `subjects/${requiredAgent(agent)}/files`,
-    seedFileTarget: ({ agent }) => `subjects/${requiredAgent(agent)}/files/SKILL.md`,
-    seedDirectoryTarget: ({ agent }) => `subjects/${requiredAgent(agent)}/files`,
+    candidateRoot: () => "candidates/current/files",
+    seedFileTarget: () => "candidates/current/files/SKILL.md",
+    seedDirectoryTarget: () => "candidates/current/files",
     files: ({ name, slug, agent, example }) => {
       const adapter = requiredAgent(agent);
       return [
         { path: "benchmark.yaml", content: skillBenchmarkSpec(name, adapter) },
-        { path: `subjects/${adapter}/subject.yaml`, content: skillSubjectSpec(name, adapter) },
-        { path: `optimizers/${adapter}.yaml`, content: optimizerSpec(name, "SKILL.md", adapter) },
-        { path: `subjects/${adapter}/files/SKILL.md`, content: skillMarkdown(name, slug, example) },
-        { path: `subjects/${adapter}/files/prepare.sh`, content: subjectPrepareScript() },
-        { path: `subjects/${adapter}/files/agents/openai.yaml`, content: skillOpenAiMetadata(name, slug) },
+        { path: "candidates/current/candidate.yaml", content: skillCandidateSpec(name, adapter) },
+        { path: "candidates/current/files/SKILL.md", content: skillMarkdown(name, slug, example) },
+        { path: "candidates/current/files/prepare.sh", content: candidatePrepareScript() },
+        { path: "candidates/current/files/agents/openai.yaml", content: skillOpenAiMetadata(name, slug) },
         { path: "environment/Dockerfile", content: nodeDockerfile() },
         { path: "tasks/task-001/task.yaml", content: taskYaml(skillCasePrompt(name)) },
         { path: "tasks/task-001/tests/rubric.md", content: skillExpectedRubric() },
@@ -51,22 +50,21 @@ export const defaultWorkbenchInitTemplatePack: WorkbenchInitTemplatePack = {
   command: {
     kind: "command",
     requiresAgent: false,
-    subjectRoot: () => "subjects/command/files",
-    seedFileTarget: () => "subjects/command/files/run.js",
-    seedDirectoryTarget: () => "subjects/command/files",
+    candidateRoot: () => "candidates/current/files",
+    seedFileTarget: () => "candidates/current/files/run.js",
+    seedDirectoryTarget: () => "candidates/current/files",
     files: ({ name, example }) => [
       { path: "benchmark.yaml", content: commandBenchmarkSpec(name) },
-      { path: "subjects/command/subject.yaml", content: commandSubjectSpec(name) },
-      { path: "optimizers/command.yaml", content: commandOptimizerSpec(name) },
-      { path: "subjects/command/files/run.js", content: commandRunnerSource() },
-      { path: "subjects/command/files/prepare.sh", content: subjectPrepareScript() },
+      { path: "candidates/current/candidate.yaml", content: commandCandidateSpec(name) },
+      { path: "candidates/current/files/run.js", content: commandRunnerSource() },
+      { path: "candidates/current/files/prepare.sh", content: candidatePrepareScript() },
       { path: "environment/Dockerfile", content: nodeDockerfile() },
       { path: "tasks/task-001/task.yaml", content: taskYaml("The command should produce a concise result for this task.\n") },
-      { path: "tasks/task-001/tests/required-output.txt", content: "command subject ran\n" },
+      { path: "tasks/task-001/tests/required-output.txt", content: "command candidate ran\n" },
       { path: "tasks/task-001/tests/test.sh", content: commandTestScript() },
       ...(example ? [
         { path: "tasks/task-002/task.yaml", content: taskYaml("The command should still produce deterministic output for a second task.\n") },
-        { path: "tasks/task-002/tests/required-output.txt", content: "command subject ran\n" },
+        { path: "tasks/task-002/tests/required-output.txt", content: "command candidate ran\n" },
         { path: "tasks/task-002/tests/test.sh", content: commandTestScript() },
       ] : []),
     ],
@@ -97,7 +95,7 @@ function taskYaml(task: string): string {
 
 function skillBenchmarkSpec(name: string, agent: InitAgent): string {
   return [
-    "version: 3",
+    "version: 4",
     `name: ${yamlString(name)}`,
     `description: ${yamlString(`Evaluate the ${name} skill across representative tasks.`)}`,
     "engine:",
@@ -108,7 +106,7 @@ function skillBenchmarkSpec(name: string, agent: InitAgent): string {
     "    score:",
     "      use: rubric",
     "      with:",
-    "        instructions: Score the completed task from the current working directory and engine-private verifier files. Do not score the subject guidance by keyword matching.",
+    "        instructions: Score the completed task from the current working directory and engine-private verifier files. Do not score the candidate guidance by keyword matching.",
     "        parallelism: 2",
     "        judge:",
     `          use: ${agent}`,
@@ -124,29 +122,23 @@ function skillBenchmarkSpec(name: string, agent: InitAgent): string {
   ].join("\n");
 }
 
-function skillSubjectSpec(name: string, agent: InitAgent): string {
+function skillCandidateSpec(name: string, agent: InitAgent): string {
   return [
-    "version: 3",
+    "version: 4",
     `name: ${yamlString(name)}`,
     "files:",
     "  path: files",
     "prepare:",
-    "  command: sh input/subject/prepare.sh",
-    "run:",
-    `  use: ${agent}`,
-    ...agentDefaultWithLines(agent, "  "),
-    "",
-  ].join("\n");
-}
-
-function optimizerSpec(name: string, editablePath: string, agent: InitAgent): string {
-  return [
-    "version: 3",
-    `name: ${yamlString(`${name} optimizer`)}`,
-    `description: ${yamlString(`Improve subject files for ${name}.`)}`,
-    "edits:",
-    `  - ${editablePath}`,
+    "  command: sh input/candidate/prepare.sh",
+    "defaultRun: main",
+    "runs:",
+    "  main:",
+    `    name: ${yamlString(`Run with ${agent}`)}`,
+    `    use: ${agent}`,
+    ...agentDefaultWithLines(agent, "    "),
     "improve:",
+    "  edits:",
+    "    - SKILL.md",
     `  use: ${agent}`,
     ...agentDefaultWithLines(agent, "  "),
     "",
@@ -165,7 +157,7 @@ function agentDefaultWithLines(agent: InitAgent, indent: string): string[] {
 
 function commandBenchmarkSpec(name: string): string {
   return [
-    "version: 3",
+    "version: 4",
     `name: ${yamlString(name)}`,
     `description: ${yamlString(`Evaluate the ${name} command implementation across representative tasks.`)}`,
     "engine:",
@@ -179,44 +171,38 @@ function commandBenchmarkSpec(name: string): string {
   ].join("\n");
 }
 
-function commandSubjectSpec(name: string): string {
+function commandCandidateSpec(name: string): string {
   const runnerCommand = JSON.stringify("node run.js");
+  const improveCommand = JSON.stringify("node -e \"const fs=require('fs');const file='run.js';const current=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';const next=current.replace(/\\s*$/,'')+'\\n// Workbench candidate revision.\\n';fs.writeFileSync(file,next);\"");
   return [
-    "version: 3",
+    "version: 4",
     `name: ${yamlString(name)}`,
     "files:",
     "  path: files",
     "prepare:",
-    "  command: sh input/subject/prepare.sh",
-    "run:",
-    "  use: command",
-    "  with:",
-    `    command: ${runnerCommand}`,
-    "",
-  ].join("\n");
-}
-
-function commandOptimizerSpec(name: string): string {
-  const optimizerCommand = JSON.stringify("node -e \"const fs=require('fs');const file='run.js';const current=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';const next=current.replace(/\\s*$/,'')+'\\n// Workbench subject revision.\\n';fs.writeFileSync(file,next);\"");
-  return [
-    "version: 3",
-    `name: ${yamlString(`${name} optimizer`)}`,
-    `description: ${yamlString(`Improve subject command files for ${name}.`)}`,
-    "edits:",
-    "  - run.js",
+    "  command: sh input/candidate/prepare.sh",
+    "defaultRun: main",
+    "runs:",
+    "  main:",
+    "    name: Command",
+    "    use: command",
+    "    with:",
+    `      command: ${runnerCommand}`,
     "improve:",
+    "  edits:",
+    "    - run.js",
     "  use: command",
     "  with:",
-    `    command: ${optimizerCommand}`,
+    `    command: ${improveCommand}`,
     "",
   ].join("\n");
 }
 
-function subjectPrepareScript(): string {
+function candidatePrepareScript(): string {
   return [
     "#!/usr/bin/env sh",
     "set -eu",
-    "cp -R input/subject/. .",
+    "cp -R input/candidate/. .",
     "",
   ].join("\n");
 }
@@ -310,8 +296,8 @@ function commandRunnerSource(): string {
     "const fs = require('fs');",
     "const path = require('path');",
     "",
-    "fs.writeFileSync(path.join(process.cwd(), 'command-output.txt'), 'command subject ran\\n');",
-    "console.log('command subject ran');",
+    "fs.writeFileSync(path.join(process.cwd(), 'command-output.txt'), 'command candidate ran\\n');",
+    "console.log('command candidate ran');",
     "",
   ].join("\n");
 }

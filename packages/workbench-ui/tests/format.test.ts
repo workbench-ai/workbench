@@ -5,8 +5,8 @@ import {
   formatDurationMs,
   formatMetricSummary,
   formatMetricValue,
-  formatSubjectDisplayName,
-  formatSubjectSecondaryLabel,
+  formatCandidateDisplayName,
+  formatCandidateSecondaryLabel,
   formatWorkspaceLabel,
   hasMetricValues,
   shortId,
@@ -14,57 +14,62 @@ import {
 
 describe("format helpers", () => {
   test("shortId keeps the first 12 characters and tolerates nullish input", () => {
-    expect(shortId("subject-1234567890")).toBe("subject-1234");
+    expect(shortId("candidate-1234567890")).toBe("candidate-12");
     expect(shortId(null)).toBeNull();
     expect(shortId(undefined)).toBeNull();
   });
 
-  test("subject display names prefer authored names over generated ids", () => {
-    expect(formatSubjectDisplayName({
-      id: "subject_abc123456789",
-      name: "Codex GPT-5.5",
-    })).toBe("Codex GPT-5.5");
-    expect(formatSubjectDisplayName({
-      subjectId: "subject_def123456789",
-      subjectName: "Codex GPT-5.4 Mini",
-    })).toBe("Codex GPT-5.4 Mini");
-    expect(formatSubjectDisplayName({ id: "subject_abc123456789" })).toBe("subject_abc1");
+  test("candidate display names prefer authored names over generated ids", () => {
+    expect(formatCandidateDisplayName({
+      id: "candidate_abc123456789",
+      name: "Skill",
+      version: 2,
+    })).toBe("Skill v2");
+    expect(formatCandidateDisplayName({
+      candidateId: "candidate_def123456789",
+      candidateName: "Skill",
+      candidateVersion: 3,
+    })).toBe("Skill v3");
+    expect(formatCandidateDisplayName({ id: "candidate_abc123456789" })).toBe("candidate_ab");
   });
 
-  test("subject secondary labels use plain workflow language", () => {
-    expect(formatSubjectSecondaryLabel({
-      id: "subject_base",
+  test("candidate secondary labels use plain workflow language", () => {
+    expect(formatCandidateSecondaryLabel({
+      id: "candidate_base",
       name: "Baseline",
-      ordinal: 0,
+      version: 1,
+      ordinal: 1,
       benchmarkFingerprint: "benchmark",
-      subjectFingerprint: "fingerprint",
+      candidateFingerprint: "fingerprint",
       createdAt: "2026-01-01T00:00:00.000Z",
       referenceIds: [],
       status: "evaluated",
       fileChanges: [],
     })).toBe("Initial");
-    expect(formatSubjectSecondaryLabel({
-      id: "subject_child",
+    expect(formatCandidateSecondaryLabel({
+      id: "candidate_child",
       name: "Improved",
-      baseId: "subject_base",
-      ordinal: 1,
+      baseId: "candidate_base",
+      version: 2,
+      ordinal: 2,
       benchmarkFingerprint: "benchmark",
-      subjectFingerprint: "fingerprint",
+      candidateFingerprint: "fingerprint",
       createdAt: "2026-01-01T00:00:00.000Z",
       referenceIds: [],
       status: "evaluated",
       fileChanges: [],
     }, {
-      id: "subject_base",
+      id: "candidate_base",
       name: "Baseline",
-      ordinal: 0,
+      version: 1,
+      ordinal: 1,
       benchmarkFingerprint: "benchmark",
-      subjectFingerprint: "fingerprint",
+      candidateFingerprint: "fingerprint",
       createdAt: "2026-01-01T00:00:00.000Z",
       referenceIds: [],
       status: "evaluated",
       fileChanges: [],
-    })).toBe("From Baseline");
+    })).toBe("From Baseline · v1");
   });
 
   test("formatWorkspaceLabel returns the trailing folder name", () => {

@@ -1,13 +1,14 @@
-import {
-  getCategoricalChartColor,
-  getSemanticChartColor,
-} from "@workbench-ai/cli-web-ui/lib/chart-colors";
+import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
 
 import {
   formatDurationMs,
   formatExecutionCostUsd,
   formatMetricValue,
 } from "./format";
+import {
+  isCompleteEvaluationSummary,
+  resolveEvaluationCandidateDisplay,
+} from "./candidate-evaluation-display";
 import type {
   EvaluationMetricDescriptor,
   EvaluationMetricStats,
@@ -17,6 +18,10 @@ import type {
 export interface EvaluationMetricDatum {
   evaluationId: string;
   evaluationLabel: string;
+  candidateId: string;
+  candidateLabel: string;
+  configurationLabel: string;
+  color: string;
   value: number;
   displayValue: string;
 }
@@ -31,6 +36,8 @@ export interface EvaluationTradeoffPair {
 export interface EvaluationTradeoffDatum {
   evaluationId: string;
   evaluationLabel: string;
+  candidateId: string;
+  candidateLabel: string;
   color: string;
   x: number;
   y: number;
@@ -42,7 +49,7 @@ export function buildEvaluationMetricDescriptors(
   evaluations: readonly LabeledEvaluationSummary[],
 ): EvaluationMetricDescriptor[] {
   const descriptors = new Map<string, EvaluationMetricDescriptor>();
-  for (const evaluation of evaluations) {
+  for (const evaluation of evaluations.filter(isCompleteEvaluationSummary)) {
     for (const metricId of Object.keys(evaluation.evaluation?.metrics ?? evaluation.metrics ?? {})) {
       const isScoreMetric = metricId === "score";
       descriptors.set(metricId, {
@@ -101,16 +108,22 @@ export function selectPrimaryEvaluationMetrics(
 export function buildEvaluationMetricData(
   evaluations: LabeledEvaluationSummary[],
   descriptor: EvaluationMetricDescriptor,
+  candidateColorById?: ReadonlyMap<string, string>,
 ): EvaluationMetricDatum[] {
-  const rows = evaluations.flatMap((evaluation) => {
+  const rows = evaluations.filter(isCompleteEvaluationSummary).flatMap((evaluation, index) => {
     const value = getEvaluationMetricValue(evaluation, descriptor);
     if (value === undefined) {
       return [];
     }
     const stats = getEvaluationMetricStats(evaluation, descriptor);
+    const display = resolveEvaluationCandidateDisplay(evaluation);
     return [{
       evaluationId: evaluation.id,
       evaluationLabel: evaluation.label,
+      candidateId: evaluation.candidateId,
+      candidateLabel: display.candidateLabel,
+      configurationLabel: display.configurationLabel,
+      color: resolveEvaluationCandidateChartColor(evaluation, candidateColorById, index),
       value,
       displayValue: formatEvaluationMetricStats(descriptor, stats, evaluation),
     }];
@@ -141,17 +154,21 @@ export function buildEvaluationTradeoffPairs(
 export function buildEvaluationTradeoffData(
   evaluations: LabeledEvaluationSummary[],
   pair: EvaluationTradeoffPair,
+  candidateColorById?: ReadonlyMap<string, string>,
 ): EvaluationTradeoffDatum[] {
-  return evaluations.flatMap((evaluation, index) => {
+  return evaluations.filter(isCompleteEvaluationSummary).flatMap((evaluation, index) => {
     const x = getEvaluationMetricValue(evaluation, pair.xMetric);
     const y = getEvaluationMetricValue(evaluation, pair.yMetric);
     if (x === undefined || y === undefined) {
       return [];
     }
+    const display = resolveEvaluationCandidateDisplay(evaluation);
     return [{
       evaluationId: evaluation.id,
       evaluationLabel: evaluation.label,
-      color: getCategoricalChartColor(index),
+      candidateId: evaluation.candidateId,
+      candidateLabel: display.candidateLabel,
+      color: resolveEvaluationCandidateChartColor(evaluation, candidateColorById, index),
       x,
       y,
       xDisplay: formatEvaluationMetricStats(pair.xMetric, getEvaluationMetricStats(evaluation, pair.xMetric), evaluation),
@@ -209,14 +226,12 @@ export function formatEvaluationMetricAxisValue(
   return formatMetricValue(value);
 }
 
-export function getEvaluationMetricChartColor(
-  descriptor: EvaluationMetricDescriptor,
-  index: number,
+export function resolveEvaluationCandidateChartColor(
+  evaluation: LabeledEvaluationSummary,
+  candidateColorById: ReadonlyMap<string, string> | undefined,
+  fallbackIndex: number,
 ): string {
-  if (descriptor.semanticRole) {
-    return getSemanticChartColor(descriptor.semanticRole);
-  }
-  return getCategoricalChartColor(index);
+  return candidateColorById?.get(evaluation.candidateId) ?? getCategoricalChartColor(fallbackIndex);
 }
 
 export function getEvaluationMetricValue(

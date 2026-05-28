@@ -3,8 +3,9 @@ import path from "node:path";
 
 import {
   buildWorkbenchTraceSessionsFromFiles,
+  candidateRecordWithoutDerivedFields,
   selectExecutionOutputFilesForInspection,
-  type SubjectRecord,
+  type CandidateRecord,
   type EvaluationScorecard,
   type HostedWorkbenchJob,
   type RunSummary,
@@ -22,8 +23,8 @@ type WorkbenchTraceUsageSummary = NonNullable<WorkbenchTraceSummary["usage"]>;
 
 export interface LocalArchiveSnapshot {
   activeId: string | null;
-  subjects: SubjectRecord[];
-  subjectFiles: Record<string, SurfaceSnapshotFile[]>;
+  candidates: CandidateRecord[];
+  candidateFiles: Record<string, SurfaceSnapshotFile[]>;
   evaluations: EvaluationScorecard[];
   runs: RunSummary[];
   events: RuntimeEvent[];
@@ -31,7 +32,7 @@ export interface LocalArchiveSnapshot {
 
 export interface LocalArchiveIndex {
   activeId: string | null;
-  subjects: SubjectRecord[];
+  candidates: CandidateRecord[];
   evaluations: EvaluationScorecard[];
   runs: RunSummary[];
   events: RuntimeEvent[];
@@ -47,6 +48,7 @@ interface LocalArchiveStateFile {
 }
 
 const RUNTIME_DIR = ".workbench/runtime";
+const CANDIDATE_RECORDS_DIR = "candidates";
 
 export function localRuntimeDir(workspace: string): string {
   return path.join(workspace, RUNTIME_DIR);
@@ -55,13 +57,15 @@ export function localRuntimeDir(workspace: string): string {
 export async function loadLocalArchive(workspace: string): Promise<LocalArchiveSnapshot> {
   const index = await loadLocalArchiveIndex(workspace);
   const root = localRuntimeDir(workspace);
-  const subjectFiles: Record<string, SurfaceSnapshotFile[]> = {};
-  await Promise.all(index.subjects.map(async (subject) => {
-    subjectFiles[subject.id] = await readSurfaceFiles(path.join(root, "subjects", localRecordName(subject.id), "files"));
+  const candidateFiles: Record<string, SurfaceSnapshotFile[]> = {};
+  await Promise.all(index.candidates.map(async (candidate) => {
+    candidateFiles[candidate.id] = await readSurfaceFiles(
+      path.join(root, CANDIDATE_RECORDS_DIR, localRecordName(candidate.id), "files"),
+    );
   }));
   const snapshot: LocalArchiveSnapshot = {
     ...index,
-    subjectFiles,
+    candidateFiles,
   };
   validateLocalArchiveSnapshot(snapshot);
   return snapshot;
@@ -69,16 +73,16 @@ export async function loadLocalArchive(workspace: string): Promise<LocalArchiveS
 
 export async function loadLocalArchiveIndex(workspace: string): Promise<LocalArchiveIndex> {
   const root = localRuntimeDir(workspace);
-  const [state, subjects, evaluations, runs, events] = await Promise.all([
+  const [state, candidates, evaluations, runs, events] = await Promise.all([
     readJson<LocalArchiveStateFile>(path.join(root, "state.json"), {}),
-    readRecords<SubjectRecord>(path.join(root, "subjects"), "record.json"),
+    readRecords<CandidateRecord>(path.join(root, CANDIDATE_RECORDS_DIR), "record.json"),
     readFlatRecords<EvaluationScorecard>(path.join(root, "evaluations")),
     readFlatRecords<RunSummary>(path.join(root, "runs")),
     readJson<RuntimeEvent[]>(path.join(root, "events.json"), []),
   ]);
   const index: LocalArchiveIndex = {
     activeId: typeof state.activeId === "string" ? state.activeId : null,
-    subjects: subjects.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id)),
+    candidates: candidates.sort(compareLocalCandidateRecords),
     evaluations: evaluations.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)),
     runs: runs.sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id)),
     events: events.sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id)),
@@ -94,19 +98,19 @@ export async function saveLocalArchive(
   const root = localRuntimeDir(workspace);
   await fs.mkdir(root, { recursive: true });
   await writeJson(path.join(root, "state.json"), { activeId: snapshot.activeId });
-  await fs.rm(path.join(root, "subjects"), { force: true, recursive: true });
+  await fs.rm(path.join(root, CANDIDATE_RECORDS_DIR), { force: true, recursive: true });
   await fs.rm(path.join(root, "evaluations"), { force: true, recursive: true });
   await fs.rm(path.join(root, "runs"), { force: true, recursive: true });
   await Promise.all([
-    fs.mkdir(path.join(root, "subjects"), { recursive: true }),
+    fs.mkdir(path.join(root, CANDIDATE_RECORDS_DIR), { recursive: true }),
     fs.mkdir(path.join(root, "evaluations"), { recursive: true }),
     fs.mkdir(path.join(root, "runs"), { recursive: true }),
   ]);
-  for (const subject of snapshot.subjects) {
-    const subjectRoot = path.join(root, "subjects", subject.id);
-    await fs.mkdir(subjectRoot, { recursive: true });
-    await writeJson(path.join(subjectRoot, "record.json"), subject);
-    await writeSurfaceFiles(path.join(subjectRoot, "files"), snapshot.subjectFiles[subject.id] ?? []);
+  for (const candidate of snapshot.candidates) {
+    const candidateRoot = path.join(root, CANDIDATE_RECORDS_DIR, candidate.id);
+    await fs.mkdir(candidateRoot, { recursive: true });
+    await writeJson(path.join(candidateRoot, "record.json"), candidateRecordWithoutDerivedFields(candidate));
+    await writeSurfaceFiles(path.join(candidateRoot, "files"), snapshot.candidateFiles[candidate.id] ?? []);
   }
   for (const evaluation of snapshot.evaluations) {
     await writeJson(path.join(root, "evaluations", `${evaluation.id}.json`), evaluation);
@@ -158,28 +162,28 @@ export async function readLocalExecutionFiles(
   );
 }
 
-export async function readLocalSubjectRecord(
+export async function readLocalCandidateRecord(
   workspace: string,
-  subjectId: string,
-): Promise<SubjectRecord> {
-  const subject = await readJson<SubjectRecord | null>(
-    path.join(localRuntimeDir(workspace), "subjects", localRecordName(subjectId), "record.json"),
+  candidateId: string,
+): Promise<CandidateRecord> {
+  const candidate = await readJson<CandidateRecord | null>(
+    path.join(localRuntimeDir(workspace), CANDIDATE_RECORDS_DIR, localRecordName(candidateId), "record.json"),
     null,
   );
-  if (!subject) {
-    throw new Error(`Subject not found: ${subjectId}`);
+  if (!candidate) {
+    throw new Error(`Candidate not found: ${candidateId}`);
   }
-  validateSubjectRecord(subject);
-  return subject;
+  validateCandidateRecord(candidate);
+  return candidate;
 }
 
-export async function readLocalSubjectFilesForId(
+export async function readLocalCandidateFilesForId(
   workspace: string,
-  subjectId: string,
+  candidateId: string,
 ): Promise<SurfaceSnapshotFile[]> {
-  await readLocalSubjectRecord(workspace, subjectId);
+  await readLocalCandidateRecord(workspace, candidateId);
   return await readSurfaceFiles(
-    path.join(localRuntimeDir(workspace), "subjects", localRecordName(subjectId), "files"),
+    path.join(localRuntimeDir(workspace), CANDIDATE_RECORDS_DIR, localRecordName(candidateId), "files"),
   );
 }
 
@@ -238,20 +242,20 @@ export async function readLocalJobInRun(
   return (await readLocalRunJobs(workspace, runId)).find((job) => job.id === jobId) ?? null;
 }
 
-export function upsertLocalSubject(
+export function upsertLocalCandidate(
   snapshot: LocalArchiveSnapshot,
-  subject: SubjectRecord,
+  candidate: CandidateRecord,
   files: readonly SurfaceSnapshotFile[],
 ): LocalArchiveSnapshot {
   return {
     ...snapshot,
-    subjects: [
-      ...snapshot.subjects.filter((entry) => entry.id !== subject.id),
-      subject,
-    ].sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id)),
-    subjectFiles: {
-      ...snapshot.subjectFiles,
-      [subject.id]: files.map((file) => ({ ...file })),
+    candidates: [
+      ...snapshot.candidates.filter((entry) => entry.id !== candidate.id),
+      candidate,
+    ].sort(compareLocalCandidateRecords),
+    candidateFiles: {
+      ...snapshot.candidateFiles,
+      [candidate.id]: files.map((file) => ({ ...file })),
     },
   };
 }
@@ -269,7 +273,7 @@ export function upsertLocalEvaluation(
   };
 }
 
-export function appendLocalRun(
+export function upsertLocalRun(
   snapshot: LocalArchiveSnapshot,
   run: RunSummary,
   events: readonly RuntimeEvent[],
@@ -294,17 +298,17 @@ export function setLocalActive(snapshot: LocalArchiveSnapshot, activeId: string 
   };
 }
 
-export function readLocalSubject(snapshot: LocalArchiveSnapshot, subjectId: string): SubjectRecord {
-  const subject = snapshot.subjects.find((entry) => entry.id === subjectId);
-  if (!subject) {
-    throw new Error(`Subject not found: ${subjectId}`);
+export function readLocalCandidate(snapshot: LocalArchiveSnapshot, candidateId: string): CandidateRecord {
+  const candidate = snapshot.candidates.find((entry) => entry.id === candidateId);
+  if (!candidate) {
+    throw new Error(`Candidate not found: ${candidateId}`);
   }
-  return subject;
+  return candidate;
 }
 
-export function readLocalSubjectFiles(snapshot: LocalArchiveSnapshot, subjectId: string): SurfaceSnapshotFile[] {
-  readLocalSubject(snapshot, subjectId);
-  return (snapshot.subjectFiles[subjectId] ?? []).map((file) => ({ ...file }));
+export function readLocalCandidateFiles(snapshot: LocalArchiveSnapshot, candidateId: string): SurfaceSnapshotFile[] {
+  readLocalCandidate(snapshot, candidateId);
+  return (snapshot.candidateFiles[candidateId] ?? []).map((file) => ({ ...file }));
 }
 
 function validateLocalArchiveSnapshot(snapshot: LocalArchiveSnapshot): void {
@@ -312,33 +316,33 @@ function validateLocalArchiveSnapshot(snapshot: LocalArchiveSnapshot): void {
 }
 
 function validateLocalArchiveIndex(snapshot: LocalArchiveIndex): void {
-  const subjectIds = new Set(snapshot.subjects.map((subject) => subject.id));
-  if (snapshot.activeId && !subjectIds.has(snapshot.activeId)) {
-    throw new Error(`Active subject not found: ${snapshot.activeId}`);
+  const candidateIds = new Set(snapshot.candidates.map((candidate) => candidate.id));
+  if (snapshot.activeId && !candidateIds.has(snapshot.activeId)) {
+    throw new Error(`Active candidate not found: ${snapshot.activeId}`);
   }
-  for (const subject of snapshot.subjects) {
-    validateSubjectRecord(subject);
-    if (!Array.isArray(subject.referenceIds)) {
-      throw new Error(`subject ${subject.id}.referenceIds must be an array.`);
+  for (const candidate of snapshot.candidates) {
+    validateCandidateRecord(candidate);
+    if (!Array.isArray(candidate.referenceIds)) {
+      throw new Error(`candidate ${candidate.id}.referenceIds must be an array.`);
     }
-    if (!Array.isArray(subject.fileChanges)) {
-      throw new Error(`subject ${subject.id}.fileChanges must be an array.`);
+    if (!Array.isArray(candidate.fileChanges)) {
+      throw new Error(`candidate ${candidate.id}.fileChanges must be an array.`);
     }
-    if (subject.baseId && !subjectIds.has(subject.baseId)) {
-      throw new Error(`subject ${subject.id}.baseId not found: ${subject.baseId}`);
+    if (candidate.baseId && !candidateIds.has(candidate.baseId)) {
+      throw new Error(`candidate ${candidate.id}.baseId not found: ${candidate.baseId}`);
     }
   }
   for (const evaluation of snapshot.evaluations) {
     validateEvaluationRecord(evaluation);
-    const subject = snapshot.subjects.find((entry) => entry.id === evaluation.subjectId);
-    if (!subject) {
-      throw new Error(`evaluation ${evaluation.id}.subjectId not found: ${evaluation.subjectId}`);
+    const candidate = snapshot.candidates.find((entry) => entry.id === evaluation.candidateId);
+    if (!candidate) {
+      throw new Error(`evaluation ${evaluation.id}.candidateId not found: ${evaluation.candidateId}`);
     }
-    if (subject.benchmarkFingerprint !== evaluation.benchmarkFingerprint) {
-      throw new Error(`evaluation ${evaluation.id}.benchmarkFingerprint does not match subject ${subject.id}.`);
+    if (candidate.benchmarkFingerprint !== evaluation.benchmarkFingerprint) {
+      throw new Error(`evaluation ${evaluation.id}.benchmarkFingerprint does not match candidate ${candidate.id}.`);
     }
-    if (subject.subjectFingerprint !== evaluation.subjectFingerprint) {
-      throw new Error(`evaluation ${evaluation.id}.subjectFingerprint does not match subject ${subject.id}.`);
+    if (candidate.candidateFingerprint !== evaluation.candidateFingerprint) {
+      throw new Error(`evaluation ${evaluation.id}.candidateFingerprint does not match candidate ${candidate.id}.`);
     }
   }
   for (const run of snapshot.runs) {
@@ -346,19 +350,21 @@ function validateLocalArchiveIndex(snapshot: LocalArchiveIndex): void {
   }
 }
 
-function validateSubjectRecord(subject: SubjectRecord): void {
-  requireArchiveString(subject.id, "subject.id");
-  requireArchiveString(subject.benchmarkFingerprint, `subject ${subject.id}.benchmarkFingerprint`);
-  requireArchiveString(subject.subjectFingerprint, `subject ${subject.id}.subjectFingerprint`);
-  requireArchiveString(subject.createdAt, `subject ${subject.id}.createdAt`);
+function validateCandidateRecord(candidate: CandidateRecord): void {
+  requireArchiveString(candidate.id, "candidate.id");
+  requireArchivePositiveInteger(candidate.version, `candidate ${candidate.id}.version`);
+  requireArchivePositiveInteger(candidate.ordinal, `candidate ${candidate.id}.ordinal`);
+  requireArchiveString(candidate.benchmarkFingerprint, `candidate ${candidate.id}.benchmarkFingerprint`);
+  requireArchiveString(candidate.candidateFingerprint, `candidate ${candidate.id}.candidateFingerprint`);
+  requireArchiveString(candidate.createdAt, `candidate ${candidate.id}.createdAt`);
 }
 
 function validateEvaluationRecord(evaluation: EvaluationScorecard): void {
   requireArchiveString(evaluation.id, "evaluation.id");
   requireArchiveString(evaluation.runId, `evaluation ${evaluation.id}.runId`);
   requireArchiveString(evaluation.benchmarkFingerprint, `evaluation ${evaluation.id}.benchmarkFingerprint`);
-  requireArchiveString(evaluation.subjectFingerprint, `evaluation ${evaluation.id}.subjectFingerprint`);
-  requireArchiveString(evaluation.subjectId, `evaluation ${evaluation.id}.subjectId`);
+  requireArchiveString(evaluation.candidateFingerprint, `evaluation ${evaluation.id}.candidateFingerprint`);
+  requireArchiveString(evaluation.candidateId, `evaluation ${evaluation.id}.candidateId`);
 }
 
 function validateRunRecord(run: RunSummary): void {
@@ -375,6 +381,21 @@ function requireArchiveString(value: unknown, label: string): void {
   }
 }
 
+function requireArchivePositiveInteger(value: unknown, label: string): void {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+}
+
+function compareLocalCandidateRecords(
+  left: CandidateRecord,
+  right: CandidateRecord,
+): number {
+  return left.version - right.version ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.id.localeCompare(right.id);
+}
+
 function archivedLocalJob(
   job: HostedWorkbenchJob,
   outputFiles: readonly SurfaceSnapshotFile[],
@@ -385,7 +406,7 @@ function archivedLocalJob(
   return {
     ...job,
     ...(Object.keys(output).length > 0
-      ? { output: { ...output, files: outputFiles } as unknown as Json }
+      ? { output: { ...output, files: traceSourceFiles } as unknown as Json }
       : {}),
     trace: buildLocalJobTrace(job),
     traceSessions,
@@ -407,7 +428,7 @@ function isWorkbenchReservedArchivePath(filePath: string): boolean {
 
 function buildLocalJobTrace(job: HostedWorkbenchJob): WorkbenchExecutionTrace {
   const purpose = readExecutionPurpose(job);
-  const role = purpose === "improve" ? "optimizer" : "engine";
+  const role = purpose === "improve" ? "improver" : "engine";
   const stageId = purpose ?? "execution";
   const status = traceStatusForJob(job.status);
   const startedAt = job.startedAt ?? job.createdAt;
@@ -503,7 +524,7 @@ function buildLocalJobTraceSessions(
     job,
     files: outputFiles,
     purpose,
-    fallbackRole: purpose === "improve" ? "optimizer" : "engine",
+    fallbackRole: purpose === "improve" ? "improver" : "engine",
   });
 }
 
@@ -610,8 +631,8 @@ function traceUsageSummary(value: unknown): WorkbenchTraceUsageSummary | null {
   const record = jsonRecord(value);
   const usage = Object.keys(jsonRecord(record.total)).length > 0
     ? jsonRecord(record.total)
-    : Object.keys(jsonRecord(record.optimizer)).length > 0
-      ? jsonRecord(record.optimizer)
+    : Object.keys(jsonRecord(record.improver)).length > 0
+      ? jsonRecord(record.improver)
       : Object.keys(jsonRecord(record.runner)).length > 0
         ? jsonRecord(record.runner)
         : Object.keys(jsonRecord(record.engine)).length > 0
@@ -666,12 +687,12 @@ function localRecordName(value: string): string {
   return value;
 }
 
-export async function materializeSubjectRoot(
+export async function materializeCandidateRoot(
   workspace: string,
-  subjectRoot: string,
+  candidateRoot: string,
   files: readonly SurfaceSnapshotFile[],
 ): Promise<string[]> {
-  const root = path.join(workspace, normalizeRelativePath(subjectRoot));
+  const root = path.join(workspace, normalizeRelativePath(candidateRoot));
   const before = new Set((await readSurfaceFiles(root)).map((file) => file.path));
   await fs.rm(root, { force: true, recursive: true });
   await writeSurfaceFiles(root, files);

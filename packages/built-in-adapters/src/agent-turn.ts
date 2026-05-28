@@ -29,6 +29,8 @@ import { importWorkbenchRuntime } from "./runtime.ts";
 const DEFAULT_AGENT_TURN_MAX_ATTEMPTS = 3;
 const DEFAULT_AGENT_TURN_RETRY_BASE_MS = 5_000;
 const DEFAULT_AGENT_TURN_RETRY_MAX_MS = 30_000;
+const DEFAULT_AGENT_TURN_TIMEOUT_MS = 3_600_000;
+const DEFAULT_AGENT_STALL_TIMEOUT_MS = 300_000;
 
 interface AgentProviderRegistration {
   executable: string;
@@ -44,7 +46,7 @@ export interface AgentProviderSpec {
 }
 
 export interface WorkbenchAgentTurnRequest {
-  role: "optimizer" | "runner" | "engine";
+  role: "improver" | "runner" | "engine";
   provider: AgentProviderSpec;
   adapterAuthRoot?: string;
   adapterAuthRequest?: JsonValue;
@@ -296,14 +298,14 @@ async function buildAgentExecutionPlan(
   agentHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<HarnessExecutionPlan> {
-  const turnTimeoutMs = provider.manifest.defaults.turn_timeout_ms ?? 3_600_000;
+  const { turnTimeoutMs, stallTimeoutMs } = resolveAgentTurnTimeouts(provider.manifest.defaults);
   const harness: WorkflowHarness = {
     id: provider.manifest.id,
     auth: await resolveAgentAuth(provider, providerSpec, workspaceRoot, agentHome, adapterAuth),
     ...(firstNonEmpty(providerSpec.model, provider.manifest.defaults.model) ? { model: firstNonEmpty(providerSpec.model, provider.manifest.defaults.model) } : {}),
     ...(firstNonEmpty(providerSpec.effort, provider.manifest.defaults.effort) ? { effort: firstNonEmpty(providerSpec.effort, provider.manifest.defaults.effort) } : {}),
     turn_timeout_ms: turnTimeoutMs,
-    stall_timeout_ms: Math.max(provider.manifest.defaults.stall_timeout_ms ?? 0, turnTimeoutMs),
+    stall_timeout_ms: stallTimeoutMs,
     config: resolveAgentConfig(provider, defaultWorkbenchAgentConfig(provider, providerSpec.use)),
     retry: DEFAULT_HARNESS_RETRY,
     cancel: DEFAULT_HARNESS_CANCEL,
@@ -315,6 +317,28 @@ async function buildAgentExecutionPlan(
     },
     harness,
   };
+}
+
+export function resolveAgentTurnTimeouts(defaults: {
+  turn_timeout_ms?: number;
+  stall_timeout_ms?: number;
+}): {
+  turnTimeoutMs: number;
+  stallTimeoutMs: number;
+} {
+  const turnTimeoutMs = positiveTimeoutMs(defaults.turn_timeout_ms) ?? DEFAULT_AGENT_TURN_TIMEOUT_MS;
+  const requestedStallTimeoutMs =
+    positiveTimeoutMs(defaults.stall_timeout_ms) ?? DEFAULT_AGENT_STALL_TIMEOUT_MS;
+  return {
+    turnTimeoutMs,
+    stallTimeoutMs: Math.min(requestedStallTimeoutMs, turnTimeoutMs),
+  };
+}
+
+function positiveTimeoutMs(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : null;
 }
 
 function defaultWorkbenchAgentConfig(
@@ -335,10 +359,10 @@ async function resolveAgentAuth(
   agentHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<Record<string, JsonValue>> {
-  const subject =
-    adapterAuthProviderSubject(adapterAuth.request, providerSpec.use) ??
+  const candidate =
+    adapterAuthProviderCandidate(adapterAuth.request, providerSpec.use) ??
     ((provider.manifest.defaults.auth as Record<string, JsonValue> | undefined) ?? {});
-  const parsed = provider.schemas.auth.safeParse(subject);
+  const parsed = provider.schemas.auth.safeParse(candidate);
   if (!parsed.success) {
     throw new Error(`Agent provider "${provider.manifest.id}" auth is invalid: ${formatValidationIssues(parsed.error.issues)}`);
   }
@@ -347,7 +371,7 @@ async function resolveAgentAuth(
   return { ...parsed.data };
 }
 
-function adapterAuthProviderSubject(
+function adapterAuthProviderCandidate(
   auth: JsonValue | undefined,
   providerName: string,
 ): Record<string, JsonValue> | null {
@@ -462,7 +486,7 @@ function isTransientAgentTurnError(error: unknown): boolean {
   if (isNativeCaCertificateFailure(message)) {
     return false;
   }
-  return /\b(fetch failed|error sending request|stream disconnected before completion|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ECONNREFUSED|socket hang up|network error|UND_ERR_|signal SIGTERM)/iu.test(message);
+  return /\b(fetch failed|error sending request|stream disconnected before completion|turn stalled after \d+ms|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ECONNREFUSED|socket hang up|network error|UND_ERR_|signal SIGTERM)/iu.test(message);
 }
 
 function isNativeCaCertificateFailure(message: string): boolean {

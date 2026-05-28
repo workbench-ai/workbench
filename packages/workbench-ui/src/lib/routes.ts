@@ -1,11 +1,11 @@
 import { isSnapshotPreviewMode } from "@workbench-ai/cli-web-ui/lib/file-preview";
 
-import type { SubjectPreviewMode } from "../types";
+import type { CandidatePreviewMode } from "../types";
 
-export type SubjectView = "overview" | "manifest" | "files";
-export type SubjectsIndexView = "archive" | "lineage";
+export type CandidateView = "overview" | "manifest" | "files";
+export type CandidatesIndexView = "archive" | "lineage";
 export type WorkbenchPersistentSearchParams = Record<string, string | null | undefined>;
-export type SubjectDialog =
+export type CandidateDialog =
   | {
       kind: "evaluation";
       evaluationId: string;
@@ -22,21 +22,21 @@ export type WorkbenchRoute =
       kind: "benchmark";
     }
   | {
-      kind: "subjects";
-      view: SubjectsIndexView;
+      kind: "candidates";
+      view: CandidatesIndexView;
     }
   | {
       kind: "evaluations";
       dialog: EvaluationDialog | null;
     }
   | {
-      kind: "subject";
-      subjectId: string | null;
-      view: SubjectView;
+      kind: "candidate";
+      candidateId: string | null;
+      view: CandidateView;
       filePath: string | null;
       directoryPath: string | null;
-      previewMode: SubjectPreviewMode;
-      dialog: SubjectDialog | null;
+      previewMode: CandidatePreviewMode;
+      dialog: CandidateDialog | null;
     };
 
 export function parseWorkbenchRoute(locationLike: {
@@ -65,14 +65,14 @@ export function parseWorkbenchRoute(locationLike: {
     };
   }
 
-  if (segments[0] === "subjects") {
+  if (segments[0] === "candidates") {
     if (segments.length === 1) {
       return {
-        kind: "subjects",
-        view: normalizeSubjectsIndexView(searchParams.get("view")),
+        kind: "candidates",
+        view: normalizeCandidatesIndexView(searchParams.get("view")),
       };
     }
-    const subjectId = segments[1] ?? null;
+    const candidateId = segments[1] ?? null;
     const requestedView = segments[2];
     const view =
       requestedView === "files"
@@ -81,13 +81,13 @@ export function parseWorkbenchRoute(locationLike: {
           ? "manifest"
           : "overview";
     return {
-      kind: "subject",
-      subjectId,
+      kind: "candidate",
+      candidateId,
       view,
       filePath: searchParams.get("file"),
       directoryPath: normalizeDirectoryPath(searchParams.get("dir")),
-      previewMode: normalizeSubjectPreviewMode(searchParams.get("view")),
-      dialog: parseSubjectDialog(searchParams),
+      previewMode: normalizeCandidatePreviewMode(searchParams.get("view")),
+      dialog: parseCandidateDialog(searchParams),
     };
   }
 
@@ -120,11 +120,11 @@ export function buildWorkbenchHref(
     return withQuery("/", params);
   }
 
-  if (route.kind === "subjects") {
+  if (route.kind === "candidates") {
     if (route.view !== "archive") {
       params.set("view", route.view);
     }
-    return withQuery("/subjects", params);
+    return withQuery("/candidates", params);
   }
 
   if (route.kind === "evaluations") {
@@ -137,7 +137,7 @@ export function buildWorkbenchHref(
     return withQuery("/evaluations", params);
   }
 
-  const subjectId = route.subjectId ? encodeURIComponent(route.subjectId) : "";
+  const candidateId = route.candidateId ? encodeURIComponent(route.candidateId) : "";
   if (route.dialog?.kind === "evaluation") {
     params.set("evaluation", route.dialog.evaluationId);
     if (route.dialog.caseId) {
@@ -145,7 +145,7 @@ export function buildWorkbenchHref(
     }
   }
   if (route.view === "overview") {
-    return withQuery(`/subjects/${subjectId}`, params);
+    return withQuery(`/candidates/${candidateId}`, params);
   }
   if (route.view === "files" && route.filePath) {
     params.set("file", route.filePath);
@@ -157,7 +157,7 @@ export function buildWorkbenchHref(
     params.set("view", route.previewMode);
   }
   const query = params.toString();
-  return `/subjects/${subjectId}/${route.view}${query ? `?${query}` : ""}`;
+  return `/candidates/${candidateId}/${route.view}${query ? `?${query}` : ""}`;
 }
 
 export function buildWorkbenchLocationHref(
@@ -174,11 +174,11 @@ export function createBenchmarkRoute(): WorkbenchRoute {
   };
 }
 
-export function createSubjectsRoute(args: {
-  view?: SubjectsIndexView;
+export function createCandidatesRoute(args: {
+  view?: CandidatesIndexView;
 } = {}): WorkbenchRoute {
   return {
-    kind: "subjects",
+    kind: "candidates",
     view: args.view ?? "archive",
   };
 }
@@ -192,27 +192,27 @@ export function createEvaluationsRoute(args: {
   };
 }
 
-export function createSubjectRoute(args: {
-  subjectId: string | null;
-  view: SubjectView;
+export function createCandidateRoute(args: {
+  candidateId: string | null;
+  view: CandidateView;
   filePath?: string | null;
   directoryPath?: string | null;
-  previewMode?: SubjectPreviewMode;
-  dialog?: SubjectDialog | null;
+  previewMode?: CandidatePreviewMode;
+  dialog?: CandidateDialog | null;
 }): WorkbenchRoute {
   const view = args.view;
   return {
-    kind: "subject",
-    subjectId: args.subjectId,
+    kind: "candidate",
+    candidateId: args.candidateId,
     view,
     filePath: view === "files" ? args.filePath ?? null : null,
     directoryPath: view === "files" ? normalizeDirectoryPath(args.directoryPath ?? null) : null,
     previewMode: view === "files" ? args.previewMode ?? "rendered" : "rendered",
-    dialog: normalizeSubjectDialog(args.dialog ?? null),
+    dialog: normalizeCandidateDialog(args.dialog ?? null),
   };
 }
 
-function parseSubjectDialog(params: URLSearchParams): SubjectDialog | null {
+function parseCandidateDialog(params: URLSearchParams): CandidateDialog | null {
   const evaluationId = normalizeDialogSelection(params.get("evaluation"));
   if (evaluationId) {
     const caseId = normalizeDialogSelection(params.get("case"));
@@ -237,7 +237,7 @@ function parseEvaluationDialog(params: URLSearchParams): EvaluationDialog | null
     : null;
 }
 
-function normalizeSubjectDialog(dialog: SubjectDialog | null): SubjectDialog | null {
+function normalizeCandidateDialog(dialog: CandidateDialog | null): CandidateDialog | null {
   if (dialog?.kind === "evaluation") {
     const evaluationId = normalizeDialogSelection(dialog.evaluationId);
     const caseId = normalizeDialogSelection(dialog.caseId ?? null);
@@ -272,7 +272,7 @@ function normalizeDirectoryPath(value: string | null): string | null {
   return normalized || null;
 }
 
-function normalizeSubjectsIndexView(value: string | null): SubjectsIndexView {
+function normalizeCandidatesIndexView(value: string | null): CandidatesIndexView {
   return value === "lineage" ? "lineage" : "archive";
 }
 
@@ -345,6 +345,6 @@ function normalizeRouteBasePath(routeBasePath: string): string {
   return `/${trimmed.replace(/^\/+|\/+$/gu, "")}`;
 }
 
-function normalizeSubjectPreviewMode(value: string | null): SubjectPreviewMode {
+function normalizeCandidatePreviewMode(value: string | null): CandidatePreviewMode {
   return value && isSnapshotPreviewMode(value) ? value : "rendered";
 }

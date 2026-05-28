@@ -1,35 +1,35 @@
 import type {
   SurfaceSnapshotFile,
-  WorkbenchSubjectPatch,
+  WorkbenchCandidatePatch,
 } from "@workbench-ai/workbench-contract";
 
-export interface ApplyWorkbenchSubjectPatchInput {
+export interface ApplyWorkbenchCandidatePatchInput {
   baseFiles: readonly SurfaceSnapshotFile[];
-  patch: WorkbenchSubjectPatch;
+  patch: WorkbenchCandidatePatch;
   edits: readonly string[];
 }
 
-export function applyWorkbenchSubjectPatch(input: ApplyWorkbenchSubjectPatchInput): SurfaceSnapshotFile[] {
+export function applyWorkbenchCandidatePatch(input: ApplyWorkbenchCandidatePatchInput): SurfaceSnapshotFile[] {
   const issues: string[] = [];
   const edits = input.edits.map(normalizeRelativePath).filter(Boolean);
   const patchPaths = new Set<string>();
   for (const file of input.patch.files) {
     const filePath = normalizeRelativePath(file.path);
     if (!isSafeRelativePath(filePath)) {
-      issues.push(`Subject patch contains unsafe path ${file.path}.`);
+      issues.push(`Candidate patch contains unsafe path ${file.path}.`);
     }
     if (!isAllowedEditPath(filePath, edits)) {
-      issues.push(`Subject patch contains path outside optimizer edits: ${file.path}.`);
+      issues.push(`Candidate patch contains path outside improve edits: ${file.path}.`);
     }
     patchPaths.add(filePath);
   }
   for (const fileChange of input.patch.fileChanges) {
     const filePath = normalizeRelativePath(fileChange);
     if (!isSafeRelativePath(filePath)) {
-      issues.push(`Subject patch fileChanges contains unsafe path ${fileChange}.`);
+      issues.push(`Candidate patch fileChanges contains unsafe path ${fileChange}.`);
     }
     if (!isAllowedEditPath(filePath, edits)) {
-      issues.push(`Subject patch fileChanges contains path outside optimizer edits: ${fileChange}.`);
+      issues.push(`Candidate patch fileChanges contains path outside improve edits: ${fileChange}.`);
     }
   }
   if (issues.length > 0) {

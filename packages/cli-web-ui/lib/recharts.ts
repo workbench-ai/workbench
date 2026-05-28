@@ -4,6 +4,7 @@ export {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Label,
   Scatter,
   ScatterChart,

@@ -8,15 +8,16 @@ import type {
   AuthoredWorkbenchCaseSummary,
   AuthoredWorkbenchSourceSpec,
   AuthoredWorkbenchSourceDocument,
-  SubjectCaseExecutionRef,
-  SubjectCaseReview,
-  SubjectFilePreview,
-  SubjectFileSummary,
-  SubjectLineageEdge,
-  SubjectLineageGraph,
-  SubjectLineageNode,
-  SubjectRecord,
-  SubjectSummary,
+  CandidateCaseExecutionRef,
+  CandidateCaseReview,
+  CandidateFilePreview,
+  CandidateFileSummary,
+  CandidateLineageEdge,
+  CandidateLineageGraph,
+  CandidateLineageNode,
+  CandidateRecord,
+  CandidateSummary,
+  EvalCaseStatus,
   EvalCaseResult,
   EvaluationRecord,
   EvaluationScorecard,
@@ -27,10 +28,9 @@ import type {
   HostedWorkbenchJob,
   Json,
   MetricStats,
-  RuntimeEvent,
   SurfaceSnapshotFile,
   UsageSummary,
-  WorkbenchSubjectPatch,
+  WorkbenchCandidatePatch,
   WorkbenchAdapterInvocation,
   WorkbenchExecutionCapability,
   WorkbenchExecutionResult,
@@ -59,13 +59,14 @@ import {
 } from "@workbench-ai/workbench-protocol";
 import {
   BENCHMARK_SPEC_FILE,
+  CANDIDATE_SPEC_FILE,
   engineCasePrivateFiles,
   engineCaseFilesForRuntimeInput,
   engineCasePublicFiles,
   resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml as resolveWorkbenchResolvedSourceYamlInternal,
   validateWorkbenchResolvedSourceYaml as validateWorkbenchResolvedSourceYamlInternal,
-  isWorkbenchSubjectManifestPath,
+  isWorkbenchCandidateManifestPath,
   type GenericEngineCaseSpec,
   type GenericRunSpec,
   type WorkbenchEngineCase,
@@ -115,7 +116,7 @@ import {
   createSandboxBackendPlaneForProvider,
   type WorkbenchSandboxProviderName,
 } from "./sandbox-backends/index.ts";
-import { applyWorkbenchSubjectPatch } from "./subject-patch.ts";
+import { applyWorkbenchCandidatePatch } from "./candidate-patch.ts";
 import {
   assignUsageRole,
   completeUsageSummary,
@@ -149,6 +150,7 @@ import {
 
 export {
   BENCHMARK_SPEC_FILE,
+  CANDIDATE_SPEC_FILE,
   DEFAULT_EXECUTION_RESOURCES,
   engineCasePrivateFiles,
   engineCaseFilesForRuntimeInput,
@@ -156,7 +158,7 @@ export {
   engineResolveInvocationForSpec,
   engineResolveBindingForSpec,
   engineResolveBindingForSourceYaml,
-  isWorkbenchSubjectManifestPath,
+  isWorkbenchCandidateManifestPath,
   parseWorkbenchSourceFiles,
   resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml,
@@ -166,13 +168,13 @@ export {
   serializeWorkbenchResolvedSourceYaml,
   validateWorkbenchResolvedSourceYaml,
   type AuthoredBenchmarkSpec,
-  type AuthoredOptimizerSpec,
+  type WorkbenchCandidateImproveSpec,
+  type WorkbenchCandidateManifestSpec,
+  type WorkbenchCandidateRunSpec,
   type GenericRunSpec,
   type GenericEngineCaseSpec,
-  type ResolvedSubjectSpec,
   type WorkbenchEngineCase,
   type WorkbenchResolvedSource,
-  type WorkbenchSubjectManifestSpec,
 } from "./generic-spec.ts";
 export {
   composeRuntimeDockerfileWithAdapterInstallers,
@@ -271,9 +273,9 @@ export {
   type WorkbenchEngineCaseSpec,
 } from "@workbench-ai/workbench-protocol";
 export {
-  applyWorkbenchSubjectPatch,
-  type ApplyWorkbenchSubjectPatchInput,
-} from "./subject-patch.ts";
+  applyWorkbenchCandidatePatch,
+  type ApplyWorkbenchCandidatePatchInput,
+} from "./candidate-patch.ts";
 export {
   createWorkbenchSandboxFileStore,
   createSandboxAdapterRequest,
@@ -289,8 +291,8 @@ export {
   type WorkbenchExecutionGraphNode,
 } from "./execution-graph.ts";
 export {
-  createBaselineSubjectExecution,
-  createBaselineSubjectJob,
+  createBaselineCandidateExecution,
+  createBaselineCandidateJob,
   createWorkbenchExecutionJob,
   expectedWorkbenchRunJobCount,
   engineCaseForCase,
@@ -342,7 +344,7 @@ export {
   type ValidatedSandboxExecutionResult,
 } from "./sandbox-plane.ts";
 export {
-  buildSubjectCaseExecutionRefs,
+  buildCandidateCaseExecutionRefs,
   buildWorkbenchExecutionEvidence,
   isWorkbenchExecutionActive,
   readWorkbenchExecutionId,
@@ -383,8 +385,8 @@ export type {
 } from "./execution-events.ts";
 
 export type {
-  SubjectCaseReview,
-  SubjectRecord,
+  CandidateCaseReview,
+  CandidateRecord,
   EngineResolveBinding,
   EvaluationScorecard,
   HostedWorkbenchJob,
@@ -406,11 +408,11 @@ interface RuntimeCommandSpec {
 }
 
 export interface WorkbenchRunMaterialization {
-  subjects: SubjectRecord[];
-  subjectFiles: Record<string, SurfaceSnapshotFile[]>;
+  candidates: CandidateRecord[];
+  candidateFiles: Record<string, SurfaceSnapshotFile[]>;
   evaluations: EvaluationScorecard[];
-  activeSubjectId: string | null;
-  selectedSubject: SubjectRecord | null;
+  activeCandidateId: string | null;
+  selectedCandidate: CandidateRecord | null;
   completedJobCount: number;
   failedJobCount: number;
 }
@@ -418,11 +420,11 @@ export interface WorkbenchRunMaterialization {
 export interface WorkbenchRunWorkload {
   job: HostedWorkbenchJob;
   spec: GenericRunSpec;
-  subjectId: string;
+  candidateId: string;
   attemptIndex: number;
   sampleIndex: number;
   caseId: string;
-  subjectFiles: SurfaceSnapshotFile[];
+  candidateFiles: SurfaceSnapshotFile[];
   engineResolveFiles: SurfaceSnapshotFile[];
   traceFiles: SurfaceSnapshotFile[];
   engineCase?: WorkbenchEngineCase;
@@ -437,7 +439,7 @@ export interface RuntimeWorkloadResult {
   fileChanges: string[];
   operationResults?: WorkbenchAdapterOperationResult[];
   workspaceFiles?: SurfaceSnapshotFile[];
-  subjectPatch?: WorkbenchSubjectPatch;
+  candidatePatch?: WorkbenchCandidatePatch;
   result?: WorkbenchResult;
   metrics?: Record<string, number>;
   cases?: EvalCaseResult[];
@@ -575,7 +577,7 @@ export const DEFAULT_ENVIRONMENTS: HostedWorkbenchEnvironment[] = [
   {
     id: "env_node",
     name: "Node",
-    description: "Node runtime for JavaScript and TypeScript subjects.",
+    description: "Node runtime for JavaScript and TypeScript candidates.",
     currentVersionId: "envv_node_22",
     builtIn: true,
     createdAt: "2026-04-23T00:00:00.000Z",
@@ -628,8 +630,7 @@ function splitAuthoredSourceYaml(
   }
   const entries: Array<[string, unknown]> = [
     [BENCHMARK_SPEC_FILE, parsed.benchmark],
-    ["subjects/current/subject.yaml", splitSubjectSourceRecord(parsed.subject)],
-    ["optimizers/current.yaml", splitOptimizerSourceRecord(parsed.optimizer)],
+    ["candidates/current/candidate.yaml", splitCandidateSourceRecord(parsed.candidate)],
   ];
   return entries.flatMap(([filePath, value]) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -642,24 +643,21 @@ function splitAuthoredSourceYaml(
   });
 }
 
-function splitSubjectSourceRecord(value: unknown): unknown {
+function splitCandidateSourceRecord(value: unknown): unknown {
   const record = cloneYamlRecord(value);
   if (!record) {
     return value;
   }
   delete record.benchmark;
   delete record.path;
-  rewriteAdapterSources(record, "subjects");
+  stripCandidateRuntimeSelection(record);
+  rewriteAdapterSources(record, "candidates/current");
   return record;
 }
 
-function splitOptimizerSourceRecord(value: unknown): unknown {
-  const record = cloneYamlRecord(value);
-  if (!record) {
-    return value;
-  }
-  rewriteAdapterSources(record, "optimizers");
-  return record;
+function stripCandidateRuntimeSelection(record: Record<string, unknown>): void {
+  delete record.selectedRunId;
+  delete record.selectedRunName;
 }
 
 function cloneYamlRecord(value: unknown): Record<string, unknown> | null {
@@ -687,12 +685,11 @@ function sourcePathRelativeTo(yamlDir: string, sourcePath: string): string {
 
 function isAuthoredSourceYamlPath(filePath: string): boolean {
   return filePath === BENCHMARK_SPEC_FILE ||
-    isWorkbenchSubjectManifestPath(filePath) ||
-    /^optimizers\/[^/]+\.ya?ml$/iu.test(filePath);
+    isWorkbenchCandidateManifestPath(filePath);
 }
 
-function formatOptimizerSummary(spec: GenericRunSpec): string {
-  return spec.improve ? `adapter:${spec.improve.use}` : "optimizer not configured";
+function formatImproveSummary(spec: GenericRunSpec): string {
+  return spec.improve ? `adapter:${spec.improve.use}` : "improve not configured";
 }
 
 function formatEngineRunSummary(spec: GenericRunSpec): string {
@@ -747,14 +744,14 @@ function protocolStepForExecution(
   if (execution.purpose !== "improve") {
     throw new Error(`Protocol execution step only supports improve executions, not ${execution.purpose}.`);
   }
-  const operation = "optimizer.improve";
+  const operation = "candidate.improve";
   const command = adapterProtocolCommandSpec(
     execution.adapter,
     operation,
     manifests,
   );
   return {
-    kind: "optimizer",
+    kind: "improver",
     label: execution.purpose,
     operation,
     executor: command.executor,
@@ -875,13 +872,13 @@ export function materializeWorkbenchRunResult(args: {
   benchmarkFingerprint: string;
   sourceYaml?: string;
   benchmarkSourceFiles?: readonly SurfaceSnapshotFile[];
-  subjectFingerprint?: string;
-  subjectSourceFiles?: readonly SurfaceSnapshotFile[];
+  candidateFingerprint?: string;
+  candidateSourceFiles?: readonly SurfaceSnapshotFile[];
   startedAt: string;
   spec: GenericRunSpec;
   jobs: readonly HostedWorkbenchJob[];
-  previousSubject?: SubjectRecord | null;
-  existingSubjectCount: number;
+  previousCandidate?: CandidateRecord | null;
+  existingCandidateCount: number;
 }): WorkbenchRunMaterialization {
   const completed = args.jobs.filter((job) => job.status === "succeeded");
   const failedJobCount = args.jobs.filter(
@@ -890,36 +887,36 @@ export function materializeWorkbenchRunResult(args: {
   const completedJobCount = args.jobs.filter(
     (job) => job.status === "succeeded",
   ).length;
-  const subjectRevisions = completed
+  const candidateRevisions = completed
     .filter((job) => workbenchExecutionPurpose(job) === "improve")
-    .map((job) => normalizeSubjectRevisionJobOutput(job.output))
-    .filter((output): output is HostedSubjectRevisionJobOutput => output !== null)
+    .map((job) => normalizeCandidateRevisionJobOutput(job.output))
+    .filter((output): output is HostedCandidateRevisionJobOutput => output !== null)
     .sort((left, right) => left.attemptIndex - right.attemptIndex);
   const evaluationJobs = args.jobs.filter(
     (job) =>
       workbenchExecutionPurpose(job) === "attempt",
   );
-  const evaluationsBySubject = new Map<string, HostedWorkbenchJob[]>();
+  const evaluationsByCandidate = new Map<string, HostedWorkbenchJob[]>();
   for (const job of evaluationJobs) {
-    const subjectId =
-      readJobString(job.output, "subjectId") ??
-      readJobString(job.input, "subjectId") ??
-      job.subjectId;
-    if (subjectId) {
-      evaluationsBySubject.set(subjectId, [
-        ...(evaluationsBySubject.get(subjectId) ?? []),
+    const candidateId =
+      readJobString(job.output, "candidateId") ??
+      readJobString(job.input, "candidateId") ??
+      job.candidateId;
+    if (candidateId) {
+      evaluationsByCandidate.set(candidateId, [
+        ...(evaluationsByCandidate.get(candidateId) ?? []),
         job,
       ]);
     }
   }
 
-  const subjects: SubjectRecord[] = [];
-  const subjectFiles: Record<string, SurfaceSnapshotFile[]> = {};
+  const candidates: CandidateRecord[] = [];
+  const candidateFiles: Record<string, SurfaceSnapshotFile[]> = {};
   const evaluations: EvaluationScorecard[] = [];
-  for (const subjectRevision of subjectRevisions) {
-    const subjectId = subjectRevision.subjectId;
-    const subjectJobs = evaluationsBySubject.get(subjectId) ?? [];
-    const succeededEvaluationJobs = subjectJobs.filter(
+  for (const candidateRevision of candidateRevisions) {
+    const candidateId = candidateRevision.candidateId;
+    const candidateJobs = evaluationsByCandidate.get(candidateId) ?? [];
+    const succeededEvaluationJobs = candidateJobs.filter(
       (job) => job.status === "succeeded",
     );
     const outputs = normalizeEvaluationSampleOutputs({
@@ -939,13 +936,13 @@ export function materializeWorkbenchRunResult(args: {
         .filter((key): key is string => key !== null),
     );
     const errorSampleJobs = [
-      ...subjectJobs.filter((job) => job.status === "failed"),
+      ...candidateJobs.filter((job) => job.status === "failed"),
       ...succeededEvaluationJobs.filter((job) => !outputJobIds.has(job.id)),
     ];
     const errorSamples = errorEvaluationSamplesFromJobs(
       errorSampleJobs,
-      subjectId,
-      subjectRevision.attemptIndex,
+      candidateId,
+      candidateRevision.attemptIndex,
       completedSampleKeys,
     );
     const samples = [
@@ -961,31 +958,30 @@ export function materializeWorkbenchRunResult(args: {
       (left, right) =>
         left.index - right.index || left.id.localeCompare(right.id),
     );
-    const subjectName = normalizedSubjectDisplayName(args.spec.subject.name);
-    const evalRecord = createEvaluationRecord(subjectId, subjectName, samples);
+    const candidateName = normalizedCandidateDisplayName(args.spec.candidate.name);
+    const evalRecord = createEvaluationRecord(candidateId, candidateName, samples);
     const usage = mergeUsageSummaries([
-      subjectRevision.usage,
+      candidateRevision.usage,
       ...samples.map((sample) => sample.usage),
     ]);
-    const metrics = evaluationMeanMetrics(evalRecord);
-    const attemptIndex = subjectRevision.attemptIndex;
+    const attemptIndex = candidateRevision.attemptIndex;
     const evaluationTraces = [
       ...outputs.flatMap(({ output }) => output.traces),
       ...errorSampleJobs.flatMap(jobTracePaths),
     ].sort();
-    const baseId = subjectRevision.baseId && subjectRevision.baseId !== subjectId
-      ? subjectRevision.baseId
+    const baseId = candidateRevision.baseId && candidateRevision.baseId !== candidateId
+      ? candidateRevision.baseId
       : null;
-    const sourceMeta = subjectSourceMetadata(args.subjectSourceFiles);
+    const sourceMeta = candidateSourceMetadata(args.candidateSourceFiles);
     const benchmarkMeta = benchmarkSourceMetadata(args.benchmarkSourceFiles);
     const meta: Record<string, Json> = {
       attemptIndex,
       sampleCount: evalRecord.sampleCount,
-      optimizer: formatOptimizerSummary(args.spec),
+      improver: formatImproveSummary(args.spec),
       engineRun: formatEngineRunSummary(args.spec),
       strategy: "greedy",
       traces: {
-        improve: subjectRevision.traces,
+        improve: candidateRevision.traces,
         evaluations: evaluationTraces,
       },
     };
@@ -995,57 +991,127 @@ export function materializeWorkbenchRunResult(args: {
     if (benchmarkMeta) {
       meta.benchmark = benchmarkMeta;
     }
-    const record: SubjectRecord = {
-      id: subjectId,
-      ...(subjectName ? { name: subjectName } : {}),
-      ordinal: args.existingSubjectCount + subjects.length,
-      benchmarkFingerprint: args.benchmarkFingerprint,
-      subjectFingerprint: args.subjectFingerprint ?? materializedSubjectFingerprint(args.spec, subjectRevision.files),
-      createdAt: args.startedAt,
-      ...(baseId ? { baseId } : {}),
-      referenceIds: [],
-      status: evalRecord.completedSampleCount > 0 ? "evaluated" : "eval_error",
-      fileChanges: subjectRevision.fileChanges,
-      ...(metrics ? { metrics } : {}),
-      ...(usage ? { usage } : {}),
-      eval: evalRecord,
-      ...(subjectRevision.prompt ? { prompt: subjectRevision.prompt } : {}),
-      meta,
-    };
-    subjects.push(record);
+    const record = preserveExistingCandidateIdentity({
+      candidate: {
+        id: candidateId,
+        ...(candidateName ? { name: candidateName } : {}),
+        version: args.existingCandidateCount + candidates.length + 1,
+        ordinal: args.existingCandidateCount + candidates.length + 1,
+        benchmarkFingerprint: args.benchmarkFingerprint,
+        candidateFingerprint: args.candidateFingerprint ?? materializedCandidateFingerprint(args.spec, candidateRevision.files),
+        createdAt: args.startedAt,
+        ...(baseId ? { baseId } : {}),
+        referenceIds: [],
+        status: evalRecord.completedSampleCount > 0 ? "evaluated" : "eval_error",
+        fileChanges: candidateRevision.fileChanges,
+        ...(usage ? { usage } : {}),
+        eval: evalRecord,
+        ...(candidateRevision.prompt ? { prompt: candidateRevision.prompt } : {}),
+        meta,
+      },
+      previousCandidate: args.previousCandidate ?? null,
+    });
+    candidates.push(record);
     evaluations.push(createEvaluationScorecard({
       runId: args.runId,
       benchmarkFingerprint: args.benchmarkFingerprint,
       createdAt: args.startedAt,
-      subject: record,
+      candidate: record,
+      candidateRunId: args.spec.candidate.selectedRunId,
+      candidateRunName: args.spec.candidate.selectedRunName,
       evaluation: evalRecord,
     }));
-    subjectFiles[subjectId] = materializedSubjectFiles({
-      subjectRevisionFiles: subjectRevision.files,
+    candidateFiles[candidateId] = materializedCandidateFiles({
+      candidateRevisionFiles: candidateRevision.files,
     });
   }
 
-  const selectedSubject = selectSubject({
-    subjects,
-    previousSubject: args.previousSubject ?? null,
+  const selectedCandidate = selectCandidate({
+    candidates,
+    previousCandidate: args.previousCandidate ?? null,
   });
   return {
-    subjects,
-    subjectFiles,
+    candidates,
+    candidateFiles,
     evaluations,
-    activeSubjectId:
-      selectedSubject?.id ?? args.previousSubject?.id ?? null,
-    selectedSubject,
+    activeCandidateId:
+      selectedCandidate?.id ?? args.previousCandidate?.id ?? null,
+    selectedCandidate,
     completedJobCount,
     failedJobCount,
   };
 }
 
-function subjectSourceMetadata(
+function preserveExistingCandidateIdentity(args: {
+  candidate: CandidateRecord;
+  previousCandidate: CandidateRecord | null;
+}): CandidateRecord {
+  const previous = args.previousCandidate;
+  if (!previous || previous.id !== args.candidate.id) {
+    return args.candidate;
+  }
+  const baseId = args.candidate.baseId ?? previous.baseId;
+  const prompt = args.candidate.prompt ?? previous.prompt;
+  const meta = mergeExistingCandidateMeta(previous.meta, args.candidate.meta);
+  return {
+    ...args.candidate,
+    version: previous.version,
+    ordinal: previous.version,
+    createdAt: previous.createdAt,
+    ...(args.candidate.name ?? previous.name
+      ? { name: (args.candidate.name ?? previous.name)! }
+      : {}),
+    ...(baseId ? { baseId } : {}),
+    referenceIds: previous.referenceIds.length > 0
+      ? [...previous.referenceIds]
+      : args.candidate.referenceIds,
+    fileChanges: args.candidate.fileChanges.length > 0
+      ? args.candidate.fileChanges
+      : [...previous.fileChanges],
+    ...(prompt ? { prompt } : {}),
+    ...(meta ? { meta } : {}),
+  };
+}
+
+function mergeExistingCandidateMeta(
+  previousMeta: Json | undefined,
+  candidateMeta: Json | undefined,
+): Json | undefined {
+  const previous = jsonRecord(previousMeta);
+  const candidate = jsonRecord(candidateMeta);
+  if (!previous) {
+    return candidateMeta;
+  }
+  if (!candidate) {
+    return previousMeta;
+  }
+  const previousTraces = jsonRecord(previous.traces);
+  const candidateTraces = jsonRecord(candidate.traces);
+  if (!previousTraces || !candidateTraces) {
+    return { ...previous, ...candidate };
+  }
+  const traces: Record<string, Json> = {
+    ...previousTraces,
+    ...candidateTraces,
+  };
+  const candidateImproveTraces = Array.isArray(candidateTraces.improve)
+    ? candidateTraces.improve
+    : [];
+  if (candidateImproveTraces.length === 0 && previousTraces.improve !== undefined) {
+    traces.improve = previousTraces.improve;
+  }
+  return {
+    ...previous,
+    ...candidate,
+    traces,
+  };
+}
+
+function candidateSourceMetadata(
   files: readonly SurfaceSnapshotFile[] | undefined,
 ): Json | null {
   const sourceFiles = (files ?? [])
-    .filter((file) => /^subjects\/[^/]+\/subject\.ya?ml$/iu.test(file.path))
+    .filter((file) => /^candidates\/[^/]+\/candidate\.ya?ml$/iu.test(file.path))
     .sort((left, right) => left.path.localeCompare(right.path))
     .map((file): Record<string, Json> => ({
       path: file.path,
@@ -1073,17 +1139,16 @@ function benchmarkSourceMetadata(
   return sourceFiles.length > 0 ? { files: sourceFiles } : null;
 }
 
-function materializedSubjectFingerprint(
+function materializedCandidateFingerprint(
   spec: GenericRunSpec,
   files: readonly SurfaceSnapshotFile[],
 ): string {
   const hash = createHash("sha256");
-  hash.update("workbench-subject-v1\0");
-  hash.update("materialized\0runner\0");
-  hash.update(JSON.stringify(spec.run));
+  hash.update("workbench-candidate-v1\0");
+  hash.update("materialized\0");
   hash.update("prepare");
-  hash.update(JSON.stringify(spec.subject.prepare ?? null));
-  for (const file of filterSubjectSourceFiles(files).slice().sort((left, right) => left.path.localeCompare(right.path))) {
+  hash.update(JSON.stringify(spec.candidate.prepare ?? null));
+  for (const file of filterCandidateSourceFiles(files).slice().sort((left, right) => left.path.localeCompare(right.path))) {
     hash.update("\0file\0");
     hash.update(file.path);
     hash.update("\0");
@@ -1096,11 +1161,11 @@ function materializedSubjectFingerprint(
   return hash.digest("hex");
 }
 
-function materializedSubjectFiles(args: {
-  subjectRevisionFiles: readonly SurfaceSnapshotFile[];
+function materializedCandidateFiles(args: {
+  candidateRevisionFiles: readonly SurfaceSnapshotFile[];
 }): SurfaceSnapshotFile[] {
   const byPath = new Map<string, SurfaceSnapshotFile>();
-  for (const file of filterSubjectSourceFiles(args.subjectRevisionFiles)) {
+  for (const file of filterCandidateSourceFiles(args.candidateRevisionFiles)) {
     byPath.set(file.path, { ...file });
   }
   return [...byPath.values()].sort((left, right) =>
@@ -1112,17 +1177,22 @@ function createEvaluationScorecard(args: {
   runId: string;
   benchmarkFingerprint: string;
   createdAt: string;
-  subject: SubjectRecord;
+  candidate: CandidateRecord;
+  candidateRunId?: string;
+  candidateRunName?: string;
   evaluation: EvaluationRecord;
 }): EvaluationScorecard {
   const evaluation = args.evaluation;
   return {
-    id: evaluationScorecardId(args.runId, args.subject.id),
+    id: evaluationScorecardId(args.runId, args.candidate.id),
     runId: args.runId,
     benchmarkFingerprint: args.benchmarkFingerprint,
-    subjectFingerprint: args.subject.subjectFingerprint,
-    subjectId: args.subject.id,
-    ...(args.subject.name ? { subjectName: args.subject.name } : {}),
+    candidateFingerprint: args.candidate.candidateFingerprint,
+    candidateId: args.candidate.id,
+    ...(args.candidate.name ? { candidateName: args.candidate.name } : {}),
+    candidateVersion: args.candidate.version,
+    ...(args.candidateRunId ? { candidateRunId: args.candidateRunId } : {}),
+    ...(args.candidateRunName ? { candidateRunName: args.candidateRunName } : {}),
     createdAt: args.createdAt,
     updatedAt: evaluation.finishedAt ?? args.createdAt,
     status: evaluation.status,
@@ -1137,10 +1207,10 @@ function createEvaluationScorecard(args: {
   };
 }
 
-export function evaluationScorecardId(runId: string, subjectId: string): string {
+export function evaluationScorecardId(runId: string, candidateId: string): string {
   const runPart = runId.replace(/[^a-z0-9]+/giu, "_").replace(/^_+|_+$/gu, "").slice(-24);
-  const subjectPart = subjectId.replace(/[^a-z0-9]+/giu, "_").replace(/^_+|_+$/gu, "").slice(-24);
-  return `eval_${runPart}_${subjectPart}`;
+  const candidatePart = candidateId.replace(/[^a-z0-9]+/giu, "_").replace(/^_+|_+$/gu, "").slice(-24);
+  return `eval_${runPart}_${candidatePart}`;
 }
 
 export function selectExecutionOutputFilesForInspection(args: {
@@ -1164,74 +1234,128 @@ export function isWorkbenchInternalOutputPath(filePath: string): boolean {
   );
 }
 
-export function createSubjectRevisionTraceInputFiles(args: {
-  runId: string;
+export function createOptimizerTraceInputFiles(args: {
   jobs: readonly HostedWorkbenchJob[];
-  events: readonly RuntimeEvent[];
 }): SurfaceSnapshotFile[] {
   const files: SurfaceSnapshotFile[] = [];
-  const manifestJobs: Json[] = [];
+  const executions: Json[] = [];
   const jobs = args.jobs
-    .filter((job) => job.runId === args.runId && isTerminalExecutionJob(job))
+    .filter(isOptimizerTraceInputJob)
     .sort(compareTraceInputJobs);
-  for (const job of jobs) {
+  jobs.forEach((job, index) => {
+    const sequence = String(index + 1).padStart(6, "0");
+    const executionPath = `executions/${sequence}`;
+    const operation: WorkbenchAdapterOperation = "engine.run";
     const jobFiles = completedJobOutputFiles(job);
-    const rawTraceFiles = jobFiles.filter((file) =>
-      normalizeRelativePath(file.path).startsWith(".workbench/traces/"),
-    );
-    files.push(...rawTraceFiles.map((file) => ({ ...file })));
-    const events = args.events
-      .filter((event) => event.runId === args.runId && event.jobId === job.id)
-      .sort((left, right) => left.at.localeCompare(right.at));
-    const eventPath = `events/${job.id}.ndjson`;
-    if (events.length > 0) {
-      files.push(textSurfaceFile(
-        eventPath,
-        `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
-      ));
-    }
-    const summaryPath = `jobs/${job.id}.json`;
-    const summary = subjectRevisionTraceJobSummary(job, {
-      eventPath: events.length > 0 ? eventPath : null,
-      rawTracePaths: rawTraceFiles.map((file) => file.path).sort(),
-    });
-    files.push(textSurfaceFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`));
-    manifestJobs.push({
-      ...summary,
-      summary_path: summaryPath,
+    const requestFile = traceInputRequestFile(jobFiles, operation);
+    const resultFile = traceInputResultFile(jobFiles, operation);
+    const requestPath = `${executionPath}/request.json`;
+    const resultPath = `${executionPath}/result.json`;
+    const filesPath = `${executionPath}/files`;
+    files.push(textSurfaceFile(
+      requestPath,
+      requestFile?.content ?? `${JSON.stringify(traceInputRequestFallback(job, operation), null, 2)}\n`,
+    ));
+    files.push(textSurfaceFile(
+      resultPath,
+      resultFile?.content ?? `${JSON.stringify(traceInputResultFallback(job, operation), null, 2)}\n`,
+    ));
+    files.push(...jobFiles.map((file) => ({
+      ...file,
+      path: normalizeRelativePath(`${filesPath}/${file.path}`),
+    })));
+    executions.push({
+      path: executionPath,
+      operation,
+      status: job.status,
+      candidateId: job.candidateId ?? readJobString(job.input, "candidateId") ?? null,
+      runId: job.runId,
+      jobId: job.id,
+      attemptIndex: readOptionalJobNumber(job.input, "attemptIndex") ?? null,
+      sampleIndex: readOptionalJobNumber(job.input, "sampleIndex") ?? null,
+      caseId: readJobString(job.input, "caseId") ?? null,
+      requestPath,
+      resultPath,
+      filesPath,
     } as unknown as Json);
-  }
+  });
   files.push(textSurfaceFile(
-    "manifest.json",
+    "index.json",
     `${JSON.stringify({
-      run_id: args.runId,
-      jobs: manifestJobs,
+      schema: "workbench.optimizer-traces.v1",
+      executions,
     }, null, 2)}\n`,
   ));
   return dedupeSurfaceFiles(files);
 }
 
-export function createSubjectEvaluationTraceInputFiles(args: {
-  subject?: SubjectRecord | null;
-  path?: string;
-}): SurfaceSnapshotFile[] {
-  const subject = args.subject;
-  if (!subject?.eval && !subject?.metrics) {
-    return [];
-  }
-  const filePath = normalizeRelativePath(
-    args.path ?? `base-subject/${subject.id}/evaluation.json`,
-  );
-  const payload = {
-    kind: "subject_evaluation",
-    subjectId: subject.id,
-    status: subject.status,
-    metrics: subject.metrics ?? null,
-    fileChanges: subject.fileChanges,
-    eval: subject.eval ?? null,
-    prompt: subject.prompt ?? null,
+export function evaluationMeanMetrics(
+  evaluation: Pick<EvaluationRecord, "metrics"> | null | undefined,
+): Record<string, number> | undefined {
+  const entries = Object.entries(evaluation?.metrics ?? {})
+    .filter((entry): entry is [string, MetricStats] => Number.isFinite(entry[1].mean));
+  return entries.length > 0
+    ? Object.fromEntries(entries.map(([key, stats]) => [key, stats.mean]))
+    : undefined;
+}
+
+export function candidateRecordWithoutDerivedFields(candidate: CandidateRecord): CandidateRecord {
+  const {
+    metrics: _metrics,
+    candidateRunId: _candidateRunId,
+    candidateRunName: _candidateRunName,
+    ...record
+  } = candidate as CandidateRecord & {
+    metrics?: unknown;
+    candidateRunId?: unknown;
+    candidateRunName?: unknown;
   };
-  return [textSurfaceFile(filePath, `${JSON.stringify(payload, null, 2)}\n`)];
+  return record;
+}
+
+export function candidateSummaryFromRecord(candidate: CandidateRecord): CandidateSummary {
+  const {
+    eval: _eval,
+    prompt: _prompt,
+    meta: _meta,
+    ...summary
+  } = candidateRecordWithoutDerivedFields(candidate);
+  return summary;
+}
+
+export function workbenchRunExecutionFingerprint(args: {
+  sourceYaml?: string | null;
+  adapterFiles?: readonly SurfaceSnapshotFile[];
+  specVersionId?: string | null;
+  environmentVersionId?: string | null;
+}): string {
+  const hash = createHash("sha256");
+  hash.update("workbench-run-execution-v1\0");
+  hash.update(args.specVersionId ?? "");
+  hash.update("\0");
+  hash.update(args.environmentVersionId ?? "");
+  hash.update("\0");
+  hash.update(args.sourceYaml ?? "");
+  for (const file of (args.adapterFiles ?? []).slice().sort((left, right) =>
+    left.path.localeCompare(right.path)
+  )) {
+    hash.update("\0file\0");
+    hash.update(file.path);
+    hash.update("\0");
+    hash.update(file.kind);
+    hash.update("\0");
+    hash.update(file.encoding);
+    hash.update("\0");
+    hash.update(file.executable ? "1" : "0");
+    hash.update("\0");
+    hash.update(file.content);
+  }
+  return hash.digest("hex");
+}
+
+function isOptimizerTraceInputJob(job: HostedWorkbenchJob): boolean {
+  return isTerminalExecutionJob(job) &&
+    workbenchExecutionPurpose(job) === "attempt";
 }
 
 function isTerminalExecutionJob(job: HostedWorkbenchJob): boolean {
@@ -1249,20 +1373,9 @@ function compareTraceInputJobs(
   const leftAttempt = readOptionalJobNumber(left.input, "attemptIndex") ?? -1;
   const rightAttempt = readOptionalJobNumber(right.input, "attemptIndex") ?? -1;
   return leftAttempt - rightAttempt ||
-    purposeSortKey(workbenchExecutionPurpose(left)) - purposeSortKey(workbenchExecutionPurpose(right)) ||
     (readOptionalJobNumber(left.input, "sampleIndex") ?? -1) - (readOptionalJobNumber(right.input, "sampleIndex") ?? -1) ||
     (readJobString(left.input, "caseId") ?? "").localeCompare(readJobString(right.input, "caseId") ?? "") ||
     left.id.localeCompare(right.id);
-}
-
-function purposeSortKey(purpose: WorkbenchExecutionSpec["purpose"] | null): number {
-  if (purpose === "improve") {
-    return 0;
-  }
-  if (purpose === "attempt") {
-    return 1;
-  }
-  return 3;
 }
 
 function completedJobOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[] {
@@ -1279,45 +1392,86 @@ function completedJobOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[]
   return files;
 }
 
-function subjectRevisionTraceJobSummary(
-  job: HostedWorkbenchJob,
-  paths: { eventPath: string | null; rawTracePaths: readonly string[] },
-): Record<string, Json> {
-  const output = jsonRecord(job.output);
-  return {
-    job_id: job.id,
-    purpose: workbenchExecutionPurpose(job) ?? "unknown",
-    status: job.status,
-    subject_id: job.subjectId ?? readJobString(job.input, "subjectId"),
-    attempt_index: readOptionalJobNumber(job.input, "attemptIndex"),
-    sample_index: readOptionalJobNumber(job.input, "sampleIndex"),
-    case_id: readJobString(job.input, "caseId"),
-    created_at: job.createdAt,
-    ...(job.startedAt ? { started_at: job.startedAt } : {}),
-    ...(job.finishedAt ? { finished_at: job.finishedAt } : {}),
-    ...(job.error ? { error: job.error } : {}),
-    traces: jobTracePaths(job),
-    event_path: paths.eventPath,
-    raw_trace_paths: [...paths.rawTracePaths],
-    output: summarizeJobOutputForTrace(output),
-  } as Record<string, Json>;
+function traceInputRequestFile(
+  files: readonly SurfaceSnapshotFile[],
+  operation: WorkbenchAdapterOperation,
+): SurfaceSnapshotFile | null {
+  return files.find((file) => {
+    const normalized = normalizeRelativePath(file.path);
+    return normalized.startsWith(".workbench/traces/") &&
+      normalized.endsWith("/request.json") &&
+      file.encoding === "utf8" &&
+      traceJsonOperation(file) === operation;
+  }) ?? null;
 }
 
-function summarizeJobOutputForTrace(output: Record<string, Json>): Record<string, Json> {
-  const {
-    files: _files,
-    fileSet: _fileSet,
-    subjectPatch,
-    ...rest
-  } = output;
-  const patch = jsonRecord(subjectPatch);
-  const { files: _patchFiles, ...patchSummary } = patch;
+function traceInputResultFile(
+  files: readonly SurfaceSnapshotFile[],
+  operation: WorkbenchAdapterOperation,
+): SurfaceSnapshotFile | null {
+  return files.find((file) => {
+    const normalized = normalizeRelativePath(file.path);
+    return normalized.startsWith(".workbench/traces/") &&
+      normalized.endsWith("/result.json") &&
+      file.encoding === "utf8" &&
+      traceJsonOperation(file) === operation;
+  }) ?? null;
+}
+
+function traceJsonOperation(file: SurfaceSnapshotFile): string | null {
+  try {
+    const parsed = JSON.parse(file.content);
+    return typeof parsed?.operation === "string" ? parsed.operation : null;
+  } catch {
+    return null;
+  }
+}
+
+function traceInputRequestFallback(
+  job: HostedWorkbenchJob,
+  operation: WorkbenchAdapterOperation,
+): Record<string, Json> {
+  const execution = jsonRecord(jsonRecord(job.input).execution);
   return {
-    ...rest,
-    ...(Object.keys(patch).length > 0
-      ? { subjectPatch: patchSummary }
-      : {}),
-  } as Record<string, Json>;
+    protocol: "workbench.adapter.v3",
+    id: typeof execution.id === "string" ? execution.id : job.id,
+    jobId: job.id,
+    operation,
+    invocation: jsonRecord(execution.adapter) as unknown as Json,
+    context: {
+      candidate: {
+        id: job.candidateId ?? readJobString(job.input, "candidateId") ?? null,
+      },
+      attempt: {
+        attemptIndex: readOptionalJobNumber(job.input, "attemptIndex") ?? null,
+        sampleIndex: readOptionalJobNumber(job.input, "sampleIndex") ?? null,
+        caseId: readJobString(job.input, "caseId") ?? null,
+      },
+    },
+  } as unknown as Record<string, Json>;
+}
+
+function traceInputResultFallback(
+  job: HostedWorkbenchJob,
+  operation: WorkbenchAdapterOperation,
+): WorkbenchAdapterOperationResult {
+  const output = jsonRecord(job.output);
+  const ok = job.status === "succeeded" && output.ok !== false;
+  const value = operation === "candidate.improve"
+    ? jsonRecord(output.candidatePatch)
+    : operation === "engine.run"
+      ? jsonRecord(output.result)
+      : {};
+  return {
+    protocol: "workbench.adapter-result.v1",
+    operation,
+    ok,
+    ...(Object.keys(value).length > 0 ? { value: value as unknown as Json } : {}),
+    ...(typeof output.summary === "string" ? { summary: output.summary } : {}),
+    ...(output.feedback !== undefined ? { feedback: output.feedback } : {}),
+    ...(output.usage !== undefined ? { usage: output.usage as UsageSummary } : {}),
+    ...(!ok ? { error: job.error ?? "Execution did not complete successfully." } : {}),
+  };
 }
 
 function textSurfaceFile(path: string, content: string): SurfaceSnapshotFile {
@@ -1346,8 +1500,8 @@ function dedupeSurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnaps
 export interface WorkbenchProjectSourceFilesInput {
   specSource?: string;
   specFiles?: readonly SurfaceSnapshotFile[];
-  subjectFilesPath: string;
-  subjectFiles: readonly SurfaceSnapshotFile[];
+  candidateFilesPath: string;
+  candidateFiles: readonly SurfaceSnapshotFile[];
   engineResolveFilesPath: string;
   engineResolveFiles: readonly SurfaceSnapshotFile[];
   adapterFiles?: readonly SurfaceSnapshotFile[];
@@ -1363,7 +1517,7 @@ export function buildWorkbenchProjectSourceFiles(
     ...(input.specFiles
       ? input.specFiles.map((file) => ({ ...file }))
       : [textSurfaceFile("benchmark.yaml", input.specSource ?? "")]),
-    ...prefixProjectSourceFiles(input.subjectFiles, input.subjectFilesPath),
+    ...prefixProjectSourceFiles(input.candidateFiles, input.candidateFilesPath),
     ...prefixProjectSourceFiles(input.engineResolveFiles, input.engineResolveFilesPath),
     ...(input.adapterFiles ?? []).map((file) => ({ ...file })),
     ...(input.dockerfiles ?? []).map((file) => ({ ...file })),
@@ -1399,7 +1553,7 @@ function prefixProjectSourceFiles(
   });
 }
 
-export function isSubjectSourceFilePath(filePath: string): boolean {
+export function isCandidateSourceFilePath(filePath: string): boolean {
   const normalized = normalizeRelativePath(filePath);
   return (
     normalized !== ".workbench" &&
@@ -1408,18 +1562,18 @@ export function isSubjectSourceFilePath(filePath: string): boolean {
   );
 }
 
-export function filterSubjectSourceFiles(
+export function filterCandidateSourceFiles(
   files: readonly SurfaceSnapshotFile[],
 ): SurfaceSnapshotFile[] {
   return files
-    .filter((file) => isSubjectSourceFilePath(file.path))
+    .filter((file) => isCandidateSourceFilePath(file.path))
     .map((file) => ({ ...file }));
 }
 
-export function buildSubjectLineage(args: {
-  summaries: readonly SubjectSummary[];
+export function buildCandidateLineage(args: {
+  summaries: readonly CandidateSummary[];
   activeId: string | null;
-}): SubjectLineageGraph {
+}): CandidateLineageGraph {
   const orderedSummaries = args.summaries.slice().sort((left, right) => {
     const createdAt = left.createdAt.localeCompare(right.createdAt);
     return createdAt !== 0 ? createdAt : left.id.localeCompare(right.id);
@@ -1428,7 +1582,7 @@ export function buildSubjectLineage(args: {
   return {
     activeId: args.activeId,
     nodes: orderedSummaries.map(
-      (summary): SubjectLineageNode => ({
+      (summary): CandidateLineageNode => ({
         id: summary.id,
         active: args.activeId === summary.id,
         summary,
@@ -1512,10 +1666,10 @@ function escapeRegExp(value: string): string {
   return value.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&");
 }
 
-export function summarizeSubjectFiles(
+export function summarizeCandidateFiles(
   files: readonly SurfaceSnapshotFile[],
   changedPaths: readonly string[] = files.map((file) => file.path),
-): SubjectFileSummary[] {
+): CandidateFileSummary[] {
   const changed = new Set(changedPaths);
   return [...files]
     .sort((left, right) => left.path.localeCompare(right.path))
@@ -1535,11 +1689,11 @@ export function summarizeSubjectFiles(
     });
 }
 
-export function createSubjectFilePreview(args: {
+export function createCandidateFilePreview(args: {
   files: readonly SurfaceSnapshotFile[];
   path: string;
   view: "diff" | "raw" | "rendered";
-}): SubjectFilePreview {
+}): CandidateFilePreview {
   if (args.view === "diff") {
     throw new Error("Diff previews require explicit before and after file content.");
   }
@@ -1564,14 +1718,14 @@ export function createSubjectFilePreview(args: {
 }
 
 export function createCaseReview(args: {
-  subject: SubjectRecord;
+  candidate: CandidateRecord;
   caseId: string;
-  executions?: SubjectCaseExecutionRef[];
-}): SubjectCaseReview {
+  executions?: CandidateCaseExecutionRef[];
+}): CandidateCaseReview {
   const preferredSampleIndex = uniqueExecutionSampleIndex(args.executions ?? []);
   const sampleMatchesCase = (sample: EvaluationSampleRecord) =>
     (sample.cases ?? []).some((entry) => entry.id === args.caseId);
-  const samples = args.subject.eval?.samples ?? [];
+  const samples = args.candidate.eval?.samples ?? [];
   const sampleResult =
     samples.find(
       (sample) =>
@@ -1582,7 +1736,7 @@ export function createCaseReview(args: {
   const caseResult = sampleResult?.cases?.find((entry) => entry.id === args.caseId);
   if (!sampleResult && (args.executions?.length ?? 0) > 0) {
     return {
-      subjectId: args.subject.id,
+      candidateId: args.candidate.id,
       caseId: args.caseId,
       caseLabel: args.caseId,
       ...(typeof preferredSampleIndex === "number"
@@ -1595,7 +1749,7 @@ export function createCaseReview(args: {
   }
   if (!sampleResult) {
     throw new Error(
-      `Case ${args.caseId} was not found on subject ${args.subject.id}.`,
+      `Case ${args.caseId} was not found on candidate ${args.candidate.id}.`,
     );
   }
   const durationMs =
@@ -1603,7 +1757,7 @@ export function createCaseReview(args: {
       ? caseResult.durationMs
       : undefined;
   return {
-    subjectId: args.subject.id,
+    candidateId: args.candidate.id,
     caseId: caseResult?.id ?? args.caseId,
     caseLabel: caseResult?.label ?? args.caseId,
     sampleId: sampleResult.id,
@@ -1627,7 +1781,7 @@ export function createCaseReview(args: {
 }
 
 function uniqueExecutionSampleIndex(
-  executions: readonly SubjectCaseExecutionRef[],
+  executions: readonly CandidateCaseExecutionRef[],
 ): number | null {
   const sampleIndices = new Set(
     executions
@@ -1648,47 +1802,46 @@ function parseAuthoredWorkbenchSourceSpec(source: string): AuthoredWorkbenchSour
   }
   const resolved = resolveWorkbenchResolvedSourceYamlInternal(source);
   return {
-    version: 3,
+    version: 4,
     benchmark: {
       name: resolved.benchmark.name,
       description: resolved.benchmark.description,
       engine: authoredAdapterSpecFromInvocation(resolved.engine),
     },
-    subject: {
-      name: resolved.subject.name,
-      description: resolved.subject.description,
-      files: { path: resolved.subject.files.path },
-      ...(resolved.subject.prepare ? { prepare: { ...resolved.subject.prepare } } : {}),
-      run: runSpecFromInvocation(resolved.run),
+    candidate: {
+      name: resolved.candidate.name,
+      description: resolved.candidate.description,
+      files: { path: resolved.candidate.files.path },
+      ...(resolved.candidate.prepare ? { prepare: { ...resolved.candidate.prepare } } : {}),
+      defaultRun: resolved.candidate.defaultRun,
+      runs: Object.fromEntries(Object.entries(resolved.candidate.runs).map(([runId, run]) => [
+        runId,
+        {
+          name: run.name,
+          ...authoredAdapterSpecFromInvocation(run),
+        },
+      ])),
+      ...(resolved.candidate.improve
+        ? {
+            improve: {
+              edits: [...resolved.candidate.improve.edits],
+              ...improveSpecFromInvocation(resolved.improve as NonNullable<GenericRunSpec["improve"]>),
+            },
+          }
+        : {}),
     },
-    ...(resolved.optimizer
-      ? {
-          optimizer: {
-            name: resolved.optimizer.name,
-            ...(resolved.optimizer.description ? { description: resolved.optimizer.description } : {}),
-            edits: [...resolved.optimizer.edits],
-            improve: improveSpecFromInvocation(resolved.improve as NonNullable<GenericRunSpec["improve"]>),
-          },
-        }
-      : {}),
   };
 }
 
 function improveSpecFromInvocation(
   invocation: NonNullable<GenericRunSpec["improve"]>,
-): NonNullable<AuthoredWorkbenchSourceSpec["optimizer"]>["improve"] {
-  return authoredAdapterSpecFromInvocation(invocation);
-}
-
-function runSpecFromInvocation(
-  invocation: WorkbenchAdapterInvocation,
-): AuthoredWorkbenchSourceSpec["subject"]["run"] {
+): { use: string; auth?: string | Record<string, string>; with?: Record<string, Json> } {
   return authoredAdapterSpecFromInvocation(invocation);
 }
 
 function authoredAdapterSpecFromInvocation(
   invocation: WorkbenchAdapterInvocation,
-): AuthoredWorkbenchSourceSpec["subject"]["run"] {
+): { use: string; auth?: string | Record<string, string>; with?: Record<string, Json> } {
   const config = jsonRecord(invocation.with);
   return {
     use: invocation.use,
@@ -1730,10 +1883,10 @@ function summarizeCaseInputs(
 }
 
 function buildLineageEdges(
-  summary: SubjectSummary,
+  summary: CandidateSummary,
   summaryIds: ReadonlySet<string>,
-): SubjectLineageEdge[] {
-  const edges: SubjectLineageEdge[] = [];
+): CandidateLineageEdge[] {
+  const edges: CandidateLineageEdge[] = [];
   if (summary.baseId && summary.baseId !== summary.id && summaryIds.has(summary.baseId)) {
     edges.push({
       id: `anchor:${summary.baseId}:${summary.id}`,
@@ -1746,7 +1899,7 @@ function buildLineageEdges(
 }
 
 interface HostedSampleJobOutput {
-  subjectId: string;
+  candidateId: string;
   attemptIndex: number;
   sample: EvaluationSampleRecord;
   fileChanges: string[];
@@ -1759,8 +1912,8 @@ interface HostedMaterializedSampleOutput {
   output: HostedSampleJobOutput;
 }
 
-interface HostedSubjectRevisionJobOutput {
-  subjectId: string;
+interface HostedCandidateRevisionJobOutput {
+  candidateId: string;
   attemptIndex: number;
   baseId: string | null;
   prompt?: string;
@@ -1782,10 +1935,10 @@ export function createWorkbenchRunWorkload(args: {
   if (!purpose) {
     throw new Error(`Unsupported runtime job kind: ${args.job.kind}`);
   }
-  const subjectId =
-    readJobString(args.job.input, "subjectId") ?? args.job.subjectId;
-  if (!subjectId) {
-    throw new Error(`${purpose} execution job is missing subjectId.`);
+  const candidateId =
+    readJobString(args.job.input, "candidateId") ?? args.job.candidateId;
+  if (!candidateId) {
+    throw new Error(`${purpose} execution job is missing candidateId.`);
   }
   const attemptIndex = readRequiredJobNumber(
     args.job.input,
@@ -1815,7 +1968,7 @@ export function createWorkbenchRunWorkload(args: {
     ? engineCaseFilesForRuntimeInput({ spec: args.spec, engineCase })
     : [];
   const engineCaseSpec = engineCase?.case;
-  const initial = createInitialSubjectFiles({
+  const initial = createInitialCandidateFiles({
     baseFiles: args.baseFiles,
     spec: args.spec,
     attemptIndex,
@@ -1823,10 +1976,10 @@ export function createWorkbenchRunWorkload(args: {
   return {
     job: args.job,
     spec: args.spec,
-    subjectId,
+    candidateId,
     attemptIndex,
     sampleIndex,
-    subjectFiles: initial.files,
+    candidateFiles: initial.files,
     caseId,
     engineResolveFiles: selectedEngineResolveFiles,
     traceFiles: (args.traceFiles ?? []).map((file) => ({ ...file })),
@@ -1838,7 +1991,7 @@ export function createWorkbenchRunWorkload(args: {
   };
 }
 
-function createInitialSubjectFiles(args: {
+function createInitialCandidateFiles(args: {
   baseFiles: readonly SurfaceSnapshotFile[];
   spec: GenericRunSpec;
   attemptIndex: number;
@@ -1847,9 +2000,9 @@ function createInitialSubjectFiles(args: {
   changedPaths: string[];
   prompt: string;
 } {
-  const editablePaths = optimizerEdits(args.spec).map(normalizeRelativePath);
+  const editablePaths = improveEdits(args.spec).map(normalizeRelativePath);
   const editPath = editablePaths[0];
-  const subjectPaths = editPath ? [editPath] : [];
+  const candidatePaths = editPath ? [editPath] : [];
   const files =
     args.baseFiles.length > 0
       ? args.baseFiles.map((file) => ({ ...file }))
@@ -1857,13 +2010,13 @@ function createInitialSubjectFiles(args: {
         ? normalizeSurfaceFiles([{ path: editPath, content: "" }])
         : [];
   const prompt = [
-    `Run the subject workload for benchmark: ${args.spec.benchmark.description}`,
-    `Attempt ${args.attemptIndex + 1} uses ${formatOptimizerSummary(args.spec)}; the improve adapter may edit the subject before Workbench scores it.`,
+    `Run the candidate workload for benchmark: ${args.spec.benchmark.description}`,
+    `Attempt ${args.attemptIndex + 1} uses ${formatImproveSummary(args.spec)}; the improve adapter may edit the candidate before Workbench scores it.`,
   ].join("\n");
   const byPath = new Map(files.map((file) => [file.path, file]));
   if (
     editPath &&
-    ![...byPath.keys()].some((filePath) => subjectPaths.includes(filePath))
+    ![...byPath.keys()].some((filePath) => candidatePaths.includes(filePath))
   ) {
     byPath.set(editPath, {
       path: editPath,
@@ -1977,7 +2130,7 @@ function adapterOperationForExecutionPurpose(
   purpose: WorkbenchExecutionSpec["purpose"],
 ): WorkbenchAdapterOperation | null {
   if (purpose === "improve") {
-    return "optimizer.improve";
+    return "candidate.improve";
   }
   if (purpose === "attempt") {
     return "engine.run";
@@ -2125,8 +2278,8 @@ function normalizeRuntimeControlInputs(
   }
   const record = value as Record<string, unknown>;
   const inputs: NonNullable<WorkbenchRuntimeControlOperationSequenceRequest["inputs"]> = {};
-  if (hasOwn(record, "subject")) {
-    inputs.subject = normalizeRuntimeControlFiles(record.subject, "inputs.subject");
+  if (hasOwn(record, "candidate")) {
+    inputs.candidate = normalizeRuntimeControlFiles(record.candidate, "inputs.candidate");
   }
   if (hasOwn(record, "case")) {
     inputs.case = normalizeRuntimeControlFiles(record.case, "inputs.case");
@@ -2183,8 +2336,8 @@ function normalizeRuntimeControlOperation(
   if (
     operation !== "engine.resolve" &&
     operation !== "engine.run" &&
-    operation !== "subject.run" &&
-    operation !== "optimizer.improve"
+    operation !== "candidate.run" &&
+    operation !== "candidate.improve"
   ) {
     throw new Error(`Workbench runtime-control ${label}.operation is invalid.`);
   }
@@ -2296,7 +2449,7 @@ export async function executeAdapterInCurrentRuntime(
   };
   try {
     if (execution.purpose === "improve") {
-      return await executeSubjectRevisionExecutionInCurrentRuntime(
+      return await executeCandidateRevisionExecutionInCurrentRuntime(
         runtimeInput,
         execution,
         startedAt,
@@ -2547,7 +2700,7 @@ function completedJobFromSandboxResult(
   );
 }
 
-async function executeSubjectRevisionExecutionInCurrentRuntime(
+async function executeCandidateRevisionExecutionInCurrentRuntime(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
   startedAt: string,
@@ -2572,22 +2725,22 @@ async function executeSubjectRevisionExecutionInCurrentRuntime(
   }
 
   const finishedAt = result.finishedAt ?? new Date().toISOString();
-  const subjectPatch = createSubjectPatchFromResult(result, args.spec);
-  if (subjectPatch.fileChanges.length === 0) {
+  const candidatePatch = createCandidatePatchFromResult(result, args.spec);
+  if (candidatePatch.fileChanges.length === 0) {
     return failWorkbenchRunJob(
       args.job,
       startedAt,
-      `${execution.adapter.use === "command" ? "Command improve adapter" : `Adapter ${execution.adapter.use}`} completed without changing subject files covered by optimizer edits.`,
+      `${execution.adapter.use === "command" ? "Command improve adapter" : `Adapter ${execution.adapter.use}`} completed without changing candidate files covered by improve edits.`,
       finishedAt,
       result,
     );
   }
-  const subjectRevisionFiles = applyWorkbenchSubjectPatch({
-    baseFiles: workload.subjectFiles,
-    patch: subjectPatch,
-    edits: requireOptimizerEdits(args.spec),
+  const candidateRevisionFiles = applyWorkbenchCandidatePatch({
+    baseFiles: workload.candidateFiles,
+    patch: candidatePatch,
+    edits: requireImproveEdits(args.spec),
   });
-  const usage = assignUsageRole("optimizer", result.usage);
+  const usage = assignUsageRole("improver", result.usage);
   return {
     ...args.job,
     status: "succeeded",
@@ -2599,13 +2752,13 @@ async function executeSubjectRevisionExecutionInCurrentRuntime(
       ok: true,
       executionId: execution.id,
       purpose: execution.purpose,
-      subjectId: workload.subjectId,
+      candidateId: workload.candidateId,
       attemptIndex: workload.attemptIndex,
       baseId: workload.baseId,
       prompt: workload.prompt,
-      subjectPatch,
-      fileChanges: subjectPatch.fileChanges,
-      files: subjectRevisionFiles,
+      candidatePatch,
+      fileChanges: candidatePatch.fileChanges,
+      files: candidateRevisionFiles,
       traces: traceFilePaths(result.files),
       ...(usage ? { usage } : {}),
       ...(result.summary !== undefined ? { summary: result.summary } : {}),
@@ -2665,7 +2818,7 @@ async function executeAttemptExecutionInCurrentRuntime(
   const finishedAt = workloadResult.finishedAt ?? new Date().toISOString();
   const usage = attemptUsageSummary(workloadResult.usage, engineResult.usage);
   const sample = evaluateSample({
-    subjectId: workload.subjectId,
+    candidateId: workload.candidateId,
     files: workloadResult.files,
     engineResolveFiles: workload.engineResolveFiles,
     spec: workload.spec,
@@ -2692,7 +2845,7 @@ async function executeAttemptExecutionInCurrentRuntime(
       ok: true,
       executionId: execution.id,
       purpose: execution.purpose,
-      subjectId: workload.subjectId,
+      candidateId: workload.candidateId,
       attemptIndex: workload.attemptIndex,
       sampleIndex: workload.sampleIndex,
       caseId: workload.caseId,
@@ -2749,7 +2902,7 @@ export async function executeRuntimeControlOperationSequenceInCurrentRuntime(
       ),
       startedAt,
       {
-        runSubjectPrepare: args.runtimeControlOperation.prepare ?? false,
+        runCandidatePrepare: args.runtimeControlOperation.prepare ?? false,
         workspaceFiles: args.runtimeControlOperation.inputs?.workspace ?? [],
         outputFiles: args.runtimeControlOperation.inputs?.output ?? [],
         collectWorkspace: args.runtimeControlOperation.collectWorkspace ?? false,
@@ -2872,10 +3025,10 @@ function createRuntimeControlSandboxInput(
     "enginePrivate",
     parentWorkload.engineCase ? engineCasePrivateFiles(parentWorkload.engineCase) : [],
   );
-  const subjectFiles = runtimeControlInputFiles(
+  const candidateFiles = runtimeControlInputFiles(
     request.inputs,
-    "subject",
-    parentWorkload.subjectFiles,
+    "candidate",
+    parentWorkload.candidateFiles,
   );
   const traceFiles = runtimeControlInputFiles(
     request.inputs,
@@ -2923,7 +3076,7 @@ function createRuntimeControlSandboxInput(
   const childArgs: WorkbenchExecutionRuntimeInput = {
     ...args,
     job: childJob,
-    baseFiles: subjectFiles,
+    baseFiles: candidateFiles,
     engineResolveFiles: [...publicFiles, ...privateFiles],
     engineCases: [engineCase],
     traceFiles,
@@ -2961,10 +3114,10 @@ function runtimeControlStepForOperation(
       manifests,
     ).command;
   return {
-    kind: operation.operation === "subject.run"
-      ? "subject"
-      : operation.operation === "optimizer.improve"
-        ? "optimizer"
+    kind: operation.operation === "candidate.run"
+      ? "candidate"
+      : operation.operation === "candidate.improve"
+        ? "improver"
         : "engine",
     label: operation.label ?? `${operation.operation.replace(".", "_")}_${index + 1}`,
     operation: operation.operation,
@@ -3044,8 +3197,8 @@ function isWorkbenchAdapterOperationResult(value: unknown): value is WorkbenchAd
   return record.protocol === "workbench.adapter-result.v1" &&
     (record.operation === "engine.resolve" ||
       record.operation === "engine.run" ||
-      record.operation === "subject.run" ||
-      record.operation === "optimizer.improve");
+      record.operation === "candidate.run" ||
+      record.operation === "candidate.improve");
 }
 
 function cloneSurfaceFiles(
@@ -3100,7 +3253,7 @@ async function runHostedCommandExecutionSteps(
   options: {
     capability?: ReturnType<typeof createWorkbenchExecutionCapability>;
     eventPublisher?: WorkbenchExecutionEventPublisher;
-    runSubjectPrepare?: boolean;
+    runCandidatePrepare?: boolean;
     workspaceFiles?: readonly SurfaceSnapshotFile[];
     outputFiles?: readonly SurfaceSnapshotFile[];
     collectWorkspace?: boolean;
@@ -3178,10 +3331,12 @@ async function runHostedCommandExecutionSteps(
       const stepTimeoutMs = environmentVersion
         ? environmentVersionTimeoutMs(environmentVersion)
         : 5 * 60 * 1000;
-      const shouldRunSubjectPrepare =
-        options.runSubjectPrepare ?? steps.some((step) => step.executor === "sandbox");
-      if (shouldRunSubjectPrepare) {
-        await runSubjectPrepareCommand({
+      const shouldRunCandidatePrepare =
+        options.runCandidatePrepare ??
+        (readWorkloadExecutionPurpose(workload) === "attempt" &&
+          steps.some((step) => step.executor === "sandbox"));
+      if (shouldRunCandidatePrepare) {
+        await runCandidatePrepareCommand({
           root: workspace.root,
           workload,
           execution,
@@ -3241,6 +3396,12 @@ async function runHostedCommandExecutionSteps(
             operationResult,
             `Adapter ${step.adapter?.use ?? execution.adapter.use} ${step.operation}`,
           );
+          await writeSurfaceFiles(outputDir(workspace.root), [
+            textSurfaceFile(
+              `.workbench/traces/${workload.job.id}/${step.label}/result.json`,
+              `${JSON.stringify(operationResult, null, 2)}\n`,
+            ),
+          ]);
           operationResults.push(operationResult);
           await publishCommandStepEvent(options.eventPublisher, {
             step: step.label,
@@ -3294,7 +3455,7 @@ async function runHostedCommandExecutionSteps(
   }
 }
 
-async function runSubjectPrepareCommand(args: {
+async function runCandidatePrepareCommand(args: {
   root: string;
   workload: WorkbenchRunWorkload;
   execution: WorkbenchExecutionSpec;
@@ -3306,13 +3467,13 @@ async function runSubjectPrepareCommand(args: {
   timeoutMs: number;
   eventPublisher?: WorkbenchExecutionEventPublisher;
 }): Promise<void> {
-  const command = args.workload.spec.subject.prepare?.command;
+  const command = args.workload.spec.candidate.prepare?.command;
   if (!command) {
     return;
   }
-  const role = args.execution.purpose === "improve" ? "optimizer" : "runner";
+  const role = args.execution.purpose === "improve" ? "improver" : "runner";
   await publishCommandStepEvent(args.eventPublisher, {
-    step: "subject_prepare",
+    step: "candidate_prepare",
     status: "started",
     role,
   });
@@ -3320,7 +3481,7 @@ async function runSubjectPrepareCommand(args: {
     const shellCommand = createHostedWorkloadShellCommand(
       args.root,
       command,
-      "subject_prepare",
+      "candidate_prepare",
     );
     await args.execFileAsync("sh", ["-c", shellCommand], {
       cwd: args.root,
@@ -3329,19 +3490,19 @@ async function runSubjectPrepareCommand(args: {
       timeout: args.timeoutMs,
     });
     await publishCommandStepEvent(args.eventPublisher, {
-      step: "subject_prepare",
+      step: "candidate_prepare",
       status: "succeeded",
       role,
     });
   } catch (error) {
     await publishCommandStepEvent(args.eventPublisher, {
-      step: "subject_prepare",
+      step: "candidate_prepare",
       status: "failed",
       exitCode: readExitCode(error),
       error: error instanceof Error ? error.message : String(error),
       role,
     });
-    throw new Error(`Subject prepare command failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Candidate prepare command failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -3389,11 +3550,11 @@ async function createRuntimeWorkspaceRoot(
 
 function stepEventRole(
   step: WorkbenchWorkloadStepCommand,
-): "optimizer" | "runner" | "engine" | undefined {
-  if (step.kind === "optimizer") {
-    return "optimizer";
+): "improver" | "runner" | "engine" | undefined {
+  if (step.kind === "improver") {
+    return "improver";
   }
-  if (step.kind === "subject") {
+  if (step.kind === "candidate") {
     return "runner";
   }
   if (step.kind === "engine") {
@@ -3408,10 +3569,10 @@ function adapterOperationUsageSummary(
   if (hasExplicitUsageRole(result.usage)) {
     return completeUsageSummary(result.usage);
   }
-  if (result.operation === "optimizer.improve") {
-    return assignUsageRole("optimizer", result.usage);
+  if (result.operation === "candidate.improve") {
+    return assignUsageRole("improver", result.usage);
   }
-  if (result.operation === "subject.run") {
+  if (result.operation === "candidate.run") {
     return assignUsageRole("runner", result.usage);
   }
   if (result.operation === "engine.run") {
@@ -3433,22 +3594,22 @@ function attemptUsageSummary(
 
 function hasExplicitUsageRole(usage: UsageSummary | undefined): boolean {
   const normalized = completeUsageSummary(usage);
-  return Boolean(normalized?.optimizer || normalized?.runner || normalized?.engine);
+  return Boolean(normalized?.improver || normalized?.runner || normalized?.engine);
 }
 
-function createSubjectPatchFromResult(
+function createCandidatePatchFromResult(
   result: RuntimeWorkloadResult,
   spec: GenericRunSpec,
-): WorkbenchSubjectPatch {
-  if (result.subjectPatch) {
-    return result.subjectPatch;
+): WorkbenchCandidatePatch {
+  if (result.candidatePatch) {
+    return result.candidatePatch;
   }
   const changedEditPaths = result.fileChanges
     .map(normalizeRelativePath)
     .filter(
       (filePath) =>
         !filePath.startsWith(".workbench/") &&
-        isSubjectEditPath(filePath, optimizerEdits(spec)),
+        isCandidateEditPath(filePath, improveEdits(spec)),
     );
   const changedSet = new Set(changedEditPaths);
   const files = result.files
@@ -3462,7 +3623,7 @@ function createSubjectPatchFromResult(
   };
 }
 
-function isSubjectEditPath(
+function isCandidateEditPath(
   filePath: string,
   edits: readonly string[],
 ): boolean {
@@ -3548,20 +3709,36 @@ export async function stageWorkbenchRunWorkload(
   ]);
   await fs.mkdir(inputDir(root), { recursive: true });
   await fs.mkdir(outputDir(root), { recursive: true });
+  await clearMutableWorkspaceFiles(root);
   if (purpose === "attempt") {
-    await fs.mkdir(subjectDir(root), { recursive: true });
+    await fs.mkdir(candidateDir(root), { recursive: true });
     await fs.mkdir(caseDir(root), { recursive: true });
     const engineCase = requireWorkloadEngineCase(workload, "Attempt staging");
-    await writeSurfaceFiles(subjectDir(root), workload.subjectFiles);
+    await writeSurfaceFiles(candidateDir(root), workload.candidateFiles);
     await writeSurfaceFiles(caseDir(root), engineCasePublicFiles(engineCase));
     return;
   }
   if (purpose === "improve") {
-    await fs.mkdir(subjectDir(root), { recursive: true });
-    await writeSurfaceFiles(subjectDir(root), workload.subjectFiles);
+    await writeSurfaceFiles(
+      root,
+      workload.candidateFiles.filter((file) => isMutableWorkspaceSnapshotPath(file.path)),
+    );
     await fs.mkdir(tracesDir(root), { recursive: true });
     await writeSurfaceFiles(tracesDir(root), workload.traceFiles);
   }
+}
+
+async function clearMutableWorkspaceFiles(root: string): Promise<void> {
+  const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
+  const path = await importNodeModule<any>(nodeBuiltin("path"));
+  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  await Promise.all(entries.map(async (entry: { name: string }) => {
+    const relativePath = normalizeRelativePath(entry.name);
+    if (!isMutableWorkspaceSnapshotPath(relativePath)) {
+      return;
+    }
+    await fs.rm(path.join(root, entry.name), { recursive: true, force: true });
+  }));
 }
 
 async function stageWorkbenchEnginePrivateFiles(
@@ -3681,7 +3858,7 @@ async function readHostedRunFailureResult(
 ): Promise<RuntimeWorkloadResult> {
   const traceFiles = await readRuntimeTraceFiles(root, workload);
   const outputFiles = filterRuntimeOutputFiles(
-    await readSurfaceFiles(outputDir(root)),
+    await readSurfaceFiles(outputDir(root), { ignorePath: isWorkbenchInternalOutputPath }),
   );
   const startedAt = options.startedAt ?? new Date().toISOString();
   const finishedAt = new Date().toISOString();
@@ -3712,7 +3889,7 @@ async function readWorkbenchRunWorkloadResult(
   const path = await importNodeModule<any>(nodeBuiltin("path"));
   const traceFiles = await readRuntimeTraceFiles(root, workload);
   const outputFiles = filterRuntimeOutputFiles(
-    await readSurfaceFiles(outputDir(root)),
+    await readSurfaceFiles(outputDir(root), { ignorePath: isWorkbenchInternalOutputPath }),
   );
   const outputExitCode = await readOptionalNumber(
     path.join(outputDir(root), "exit_code"),
@@ -3721,7 +3898,7 @@ async function readWorkbenchRunWorkloadResult(
   const finishedAt = new Date().toISOString();
   const purpose = readWorkloadExecutionPurpose(workload);
   const primaryOperation: WorkbenchAdapterOperation = purpose === "improve"
-    ? "optimizer.improve"
+    ? "candidate.improve"
     : "engine.run";
   const primaryResult = [...(options.operationResults ?? [])]
     .reverse()
@@ -3737,12 +3914,12 @@ async function readWorkbenchRunWorkloadResult(
   const files = [...outputFiles, ...traceFiles].sort((left, right) =>
     left.path.localeCompare(right.path),
   );
-  const subjectPatch =
-    purpose === "improve" ? primaryResult?.value as WorkbenchSubjectPatch | undefined : undefined;
+  const candidatePatch =
+    purpose === "improve" ? primaryResult?.value as WorkbenchCandidatePatch | undefined : undefined;
   const engineResult =
     purpose === "attempt" ? primaryResult?.value as WorkbenchResult | undefined : undefined;
   const declaredChanges =
-    subjectPatch?.fileChanges ??
+    candidatePatch?.fileChanges ??
     (Array.isArray(resultPayload.fileChanges)
       ? resultPayload.fileChanges.filter(
           (entry): entry is string => typeof entry === "string",
@@ -3752,7 +3929,7 @@ async function readWorkbenchRunWorkloadResult(
     files,
     fileChanges: declaredChanges,
     ...(options.operationResults ? { operationResults: [...options.operationResults] } : {}),
-    ...(subjectPatch ? { subjectPatch } : {}),
+    ...(candidatePatch ? { candidatePatch } : {}),
     ...(engineResult ? { result: engineResult } : {}),
     ...(includeResultScoring && metrics ? { metrics } : {}),
     ...(includeResultScoring && cases ? { cases } : {}),
@@ -3850,69 +4027,93 @@ async function writeWorkbenchAdapterRequest(
   await fs.mkdir(path.dirname(requestPath), { recursive: true });
   const casePrompt = workload.engineCaseSpec?.prompt;
   const adapter = step.adapter ?? execution.adapter;
-  const subjectCommand = adapterProtocolCommandSpec(workload.spec.run, "subject.run", manifests).command;
+  const candidateCommand = adapterProtocolCommandSpec(workload.spec.run, "candidate.run", manifests).command;
+  const payload = {
+    protocol: "workbench.adapter.v3",
+    id: execution.id,
+    jobId: workload.job.id,
+    operation: step.operation,
+    invocation: {
+      use: adapter.use,
+      with: adapterConfigRecord(adapter, manifests),
+      ...(adapter.auth !== undefined ? { auth: adapter.auth } : {}),
+    },
+    ...(auth !== undefined ? { auth } : {}),
+    context: {
+      benchmark: {
+        name: workload.spec.benchmark.name,
+        description: workload.spec.benchmark.description,
+      },
+      candidate: {
+        id: workload.candidateId,
+        path: workload.spec.candidate.files.path,
+        ...(workload.spec.candidate.prepare ? { prepare: { ...workload.spec.candidate.prepare } } : {}),
+        run: {
+          ...workload.spec.run,
+          command: candidateCommand,
+        },
+      },
+      ...(workload.spec.candidate.improve
+        ? { improve: { edits: [...workload.spec.candidate.improve.edits] } }
+        : {}),
+      attempt: {
+        attemptIndex: workload.attemptIndex,
+        sampleIndex: workload.sampleIndex,
+        caseId: workload.caseId,
+      },
+      case: {
+        id: workload.caseId,
+        ...(casePrompt ? { prompt: casePrompt } : {}),
+      },
+    },
+    paths: {
+      workspace: root,
+      output: outputDir(root),
+      result: workbenchAdapterOperationResultPath(outputDir(root)),
+      ...(readWorkloadExecutionPurpose(workload) === "attempt" ? { candidate: candidateDir(root) } : {}),
+      ...(workload.engineCaseSpec ? { case: caseDir(root) } : {}),
+      traces: tracesDir(root),
+      ...(step.kind === "engine" ? { enginePrivate: runtimeEnginePrivateDir(root) } : {}),
+    },
+  };
   await fs.writeFile(
     requestPath,
-    `${JSON.stringify({
-      protocol: "workbench.adapter.v3",
-      id: execution.id,
-      jobId: workload.job.id,
-      operation: step.operation,
-      invocation: {
-        use: adapter.use,
-        with: adapterConfigRecord(adapter, manifests),
-        ...(adapter.auth !== undefined ? { auth: adapter.auth } : {}),
-      },
-      ...(auth !== undefined ? { auth } : {}),
-      context: {
-        benchmark: {
-          name: workload.spec.benchmark.name,
-          description: workload.spec.benchmark.description,
-        },
-        subject: {
-          id: workload.subjectId,
-          path: workload.spec.subject.files.path,
-          ...(workload.spec.subject.prepare ? { prepare: { ...workload.spec.subject.prepare } } : {}),
-          run: {
-            ...workload.spec.run,
-            command: subjectCommand,
-          },
-        },
-        ...(workload.spec.optimizer
-          ? { optimizer: { edits: [...workload.spec.optimizer.edits] } }
-          : {}),
-        attempt: {
-          attemptIndex: workload.attemptIndex,
-          sampleIndex: workload.sampleIndex,
-          caseId: workload.caseId,
-        },
-        case: {
-          id: workload.caseId,
-          ...(casePrompt ? { prompt: casePrompt } : {}),
-        },
-      },
-      paths: {
-        workspace: root,
-        output: outputDir(root),
-        result: workbenchAdapterOperationResultPath(outputDir(root)),
-        subject: subjectDir(root),
-        ...(workload.engineCaseSpec ? { case: caseDir(root) } : {}),
-        traces: tracesDir(root),
-        ...(step.kind === "engine" ? { enginePrivate: runtimeEnginePrivateDir(root) } : {}),
-      },
-    }, null, 2)}\n`,
+    `${JSON.stringify(payload, null, 2)}\n`,
   );
+  await writeSurfaceFiles(outputDir(root), [
+    textSurfaceFile(
+      `.workbench/traces/${workload.job.id}/${step.label}/request.json`,
+      `${JSON.stringify(sanitizeAdapterRequestTracePayload(payload), null, 2)}\n`,
+    ),
+  ]);
   return requestPath;
 }
 
-function optimizerEdits(spec: GenericRunSpec): string[] {
-  return spec.optimizer?.edits ?? [];
+function sanitizeAdapterRequestTracePayload(value: unknown): Json {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeAdapterRequestTracePayload(entry)) as unknown as Json;
+  }
+  if (!value || typeof value !== "object") {
+    return (value ?? null) as Json;
+  }
+  const sanitized: Record<string, Json> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "auth" || key === "enginePrivate") {
+      continue;
+    }
+    sanitized[key] = sanitizeAdapterRequestTracePayload(entry);
+  }
+  return sanitized as unknown as Json;
 }
 
-function requireOptimizerEdits(spec: GenericRunSpec): string[] {
-  const edits = optimizerEdits(spec);
+function improveEdits(spec: GenericRunSpec): string[] {
+  return spec.candidate.improve?.edits ?? [];
+}
+
+function requireImproveEdits(spec: GenericRunSpec): string[] {
+  const edits = improveEdits(spec);
   if (edits.length === 0) {
-    throw new Error("Optimizer YAML must declare at least one entry in edits.");
+    throw new Error("Candidate improve configuration must declare at least one entry in edits.");
   }
   return edits;
 }
@@ -4030,8 +4231,8 @@ function requireWorkloadEngineCase(
   return workload.engineCase;
 }
 
-function subjectDir(root: string): string {
-  return `${inputDir(root)}/subject`;
+function candidateDir(root: string): string {
+  return `${inputDir(root)}/candidate`;
 }
 
 function caseDir(root: string): string {
@@ -4078,7 +4279,10 @@ async function writeSurfaceFiles(
   }
 }
 
-async function readSurfaceFiles(root: string): Promise<SurfaceSnapshotFile[]> {
+async function readSurfaceFiles(
+  root: string,
+  options: { ignorePath?: (path: string) => boolean } = {},
+): Promise<SurfaceSnapshotFile[]> {
   const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
   const path = await importNodeModule<any>(nodeBuiltin("path"));
   const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -4089,6 +4293,12 @@ async function readSurfaceFiles(root: string): Promise<SurfaceSnapshotFile[]> {
       .catch(() => []);
     for (const entry of entries) {
       const absolutePath = path.join(directory, entry.name);
+      const relativePath = normalizeRelativePath(
+        path.relative(root, absolutePath).replace(/\\/gu, "/"),
+      );
+      if (options.ignorePath?.(relativePath)) {
+        continue;
+      }
       if (entry.isDirectory()) {
         await walk(absolutePath);
         continue;
@@ -4096,11 +4306,17 @@ async function readSurfaceFiles(root: string): Promise<SurfaceSnapshotFile[]> {
       if (!entry.isFile()) {
         continue;
       }
-      const relativePath = normalizeRelativePath(
-        path.relative(root, absolutePath).replace(/\\/gu, "/"),
-      );
-      const body = await fs.readFile(absolutePath);
-      const stats = await fs.stat(absolutePath);
+      let body: Buffer;
+      let stats: { mode: number };
+      try {
+        body = await fs.readFile(absolutePath);
+        stats = await fs.stat(absolutePath);
+      } catch (error) {
+        if (isVanishedWalkEntry(error)) {
+          continue;
+        }
+        throw error;
+      }
       const content = encodeSurfaceSnapshotContent(body, utf8Decoder);
       files.push({
         path: relativePath,
@@ -4113,6 +4329,11 @@ async function readSurfaceFiles(root: string): Promise<SurfaceSnapshotFile[]> {
   }
   await walk(root);
   return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function isVanishedWalkEntry(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 function encodeSurfaceSnapshotContent(
@@ -4333,7 +4554,7 @@ function failWorkbenchRunJob(
 }
 
 function evaluateSample(args: {
-  subjectId: string;
+  candidateId: string;
   files: readonly SurfaceSnapshotFile[];
   engineResolveFiles: readonly SurfaceSnapshotFile[];
   spec: GenericRunSpec;
@@ -4358,7 +4579,13 @@ function evaluateSample(args: {
   if (metrics.score === undefined) {
     metrics.score = sampleScore;
   }
-  const cases = args.workload.cases?.length ? args.workload.cases : undefined;
+  const cases = runtimeTimedCaseResults({
+    caseId: args.caseId,
+    status: "completed",
+    durationMs,
+    metrics,
+    cases: args.workload.cases,
+  });
   const feedback = {
     ...(args.workload.summary !== undefined
       ? { summary: args.workload.summary }
@@ -4371,10 +4598,10 @@ function evaluateSample(args: {
   return {
     id: `${args.caseId}__sample_${String(args.sampleIndex + 1).padStart(3, "0")}`,
     index: args.sampleIndex,
-    subject: {
-      id: args.subjectId,
-      kind: "subject",
-      label: args.subjectId,
+    candidate: {
+      id: args.candidateId,
+      kind: "candidate",
+      label: args.candidateId,
     },
     status: "completed",
     startedAt: args.startedAt,
@@ -4382,7 +4609,7 @@ function evaluateSample(args: {
     durationMs,
     metrics,
     ...(usage ? { usage } : {}),
-    ...(cases ? { cases } : {}),
+    cases,
     feedback,
   };
 }
@@ -4394,7 +4621,7 @@ function normalizeSampleJobOutput(
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (record.ok !== true || typeof record.subjectId !== "string") {
+  if (record.ok !== true || typeof record.candidateId !== "string") {
     return null;
   }
   const files = Array.isArray(record.files)
@@ -4411,7 +4638,7 @@ function normalizeSampleJobOutput(
     return null;
   }
   return {
-    subjectId: record.subjectId,
+    candidateId: record.candidateId,
     attemptIndex: record.attemptIndex,
     sample,
     fileChanges: Array.isArray(record.fileChanges)
@@ -4434,8 +4661,64 @@ function normalizeEvaluationSampleOutputs(args: {
 }): HostedMaterializedSampleOutput[] {
   return args.jobs.flatMap((job): HostedMaterializedSampleOutput[] => {
     const output = normalizeSampleJobOutput(job.output);
-    return output ? [{ jobs: [job], output }] : [];
+    if (!output) {
+      return [];
+    }
+    const caseId = readJobString(job.input, "caseId") ?? output.sample.cases?.[0]?.id ?? null;
+    const durationMs = runtimeJobDurationMs(job) ?? output.sample.durationMs;
+    const sample = caseId && typeof durationMs === "number" && Number.isFinite(durationMs)
+      ? {
+          ...output.sample,
+          cases: runtimeTimedCaseResults({
+            caseId,
+            status: output.sample.status === "error" ? "error" : "completed",
+            durationMs,
+            metrics: output.sample.metrics ?? {},
+            cases: output.sample.cases,
+          }),
+        }
+      : output.sample;
+    return [{
+      jobs: [job],
+      output: {
+        ...output,
+        sample,
+      },
+    }];
   });
+}
+
+function runtimeTimedCaseResults(args: {
+  caseId: string;
+  status: EvalCaseStatus;
+  durationMs: number;
+  metrics: Record<string, number>;
+  cases?: EvalCaseResult[];
+}): EvalCaseResult[] {
+  const cases = args.cases?.length
+    ? args.cases
+    : [{
+        id: args.caseId,
+        status: args.status,
+        metrics: args.metrics,
+      }];
+  return cases.map((entry) => ({
+    ...entry,
+    status: entry.status ?? args.status,
+    metrics: entry.metrics ?? args.metrics,
+    durationMs: args.durationMs,
+  }));
+}
+
+function runtimeJobDurationMs(job: HostedWorkbenchJob): number | undefined {
+  if (typeof job.startedAt !== "string" || typeof job.finishedAt !== "string") {
+    return undefined;
+  }
+  const startedMs = Date.parse(job.startedAt);
+  const finishedMs = Date.parse(job.finishedAt);
+  return Number.isFinite(startedMs) && Number.isFinite(finishedMs)
+    ? Math.max(0, finishedMs - startedMs)
+    : undefined;
 }
 
 function meanFinite(values: readonly unknown[]): number | undefined {
@@ -4478,14 +4761,14 @@ function withJobUsage(
   };
 }
 
-function normalizeSubjectRevisionJobOutput(
+function normalizeCandidateRevisionJobOutput(
   value: unknown,
-): HostedSubjectRevisionJobOutput | null {
+): HostedCandidateRevisionJobOutput | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (record.ok !== true || typeof record.subjectId !== "string") {
+  if (record.ok !== true || typeof record.candidateId !== "string") {
     return null;
   }
   const files = Array.isArray(record.files)
@@ -4499,7 +4782,7 @@ function normalizeSubjectRevisionJobOutput(
   }
   const usage = normalizeUsageSummary(record.usage);
   return {
-    subjectId: record.subjectId,
+    candidateId: record.candidateId,
     attemptIndex: record.attemptIndex,
     baseId:
       typeof record.baseId === "string" && record.baseId.length > 0
@@ -4523,7 +4806,7 @@ function normalizeSubjectRevisionJobOutput(
 
 function errorEvaluationSamplesFromJobs(
   jobs: readonly HostedWorkbenchJob[],
-  subjectId: string,
+  candidateId: string,
   attemptIndex: number,
   completedSampleKeys: ReadonlySet<string>,
 ): EvaluationSampleRecord[] {
@@ -4536,13 +4819,13 @@ function errorEvaluationSamplesFromJobs(
     groups.set(key, [...(groups.get(key) ?? []), job]);
   }
   return [...groups.values()]
-    .map((group) => errorEvaluationSampleFromJobGroup(group, subjectId, attemptIndex))
+    .map((group) => errorEvaluationSampleFromJobGroup(group, candidateId, attemptIndex))
     .filter((sample): sample is EvaluationSampleRecord => sample !== null);
 }
 
 function errorEvaluationSampleFromJobGroup(
   jobs: readonly HostedWorkbenchJob[],
-  subjectId: string,
+  candidateId: string,
   attemptIndex: number,
 ): EvaluationSampleRecord | null {
   const job = jobs[0];
@@ -4556,25 +4839,27 @@ function errorEvaluationSampleFromJobGroup(
   }
   const startedAt = minIsoTimestamp(jobs.map((entry) => entry.startedAt ?? entry.createdAt));
   const finishedAt = maxIsoTimestamp(jobs.map((entry) => entry.finishedAt ?? entry.updatedAt ?? entry.startedAt));
+  const durationMs = startedAt && finishedAt
+    ? Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt))
+    : undefined;
   const error = summarizeEvaluationJobErrors(jobs) ?? "Evaluation job did not produce a valid sample.";
   return {
     id: `${caseId}__sample_${String(sampleIndex + 1).padStart(3, "0")}`,
     index: sampleIndex,
-    subject: {
-      id: subjectId,
-      kind: "subject",
-      label: subjectId,
+    candidate: {
+      id: candidateId,
+      kind: "candidate",
+      label: candidateId,
     },
     status: "error",
     ...(startedAt ? { startedAt } : {}),
     ...(finishedAt ? { finishedAt } : {}),
-    ...(startedAt && finishedAt
-      ? { durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)) }
-      : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
     ...(error ? { error } : {}),
     cases: [{
       id: caseId,
       status: "error",
+      ...(durationMs !== undefined ? { durationMs } : {}),
       metrics: {},
       ...(error ? { feedback: { summary: error } } : {}),
     }],
@@ -4647,17 +4932,17 @@ function compareSampleOutputs(
 }
 
 function createEvaluationRecord(
-  subjectId: string,
-  subjectName: string | null,
+  candidateId: string,
+  candidateName: string | null,
   rawSamples: EvaluationSampleRecord[],
 ): EvaluationRecord {
   const samples = mergeEvaluationSampleRecords(rawSamples).map((sample) =>
-    subjectName
+    candidateName
       ? {
           ...sample,
-          subject: {
-            ...sample.subject,
-            label: subjectName,
+          candidate: {
+            ...sample.candidate,
+            label: candidateName,
           },
         }
       : sample,
@@ -4680,10 +4965,10 @@ function createEvaluationRecord(
   const errorSampleCount = samples.filter((sample) => sample.status === "error")
     .length;
   return {
-    subject: {
-      id: subjectId,
-      kind: "subject",
-      ...(subjectName ? { label: subjectName } : {}),
+    candidate: {
+      id: candidateId,
+      kind: "candidate",
+      ...(candidateName ? { label: candidateName } : {}),
     },
     status:
       samples.length > 0 && completedSampleCount === samples.length
@@ -4706,7 +4991,7 @@ function createEvaluationRecord(
   };
 }
 
-function normalizedSubjectDisplayName(value: string | undefined): string | null {
+function normalizedCandidateDisplayName(value: string | undefined): string | null {
   const normalized = value?.trim();
   return normalized ? normalized : null;
 }
@@ -4772,7 +5057,7 @@ function mergeEvaluationSampleGroup(
   return {
     id: `sample_${String(first.index + 1).padStart(3, "0")}`,
     index: first.index,
-    subject: first.subject,
+    candidate: first.candidate,
     status: mergeEvaluationSampleStatus(group),
     ...(startedAt ? { startedAt } : {}),
     ...(finishedAt ? { finishedAt } : {}),
@@ -4891,49 +5176,39 @@ function aggregateCaseStatus(
   return undefined;
 }
 
-function evaluationMeanMetrics(
-  evaluation: EvaluationRecord,
-): Record<string, number> | undefined {
-  const entries = Object.entries(evaluation.metrics ?? {}).filter(
-    (entry): entry is [string, MetricStats] => Number.isFinite(entry[1].mean),
-  );
-  return entries.length > 0
-    ? Object.fromEntries(
-        entries.map(([key, stats]) => [key, Number(stats.mean.toFixed(3))]),
-      )
-    : undefined;
-}
-
-function selectSubject(args: {
-  subjects: readonly SubjectRecord[];
-  previousSubject: SubjectRecord | null;
-}): SubjectRecord | null {
-  let selected = args.previousSubject;
-  for (const subject of args.subjects) {
-    if (!selected || hasHigherScore(subject, selected)) {
-      selected = subject;
+function selectCandidate(args: {
+  candidates: readonly CandidateRecord[];
+  previousCandidate: CandidateRecord | null;
+}): CandidateRecord | null {
+  let selected = args.previousCandidate;
+  for (const candidate of args.candidates) {
+    if (!selected || hasHigherScore(candidate, selected)) {
+      selected = candidate;
     }
   }
   return selected;
 }
 
 function hasHigherScore(
-  subject: SubjectRecord,
-  incumbent: SubjectRecord,
+  candidate: CandidateRecord,
+  incumbent: CandidateRecord,
 ): boolean {
-  const subjectValue = readMetric(subject, "score");
-  const incumbentValue = readMetric(incumbent, "score");
-  if (subjectValue == null) {
+  const candidateValue = readEvaluationMean(candidate.eval, "score");
+  const incumbentValue = readEvaluationMean(incumbent.eval, "score");
+  if (candidateValue == null) {
     return false;
   }
   if (incumbentValue == null) {
     return true;
   }
-  return subjectValue > incumbentValue;
+  return candidateValue > incumbentValue;
 }
 
-function readMetric(subject: SubjectRecord, metric: string): number | null {
-  const direct = subject.metrics?.[metric];
+function readEvaluationMean(
+  evaluation: EvaluationRecord | undefined,
+  metric: string,
+): number | null {
+  const direct = evaluation?.metrics?.[metric]?.mean;
   return typeof direct === "number" && Number.isFinite(direct) ? direct : null;
 }
 
@@ -5002,7 +5277,7 @@ function detectMimeType(filePath: string): string | null {
 
 function resolvePreviewKind(
   filePath: string,
-): SubjectFileSummary["preview_kind"] {
+): CandidateFileSummary["preview_kind"] {
   const lower = filePath.toLowerCase();
   if (lower.endsWith(".md") || lower.endsWith(".markdown")) {
     return "markdown";
@@ -5077,7 +5352,7 @@ function isEvaluationSampleRecord(
     !Array.isArray(value) &&
     typeof record.id === "string" &&
     typeof record.index === "number" &&
-    typeof record.subject === "object" &&
+    typeof record.candidate === "object" &&
     isEvaluationSampleStatus(record.status) &&
     hasOperationalCaseStatuses(record.cases),
   );

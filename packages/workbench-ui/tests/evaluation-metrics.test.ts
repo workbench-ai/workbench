@@ -5,10 +5,10 @@ import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-col
 
 import {
   buildEvaluationMetricDescriptors,
+  buildEvaluationMetricData,
   buildEvaluationTradeoffData,
   buildEvaluationTradeoffPairs,
   formatEvaluationMetricStats,
-  getEvaluationMetricChartColor,
   selectPrimaryEvaluationMetrics,
 } from "../src/lib/evaluation-metrics";
 import type {
@@ -30,58 +30,39 @@ describe("evaluation metric helpers", () => {
     expect(source).not.toContain('"rubric"');
   });
 
-  test("keeps semantic colors for the shared performance, speed, and cost roles", () => {
-    const descriptors: EvaluationMetricDescriptor[] = [
-      {
-        id: "score",
-        label: "Score",
-        direction: "higher",
-        kind: "number",
-        group: "metric",
-        primary: true,
-        semanticRole: "performance",
-      },
-      {
-        id: "durationMs",
-        label: "Duration",
-        direction: "lower",
-        kind: "duration_ms",
-        group: "metric",
-        primary: true,
-        semanticRole: "speed",
-      },
-      {
-        id: "usage.total.costUsd",
-        label: "Execution Cost / Sample",
-        direction: "lower",
-        kind: "currency_usd",
-        group: "metric",
-        primary: true,
-        semanticRole: "cost",
-      },
-    ];
-
-    expect(getEvaluationMetricChartColor(descriptors[0]!, 0)).toBe("var(--chart-performance)");
-    expect(getEvaluationMetricChartColor(descriptors[1]!, 1)).toBe("var(--chart-speed)");
-    expect(getEvaluationMetricChartColor(descriptors[2]!, 2)).toBe("var(--chart-cost)");
-  });
-
-  test("rotates scatter points through the shared categorical palette", () => {
+  test("colors metric rows and scatter points by candidate", () => {
     const evaluations: LabeledEvaluationScorecard[] = [
-      evaluationRecord("current", "Source subject", 1, 12_000),
-      evaluationRecord("degraded", "Reduced radius", 0.8, 14_000),
-      evaluationRecord("cheaper", "Cheaper run", 0.95, 13_000),
+      evaluationRecord("skill_v1_opus", "Skill", 1, 12_000, {}, {
+        candidateId: "skill_v1",
+        candidateVersion: 1,
+        candidateRunName: "Claude Code w/ Opus 4.6",
+      }),
+      evaluationRecord("skill_v1_codex", "Skill", 0.8, 14_000, {}, {
+        candidateId: "skill_v1",
+        candidateVersion: 1,
+        candidateRunName: "Codex w/ GPT-5.4",
+      }),
+      evaluationRecord("skill_v3_opus", "Skill", 0.95, 13_000, {}, {
+        candidateId: "skill_v3",
+        candidateVersion: 3,
+        candidateRunName: "Claude Code w/ Opus 4.6",
+      }),
     ];
+    const candidateColorById = new Map([
+      ["skill_v1", getCategoricalChartColor(0)],
+      ["skill_v3", getCategoricalChartColor(1)],
+    ]);
+    const scoreDescriptor: EvaluationMetricDescriptor = {
+      id: "score",
+      label: "Score",
+      direction: "higher",
+      kind: "number",
+      group: "metric",
+      primary: true,
+      semanticRole: "performance",
+    };
     const tradeoffPair = buildEvaluationTradeoffPairs([
-      {
-        id: "score",
-        label: "Score",
-        direction: "higher",
-        kind: "number",
-        group: "metric",
-        primary: true,
-        semanticRole: "performance",
-      },
+      scoreDescriptor,
       {
         id: "durationMs",
         label: "Duration",
@@ -94,11 +75,49 @@ describe("evaluation metric helpers", () => {
     ])[0]!;
 
     expect(
-      buildEvaluationTradeoffData(evaluations, tradeoffPair).map((datum) => datum.color),
+      buildEvaluationMetricData(evaluations, scoreDescriptor, candidateColorById).map((datum) => datum.color),
     ).toEqual([
       getCategoricalChartColor(0),
       getCategoricalChartColor(1),
-      getCategoricalChartColor(2),
+      getCategoricalChartColor(0),
+    ]);
+    expect(
+      buildEvaluationTradeoffData(evaluations, tradeoffPair, candidateColorById).map((datum) => datum.color),
+    ).toEqual([
+      getCategoricalChartColor(0),
+      getCategoricalChartColor(0),
+      getCategoricalChartColor(1),
+    ]);
+  });
+
+  test("excludes incomplete evaluations from comparison charts", () => {
+    const complete = evaluationRecord("complete", "Skill", 0.7, 12_000);
+    const errorBase = evaluationRecord("error", "Skill", 1, 1_000);
+    const error = {
+      ...errorBase,
+      status: "error" as const,
+      completedSampleCount: 0,
+      errorSampleCount: 1,
+      evaluation: {
+        ...errorBase.evaluation,
+        status: "error" as const,
+        completedSampleCount: 0,
+        errorSampleCount: 1,
+      },
+    };
+    const scoreDescriptor: EvaluationMetricDescriptor = {
+      id: "score",
+      label: "Score",
+      direction: "higher",
+      kind: "number",
+      group: "metric",
+      primary: true,
+      semanticRole: "performance",
+    };
+
+    expect(buildEvaluationMetricDescriptors([error])).toEqual([]);
+    expect(buildEvaluationMetricData([complete, error], scoreDescriptor).map((datum) => datum.evaluationId)).toEqual([
+      "complete",
     ]);
   });
 
@@ -130,7 +149,7 @@ describe("evaluation metric helpers", () => {
 
   test("classifies score as primary and leaves other metrics generic", () => {
     const descriptors = buildEvaluationMetricDescriptors([
-      evaluationRecord("current", "Source subject", 1, 12_000, {
+      evaluationRecord("current", "Source candidate", 1, 12_000, {
         case_completion: stats(0.8),
       }),
     ]);
@@ -183,9 +202,15 @@ function evaluationRecord(
   score: number,
   durationMs: number,
   extraMetrics: Record<string, ReturnType<typeof stats>> = {},
+  options: {
+    candidateId?: string;
+    candidateVersion?: number;
+    candidateRunName?: string;
+  } = {},
 ): LabeledEvaluationScorecard {
+  const candidateId = options.candidateId ?? id;
   const evaluation = {
-    subject: { id, kind: "subject" as const, label },
+    candidate: { id: candidateId, kind: "candidate" as const, label },
     status: "completed" as const,
     sampleCount: 1,
     completedSampleCount: 1,
@@ -198,7 +223,10 @@ function evaluationRecord(
     id,
     runId: "run_test",
     benchmarkFingerprint: "3333333333333333333333333333333333333333333333333333333333333333",
-    subjectId: id,
+    candidateId,
+    candidateName: label,
+    candidateVersion: options.candidateVersion ?? 1,
+    candidateRunName: options.candidateRunName,
     createdAt: "2026-04-27T00:00:00.000Z",
     updatedAt: "2026-04-27T00:00:00.000Z",
     label,

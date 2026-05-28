@@ -1,5 +1,5 @@
 import type {
-  SubjectSummary,
+  CandidateSummary,
   EvaluationSummary,
   HostedWorkbenchJob,
   RunSummary,
@@ -7,23 +7,23 @@ import type {
 
 type BadgeTone = "success" | "warning" | "destructive" | "outline" | "accent";
 type WorkbenchDisplayStatus =
-  | SubjectSummary["status"]
+  | CandidateSummary["status"]
   | EvaluationSummary["status"]
   | HostedWorkbenchJob["status"]
   | RunSummary["status"]
   | RunSummary["outcome"];
 
-interface SubjectSelectionLabelOptions {
-  summary: SubjectSummary;
-  baseSummary?: SubjectSummary | null;
+interface CandidateSelectionLabelOptions {
+  summary: CandidateSummary;
+  baseSummary?: CandidateSummary | null;
   active?: boolean;
   details?: Array<string | null | undefined>;
 }
 
-type SubjectDisplayInput =
+type CandidateDisplayInput =
   | string
-  | Pick<SubjectSummary, "id" | "name">
-  | Pick<EvaluationSummary, "subjectId" | "subjectName">
+  | Pick<CandidateSummary, "id" | "name" | "version">
+  | Pick<EvaluationSummary, "candidateId" | "candidateName" | "candidateVersion">
   | null
   | undefined;
 
@@ -31,39 +31,94 @@ export function shortId(value: string | null | undefined): string | null {
   return value ? value.slice(0, 12) : null;
 }
 
-export function formatSubjectDisplayName(subject: SubjectDisplayInput): string {
-  if (!subject) {
-    return "Unknown subject";
+export function formatCandidateDisplayName(candidate: CandidateDisplayInput): string {
+  if (!candidate) {
+    return "Unknown candidate";
   }
-  if (typeof subject === "string") {
-    return shortId(subject) ?? subject;
+  if (typeof candidate === "string") {
+    return shortId(candidate) ?? candidate;
   }
   const name =
-    "name" in subject
-      ? normalizedDisplayName(subject.name)
-      : "subjectName" in subject
-        ? normalizedDisplayName(subject.subjectName)
+    "name" in candidate
+      ? normalizedDisplayName(candidate.name)
+      : "candidateName" in candidate
+        ? normalizedDisplayName(candidate.candidateName)
+        : null;
+  const version =
+    "version" in candidate
+      ? candidate.version
+      : "candidateVersion" in candidate
+        ? candidate.candidateVersion
+        : null;
+  if (name) {
+    return typeof version === "number" && Number.isInteger(version) && version > 0
+      ? `${name} v${version}`
+      : name;
+  }
+  const id =
+    "id" in candidate
+      ? candidate.id
+      : "candidateId" in candidate
+        ? candidate.candidateId
+        : null;
+  return shortId(id) ?? id ?? "Unknown candidate";
+}
+
+export function formatCandidateName(candidate: CandidateDisplayInput): string {
+  if (!candidate) {
+    return "Unknown candidate";
+  }
+  if (typeof candidate === "string") {
+    return shortId(candidate) ?? candidate;
+  }
+  const name =
+    "name" in candidate
+      ? normalizedDisplayName(candidate.name)
+      : "candidateName" in candidate
+        ? normalizedDisplayName(candidate.candidateName)
         : null;
   if (name) {
     return name;
   }
   const id =
-    "id" in subject
-      ? subject.id
-      : "subjectId" in subject
-        ? subject.subjectId
+    "id" in candidate
+      ? candidate.id
+      : "candidateId" in candidate
+        ? candidate.candidateId
         : null;
-  return shortId(id) ?? id ?? "Unknown subject";
+  return shortId(id) ?? id ?? "Unknown candidate";
 }
 
-export function formatSubjectSecondaryLabel(
-  summary: SubjectSummary,
-  baseSummary?: SubjectSummary | null,
+export function formatCandidateVersionLabel(candidate: CandidateDisplayInput): string | null {
+  if (!candidate || typeof candidate === "string") {
+    return null;
+  }
+  const version =
+    "version" in candidate
+      ? candidate.version
+      : "candidateVersion" in candidate
+        ? candidate.candidateVersion
+        : null;
+  return typeof version === "number" && Number.isInteger(version) && version > 0
+    ? `v${version}`
+    : null;
+}
+
+export function formatCandidateSecondaryLabel(
+  summary: CandidateSummary,
+  baseSummary?: CandidateSummary | null,
 ): string {
   const baseId = summary.baseId && summary.baseId !== summary.id ? summary.baseId : null;
-  return baseId
-    ? `From ${baseSummary ? formatSubjectDisplayName(baseSummary) : shortId(baseId) ?? baseId}`
-    : "Initial";
+  if (!baseId) {
+    return "Initial";
+  }
+  if (!baseSummary) {
+    return `From ${shortId(baseId) ?? baseId}`;
+  }
+  return `From ${[
+    formatCandidateName(baseSummary),
+    formatCandidateVersionLabel(baseSummary),
+  ].filter(Boolean).join(" · ")}`;
 }
 
 export function formatWorkspaceLabel(value: string | null | undefined): string {
@@ -151,19 +206,19 @@ export function formatMetricSummary(metrics: Record<string, number> | undefined)
     .join(" · ");
 }
 
-export function formatSubjectSelectionLabel({
+export function formatCandidateSelectionLabel({
   summary,
   baseSummary = null,
   active = false,
   details = [],
-}: SubjectSelectionLabelOptions): string {
+}: CandidateSelectionLabelOptions): string {
   return [
-    formatSubjectDisplayName(summary),
-    `Subject ID ${shortId(summary.id) ?? summary.id}`,
-    formatSubjectSecondaryLabel(summary, baseSummary),
+    formatCandidateDisplayName(summary),
+    `Candidate ID ${shortId(summary.id) ?? summary.id}`,
+    formatCandidateSecondaryLabel(summary, baseSummary),
     statusLabel(summary.status),
     ...details,
-    active ? "active subject" : null,
+    active ? "active candidate" : null,
   ]
     .filter(Boolean)
     .join(". ");

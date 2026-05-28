@@ -52,9 +52,9 @@ export function SourceYamlSkeleton() {
   );
 }
 
-export function SubjectManifestSkeleton() {
+export function CandidateManifestSkeleton() {
   return (
-    <div className="grid min-w-0 gap-3" aria-busy="true" data-testid="subject-manifest-loading">
+    <div className="grid min-w-0 gap-3" aria-busy="true" data-testid="candidate-manifest-loading">
       <Skeleton className="h-5 w-48 max-w-full rounded-full" />
       <div className="rounded-xl border border-border/70 bg-background p-3">
         <SkeletonCopyBlock rows={6} />
@@ -134,7 +134,7 @@ export function BenchmarkSurfaceSkeleton() {
         </div>
       </SurfaceSection>
 
-      <SurfaceSection title="Subject">
+      <SurfaceSection title="Candidate">
         <div className="grid gap-4">
           <Skeleton className="h-4 w-48" />
           <Skeleton className="h-4 w-72 max-w-full" />
@@ -145,9 +145,9 @@ export function BenchmarkSurfaceSkeleton() {
   );
 }
 
-export function SubjectArchiveSkeleton() {
+export function CandidateArchiveSkeleton() {
   return (
-    <div className="grid gap-3" aria-busy="true" data-testid="subject-archive-loading">
+    <div className="grid gap-3" aria-busy="true" data-testid="candidate-archive-loading">
       {Array.from({ length: 3 }, (_, index) => (
         <div key={index} className="grid gap-2 rounded-lg border border-border p-4">
           <div className="flex items-start justify-between gap-3">
@@ -168,13 +168,13 @@ export function SubjectArchiveSkeleton() {
   );
 }
 
-export function SubjectFilesSurfaceSkeleton() {
+export function CandidateFilesSurfaceSkeleton() {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-6">
       <SurfaceSection
-        title="Subject Files"
+        title="Candidate Files"
         icon={FolderOpenIcon}
-        description="Inspect the subject file snapshot."
+        description="Inspect the candidate file snapshot."
         className="flex min-h-0 flex-1 flex-col"
       >
         <SkeletonBadgeRow count={3} />
@@ -207,9 +207,9 @@ export function EvaluationCaseRowsSkeleton({
   );
 }
 
-export function SubjectOverviewSkeleton() {
+export function CandidateOverviewSkeleton() {
   return (
-    <div className="grid gap-6" aria-busy="true" data-testid="subject-overview-loading">
+    <div className="grid gap-6" aria-busy="true" data-testid="candidate-overview-loading">
       <SurfaceSection title="Overview" icon={ListChecksIcon}>
         <FactsSkeleton />
       </SurfaceSection>

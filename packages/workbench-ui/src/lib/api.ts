@@ -8,6 +8,7 @@ export async function requestJson<T>(
   init?: RequestInit,
 ): Promise<T> {
   const response = await fetch(url, {
+    cache: "no-store",
     ...init,
     headers: {
       "content-type": "application/json",

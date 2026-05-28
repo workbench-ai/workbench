@@ -32,7 +32,7 @@ const NUMERIC_USAGE_FIELDS = [
 ] as const satisfies readonly (keyof ExecutionUsage)[];
 
 const USAGE_ROLES = [
-  "optimizer",
+  "improver",
   "runner",
   "engine",
 ] as const satisfies readonly ExecutionRole[];
@@ -84,18 +84,18 @@ export function completeUsageSummary(
   if (!usage) {
     return undefined;
   }
-  const optimizer = usage.optimizer ? normalizeExecutionUsage(usage.optimizer) : undefined;
+  const improver = usage.improver ? normalizeExecutionUsage(usage.improver) : undefined;
   const runner = usage.runner ? normalizeExecutionUsage(usage.runner) : undefined;
   const engine = usage.engine ? normalizeExecutionUsage(usage.engine) : undefined;
   const roleTotal = mergeExecutionUsage([
-    optimizer,
+    improver,
     runner,
     engine,
   ]);
   const total = roleTotal ?? normalizeExecutionUsage(usage.total);
   return compactUsageSummary({
     ...(total ? { total } : {}),
-    ...(optimizer ? { optimizer } : {}),
+    ...(improver ? { improver } : {}),
     ...(runner ? { runner } : {}),
     ...(engine ? { engine } : {}),
   });
@@ -104,12 +104,12 @@ export function completeUsageSummary(
 export function normalizeUsageSummary(value: unknown): UsageSummary | undefined {
   const record = jsonRecord(value);
   const total = normalizeExecutionUsage(record.total);
-  const optimizer = normalizeExecutionUsage(record.optimizer);
+  const improver = normalizeExecutionUsage(record.improver);
   const runner = normalizeExecutionUsage(record.runner);
   const engine = normalizeExecutionUsage(record.engine);
   return completeUsageSummary({
     ...(total ? { total } : {}),
-    ...(optimizer ? { optimizer } : {}),
+    ...(improver ? { improver } : {}),
     ...(runner ? { runner } : {}),
     ...(engine ? { engine } : {}),
   });
@@ -127,7 +127,7 @@ export function mergeUsageSummaries(
   }
   return compactUsageSummary({
     total: mergeExecutionUsage(entries.map((entry) => entry.total)),
-    optimizer: mergeExecutionUsage(entries.map((entry) => entry.optimizer)),
+    improver: mergeExecutionUsage(entries.map((entry) => entry.improver)),
     runner: mergeExecutionUsage(entries.map((entry) => entry.runner)),
     engine: mergeExecutionUsage(entries.map((entry) => entry.engine)),
   });
@@ -136,11 +136,11 @@ export function mergeUsageSummaries(
 export function mergeUsageRoles(
   roles: Partial<Record<ExecutionRole, UsageSummary | undefined>>,
 ): UsageSummary | undefined {
-  const optimizer = completeUsageSummary(roles.optimizer);
+  const improver = completeUsageSummary(roles.improver);
   const runner = completeUsageSummary(roles.runner);
   const engine = completeUsageSummary(roles.engine);
   return completeUsageSummary({
-    optimizer: optimizer?.optimizer ?? optimizer?.total,
+    improver: improver?.improver ?? improver?.total,
     runner: runner?.runner ?? runner?.total,
     engine: engine?.engine ?? engine?.total,
   });

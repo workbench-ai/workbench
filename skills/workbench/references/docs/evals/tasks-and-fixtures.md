@@ -1,6 +1,6 @@
 # Tasks And Fixtures
 
-Tasks are part of the Workbench project and are pushed to Workbench Cloud by `workbench push` when hosted execution is needed. They are frozen onto each run. For the built-in `workbench` engine, public files are staged under `/workspace/input/case` before the subject runs, verifier files are staged under `/workspace/private/engine` only for scoring, and subject adapters never receive `paths.enginePrivate`. The default shared grading mode scores the runner-mutated child sandbox; `engine.with.grading.isolation: separate` scores a second child sandbox seeded with runner workspace/output artifacts.
+Tasks are part of the Workbench project and are pushed to Workbench Cloud by `workbench push` when hosted execution is needed. They are frozen onto each run. For the built-in `workbench` engine, public files are staged under `/workspace/input/case` before the candidate runs, verifier files are staged under `/workspace/private/engine` only for scoring, and candidate adapters never receive `paths.enginePrivate`. The default shared grading mode scores the runner-mutated child sandbox; `engine.with.grading.isolation: separate` scores a second child sandbox seeded with runner workspace/output artifacts.
 
 Native Workbench task directories are source input for the built-in `workbench` engine. The engine owns native task parsing. For native task packages, omit `engine.with.tasks` to use the default `tasks/` directory. Use explicit `engine.with.tasks.path` only when the native task directory is not the default.
 
@@ -63,9 +63,9 @@ solution:
 - scoring rubrics
 - expected values and tolerances
 
-Keep answer keys, extracted goldens, private rubrics, tolerances, and scoring scripts out of `files/`. If a subject can read the file and directly copy the target answer, the eval is measuring lookup behavior rather than task performance.
+Keep answer keys, extracted goldens, private rubrics, tolerances, and scoring scripts out of `files/`. If a candidate can read the file and directly copy the target answer, the eval is measuring lookup behavior rather than task performance.
 
-Do not put mutable prompts, templates, or scripts in tasks when Workbench should improve them. Put those files under the subject root instead; subjects can copy or install them into `/workspace` with `prepare.command`. Do not depend on case files appearing in the workspace root.
+Do not put mutable prompts, templates, or scripts in tasks when Workbench should improve them. Put those files under the candidate root instead; candidates can copy or install them into `/workspace` with `prepare.command`. Do not depend on case files appearing in the workspace root.
 
 Every smoke task should contain verifier material that lets the engine produce a numeric result. Empty `tests/` folders are placeholders only; they should not be treated as passing tasks.
 
@@ -83,8 +83,8 @@ tests/
 solution/
 ```
 
-The `harbor` engine adapter is only the Workbench bridge. Harbor itself parses this source and owns how Harbor tasks become attempts, including subject invocation, artifact handoff, verifier/reward behavior, health checks, MCP server config, and same-sandbox versus separate-sandbox verification from `task.toml`. Harbor `instruction.md` supplies the task text, `tests/` remains verifier-private, and `solution/` is preserved for oracle workflows but is not part of the normal public case input. The adapter should call Harbor inspect/export and run APIs, expose Workbench runtime-control as a sandbox provider when Harbor asks for sandboxes, and normalize the final Harbor result; core does not infer criteria from metrics or parse Harbor directories directly.
+The `harbor` engine adapter is only the Workbench bridge. Harbor itself parses this source and owns how Harbor tasks become attempts, including candidate invocation, artifact handoff, verifier/reward behavior, health checks, MCP server config, and same-sandbox versus separate-sandbox verification from `task.toml`. Harbor `instruction.md` supplies the task text, `tests/` remains verifier-private, and `solution/` is preserved for oracle workflows but is not part of the normal public case input. The adapter should call Harbor inspect/export and run APIs, expose Workbench runtime-control as a sandbox provider when Harbor asks for sandboxes, and normalize the final Harbor result; core does not infer criteria from metrics or parse Harbor directories directly.
 
 ## Task Count
 
-Start with one or two smoke tasks. Add broader task coverage after the subject runner and scoring helper are stable. A small task set that catches the most important failure modes is better than a large set that is slow, flaky, or hard to explain.
+Start with one or two smoke tasks. Add broader task coverage after the candidate runner and scoring helper are stable. A small task set that catches the most important failure modes is better than a large set that is slow, flaky, or hard to explain.

@@ -30,7 +30,7 @@ describe("workbench contract", () => {
     });
   });
 
-  test("uses fingerprint-only subject comparability and typed execution specs", () => {
+  test("uses fingerprint-only candidate comparability and typed execution specs", () => {
     const execution = {
       id: "exec_1",
       projectId: "wb_1",

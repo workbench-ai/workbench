@@ -13,13 +13,11 @@ export function localBenchmarkFingerprint(project: LocalProjectSource): string {
   ]);
 }
 
-export function localSubjectFingerprint(project: LocalProjectSource): string {
+export function localCandidateFingerprint(project: LocalProjectSource): string {
   const hash = createHash("sha256");
-  hash.update("workbench-subject-v1\0");
-  hash.update(project.subjectSource);
-  hash.update("\0runner\0");
-  hash.update(JSON.stringify(project.spec.run));
-  hashSurfaceFiles(hash, project.subjectFiles);
+  hash.update("workbench-candidate-v1\0");
+  hash.update(project.candidateSource);
+  hashSurfaceFiles(hash, project.candidateFiles);
   return hash.digest("hex");
 }
 

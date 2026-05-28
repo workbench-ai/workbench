@@ -1,6 +1,6 @@
 # File Output Essentials
 
-Use these notes to choose runtime prerequisites for file-output evals. They are intentionally short: install the tools a subject runner or scoring helper needs, then keep the eval contract in [../from-file-outputs.md](../from-file-outputs.md).
+Use these notes to choose runtime prerequisites for file-output evals. They are intentionally short: install the tools a candidate runner or scoring helper needs, then keep the eval contract in [../from-file-outputs.md](../from-file-outputs.md).
 
 ## Shared Rules
 

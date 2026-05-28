@@ -14,8 +14,8 @@ export interface WorkbenchAdapterManifest {
 export type WorkbenchPrimitiveAdapterOperation =
   | "engine.resolve"
   | "engine.run"
-  | "subject.run"
-  | "optimizer.improve";
+  | "candidate.run"
+  | "candidate.improve";
 
 export type WorkbenchAdapterOperation = WorkbenchPrimitiveAdapterOperation;
 export type WorkbenchAdapterOperationExecutor = "sandbox" | "host";
@@ -625,12 +625,12 @@ export function normalizeWorkbenchAdapterOperation(
   if (
     value === "engine.resolve" ||
     value === "engine.run" ||
-    value === "subject.run" ||
-    value === "optimizer.improve"
+    value === "candidate.run" ||
+    value === "candidate.improve"
   ) {
     return value;
   }
-  throw new Error(`${label} must be engine.resolve, engine.run, subject.run, or optimizer.improve.`);
+  throw new Error(`${label} must be engine.resolve, engine.run, candidate.run, or candidate.improve.`);
 }
 
 function readJsonPointer(value: unknown, label: string): string {

@@ -5,7 +5,7 @@ import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 import { badgeToneForStatus, statusLabel } from "../lib/format";
 import type {
   HostedWorkbenchJob,
-  SubjectSummary,
+  CandidateSummary,
 } from "../types";
 
 export function StatusBadge({
@@ -14,7 +14,7 @@ export function StatusBadge({
   className,
 }: {
   status:
-    | SubjectSummary["status"]
+    | CandidateSummary["status"]
     | HostedWorkbenchJob["status"]
     | null
     | undefined;

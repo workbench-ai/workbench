@@ -12,12 +12,13 @@ import { composeRuntimeDockerfileWithAdapters } from "../src/adapter-project";
 import { localBenchmarkFingerprint } from "../src/benchmark-fingerprint";
 import { startLocalWorkbenchDevServer } from "../src/dev-open-server";
 import { runCli } from "../src/index";
-import { loadLocalArchive, saveLocalArchive, saveLocalJobs } from "../src/local-archive";
+import { loadLocalArchive, readLocalJobs, saveLocalArchive, saveLocalJobs, upsertLocalRun } from "../src/local-archive";
 import { readLocalProjectSource } from "../src/project-source";
 import { packageRoot, productRoot } from "./test-paths";
 import type {
-  SubjectRecord,
+  CandidateRecord,
   HostedWorkbenchJob,
+  RunSummary,
 } from "@workbench-ai/workbench-core";
 
 const loopbackAvailable = await canBindLoopback();
@@ -32,11 +33,11 @@ async function writeDockerNodeWorkbenchSpec(
   },
 ): Promise<void> {
   const runnerCommand = JSON.stringify("node run.js");
-  const optimizerCommand = JSON.stringify("node -e \"process.exit(1)\"");
+  const improveCommand = JSON.stringify("node -e \"process.exit(1)\"");
   const resultPayload = Buffer.from(JSON.stringify(result), "utf8").toString("base64");
   const scoreCommand = JSON.stringify(`node -e "const fs=require('fs'),path=require('path');const out='/workspace/output';fs.mkdirSync(out,{recursive:true});const result=JSON.parse(Buffer.from('${resultPayload}','base64').toString('utf8'));fs.writeFileSync(path.join(out,'workbench-result.json'),JSON.stringify({protocol:'workbench.adapter-result.v1',operation:'engine.run',ok:true,value:result},null,2));"`);
   await writeFile(path.join(workspace, "benchmark.yaml"), [
-    "version: 3",
+    "version: 4",
     "name: local-workbench",
     "description: Exercise the local command-based Workbench development path.",
     "engine:",
@@ -50,42 +51,38 @@ async function writeDockerNodeWorkbenchSpec(
     `        command: ${scoreCommand}`,
     "",
   ].join("\n"));
-  await mkdir(path.join(workspace, "subjects", "command", "files"), { recursive: true });
-  await mkdir(path.join(workspace, "optimizers"), { recursive: true });
-  await writeFile(path.join(workspace, "subjects", "command", "subject.yaml"), [
-    "version: 3",
+  await mkdir(path.join(workspace, "candidates", "current", "files"), { recursive: true });
+  await writeFile(path.join(workspace, "candidates", "current", "candidate.yaml"), [
+    "version: 4",
     "name: local-command-eval",
     "files:",
     "  path: files",
     "prepare:",
-    "  command: sh input/subject/prepare.sh",
-    "run:",
-    "  use: command",
-    "  with:",
-    `    command: ${runnerCommand}`,
-    "",
-  ].join("\n"));
-  await writeFile(path.join(workspace, "subjects", "command", "files", "prepare.sh"), "#!/usr/bin/env sh\nset -eu\ncp -R input/subject/. .\n");
-  await writeFile(path.join(workspace, "subjects", "command", "files", "run.js"), "const fs=require('fs'),path=require('path');const out='/workspace/output';fs.mkdirSync(out,{recursive:true});fs.writeFileSync(path.join(out,'runner-summary.md'),'runner completed\\n');\n");
-  await writeFile(path.join(workspace, "optimizers", "command.yaml"), [
-    "version: 3",
-    "name: local-command-eval optimizer",
-    "description: Improve subject command files for local-command-eval.",
-    "edits:",
-    "  - run.js",
+    "  command: sh input/candidate/prepare.sh",
+    "defaultRun: main",
+    "runs:",
+    "  main:",
+    "    name: Command",
+    "    use: command",
+    "    with:",
+    `      command: ${runnerCommand}`,
     "improve:",
+    "  edits:",
+    "    - run.js",
     "  use: command",
     "  with:",
-    `    command: ${optimizerCommand}`,
+    `    command: ${improveCommand}`,
     "",
   ].join("\n"));
+  await writeFile(path.join(workspace, "candidates", "current", "files", "prepare.sh"), "#!/usr/bin/env sh\nset -eu\ncp -R input/candidate/. .\n");
+  await writeFile(path.join(workspace, "candidates", "current", "files", "run.js"), "const fs=require('fs'),path=require('path');const out='/workspace/output';fs.mkdirSync(out,{recursive:true});fs.writeFileSync(path.join(out,'runner-summary.md'),'runner completed\\n');\n");
 }
 
-async function appendSubjectAdapters(
+async function appendCandidateAdapters(
   workspace: string,
   sources: readonly string[],
 ): Promise<void> {
-  const specPath = commandSubjectSpecPath(workspace);
+  const specPath = commandCandidateSpecPath(workspace);
   const source = await readFile(specPath, "utf8");
   await writeFile(specPath, [
     source.trimEnd(),
@@ -95,12 +92,12 @@ async function appendSubjectAdapters(
   ].join("\n"));
 }
 
-function commandSubjectSpecPath(workspace: string): string {
-  return path.join(workspace, "subjects", "command", "subject.yaml");
+function commandCandidateSpecPath(workspace: string): string {
+  return path.join(workspace, "candidates", "current", "candidate.yaml");
 }
 
-function commandOptimizerSpecPath(workspace: string): string {
-  return path.join(workspace, "optimizers", "command.yaml");
+function commandImproveSpecPath(workspace: string): string {
+  return commandCandidateSpecPath(workspace);
 }
 
 async function writeFakeCodexHome(
@@ -304,12 +301,14 @@ describe("workbench CLI", () => {
     expect(io.stdoutText()).toContain("workbench cloud star OWNER/BENCHMARK");
     expect(io.stdoutText()).toContain("workbench init");
     expect(io.stdoutText()).toContain("workbench check [SOURCE] [--dir DIR]");
-    expect(io.stdoutText()).toContain("workbench improve [SOURCE] [--dir DIR] [--from SUBJECT_ID]");
+    expect(io.stdoutText()).toContain("workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID]");
+    expect(io.stdoutText()).toContain("workbench retry TARGET_ID [--dir DIR]");
     expect(io.stdoutText()).toContain("workbench adapters test ID|SOURCE");
     expect(io.stdoutText()).toContain("workbench open [SOURCE] [--dir DIR]");
-    expect(io.stdoutText()).toContain("workbench cloud benchmarks|runs|subjects");
-    expect(io.stdoutText()).toContain("Workbench project containing benchmark.yaml plus subjects/<name>/subject.yaml");
-    expect(io.stdoutText()).toContain("Subject manifests declare their files with files.path");
+    expect(io.stdoutText()).toContain("workbench cloud retry TARGET_ID");
+    expect(io.stdoutText()).toContain("workbench cloud benchmarks|runs|candidates");
+    expect(io.stdoutText()).toContain("Workbench project containing benchmark.yaml plus candidates/<name>/candidate.yaml");
+    expect(io.stdoutText()).toContain("Candidate manifests declare their files with files.path");
     expect(io.stdoutText()).toContain("WORKBENCH_API_URL");
     expect(io.stdoutText()).toContain("https://v2.workbench.ai");
   });
@@ -337,11 +336,17 @@ describe("workbench CLI", () => {
     expect(await runCli(["open", "--help"], openIo)).toBe(0);
     expect(openIo.stdoutText()).toContain("workbench open [SOURCE] [--dir DIR]");
     expect(openIo.stdoutText()).toContain("--run RUN_ID");
-    expect(openIo.stdoutText()).toContain("Workbench project containing benchmark.yaml plus subjects/<name>/subject.yaml");
+    expect(openIo.stdoutText()).toContain("Workbench project containing benchmark.yaml plus candidates/<name>/candidate.yaml");
     expect(openIo.stdoutText()).toContain("Keep this command running while using the local web view");
     const evalIo = createIo();
     expect(await runCli(["cloud", "eval", "--help"], evalIo)).toBe(0);
     expect(evalIo.stdoutText()).toContain("Stopping this command does not cancel the hosted run");
+    const retryIo = createIo();
+    expect(await runCli(["retry", "--help"], retryIo)).toBe(0);
+    expect(retryIo.stdoutText()).toContain("workbench retry TARGET_ID");
+    const cloudRetryIo = createIo();
+    expect(await runCli(["cloud", "retry", "--help"], cloudRetryIo)).toBe(0);
+    expect(cloudRetryIo.stdoutText()).toContain("workbench cloud retry TARGET_ID");
     const deleteIo = createIo();
     expect(await runCli(["cloud", "benchmarks", "delete", "--help"], deleteIo)).toBe(0);
     expect(deleteIo.stdoutText()).toContain("workbench cloud benchmarks delete OWNER/BENCHMARK");
@@ -363,7 +368,7 @@ describe("workbench CLI", () => {
       ["adapters", "create", "--help"],
       ["cloud", "eval", "--help"],
       ["cloud", "benchmarks", "delete", "--help"],
-      ["cloud", "subjects", "preview", "--help"],
+      ["cloud", "candidates", "preview", "--help"],
     ];
 
     for (const command of commands) {
@@ -821,9 +826,9 @@ describe("workbench CLI", () => {
         .replace("OWNER/BENCHMARK[@REF]|RUN_ID|SUBJECT_ID", "OWNER/BENCHMARK[@REF]|RUN_ID|SUBJECT_ID");
       expect(cliDocs).toContain(documentedCommand);
     }
-    expect(spec).toContain("workbench eval [SOURCE] [--dir DIR] [--subject ID]");
-    expect(spec).toContain("workbench subjects list|show|files|preview");
-    expect(spec).toContain("subjects/<name>/subject.yaml");
+    expect(spec).toContain("workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID]");
+    expect(spec).toContain("workbench candidates list|show|files|preview");
+    expect(spec).toContain("candidates/<name>/candidate.yaml");
   });
 
   test("keeps public onboarding, skill metadata, and eval prompts aligned with current hosted paths", async () => {
@@ -864,28 +869,27 @@ describe("workbench CLI", () => {
     expect(onboardingSource).toContain("workbench clone official/three-statement-demo");
     expect(onboardingSource).toContain("workbench check");
     expect(onboardingSource).toContain("workbench push");
-    expect(onboardingSource).toContain("workbench cloud improve subjects/current");
-    expect(onboardingSource).toContain("--optimizer optimizers/current.yaml");
+    expect(onboardingSource).toContain("workbench cloud improve candidates/current");
     expect(onboardingSource).toContain("--budget 1 --samples 1 --watch");
-    expect(onboardingSource).not.toContain("workbench eval subjects/current --samples 1");
+    expect(onboardingSource).not.toContain("workbench eval candidates/current --samples 1");
     expect(onboardingSource).not.toContain("workbench cloud open official/three-statement-demo");
     expect(onboardingSource).not.toContain("workbench auth connect codex --method oauth");
     expect(onboardingSource).not.toContain("workbench whoami --json # provider status");
     expect(cliDocs).toContain("workbench init [DIR] --skill NAME --agent ADAPTER");
     expect(cliDocs).toContain("workbench clone official/three-statement-demo");
-    expect(cliDocs).not.toContain("workbench eval subjects/current --samples 1");
+    expect(cliDocs).not.toContain("workbench eval candidates/current --samples 1");
     expect(cliDocs).toContain("workbench improve --budget 1 --samples 1");
-    expect(cliDocs).toContain("workbench cloud improve subjects/current --optimizer optimizers/current.yaml --budget 1 --samples 1 --watch");
-    expect(cliDocs).toContain("workbench cloud improve subjects/codex --base SUBJECT_ID --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
+    expect(cliDocs).toContain("workbench cloud improve candidates/current --budget 1 --samples 1 --watch");
+    expect(cliDocs).toContain("workbench cloud improve candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch");
     expect(cliDocs).toContain("workbench push --tag v1");
-    expect(cliDocs).toContain("subject files are declared explicitly with `files: { path: files }`");
+    expect(cliDocs).toContain("candidate files are declared explicitly with `files: { path: files }`");
     expect(skill).toContain("workbench init --skill my-eval --agent codex");
     expect(skill).toContain("workbench clone official/three-statement-demo");
-    expect(skill).not.toContain("workbench eval subjects/current --samples 1");
+    expect(skill).not.toContain("workbench eval candidates/current --samples 1");
     expect(skill).toContain("workbench improve --budget 1 --samples 1");
-    expect(skill).toContain("workbench cloud improve subjects/current --optimizer optimizers/current.yaml --budget 1 --samples 1 --watch");
-    expect(skill).toContain("workbench cloud improve subjects/codex --base subject_123 --optimizer optimizers/codex.yaml --budget 1 --samples 1 --watch");
-    expect(skill).toContain("subjects/<name>/subject.yaml");
+    expect(skill).toContain("workbench cloud improve candidates/current --budget 1 --samples 1 --watch");
+    expect(skill).toContain("workbench cloud improve candidates/codex --base candidate_123 --budget 1 --samples 1 --watch");
+    expect(skill).toContain("candidates/<name>/candidate.yaml");
     expect(skill).toContain("workbench open --json --no-open");
     expect(agentYaml).toContain("official/three-statement-demo");
     expect(agentYaml).toContain("workbench check");
@@ -898,7 +902,7 @@ describe("workbench CLI", () => {
     expect(installEval?.expected_output).toContain("installs the published package");
     expect(installEval?.assertions.some((assertion) => assertion.value?.includes("@workbench-ai/workbench"))).toBe(true);
     expect(skillEvalsRaw).toContain("opens or returns the Workbench Cloud benchmark URL");
-    expect(skillEvalsRaw).toContain("opens or returns the resulting subject URL");
+    expect(skillEvalsRaw).toContain("opens or returns the resulting candidate URL");
   });
 
   test("local source development uses Docker and fails closed without templates", async () => {
@@ -914,14 +918,13 @@ describe("workbench CLI", () => {
     await writeDockerNodeWorkbenchSpec(workspace);
     expect(await runCli(["check", "--dir", workspace, "--json"], validateIo)).toBe(0);
     const fileValidateIo = createIo();
-    expect(await runCli(["check", commandSubjectSpecPath(workspace), "--json"], fileValidateIo)).toBe(0);
+    expect(await runCli(["check", commandCandidateSpecPath(workspace), "--json"], fileValidateIo)).toBe(0);
     const validation = JSON.parse(validateIo.stdoutText()) as {
       plan?: {
         benchmarkName?: string;
         benchmarkDescription?: string;
         source?: { files?: number; dockerfile?: string };
-        subject?: { filesPath?: string; files?: number };
-        optimizer?: { edits?: string[] };
+        candidate?: { filesPath?: string; files?: number; selectedRunId?: string; runCount?: number; improve?: { edits?: string[] } };
         tasks?: { source?: { use?: string }; path?: string; cases?: number; files?: number };
         environment?: {
           network?: { egress?: string };
@@ -937,12 +940,11 @@ describe("workbench CLI", () => {
     expect(validation.plan?.benchmarkName).toBe("local-workbench");
     expect(validation.plan?.benchmarkDescription).toBe("Exercise the local command-based Workbench development path.");
     expect(validation.plan?.source?.dockerfile).toBe("environment/Dockerfile");
-    expect(validation.plan?.subject).toMatchObject({
-      filesPath: "subjects/command/files",
+    expect(validation.plan?.candidate).toMatchObject({
+      filesPath: "candidates/current/files",
       files: 2,
-    });
-    expect(validation.plan?.optimizer).toMatchObject({
-      edits: ["run.js"],
+      selectedRunId: "main",
+      runCount: 1,
     });
     expect(validation.plan?.engine).toMatchObject({
       resolver: { use: "workbench" },
@@ -955,12 +957,10 @@ describe("workbench CLI", () => {
     expect(validation.plan?.adapters?.run?.use).toBe("command");
     expect(validation.plan?.adapters?.run?.command).toBe("node run.js");
     expect(validation.plan?.adapters?.engine?.use).toBe("workbench");
-    const baseId = await seedLocalSubject(workspace);
+    const baseId = await seedLocalCandidate(workspace);
     expect(await runCli([
       "improve",
-      commandSubjectSpecPath(workspace),
-      "--optimizer",
-      commandOptimizerSpecPath(workspace),
+      commandCandidateSpecPath(workspace),
       "--from",
       baseId,
       "--budget",
@@ -975,7 +975,7 @@ describe("workbench CLI", () => {
       error?: string;
       completedJobCount?: number;
       failedJobCount?: number;
-      activeSubjectId?: string | null;
+      activeCandidateId?: string | null;
       localView?: { command?: string; note?: string };
     };
     if (run.error) {
@@ -985,7 +985,7 @@ describe("workbench CLI", () => {
       expect(run.ok).toBe(false);
       expect(run.completedJobCount).toBe(0);
       expect(run.failedJobCount).toBe(1);
-      expect(run.activeSubjectId).toBe(baseId);
+      expect(run.activeCandidateId).toBe(baseId);
       expect(run.localView?.command).toContain("workbench open --dir");
       expect(run.localView?.command).toContain("--run");
       expect(run.localView?.note).toContain("Keep this command running while using the local web view");
@@ -1027,33 +1027,33 @@ describe("workbench CLI", () => {
     await writeFile(path.join(workspace, "README.md"), "local root note that should not sync\n");
     await mkdir(path.join(workspace, "docs"), { recursive: true });
     await writeFile(path.join(workspace, "docs", "notes.md"), "local docs that should not sync\n");
-    const subjectId = await seedLocalSubject(workspace, {
-      metrics: { score: 0.75 },
+    const candidateId = await seedLocalCandidate(workspace, {
       meta: {
         source: {
-          files: [textFile("subjects/command/subject.yaml", "version: 3\nname: local-command-eval\nfiles:\n  path: files\n")],
+          files: [textFile("candidates/command/candidate.yaml", "version: 4\nname: local-command-eval\nfiles:\n  path: files\nruns:\n  command:\n    name: Command\n    use: command\n")],
         },
       },
     });
-    const snapshotWithSubject = await loadLocalArchive(workspace);
+    const snapshotWithCandidate = await loadLocalArchive(workspace);
     await saveLocalArchive(workspace, {
-      ...snapshotWithSubject,
+      ...snapshotWithCandidate,
       activeId: "local_draft_001",
-      subjects: [
-        ...snapshotWithSubject.subjects,
+      candidates: [
+        ...snapshotWithCandidate.candidates,
         {
           id: "local_draft_001",
-          ordinal: snapshotWithSubject.subjects.length,
+          version: snapshotWithCandidate.candidates.length + 1,
+          ordinal: snapshotWithCandidate.candidates.length + 1,
           benchmarkFingerprint: await localSeedBenchmarkFingerprint(workspace),
-          subjectFingerprint: "local-draft-fingerprint",
+          candidateFingerprint: "local-draft-fingerprint",
           createdAt: "2026-04-28T00:01:00.000Z",
           referenceIds: [],
           status: "agent_error",
           fileChanges: ["SKILL.md"],
         },
       ],
-      subjectFiles: {
-        ...snapshotWithSubject.subjectFiles,
+      candidateFiles: {
+        ...snapshotWithCandidate.candidateFiles,
         local_draft_001: [textFile("SKILL.md", "local draft\n")],
       },
     });
@@ -1069,13 +1069,13 @@ describe("workbench CLI", () => {
       const snapshot = await fetchJson<{
         workspaceRoot: string;
         activeId: string | null;
-        summaries: Array<{ id: string; metrics?: Record<string, number> }>;
+        summaries: Array<{ id: string; metrics?: unknown }>;
         evaluations: unknown[];
       }>(`${server.url}api/snapshot`);
       expect(snapshot.workspaceRoot).toBe(path.resolve(workspace));
-      expect(snapshot.activeId).toBe(subjectId);
-      expect(snapshot.summaries.map((summary) => summary.id)).toEqual([subjectId]);
-      expect(snapshot.summaries[0]?.metrics?.score).toBe(0.75);
+      expect(snapshot.activeId).toBe(candidateId);
+      expect(snapshot.summaries.map((summary) => summary.id)).toEqual([candidateId]);
+      expect(snapshot.summaries[0]).not.toHaveProperty("metrics");
       expect(snapshot.evaluations).toEqual([]);
 
       const spec = await fetchJson<{
@@ -1093,24 +1093,23 @@ describe("workbench CLI", () => {
       expect(sourcePaths).toContain("task-001/task.yaml");
       expect(sourcePaths).not.toContain("benchmark.yaml");
       expect(sourcePaths).not.toContain("environment/Dockerfile");
-      expect(sourcePaths).not.toContain("subjects/command/subject.yaml");
-      expect(sourcePaths).not.toContain("optimizers/command.yaml");
-      expect(sourcePaths).not.toContain("subjects/command/files/run.js");
+      expect(sourcePaths).not.toContain("candidates/current/candidate.yaml");
+      expect(sourcePaths).not.toContain("candidates/current/files/run.js");
       expect(sourcePaths).not.toContain("README.md");
       expect(sourcePaths).not.toContain("docs/notes.md");
 
-      const subjectFiles = await fetchJson<Array<{ path: string; status: string }>>(
-        `${server.url}api/subject/files?id=${encodeURIComponent(subjectId)}`,
+      const candidateFiles = await fetchJson<Array<{ path: string; status: string }>>(
+        `${server.url}api/candidate/files?id=${encodeURIComponent(candidateId)}`,
       );
-      expect(subjectFiles).toEqual([
+      expect(candidateFiles).toEqual([
         expect.objectContaining({ path: "prompt.md", status: "added" }),
       ]);
 
       const preview = await fetchJson<{ path: string; source: { content: string } | null }>(
-        `${server.url}api/subject/preview?id=${encodeURIComponent(subjectId)}&path=prompt.md`,
+        `${server.url}api/candidate/preview?id=${encodeURIComponent(candidateId)}&path=prompt.md`,
       );
       expect(preview.path).toBe("prompt.md");
-      expect(preview.source?.content).toBe("seeded subject\n");
+      expect(preview.source?.content).toBe("seeded candidate\n");
 
       const mutation = await fetch(`${server.url}api/spec`, { method: "PUT" });
       expect(mutation.status).toBe(405);
@@ -1120,15 +1119,75 @@ describe("workbench CLI", () => {
     }
   });
 
+  test("local archive upserts in-progress runs before terminal records", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-local-runs-"));
+    const startedAt = "2026-05-27T00:00:00.000Z";
+    const runningRun = localRunSummary({
+      id: "run_local_test",
+      status: "running",
+      startedAt,
+      attemptsExecuted: 0,
+    });
+    const finishedRun = localRunSummary({
+      id: runningRun.id,
+      status: "finished",
+      startedAt,
+      finishedAt: "2026-05-27T00:00:10.000Z",
+      durationMs: 10_000,
+      outcome: "ok",
+      attemptsExecuted: 1,
+    });
+
+    await saveLocalArchive(workspace, {
+      activeId: null,
+      candidates: [],
+      candidateFiles: {},
+      evaluations: [],
+      runs: [],
+      events: [],
+    });
+    let archive = await loadLocalArchive(workspace);
+    archive = upsertLocalRun(archive, runningRun, [{
+      id: "event_started",
+      at: startedAt,
+      type: "run_started",
+      runId: runningRun.id,
+    }]);
+    await saveLocalArchive(workspace, archive);
+
+    expect((await loadLocalArchive(workspace)).runs).toMatchObject([{
+      id: runningRun.id,
+      status: "running",
+      attemptsExecuted: 0,
+    }]);
+
+    archive = upsertLocalRun(await loadLocalArchive(workspace), finishedRun, [{
+      id: "event_finished",
+      at: finishedRun.finishedAt!,
+      type: "run_finished",
+      runId: runningRun.id,
+    }]);
+    await saveLocalArchive(workspace, archive);
+
+    const persisted = await loadLocalArchive(workspace);
+    expect(persisted.runs).toHaveLength(1);
+    expect(persisted.runs[0]).toMatchObject({
+      id: runningRun.id,
+      status: "finished",
+      outcome: "ok",
+      attemptsExecuted: 1,
+    });
+    expect(persisted.events.map((event) => event.type)).toEqual(["run_started", "run_finished"]);
+  });
+
   test.skipIf(!loopbackAvailable)("local dev browser server exposes archived job executions, traces, and execution files", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-dev-open-jobs-"));
     const assetsRoot = await mkdtemp(path.join(os.tmpdir(), "workbench-dev-open-assets-"));
     await writeFile(path.join(assetsRoot, "client.js"), "console.log('dev-open-test');\n");
     await writeFile(path.join(assetsRoot, "client.css"), "body { margin: 0; }\n");
-    const subjectId = await seedLocalSubject(workspace, {
-      metrics: { score: 1 },
+    const candidateId = await seedLocalCandidate(workspace, {
       eval: {
-        subject: { id: "subject_seeded_001", kind: "subject" },
+        candidate: { id: "candidate_seeded_001", kind: "candidate" },
         status: "completed",
         sampleCount: 1,
         completedSampleCount: 1,
@@ -1138,7 +1197,7 @@ describe("workbench CLI", () => {
         samples: [{
           id: "case-001__sample_001",
           index: 0,
-          subject: { id: "subject_seeded_001", kind: "subject" },
+          candidate: { id: "candidate_seeded_001", kind: "candidate" },
           status: "completed",
           metrics: { score: 1 },
           cases: [{
@@ -1153,7 +1212,7 @@ describe("workbench CLI", () => {
     await saveLocalJobs(workspace, [
       localExecutionJob({
         id: "job_attempt",
-        subjectId,
+        candidateId,
         purpose: "attempt",
         output: {
           ok: true,
@@ -1292,6 +1351,13 @@ describe("workbench CLI", () => {
         },
       }),
     ]);
+    const archivedJobs = await readLocalJobs(workspace);
+    const archivedAttemptFiles = (archivedJobs.find((job) => job.id === "job_attempt")?.output as {
+      files?: Array<{ path?: string }>;
+    } | undefined)?.files ?? [];
+    expect(archivedAttemptFiles.some((file) =>
+      file.path === ".workbench/traces/job_attempt/runner/session/trace.json"
+    )).toBe(true);
 
     const server = await startLocalWorkbenchDevServer({
       workspace,
@@ -1302,7 +1368,7 @@ describe("workbench CLI", () => {
     try {
       const review = await fetchJson<{
         executions: Array<{ kind: string; role: string; jobIds: string[] }>;
-      }>(`${server.url}api/case-review?id=${encodeURIComponent(subjectId)}&run=run_seeded&case=case-001`);
+      }>(`${server.url}api/case-review?id=${encodeURIComponent(candidateId)}&run=run_seeded&case=case-001`);
       expect(review.executions.map((execution) => execution.kind)).toEqual(["attempt"]);
       expect(review.executions[0]?.role).toBe("engine");
       expect(review.executions[0]?.jobIds).toEqual(["job_attempt"]);
@@ -1331,7 +1397,7 @@ describe("workbench CLI", () => {
       expect(traces.executions.map((execution) => execution.kind)).toEqual(["attempt"]);
       expect(traces.executions[0]?.jobIds).toEqual(["job_attempt"]);
       expect(traces.executions[0]?.sessions.map((session) => session.label)).toEqual([
-        "Subject runner",
+        "Candidate run",
         "Accuracy judge",
         "Style judge",
       ]);
@@ -1375,7 +1441,7 @@ describe("workbench CLI", () => {
     expect(io.stderrText()).toContain("--host requires a value.");
   });
 
-  test("init writes explicit benchmark, subject, and optimizer YAML", async () => {
+  test("init writes explicit benchmark and candidate YAML", async () => {
     const skillWorkspace = await mkdtemp(path.join(os.tmpdir(), "workbench-init-skill-"));
     const commandWorkspace = await mkdtemp(path.join(os.tmpdir(), "workbench-init-command-"));
     const customAgentWorkspace = await mkdtemp(path.join(os.tmpdir(), "workbench-init-custom-agent-"));
@@ -1385,40 +1451,40 @@ describe("workbench CLI", () => {
     expect(await runCli(["init", customAgentWorkspace, "--skill", "custom-agent-skill", "--agent", "my-agent", "--json"], createIo())).toBe(0);
 
     const skillBenchmark = await readFile(path.join(skillWorkspace, "benchmark.yaml"), "utf8");
-    const skillSubject = await readFile(path.join(skillWorkspace, "subjects", "codex", "subject.yaml"), "utf8");
-    const skillOptimizer = await readFile(path.join(skillWorkspace, "optimizers", "codex.yaml"), "utf8");
-    expect(skillBenchmark).toContain("version: 3");
+    const skillCandidate = await readFile(path.join(skillWorkspace, "candidates", "current", "candidate.yaml"), "utf8");
+    expect(skillBenchmark).toContain("version: 4");
     expect(skillBenchmark).toContain("description: \"Evaluate the invoice-review skill across representative tasks.\"");
     expect(skillBenchmark).toContain("engine:\n  use: workbench");
     expect(skillBenchmark).not.toContain("use: path");
     expect(skillBenchmark).toContain("environment:\n      dockerfile: environment/Dockerfile");
     expect(skillBenchmark).toContain("judge:\n          use: codex\n          with:\n            model: gpt-5.5");
-    expect(skillSubject).toContain("run:\n  use: codex\n  with:\n    model: gpt-5.5");
-    expect(skillSubject).toContain("prepare:\n  command: sh input/subject/prepare.sh");
-    expect(skillOptimizer).toContain("edits:\n  - SKILL.md");
-    expect(skillOptimizer).toContain("improve:\n  use: codex\n  with:\n    model: gpt-5.5");
-    expect(await readFile(path.join(skillWorkspace, "subjects", "codex", "files", "SKILL.md"), "utf8")).toContain("name: invoice-review");
-    expect(await readFile(path.join(skillWorkspace, "subjects", "codex", "files", "prepare.sh"), "utf8")).toContain("cp -R input/subject/. .");
+    expect(skillCandidate).toContain("runs:\n  main:");
+    expect(skillCandidate).toContain("use: codex\n    with:\n      model: gpt-5.5");
+    expect(skillCandidate).toContain("prepare:\n  command: sh input/candidate/prepare.sh");
+    expect(skillCandidate).toContain("improve:\n  edits:\n    - SKILL.md\n  use: codex\n  with:\n    model: gpt-5.5");
+    expect(await readFile(path.join(skillWorkspace, "candidates", "current", "files", "SKILL.md"), "utf8")).toContain("name: invoice-review");
+    expect(await readFile(path.join(skillWorkspace, "candidates", "current", "files", "prepare.sh"), "utf8")).toContain("cp -R input/candidate/. .");
     expect(await readFile(path.join(skillWorkspace, "tasks", "task-001", "tests", "rubric.md"), "utf8")).toContain("Reward complete");
     const skillDockerfile = await readFile(path.join(skillWorkspace, "environment", "Dockerfile"), "utf8");
     expect(skillDockerfile).toContain("ca-certificates");
     expect(skillDockerfile).not.toContain("npm install --global @openai/codex");
 
     const commandBenchmark = await readFile(path.join(commandWorkspace, "benchmark.yaml"), "utf8");
-    const commandSubject = await readFile(path.join(commandWorkspace, "subjects", "command", "subject.yaml"), "utf8");
-    expect(commandBenchmark).toContain("version: 3");
+    const commandCandidate = await readFile(path.join(commandWorkspace, "candidates", "current", "candidate.yaml"), "utf8");
+    expect(commandBenchmark).toContain("version: 4");
     expect(commandBenchmark).toContain("description: \"Evaluate the command-eval command implementation across representative tasks.\"");
-    expect(commandSubject).toContain("run:\n  use: command");
-    expect(commandSubject).toContain("prepare:\n  command: sh input/subject/prepare.sh");
+    expect(commandCandidate).toContain("runs:\n  main:");
+    expect(commandCandidate).toContain("use: command");
+    expect(commandCandidate).toContain("prepare:\n  command: sh input/candidate/prepare.sh");
     expect(commandBenchmark).toContain("score:\n      use: tests");
-    expect(await readFile(path.join(commandWorkspace, "subjects", "command", "files", "run.js"), "utf8")).toContain("command subject ran");
-    expect(await readFile(path.join(commandWorkspace, "subjects", "command", "files", "prepare.sh"), "utf8")).toContain("cp -R input/subject/. .");
-    expect(await readFile(path.join(commandWorkspace, "tasks", "task-001", "tests", "required-output.txt"), "utf8")).toContain("command subject ran");
+    expect(await readFile(path.join(commandWorkspace, "candidates", "current", "files", "run.js"), "utf8")).toContain("command candidate ran");
+    expect(await readFile(path.join(commandWorkspace, "candidates", "current", "files", "prepare.sh"), "utf8")).toContain("cp -R input/candidate/. .");
+    expect(await readFile(path.join(commandWorkspace, "tasks", "task-001", "tests", "required-output.txt"), "utf8")).toContain("command candidate ran");
     expect(await readFile(path.join(commandWorkspace, "environment", "Dockerfile"), "utf8")).toContain("ca-certificates");
 
-    await expect(readFile(path.join(customAgentWorkspace, "subjects", "my-agent", "subject.yaml"), "utf8"))
-      .resolves.toContain("run:\n  use: my-agent");
-    await expect(readFile(path.join(customAgentWorkspace, "subjects", "my-agent", "subject.yaml"), "utf8"))
+    await expect(readFile(path.join(customAgentWorkspace, "candidates", "current", "candidate.yaml"), "utf8"))
+      .resolves.toContain("use: my-agent");
+    await expect(readFile(path.join(customAgentWorkspace, "candidates", "current", "candidate.yaml"), "utf8"))
       .resolves.not.toContain("model: gpt-5.5");
 
     for (const workspace of [skillWorkspace, commandWorkspace]) {
@@ -1468,7 +1534,7 @@ describe("workbench CLI", () => {
     const benchmarkPath = path.join(workspace, "benchmark.yaml");
     await mkdir(path.join(workspace, "alt-tasks", "case-001", "tests"), { recursive: true });
     await writeFile(path.join(workspace, "alt-tasks", "case-001", "task.yaml"), "version: 3\ntask: Say hello from the alternate task directory.\n");
-    await writeFile(path.join(workspace, "alt-tasks", "case-001", "tests", "required-output.txt"), "command subject ran\n");
+    await writeFile(path.join(workspace, "alt-tasks", "case-001", "tests", "required-output.txt"), "command candidate ran\n");
     await writeFile(
       benchmarkPath,
       (await readFile(benchmarkPath, "utf8")).replace(
@@ -1500,7 +1566,7 @@ describe("workbench CLI", () => {
 
     expect(await runCli(["init", workspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
     expect(await runCli(["adapters", "create", "adapters/my-agent", "--dir", workspace, "--json"], createIo())).toBe(0);
-    await appendSubjectAdapters(workspace, ["../../adapters/my-agent"]);
+    await appendCandidateAdapters(workspace, ["../../adapters/my-agent"]);
 
     const listIo = createIo();
     expect(await runCli(["adapters", "list", "--dir", workspace, "--json"], listIo)).toBe(0);
@@ -1526,7 +1592,7 @@ describe("workbench CLI", () => {
         resolvedSource: "adapters/my-agent",
         stability: "local",
         operations: {
-          "subject.run": "workbench-adapter-my-agent",
+          "candidate.run": "workbench-adapter-my-agent",
         },
       },
     });
@@ -1537,12 +1603,12 @@ describe("workbench CLI", () => {
       ok: true,
       plan: {
         source: {
-          files: 13,
+          files: 12,
         },
       },
     });
     expect(JSON.parse(checkIo.stdoutText()).plan.source).toMatchObject({
-      files: 13,
+      files: 12,
     });
 
     const manifestPath = path.join(workspace, "adapters", "my-agent", "workbench.adapter.yaml");
@@ -1559,7 +1625,7 @@ describe("workbench CLI", () => {
 
     expect(await runCli(["init", workspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
     expect(await runCli(["adapters", "create", "adapters/codex", "--dir", workspace, "--json"], createIo())).toBe(0);
-    await appendSubjectAdapters(workspace, ["../../adapters/codex"]);
+    await appendCandidateAdapters(workspace, ["../../adapters/codex"]);
 
     const listIo = createIo();
     expect(await runCli(["adapters", "list", "--dir", workspace, "--json"], listIo)).toBe(0);
@@ -1600,12 +1666,12 @@ describe("workbench CLI", () => {
         "protocol: workbench.adapter.v3",
         "setup: []",
         "operations:",
-        `  subject.run: { command: "node ${source}.mjs" }`,
+        `  candidate.run: { command: "node ${source}.mjs" }`,
         "",
       ].join("\n"));
       await writeFile(path.join(workspace, "adapters", source, `${source}.mjs`), "");
     }
-    await appendSubjectAdapters(workspace, ["../../adapters/left", "../../adapters/right"]);
+    await appendCandidateAdapters(workspace, ["../../adapters/left", "../../adapters/right"]);
 
     const checkIo = createIo();
     expect(await runCli(["check", "--dir", workspace, "--json"], checkIo)).toBe(1);
@@ -1728,7 +1794,7 @@ describe("workbench CLI", () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-adapter-push-"));
     expect(await runCli(["init", workspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
     expect(await runCli(["adapters", "create", "adapters/my-agent", "--dir", workspace, "--json"], createIo())).toBe(0);
-    await appendSubjectAdapters(workspace, ["../../adapters/my-agent"]);
+    await appendCandidateAdapters(workspace, ["../../adapters/my-agent"]);
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -1775,7 +1841,7 @@ describe("workbench CLI", () => {
         protocol: "workbench.adapter.v3",
         setup: ["npm install --global ."],
         operations: {
-          "subject.run": { command: "node /opt/workbench-adapters/string-command/adapter.mjs --mode workbench" },
+          "candidate.run": { command: "node /opt/workbench-adapters/string-command/adapter.mjs --mode workbench" },
         },
       },
       files: [{
@@ -1802,18 +1868,18 @@ describe("workbench CLI", () => {
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "slots:",
       "  child:",
       "    path: /child",
-      "    operation: subject.run",
+      "    operation: candidate.run",
       "",
     ].join("\n"));
-    const specPath = commandSubjectSpecPath(workspace);
+    const specPath = commandCandidateSpecPath(workspace);
     const specSource = await readFile(specPath, "utf8");
     await writeFile(specPath, specSource.replace(
-      /run:\n  use: command\n  with:\n    command: .+/u,
-      "run:\n  use: orchestrator\n  with:\n    child:\n      use: secret-agent",
+      /runs:\n  main:\n    name: Command\n    use: command\n    with:\n      command: .+/u,
+      "runs:\n  main:\n    name: Orchestrator\n    use: orchestrator\n    with:\n      child:\n        use: secret-agent",
     ) + "adapters:\n  - ../../adapters/orchestrator\n");
 
     const checkIo = createIo();
@@ -1835,18 +1901,18 @@ describe("workbench CLI", () => {
       "  engine.run: {}",
       "",
     ].join("\n"));
-    const subjectPath = commandSubjectSpecPath(workspace);
+    const candidatePath = commandCandidateSpecPath(workspace);
     await writeFile(
-      subjectPath,
-      (await readFile(subjectPath, "utf8")).replace(
-        /run:\n  use: command\n  with:\n    command: .+/u,
-        "run:\n  use: score-only-runner\n  with: {}",
+      candidatePath,
+      (await readFile(candidatePath, "utf8")).replace(
+        /runs:\n  main:\n    name: Command\n    use: command\n    with:\n      command: .+/u,
+        "runs:\n  main:\n    name: Score-only runner\n    use: score-only-runner\n    with: {}",
       ) + "adapters:\n  - ../../adapters/score-only-runner\n",
     );
 
     const topLevelIo = createIo();
     expect(await runCli(["check", "--dir", workspace, "--json"], topLevelIo)).toBe(1);
-    expect(topLevelIo.stdoutText()).toContain("Adapter score-only-runner does not implement subject.run.");
+    expect(topLevelIo.stdoutText()).toContain("Adapter score-only-runner does not implement candidate.run.");
 
     const slotWorkspace = await mkdtemp(path.join(os.tmpdir(), "workbench-adapter-slot-operation-support-"));
     expect(await runCli(["init", slotWorkspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
@@ -1863,7 +1929,7 @@ describe("workbench CLI", () => {
       "slots:",
       "  judge:",
       "    path: /judge",
-      "    operation: subject.run",
+      "    operation: candidate.run",
       "",
     ].join("\n"));
     await writeFile(path.join(engineOnlyRoot, "workbench.adapter.yaml"), [
@@ -1885,7 +1951,7 @@ describe("workbench CLI", () => {
 
     const slotIo = createIo();
     expect(await runCli(["check", "--dir", slotWorkspace, "--json"], slotIo)).toBe(1);
-    expect(slotIo.stdoutText()).toContain("Adapter engine-only does not implement subject.run.");
+    expect(slotIo.stdoutText()).toContain("Adapter engine-only does not implement candidate.run.");
   });
 
   test("check validates engine-resolve adapter slot operations before resolving cases", async () => {
@@ -1905,7 +1971,7 @@ describe("workbench CLI", () => {
       "slots:",
       "  resolver:",
       "    path: /resolver",
-      "    operation: subject.run",
+      "    operation: candidate.run",
       "",
     ].join("\n"));
     await writeFile(path.join(engineOnlyRoot, "workbench.adapter.yaml"), [
@@ -1927,7 +1993,7 @@ describe("workbench CLI", () => {
 
     const checkIo = createIo();
     expect(await runCli(["check", "--dir", workspace, "--json"], checkIo)).toBe(1);
-    expect(checkIo.stdoutText()).toContain("Adapter engine-only does not implement subject.run.");
+    expect(checkIo.stdoutText()).toContain("Adapter engine-only does not implement candidate.run.");
   });
 
   test("adapters list resolves npm package manifests directly from YAML", async () => {
@@ -1951,7 +2017,7 @@ describe("workbench CLI", () => {
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  methods:",
       "    api-key:",
@@ -1962,7 +2028,7 @@ describe("workbench CLI", () => {
     await writeFile(path.join(packageRoot, "adapter.mjs"), "#!/usr/bin/env node\n");
 
     expect(await runCli(["init", workspace, "--command", "adapter-eval", "--json"], createIo())).toBe(0);
-    const specPath = commandSubjectSpecPath(workspace);
+    const specPath = commandCandidateSpecPath(workspace);
     await writeFile(
       specPath,
       `${await readFile(specPath, "utf8")}adapters:\n  - npm:${packageRoot}\n`,
@@ -2000,7 +2066,7 @@ describe("workbench CLI", () => {
         stability: "floating",
       }),
     ]));
-    const spec = await readFile(commandSubjectSpecPath(workspace), "utf8");
+    const spec = await readFile(commandCandidateSpecPath(workspace), "utf8");
     expect(spec).toContain(`npm:${packageRoot}`);
   });
 
@@ -2022,13 +2088,11 @@ describe("workbench CLI", () => {
 
     expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
     await writeDockerNodeWorkbenchSpec(workspace);
-    const baseId = await seedLocalSubject(workspace);
+    const baseId = await seedLocalCandidate(workspace);
     const runIo = createIo();
     expect(await runCli([
       "improve",
-      commandSubjectSpecPath(workspace),
-      "--optimizer",
-      commandOptimizerSpecPath(workspace),
+      commandCandidateSpecPath(workspace),
       "--from",
       baseId,
       "--budget",
@@ -2042,7 +2106,7 @@ describe("workbench CLI", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  test("subject text output summarizes emitted metrics without score-only labels", async () => {
+  test("candidate text output summarizes evaluation scores without candidate-owned metrics", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-metric-summary-"));
     vi.stubGlobal("fetch", vi.fn());
 
@@ -2056,17 +2120,23 @@ describe("workbench CLI", () => {
       summary: "Metric summary run completed.",
       fileChanges: ["prompt.md"],
     });
-    await seedLocalSubject(workspace, {
-      metrics: {
+    await seedLocalCandidate(workspace, {
+      eval: candidateEvaluation({
         score: 0.5,
         accuracy: 0.75,
-      },
+      }),
     });
 
     const listIo = createIo();
-    expect(await runCli(["subjects", "list", "--dir", workspace], listIo)).toBe(0);
-    expect(listIo.stdoutText()).toContain("metrics score: 0.50, accuracy: 0.75");
+    expect(await runCli(["candidates", "list", "--dir", workspace], listIo)).toBe(0);
+    expect(listIo.stdoutText()).toContain("evaluation 0.50");
+    expect(listIo.stdoutText()).not.toContain("metrics");
     expect(listIo.stdoutText()).not.toContain("\tscore 0.5");
+
+    const showIo = createIo();
+    expect(await runCli(["candidates", "show", "--dir", workspace], showIo)).toBe(0);
+    expect(showIo.stdoutText()).toContain("evaluation\tscore: 0.50, accuracy: 0.75");
+    expect(showIo.stdoutText()).not.toContain("metrics");
   });
 
   test.skipIf(!dockerAvailable)("external host engines resolve cases, own shared/separate/no-grader child sandboxes, and persist summaries", async () => {
@@ -2074,10 +2144,10 @@ describe("workbench CLI", () => {
 
     await mkdir(path.join(workspace, "adapters", "external-host-engine"), { recursive: true });
     await mkdir(path.join(workspace, "environment"), { recursive: true });
-    await mkdir(path.join(workspace, "subjects", "external", "files"), { recursive: true });
+    await mkdir(path.join(workspace, "candidates", "external", "files"), { recursive: true });
     await writeFile(path.join(workspace, "environment", "Dockerfile"), "FROM node:22-bookworm-slim\n");
     await writeFile(path.join(workspace, "benchmark.yaml"), [
-      "version: 3",
+      "version: 4",
       "name: external-host-engine-regression",
       "description: Minimal external host engine regression.",
       "engine:",
@@ -2086,18 +2156,21 @@ describe("workbench CLI", () => {
       "  - adapters/external-host-engine",
       "",
     ].join("\n"));
-    await writeFile(path.join(workspace, "subjects", "external", "subject.yaml"), [
-      "version: 3",
-      "name: external-subject",
+    await writeFile(path.join(workspace, "candidates", "external", "candidate.yaml"), [
+      "version: 4",
+      "name: external-candidate",
       "files:",
       "  path: files",
-      "run:",
-      "  use: external-host-engine",
+      "defaultRun: external",
+      "runs:",
+      "  external:",
+      "    name: External host engine",
+      "    use: external-host-engine",
       "adapters:",
       "  - ../../adapters/external-host-engine",
       "",
     ].join("\n"));
-    await writeFile(path.join(workspace, "subjects", "external", "files", "answer.txt"), "external-answer\n");
+    await writeFile(path.join(workspace, "candidates", "external", "files", "answer.txt"), "external-answer\n");
     await writeFile(path.join(workspace, "adapters", "external-host-engine", "workbench.adapter.yaml"), [
       "id: external-host-engine",
       "protocol: workbench.adapter.v3",
@@ -2106,7 +2179,7 @@ describe("workbench CLI", () => {
       "operations:",
       "  engine.resolve: { command: \"node adapter.mjs\" }",
       "  engine.run: { command: \"node adapter.mjs\", executor: host }",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "",
     ].join("\n"));
     await writeFile(path.join(workspace, "adapters", "external-host-engine", "package.json"), `${JSON.stringify({
@@ -2222,13 +2295,13 @@ if (request.operation === "engine.resolve") {
         },
       })),
     };
-} else if (request.operation === "subject.run") {
+} else if (request.operation === "candidate.run") {
   if ("enginePrivate" in request.paths) {
-    throw new Error("subject.run must not receive enginePrivate paths");
+    throw new Error("candidate.run must not receive enginePrivate paths");
   }
   try {
     await fs.readFile(path.join(request.paths.workspace, "private", "engine", "secret.txt"), "utf8");
-    throw new Error("private file leaked into subject run");
+    throw new Error("private file leaked into candidate run");
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
@@ -2239,23 +2312,23 @@ if (request.operation === "engine.resolve") {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  const answer = await fs.readFile(path.join(request.paths.subject, "answer.txt"), "utf8");
-  await fs.writeFile(path.join(output, "subject-output.txt"), answer);
-  value = { artifact: "subject-output.txt", exact: answer.trim() === "external-answer" && caseNote.includes("public external case") ? 1 : 0 };
+  const answer = await fs.readFile(path.join(request.paths.candidate, "answer.txt"), "utf8");
+  await fs.writeFile(path.join(output, "candidate-output.txt"), answer);
+  value = { artifact: "candidate-output.txt", exact: answer.trim() === "external-answer" && caseNote.includes("public external case") ? 1 : 0 };
 } else if (request.operation === "engine.run") {
   if (!request.paths.enginePrivate) {
     throw new Error("engine.run must receive enginePrivate paths");
   }
   await fs.readFile(path.join(request.paths.enginePrivate, "secret.txt"), "utf8");
   if (request.invocation?.with?.mode === "grade") {
-    const subjectOutput = await fs.readFile(path.join(output, "subject-output.txt"), "utf8");
-    const exact = subjectOutput.trim() === "external-answer" ? 1 : 0;
+    const candidateOutput = await fs.readFile(path.join(output, "candidate-output.txt"), "utf8");
+    const exact = candidateOutput.trim() === "external-answer" ? 1 : 0;
     const criteria = [{
       criterion_id: "exact",
       label: "Exact match",
       score: exact,
       pass: exact === 1,
-      rationale: exact === 1 ? "Subject output matched the external verifier expectation." : "Subject output did not match the external verifier expectation.",
+      rationale: exact === 1 ? "Candidate output matched the external verifier expectation." : "Candidate output did not match the external verifier expectation.",
     }];
     value = {
       score: exact,
@@ -2266,21 +2339,21 @@ if (request.operation === "engine.resolve") {
         metrics: { score: exact, exact },
         criteria,
       }],
-      summary: "external host engine graded delegated subject output",
+      summary: "external host engine graded delegated candidate output",
       };
     } else {
-      const subject = request.context?.subject?.run;
-      if (!subject) {
-        throw new Error("engine.run request context.subject.run is required");
+      const candidate = request.context?.candidate?.run;
+      if (!candidate) {
+        throw new Error("engine.run request context.candidate.run is required");
       }
       const topology = String(request.context?.attempt?.caseId ?? "").replace(/^case-/, "") || "separate";
-      const subjectInput = await readSurfaceFiles(request.paths.subject);
+      const candidateInput = await readSurfaceFiles(request.paths.candidate);
       const caseInput = await readSurfaceFiles(request.paths.case);
       const enginePrivateInput = await readSurfaceFiles(request.paths.enginePrivate);
-      const subjectInvocation = {
-        use: subject.use,
-        with: subject.with ?? {},
-        ...(subject.command ? { command: subject.command } : {}),
+      const candidateInvocation = {
+        use: candidate.use,
+        with: candidate.with ?? {},
+        ...(candidate.command ? { command: candidate.command } : {}),
       };
       const gradeInvocation = {
         use: request.invocation.use,
@@ -2290,14 +2363,14 @@ if (request.operation === "engine.resolve") {
       if (topology === "shared") {
         const shared = await runRuntimeControlSequence({
           inputs: {
-            subject: subjectInput,
+            candidate: candidateInput,
             case: caseInput,
             enginePrivate: enginePrivateInput,
           },
           operations: [{
             label: "external-runner",
-            operation: "subject.run",
-            invocation: subjectInvocation,
+            operation: "candidate.run",
+            invocation: candidateInvocation,
           }, {
             label: "external-grader",
             operation: "engine.run",
@@ -2318,19 +2391,19 @@ if (request.operation === "engine.resolve") {
       } else if (topology === "separate") {
         const runner = await runRuntimeControlSequence({
           inputs: {
-            subject: subjectInput,
+            candidate: candidateInput,
             case: caseInput,
           },
           operations: [{
             label: "external-runner",
-            operation: "subject.run",
-            invocation: subjectInvocation,
+            operation: "candidate.run",
+            invocation: candidateInvocation,
           }],
         });
         const runnerFiles = publicOutputFiles(runner.files);
         const grader = await runRuntimeControlSequence({
           inputs: {
-            subject: subjectInput,
+            candidate: candidateInput,
             case: caseInput,
             enginePrivate: enginePrivateInput,
             output: runnerFiles,
@@ -2355,18 +2428,18 @@ if (request.operation === "engine.resolve") {
       } else if (topology === "runner-only") {
         const runner = await runRuntimeControlSequence({
           inputs: {
-            subject: subjectInput,
+            candidate: candidateInput,
             case: caseInput,
           },
           operations: [{
             label: "external-runner",
-            operation: "subject.run",
-            invocation: subjectInvocation,
+            operation: "candidate.run",
+            invocation: candidateInvocation,
           }],
         });
         await writeSurfaceFiles(output, publicOutputFiles(runner.files));
-        const subjectValue = runner.operationResults?.find((result) => result.operation === "subject.run")?.value ?? {};
-        const exact = subjectValue.exact === 1 ? 1 : 0;
+        const candidateValue = runner.operationResults?.find((result) => result.operation === "candidate.run")?.value ?? {};
+        const exact = candidateValue.exact === 1 ? 1 : 0;
         value = {
           score: exact,
           metrics: { exact },
@@ -2427,11 +2500,10 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(evalResult.evaluation?.metrics?.exact?.mean).toBe(1);
 
     const archive = await loadLocalArchive(workspace);
-    expect(archive.subjects[0]?.metrics).toMatchObject({
-      score: 1,
-      exact: 1,
-    });
-    const sampleCases = archive.subjects[0]?.eval?.samples[0]?.cases ?? [];
+    expect(archive.candidates[0]).not.toHaveProperty("metrics");
+    expect(archive.candidates[0]?.eval?.metrics?.score.mean).toBe(1);
+    expect(archive.candidates[0]?.eval?.metrics?.exact.mean).toBe(1);
+    const sampleCases = archive.candidates[0]?.eval?.samples[0]?.cases ?? [];
     expect(sampleCases.map((sampleCase) => sampleCase.id).sort()).toEqual([
       "case-runner-only",
       "case-separate",
@@ -2618,7 +2690,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  methods:",
       "    api-key:",
@@ -2626,7 +2698,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       "        - name: MY_AGENT_API_KEY",
       "",
     ].join("\n"));
-    await appendSubjectAdapters(workspace, ["../../adapters/my-agent"]);
+    await appendCandidateAdapters(workspace, ["../../adapters/my-agent"]);
 
     const connectIo = createIo();
     expect(await runCli([
@@ -2677,7 +2749,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  methods:",
       "    profile:",
@@ -2687,7 +2759,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       "      command: node -e 'console.log(JSON.stringify({env:{MY_AGENT_TOKEN:\"cmd-token\"}}))'",
       "",
     ].join("\n"));
-    await appendSubjectAdapters(workspace, ["../../adapters/my-agent"]);
+    await appendCandidateAdapters(workspace, ["../../adapters/my-agent"]);
 
     const profileIo = createIo();
     expect(await runCli([
@@ -2754,7 +2826,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  methods:",
       "    api-key:",
@@ -2762,12 +2834,12 @@ await fs.writeFile(resultPath, JSON.stringify({
       "        - name: MY_AGENT_API_KEY",
       "",
     ].join("\n"));
-    await appendSubjectAdapters(workspace, ["../../adapters/my-agent"]);
-    const specPath = commandSubjectSpecPath(workspace);
+    await appendCandidateAdapters(workspace, ["../../adapters/my-agent"]);
+    const specPath = commandCandidateSpecPath(workspace);
     const specSource = await readFile(specPath, "utf8");
     await writeFile(specPath, specSource.replace(
-      /run:\n  use: command\n  with:\n    command: .+/u,
-      "run:\n  use: my-agent",
+      /runs:\n  main:\n    name: Command\n    use: command\n    with:\n      command: .+/u,
+      "runs:\n  main:\n    name: My agent\n    use: my-agent",
     ));
 
     vi.stubGlobal("fetch", async (url: string) => {
@@ -2849,11 +2921,11 @@ await fs.writeFile(resultPath, JSON.stringify({
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "slots:",
       "  child:",
       "    path: /child",
-      "    operation: subject.run",
+      "    operation: candidate.run",
       "",
     ].join("\n"));
     await writeFile(path.join(workspace, "adapters", "secret-agent", "workbench.adapter.yaml"), [
@@ -2862,7 +2934,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  methods:",
       "    api-key:",
@@ -2870,12 +2942,12 @@ await fs.writeFile(resultPath, JSON.stringify({
       "        - name: SECRET_AGENT_KEY",
       "",
     ].join("\n"));
-    await appendSubjectAdapters(workspace, ["../../adapters/orchestrator", "../../adapters/secret-agent"]);
-    const specPath = commandSubjectSpecPath(workspace);
+    await appendCandidateAdapters(workspace, ["../../adapters/orchestrator", "../../adapters/secret-agent"]);
+    const specPath = commandCandidateSpecPath(workspace);
     const specSource = await readFile(specPath, "utf8");
     await writeFile(specPath, specSource.replace(
-      /run:\n  use: command\n  with:\n    command: .+/u,
-      "run:\n  use: orchestrator\n  with:\n    child:\n      use: secret-agent",
+      /runs:\n  main:\n    name: Command\n    use: command\n    with:\n      command: .+/u,
+      "runs:\n  main:\n    name: Orchestrator\n    use: orchestrator\n    with:\n      child:\n        use: secret-agent",
     ));
 
     vi.stubGlobal("fetch", async (url: string) => {
@@ -2922,7 +2994,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       "setup:",
       "  - npm install --global .",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  slots:",
       "    github:",
@@ -2936,12 +3008,12 @@ await fs.writeFile(resultPath, JSON.stringify({
       "            - name: DEPLOYER_LLM_API_KEY",
       "",
     ].join("\n"));
-    await appendSubjectAdapters(workspace, ["../../adapters/deployer"]);
-    const specPath = commandSubjectSpecPath(workspace);
+    await appendCandidateAdapters(workspace, ["../../adapters/deployer"]);
+    const specPath = commandCandidateSpecPath(workspace);
     const specSource = await readFile(specPath, "utf8");
     await writeFile(specPath, specSource.replace(
-      /run:\n  use: command\n  with:\n    command: .+/u,
-      "run:\n  use: deployer",
+      /runs:\n  main:\n    name: Command\n    use: command\n    with:\n      command: .+/u,
+      "runs:\n  main:\n    name: Deployer\n    use: deployer",
     ));
 
     vi.stubGlobal("fetch", async (url: string) => {
@@ -3243,7 +3315,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       source: expect.stringContaining("name: demo"),
       dockerfile: expect.stringContaining("FROM"),
       runtimeDockerfile: expect.stringContaining("FROM"),
-      subjectFiles: expect.arrayContaining([
+      candidateFiles: expect.arrayContaining([
         expect.objectContaining({ path: "prepare.sh" }),
         expect.objectContaining({ path: "run.js" }),
       ]),
@@ -3305,10 +3377,10 @@ await fs.writeFile(resultPath, JSON.stringify({
             sourceFingerprint: "fp_0001",
           },
           files: [
-            { path: "benchmark.yaml", content: "version: 3\nname: demo\ndescription: Demo benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n" },
-            { path: "subjects/command/subject.yaml", content: "version: 3\nname: demo\nfiles:\n  path: files\nprepare:\n  command: sh input/subject/prepare.sh\nrun:\n  use: command\n  with:\n    command: node run.js\n" },
-            { path: "subjects/command/files/prepare.sh", content: "#!/usr/bin/env sh\nset -eu\ncp -R input/subject/. .\n" },
-            { path: "subjects/command/files/run.js", content: "console.log('ok')\n" },
+            { path: "benchmark.yaml", content: "version: 4\nname: demo\ndescription: Demo benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n" },
+            { path: "candidates/command/candidate.yaml", content: "version: 4\nname: demo\nfiles:\n  path: files\nprepare:\n  command: sh input/candidate/prepare.sh\ndefaultRun: command\nruns:\n  command:\n    name: Command\n    use: command\n    with:\n      command: node run.js\n" },
+            { path: "candidates/command/files/prepare.sh", content: "#!/usr/bin/env sh\nset -eu\ncp -R input/candidate/. .\n" },
+            { path: "candidates/command/files/run.js", content: "console.log('ok')\n" },
           ],
         });
       }
@@ -3611,12 +3683,11 @@ await fs.writeFile(resultPath, JSON.stringify({
 
   test("pull downloads hosted benchmark source state", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-source-pull-cli-"));
-    await mkdir(path.join(root, "subjects", "command", "files"), { recursive: true });
-    await mkdir(path.join(root, "optimizers"), { recursive: true });
+    await mkdir(path.join(root, "candidates", "command", "files"), { recursive: true });
     await mkdir(path.join(root, "tasks", "previous-case"), { recursive: true });
     await mkdir(path.join(root, "environment"), { recursive: true });
     await writeFile(path.join(root, "benchmark.yaml"), [
-      "version: 3",
+      "version: 4",
       "name: demo",
       "description: Previous benchmark state",
       "engine:",
@@ -3630,32 +3701,30 @@ await fs.writeFile(resultPath, JSON.stringify({
       "        command: printf '{\"protocol\":\"workbench.adapter-result.v1\",\"operation\":\"engine.run\",\"ok\":true,\"value\":{\"score\":1}}' > /workspace/output/workbench-result.json",
       "",
     ].join("\n"));
-    await writeFile(path.join(root, "subjects", "command", "subject.yaml"), [
-      "version: 3",
+    await writeFile(path.join(root, "candidates", "command", "candidate.yaml"), [
+      "version: 4",
       "name: demo",
       "files:",
       "  path: files",
       "prepare:",
-      "  command: sh input/subject/prepare.sh",
-      "run:",
-      "  use: command",
-      "  with:",
-      "    command: node previous.js",
-      "",
-    ].join("\n"));
-    await writeFile(path.join(root, "optimizers", "command.yaml"), [
-      "version: 3",
-      "name: demo optimizer",
-      "edits:",
-      "  - previous.js",
+      "  command: sh input/candidate/prepare.sh",
+      "defaultRun: command",
+      "runs:",
+      "  command:",
+      "    name: Command",
+      "    use: command",
+      "    with:",
+      "      command: node previous.js",
       "improve:",
+      "  edits:",
+      "    - previous.js",
       "  use: command",
       "  with:",
-      "    command: cp -R /workspace/input/subject/. /workspace/output/",
+      "    command: printf '\\n// improved\\n' >> previous.js",
       "",
     ].join("\n"));
-    await writeFile(path.join(root, "subjects", "command", "files", "prepare.sh"), "#!/usr/bin/env sh\nset -eu\ncp -R input/subject/. .\n");
-    await writeFile(path.join(root, "subjects", "command", "files", "previous.js"), "console.log('previous')\n");
+    await writeFile(path.join(root, "candidates", "command", "files", "prepare.sh"), "#!/usr/bin/env sh\nset -eu\ncp -R input/candidate/. .\n");
+    await writeFile(path.join(root, "candidates", "command", "files", "previous.js"), "console.log('previous')\n");
     await writeFile(path.join(root, "tasks", "previous-case", "task.yaml"), "version: 3\ntask: previous\n");
     await writeFile(path.join(root, "environment", "Dockerfile"), "FROM node:22-alpine\n");
     await writeFile(path.join(root, "notes.md"), "local note\n");
@@ -3688,11 +3757,10 @@ await fs.writeFile(resultPath, JSON.stringify({
             sourceFingerprint: "fp_0002",
           },
           files: [
-            { path: "benchmark.yaml", content: "version: 3\nname: demo\ndescription: New benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n" },
-            { path: "subjects/command/subject.yaml", content: "version: 3\nname: demo\nfiles:\n  path: files\nprepare:\n  command: sh input/subject/prepare.sh\nrun:\n  use: command\n  with:\n    command: ./run.sh\n" },
-            { path: "optimizers/command.yaml", content: "version: 3\nname: demo optimizer\nedits:\n  - run.sh\nimprove:\n  use: command\n  with:\n    command: cp -R /workspace/input/subject/. /workspace/output/\n" },
-            { path: "subjects/command/files/prepare.sh", content: "#!/usr/bin/env sh\nset -eu\ncp -R input/subject/. .\n", executable: true },
-            { path: "subjects/command/files/run.sh", content: "echo ok\n", executable: true },
+            { path: "benchmark.yaml", content: "version: 4\nname: demo\ndescription: New benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n" },
+            { path: "candidates/command/candidate.yaml", content: "version: 4\nname: demo\nfiles:\n  path: files\nprepare:\n  command: sh input/candidate/prepare.sh\ndefaultRun: command\nruns:\n  command:\n    name: Command\n    use: command\n    with:\n      command: ./run.sh\nimprove:\n  edits:\n    - run.sh\n  use: command\n  with:\n    command: printf '\\n# improved\\n' >> run.sh\n" },
+            { path: "candidates/command/files/prepare.sh", content: "#!/usr/bin/env sh\nset -eu\ncp -R input/candidate/. .\n", executable: true },
+            { path: "candidates/command/files/run.sh", content: "echo ok\n", executable: true },
             { path: "tasks/case-a/task.yaml", content: "version: 3\ntask: test\n" },
             { path: "environment/Dockerfile", content: "FROM node:22-alpine\n" },
           ],
@@ -3709,21 +3777,20 @@ await fs.writeFile(resultPath, JSON.stringify({
     ], io);
 
     expect(exitCode).toBe(0);
-    expect(io.stdoutText()).toContain("Pulled 7 source file(s)");
+    expect(io.stdoutText()).toContain("Pulled 6 source file(s)");
     expect(requests).toEqual([
       "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc/source",
     ]);
     expect(await readTextTree(root)).toMatchObject({
-      "benchmark.yaml": "file\nversion: 3\nname: demo\ndescription: New benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n",
-      "subjects/command/subject.yaml": "file\nversion: 3\nname: demo\nfiles:\n  path: files\nprepare:\n  command: sh input/subject/prepare.sh\nrun:\n  use: command\n  with:\n    command: ./run.sh\n",
-      "subjects/command/files/prepare.sh": "executable\n#!/usr/bin/env sh\nset -eu\ncp -R input/subject/. .\n",
-      "subjects/command/files/run.sh": "executable\necho ok\n",
-      "optimizers/command.yaml": "file\nversion: 3\nname: demo optimizer\nedits:\n  - run.sh\nimprove:\n  use: command\n  with:\n    command: cp -R /workspace/input/subject/. /workspace/output/\n",
+      "benchmark.yaml": "file\nversion: 4\nname: demo\ndescription: New benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n",
+      "candidates/command/candidate.yaml": "file\nversion: 4\nname: demo\nfiles:\n  path: files\nprepare:\n  command: sh input/candidate/prepare.sh\ndefaultRun: command\nruns:\n  command:\n    name: Command\n    use: command\n    with:\n      command: ./run.sh\nimprove:\n  edits:\n    - run.sh\n  use: command\n  with:\n    command: printf '\\n# improved\\n' >> run.sh\n",
+      "candidates/command/files/prepare.sh": "executable\n#!/usr/bin/env sh\nset -eu\ncp -R input/candidate/. .\n",
+      "candidates/command/files/run.sh": "executable\necho ok\n",
       "environment/Dockerfile": "file\nFROM node:22-alpine\n",
       "notes.md": "file\nlocal note\n",
       "tasks/case-a/task.yaml": "file\nversion: 3\ntask: test\n",
     });
-    await expect(readFile(path.join(root, "subjects", "command", "files", "previous.js"), "utf8"))
+    await expect(readFile(path.join(root, "candidates", "command", "files", "previous.js"), "utf8"))
       .rejects
       .toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(root, "tasks", "previous-case", "task.yaml"), "utf8"))
@@ -3839,11 +3906,11 @@ await fs.writeFile(resultPath, JSON.stringify({
       url: "http://workbench.test/benchmarks/alice/demo",
     });
 
-    const subjectIo = createIo();
-    expect(await runCli(["cloud", "open", "subject_abc123", "--benchmark", "wb_123456789abc", "--json", "--no-open"], subjectIo)).toBe(0);
-    expect(JSON.parse(subjectIo.stdoutText())).toMatchObject({
+    const candidateIo = createIo();
+    expect(await runCli(["cloud", "open", "candidate_abc123", "--benchmark", "wb_123456789abc", "--json", "--no-open"], candidateIo)).toBe(0);
+    expect(JSON.parse(candidateIo.stdoutText())).toMatchObject({
       ok: true,
-      url: "http://workbench.test/benchmarks/alice/demo/subjects/subject_abc123",
+      url: "http://workbench.test/benchmarks/alice/demo/candidates/candidate_abc123",
     });
 
     const runIo = createIo();
@@ -3914,11 +3981,11 @@ await fs.writeFile(resultPath, JSON.stringify({
           },
         });
       }
-      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/subjects") {
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/candidates") {
         requests.push({ url, body: null });
         return Response.json({
-          subjects: [{
-            id: "subject_123",
+          candidates: [{
+            id: "candidate_123",
             status: "evaluated",
             eval: { metric: 1 },
           }],
@@ -3931,7 +3998,7 @@ await fs.writeFile(resultPath, JSON.stringify({
           id: `run_${requests.length}`,
           workflow: body.workflow,
           status: "queued",
-          subjectId: null,
+          candidateId: null,
           jobCount: 1,
         },
       }, { status: 201 });
@@ -3941,11 +4008,9 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(await runCli([
       "cloud",
       "improve",
-      commandSubjectSpecPath(workspace),
-      "--optimizer",
-      commandOptimizerSpecPath(workspace),
+      commandCandidateSpecPath(workspace),
       "--base",
-      "subject_123",
+      "candidate_123",
       "--benchmark",
       "wb_123456789abc",
       "--budget",
@@ -3956,11 +4021,11 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(await runCli([
       "cloud",
       "eval",
-      commandSubjectSpecPath(workspace),
+      commandCandidateSpecPath(workspace),
       "--benchmark",
       "wb_123456789abc",
       "--base",
-      "subject_123",
+      "candidate_123",
       "--samples",
       "2",
     ], createIo())).toBe(0);
@@ -3968,7 +4033,7 @@ await fs.writeFile(resultPath, JSON.stringify({
 
     expect(requests.map((request) => request.url)).toEqual([
       "http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
-      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/subjects",
+      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/candidates",
       "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
       "http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
       "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
@@ -3977,22 +4042,22 @@ await fs.writeFile(resultPath, JSON.stringify({
       workflow: "improve",
       budget: 2,
       samples: 3,
-      subjectId: "subject_123",
-      optimizerSource: expect.stringContaining("improve:"),
+      candidateId: "candidate_123",
+      sourceYaml: expect.stringContaining("improve:"),
     });
+    expect(requests[2]?.body).not.toHaveProperty("candidateSource");
+    expect(requests[2]?.body).not.toHaveProperty("candidateFiles");
     expect(requests[4]?.body).toMatchObject({
       workflow: "eval",
       samples: 2,
-      subjectId: "subject_123",
-      subjectSource: expect.stringContaining("run:"),
-      subjectFiles: expect.arrayContaining([
-        expect.objectContaining({ path: "prepare.sh" }),
-        expect.objectContaining({ path: "run.js" }),
-      ]),
+      candidateId: "candidate_123",
+      sourceYaml: expect.stringContaining("runs:"),
     });
+    expect(requests[4]?.body).not.toHaveProperty("candidateSource");
+    expect(requests[4]?.body).not.toHaveProperty("candidateFiles");
   });
 
-  test("treats hosted eval positional YAML as source, not subject id", async () => {
+  test("treats hosted eval positional YAML as source, not candidate id", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-eval-source-"));
     expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
 
@@ -4014,7 +4079,7 @@ await fs.writeFile(resultPath, JSON.stringify({
     const exitCode = await runCli([
       "cloud",
       "eval",
-      commandSubjectSpecPath(workspace),
+      commandCandidateSpecPath(workspace),
       "--benchmark",
       "wb_123456789abc",
       "--dry-run",
@@ -4029,7 +4094,72 @@ await fs.writeFile(resultPath, JSON.stringify({
         samples: 1,
       },
     });
-    expect(JSON.parse(io.stdoutText()).request).not.toHaveProperty("subjectId");
+    expect(JSON.parse(io.stdoutText()).request).not.toHaveProperty("candidateId");
+  });
+
+  test("reports candidate run id when the hosted server reuses an eval", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-hosted-eval-reuse-output-"));
+    expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
+
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    const requests: Array<{ method: string; url: string }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      requests.push({ method, url });
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc" && method === "GET") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs" && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        return Response.json({
+          reused: true,
+          run: {
+            id: "run_existing",
+            workflow: "eval",
+            status: "finished",
+            outcome: "ok",
+            candidateId: body.candidateId,
+            outputCandidateId: body.candidateId,
+            candidateRunId: "main",
+            jobCount: 1,
+            completedJobCount: 1,
+            failedJobCount: 0,
+          },
+        }, { status: 200 });
+      }
+      return Response.json({ error: `unexpected ${method} ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    const exitCode = await runCli([
+      "cloud",
+      "eval",
+      "--dir",
+      workspace,
+      "--benchmark",
+      "wb_123456789abc",
+      "--base",
+      "candidate_v3",
+      "--json",
+    ], io);
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      reused: true,
+      runId: "run_existing",
+      candidateId: "candidate_v3",
+      candidateRunId: "main",
+    });
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
+      "POST http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
+    ]);
   });
 
   test("starts hosted runs immediately without waiting for environment builds", async () => {
@@ -4070,7 +4200,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             id: "run_123",
             workflow: "eval",
             status: "queued",
-            subjectId: null,
+            candidateId: null,
             jobCount: 1,
           },
         }, { status: 201 });
@@ -4094,7 +4224,212 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(requests.filter((r) => r === "POST http://workbench.test/api/workbench/environments")).toEqual([]);
   });
 
-  test("reuses an evaluated active subject before hosted improve", async () => {
+  test("retries failed hosted eval runs from recorded candidate and samples", async () => {
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc" && method === "GET") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs/run_failed" && method === "GET") {
+        return Response.json({
+          run: {
+            id: "run_failed",
+            workflow: "eval",
+            status: "finished",
+            outcome: "error",
+            candidateId: "candidate_failed",
+            outputCandidateId: "candidate_failed",
+            samples: 2,
+            failedJobCount: 1,
+            input: {
+              sourceYaml: "version: 4\nname: demo\ncandidate:\n  name: Skill\n  selectedRunId: claude-haiku-45\n",
+            },
+          },
+          jobs: [{
+            id: "job_failed",
+            runId: "run_failed",
+            status: "failed",
+            candidateId: "candidate_failed",
+            input: {
+              execution: {
+                purpose: "attempt",
+                metadata: {
+                  caseId: "case-a",
+                  sampleIndex: 1,
+                },
+              },
+            },
+            error: "adapter auth missing",
+          }],
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs" && method === "POST") {
+        return Response.json({
+          run: {
+            id: "run_retry",
+            workflow: "eval",
+            status: "queued",
+            candidateId: "candidate_failed",
+            outputCandidateId: "candidate_failed",
+            jobCount: 1,
+          },
+        }, { status: 201 });
+      }
+      return Response.json({ error: `unexpected ${method} ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    const exitCode = await runCli([
+      "cloud",
+      "retry",
+      "run_failed",
+      "--benchmark",
+      "wb_123456789abc",
+      "--json",
+    ], io);
+
+    expect(exitCode).toBe(0);
+    expect(requests.at(-1)).toMatchObject({
+      method: "POST",
+      url: "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
+      body: {
+        workflow: "eval",
+        samples: 2,
+        candidateId: "candidate_failed",
+        sourceYaml: "version: 4\nname: demo\ncandidate:\n  name: Skill\n  selectedRunId: claude-haiku-45\n",
+        preserveActive: true,
+        selectedSamples: [{ caseId: "case-a", sampleIndex: 1 }],
+      },
+    });
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      retried: {
+        id: "run_failed",
+        kind: "run",
+        workflow: "eval",
+      },
+      runId: "run_retry",
+    });
+  });
+
+  test("retries failed hosted evaluations using full run detail for recorded source", async () => {
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    const sourceYaml = "version: 4\nname: demo\ncandidate:\n  name: Skill\n  selectedRunId: claude-haiku-45\n";
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc" && method === "GET") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/workbench/snapshot" && method === "GET") {
+        return Response.json({
+          evaluations: [{
+            id: "eval_failed",
+            runId: "run_failed",
+            candidateId: "candidate_failed",
+            status: "error",
+            sampleCount: 2,
+            errorSampleCount: 1,
+          }],
+          runs: [{
+            id: "run_failed",
+            workflow: "eval",
+            status: "finished",
+            outcome: "error",
+            samples: 2,
+          }],
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs/run_failed" && method === "GET") {
+        return Response.json({
+          run: {
+            id: "run_failed",
+            workflow: "eval",
+            status: "finished",
+            outcome: "error",
+            candidateId: "candidate_failed",
+            samples: 2,
+            failedJobCount: 1,
+            input: { sourceYaml },
+          },
+          jobs: [],
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs" && method === "POST") {
+        return Response.json({
+          run: {
+            id: "run_retry",
+            workflow: "eval",
+            status: "queued",
+            candidateId: "candidate_failed",
+            outputCandidateId: "candidate_failed",
+            jobCount: 1,
+          },
+        }, { status: 201 });
+      }
+      return Response.json({ error: `unexpected ${method} ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    const exitCode = await runCli([
+      "cloud",
+      "retry",
+      "eval_failed",
+      "--benchmark",
+      "wb_123456789abc",
+      "--json",
+    ], io);
+
+    expect(exitCode).toBe(0);
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc/workbench/snapshot",
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs/run_failed",
+      "POST http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
+    ]);
+    expect(requests.at(-1)?.body).toEqual({
+      workflow: "eval",
+      samples: 2,
+      candidateId: "candidate_failed",
+      sourceYaml,
+      preserveActive: true,
+    });
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      retried: {
+        id: "eval_failed",
+        kind: "evaluation",
+        workflow: "eval",
+      },
+      runId: "run_retry",
+    });
+  });
+
+  test("reuses an evaluated active candidate before hosted improve", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-hosted-improve-active-"));
     expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
 
@@ -4111,14 +4446,14 @@ await fs.writeFile(resultPath, JSON.stringify({
             id: "wb_123456789abc",
             ownerUsername: "alice",
             name: "demo",
-            activeSubjectId: "subject_active",
+            activeCandidateId: "candidate_active",
           },
         });
       }
-      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/subjects") {
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/candidates") {
         return Response.json({
-          subjects: [{
-            id: "subject_active",
+          candidates: [{
+            id: "candidate_active",
             status: "evaluated",
             eval: { metric: 1 },
           }],
@@ -4131,7 +4466,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             id: "run_improve",
             workflow: body.workflow,
             status: "queued",
-            subjectId: body.subjectId,
+            candidateId: body.candidateId,
             jobCount: 1,
           },
         }, { status: 201 });
@@ -4143,9 +4478,7 @@ await fs.writeFile(resultPath, JSON.stringify({
     const exitCode = await runCli([
       "cloud",
       "improve",
-      commandSubjectSpecPath(workspace),
-      "--optimizer",
-      commandOptimizerSpecPath(workspace),
+      commandCandidateSpecPath(workspace),
       "--benchmark",
       "wb_123456789abc",
       "--json",
@@ -4155,18 +4488,138 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(requests.map((request) => request.url)).toEqual([
       "http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
       "http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
-      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/subjects",
+      "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/candidates",
       "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
     ]);
     expect(requests.at(-1)?.body).toMatchObject({
       workflow: "improve",
-      subjectId: "subject_active",
-      optimizerSource: expect.stringContaining("improve:"),
+      candidateId: "candidate_active",
+      sourceYaml: expect.stringContaining("improve:"),
     });
+    expect(requests.at(-1)?.body).not.toHaveProperty("candidateSource");
     expect(JSON.parse(io.stdoutText())).toMatchObject({
       id: "run_improve",
       workflow: "improve",
-      subjectId: "subject_active",
+      candidateId: "candidate_active",
+    });
+  });
+
+  test("surfaces hosted server improve reuse against the recorded base candidate", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-hosted-improve-reuse-base-"));
+    expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
+
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc" && method === "GET") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/candidates" && method === "GET") {
+        return Response.json({
+          candidates: [
+            { id: "candidate_v1", status: "evaluated", eval: { metric: 0.5 } },
+            { id: "candidate_v2", status: "evaluated", eval: { metric: 0.8 } },
+          ],
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs" && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        if (body.candidateId === "candidate_v1") {
+          return Response.json({
+            reused: true,
+            run: {
+              id: "run_v1_to_v2",
+              workflow: "improve",
+              status: "finished",
+              outcome: "ok",
+              candidateId: "candidate_v2",
+              activeCandidateId: "candidate_v2",
+              outputCandidateId: "candidate_v2",
+              candidateRunId: "main",
+              budget: 1,
+              samples: 1,
+              jobCount: 1,
+              completedJobCount: 1,
+              failedJobCount: 0,
+            },
+          }, { status: 200 });
+        }
+        return Response.json({
+          run: {
+            id: "run_v2_to_v3",
+            workflow: "improve",
+            status: "queued",
+            candidateId: body.candidateId,
+            outputCandidateId: "candidate_v3",
+            candidateRunId: "main",
+            jobCount: 1,
+          },
+        }, { status: 201 });
+      }
+      return Response.json({ error: `unexpected ${method} ${url}` }, { status: 500 });
+    });
+
+    const reuseIo = createIo();
+    expect(await runCli([
+      "cloud",
+      "improve",
+      commandCandidateSpecPath(workspace),
+      "--benchmark",
+      "wb_123456789abc",
+      "--base",
+      "candidate_v1",
+      "--json",
+    ], reuseIo)).toBe(0);
+    expect(JSON.parse(reuseIo.stdoutText())).toMatchObject({
+      reused: true,
+      runId: "run_v1_to_v2",
+      candidateId: "candidate_v2",
+      candidateRunId: "main",
+      outputCandidateId: "candidate_v2",
+    });
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc/candidates",
+      "POST http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
+    ]);
+
+    requests.length = 0;
+    const nextIo = createIo();
+    expect(await runCli([
+      "cloud",
+      "improve",
+      commandCandidateSpecPath(workspace),
+      "--benchmark",
+      "wb_123456789abc",
+      "--base",
+      "candidate_v2",
+      "--json",
+    ], nextIo)).toBe(0);
+
+    expect(requests.at(-1)).toMatchObject({
+      method: "POST",
+      url: "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs",
+      body: {
+        workflow: "improve",
+        candidateId: "candidate_v2",
+      },
+    });
+    expect(JSON.parse(nextIo.stdoutText())).toMatchObject({
+      id: "run_v2_to_v3",
+      workflow: "improve",
+      candidateId: "candidate_v2",
     });
   });
 
@@ -4195,7 +4648,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             workflow: "eval",
             status: polls < 2 ? "running" : "finished",
             outcome: "ok",
-            subjectId: "subject_123",
+            candidateId: "candidate_123",
             completedJobCount: 1,
             failedJobCount: 0,
             jobCount: 1,
@@ -4226,9 +4679,9 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(JSON.parse(io.stdoutText())).toMatchObject({
       id: "run_123",
       status: "finished",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       urls: {
-        subjectEvaluation: "http://workbench.test/benchmarks/alice/demo/subjects/subject_123?evaluation=eval_run_123_subject_123",
+        candidateEvaluation: "http://workbench.test/benchmarks/alice/demo/candidates/candidate_123?evaluation=eval_run_123_candidate_123",
       },
     });
   });
@@ -4261,7 +4714,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             workflow: "eval",
             status: polls < 4 ? "running" : "finished",
             outcome: "ok",
-            subjectId: "subject_123",
+            candidateId: "candidate_123",
             completedJobCount: polls < 4 ? 0 : 1,
             failedJobCount: 0,
             jobCount: 1,
@@ -4316,7 +4769,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             id: "run_123",
             workflow: "eval",
             status: "running",
-            subjectId: "subject_123",
+            candidateId: "candidate_123",
             samples: 1,
             attemptsExecuted: 0,
             attemptsRequested: 0,
@@ -4329,7 +4782,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             id: "job_attempt_failed",
             runId: "run_123",
             status: "failed",
-            subjectId: "subject_123",
+            candidateId: "candidate_123",
             input: { execution: { purpose: "attempt" } },
             error: "attempt failed",
           }],
@@ -4342,7 +4795,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             workflow: "eval",
             status: "finished",
             outcome: "cancelled",
-            subjectId: "subject_123",
+            candidateId: "candidate_123",
             completedJobCount: 1,
             failedJobCount: 0,
             jobCount: 1,
@@ -4358,7 +4811,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       run: {
         id: "run_123",
         urls: {
-          subjectEvaluation: "http://workbench.test/benchmarks/alice/demo/subjects/subject_123?evaluation=eval_run_123_subject_123",
+          candidateEvaluation: "http://workbench.test/benchmarks/alice/demo/candidates/candidate_123?evaluation=eval_run_123_candidate_123",
         },
       },
       urls: {
@@ -4423,13 +4876,13 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(listIo.stdoutText()).toContain("No hosted Workbench benchmarks.");
   });
 
-  test("push uploads subject directories as utf8 snapshots", async () => {
+  test("push uploads candidate directories as utf8 snapshots", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-cloud-cli-"));
     expect(await runCli(["init", root, "--command", "push-command-eval", "--json"], createIo())).toBe(0);
-    await writeFile(path.join(root, "subjects", "command", "files", "notes.txt"), "case notes\n");
-    await mkdir(path.join(root, "subjects", "command", "files", "__pycache__"));
-    await writeFile(path.join(root, "subjects", "command", "files", "__pycache__", "run.cpython-314.pyc"), "bytecode\n");
-    await writeFile(path.join(root, "subjects", "command", "files", ".DS_Store"), "finder metadata\n");
+    await writeFile(path.join(root, "candidates", "current", "files", "notes.txt"), "case notes\n");
+    await mkdir(path.join(root, "candidates", "current", "files", "__pycache__"));
+    await writeFile(path.join(root, "candidates", "current", "files", "__pycache__", "run.cpython-314.pyc"), "bytecode\n");
+    await writeFile(path.join(root, "candidates", "current", "files", ".DS_Store"), "finder metadata\n");
     await mkdir(path.join(root, ".workbench"), { recursive: true });
     await writeFile(
       path.join(root, ".workbench", "origin.json"),
@@ -4468,10 +4921,10 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(exitCode).toBe(0);
     expect(io.stdoutText()).toContain("Pushed alice/push-command-eval (wb_123456789abc).");
     expect(bodies["http://workbench.test/api/workbench/benchmarks/wb_123456789abc/source"]).toMatchObject({
-      subjectFiles: expect.arrayContaining([
+      candidateFiles: expect.arrayContaining([
         { path: "notes.txt", content: "case notes\n" },
-        { path: "prepare.sh", content: expect.stringContaining("cp -R input/subject/. .") },
-        { path: "run.js", content: expect.stringContaining("command subject ran") },
+        { path: "prepare.sh", content: expect.stringContaining("cp -R input/candidate/. .") },
+        { path: "run.js", content: expect.stringContaining("command candidate ran") },
       ]),
     });
   });
@@ -4542,7 +4995,7 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
   });
 
-  test("exports binary subject files from base64 snapshots", async () => {
+  test("exports binary candidate files from base64 snapshots", async () => {
     const outputDir = await mkdtemp(path.join(os.tmpdir(), "workbench-export-cli-"));
     const fileBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]);
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
@@ -4565,9 +5018,9 @@ await fs.writeFile(resultPath, JSON.stringify({
     const io = createIo();
     const exitCode = await runCli([
       "cloud",
-      "subjects",
+      "candidates",
       "pull",
-      "subject_123",
+      "candidate_123",
       "--benchmark",
       "wb_123456789abc",
       "--out",
@@ -4598,7 +5051,7 @@ await fs.writeFile(resultPath, JSON.stringify({
         run: {
           id: "run_123",
           status: polls === 1 ? "queued" : "finished",
-          subjectId: polls === 1 ? null : "subject_123",
+          candidateId: polls === 1 ? null : "candidate_123",
         },
       });
     });
@@ -4616,8 +5069,8 @@ await fs.writeFile(resultPath, JSON.stringify({
 
     expect(exitCode).toBe(0);
     expect(polls).toBe(2);
-    expect(io.stdoutText()).toContain("Run run_123 reached finished; subject subject_123");
-    expect(io.stdoutText()).toContain("Open evaluation: http://workbench.test/benchmarks/alice/demo/subjects/subject_123?evaluation=eval_run_123_subject_123");
+    expect(io.stdoutText()).toContain("Run run_123 reached finished; candidate candidate_123");
+    expect(io.stdoutText()).toContain("Open evaluation: http://workbench.test/benchmarks/alice/demo/candidates/candidate_123?evaluation=eval_run_123_candidate_123");
   });
 
   test("returns a failing exit code when a watched hosted run finishes with failed jobs", async () => {
@@ -4638,7 +5091,7 @@ await fs.writeFile(resultPath, JSON.stringify({
           id: "run_failed",
           status: "finished",
           outcome: "error",
-          subjectId: null,
+          candidateId: null,
           jobCount: 3,
           completedJobCount: 0,
           failedJobCount: 1,
@@ -4675,7 +5128,7 @@ await fs.writeFile(resultPath, JSON.stringify({
             id: "run_failed",
             status: "finished",
             outcome: "error",
-            subjectId: null,
+            candidateId: null,
             jobCount: 1,
             completedJobCount: 0,
             failedJobCount: 1,
@@ -4739,45 +5192,44 @@ await fs.writeFile(resultPath, JSON.stringify({
   });
 });
 
-async function seedLocalSubject(
+async function seedLocalCandidate(
   workspace: string,
   options: {
-    metrics?: Record<string, number>;
-    eval?: SubjectRecord["eval"];
-    meta?: SubjectRecord["meta"];
+    eval?: CandidateRecord["eval"];
+    meta?: CandidateRecord["meta"];
   } = {},
 ): Promise<string> {
-  const subjectId = "subject_seeded_001";
+  const candidateId = "candidate_seeded_001";
   const benchmarkFingerprint = await localSeedBenchmarkFingerprint(workspace);
   await saveLocalArchive(workspace, {
-    activeId: subjectId,
-    subjects: [{
-      id: subjectId,
-      ordinal: 0,
+    activeId: candidateId,
+    candidates: [{
+      id: candidateId,
+      version: 1,
+      ordinal: 1,
       benchmarkFingerprint,
-      subjectFingerprint: "seeded-subject-fingerprint",
+      candidateFingerprint: "seeded-candidate-fingerprint",
       createdAt: "2026-04-28T00:00:00.000Z",
       referenceIds: [],
       status: "evaluated",
       fileChanges: ["prompt.md"],
-      ...(options.metrics ? { metrics: options.metrics } : {}),
       ...(options.eval ? { eval: options.eval } : {}),
       ...(options.meta ? { meta: options.meta } : {}),
     }],
-    subjectFiles: {
-      [subjectId]: [{
+    candidateFiles: {
+      [candidateId]: [{
         path: "prompt.md",
         kind: "text",
         encoding: "utf8",
         executable: false,
-        content: "seeded subject\n",
+        content: "seeded candidate\n",
       }],
     },
     evaluations: [],
     runs: [],
     events: [],
   });
-  return subjectId;
+  return candidateId;
 }
 
 async function localSeedBenchmarkFingerprint(workspace: string): Promise<string> {
@@ -4787,7 +5239,7 @@ async function localSeedBenchmarkFingerprint(workspace: string): Promise<string>
 
 function localExecutionJob(args: {
   id: string;
-  subjectId: string;
+  candidateId: string;
   purpose: "attempt";
   output: Record<string, unknown>;
 }): HostedWorkbenchJob {
@@ -4797,7 +5249,7 @@ function localExecutionJob(args: {
     id: args.id,
     projectId: "local",
     runId: "run_seeded",
-    subjectId: args.subjectId,
+    candidateId: args.candidateId,
     kind: "execute",
     status: "succeeded",
     attempt: 1,
@@ -4810,7 +5262,7 @@ function localExecutionJob(args: {
         id: `exec_${args.id}`,
         purpose: args.purpose,
       },
-      subjectId: args.subjectId,
+      candidateId: args.candidateId,
       attemptIndex: 0,
       sampleIndex: 0,
       caseId: "case-001",
@@ -4837,6 +5289,20 @@ function metricStats(value: number) {
     stddev: 0,
     min: value,
     max: value,
+  };
+}
+
+function candidateEvaluation(metrics: Record<string, number>): CandidateRecord["eval"] {
+  return {
+    candidate: { id: "candidate_seeded_001", kind: "candidate" },
+    status: "completed",
+    sampleCount: 1,
+    completedSampleCount: 1,
+    errorSampleCount: 0,
+    metrics: Object.fromEntries(
+      Object.entries(metrics).map(([key, value]) => [key, metricStats(value)]),
+    ),
+    samples: [],
   };
 }
 
@@ -4892,6 +5358,25 @@ async function canRunDocker(): Promise<boolean> {
       resolve(!error);
     });
   });
+}
+
+function localRunSummary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    id: "run_local_test",
+    workflow: "eval",
+    benchmarkFingerprint: "benchmark",
+    status: "finished",
+    startedAt: "2026-05-27T00:00:00.000Z",
+    improver: "none",
+    engineRun: "command",
+    strategy: "direct",
+    budget: 1,
+    repairBudget: 0,
+    attemptsRequested: 1,
+    attemptsExecuted: 1,
+    samples: 1,
+    ...overrides,
+  };
 }
 
 function createIo() {

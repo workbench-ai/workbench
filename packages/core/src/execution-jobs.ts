@@ -59,10 +59,11 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  subjectId: string;
+  candidateId: string;
   attemptIndex: number;
   samples: number;
   caseIds?: readonly string[];
+  sampleIndexesByCase?: ReadonlyMap<string, readonly number[]>;
   spec: GenericRunSpec;
   workflow: WorkbenchRunWorkflow;
   purpose: WorkbenchExecutionSpec["purpose"];
@@ -84,12 +85,17 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   }
   for (const caseId of caseIds) {
     const engineCase = engineCaseForCase(engineCases, caseId);
-    for (let sampleIndex = 0; sampleIndex < args.samples; sampleIndex += 1) {
+    const sampleIndexes = sampleIndexesForCase({
+      caseId,
+      samples: args.samples,
+      sampleIndexesByCase: args.sampleIndexesByCase,
+    });
+    for (const sampleIndex of sampleIndexes) {
       const graph = compileWorkbenchExecutionGraph({
         ownerUserId: args.ownerUserId,
         projectId: args.projectId,
         runId: args.runId,
-        subjectId: args.subjectId,
+        candidateId: args.candidateId,
         attemptIndex: args.attemptIndex,
         sampleIndex,
         caseId,
@@ -105,7 +111,7 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
         jobs.push(createWorkbenchExecutionJob({
           projectId: args.projectId,
           runId: args.runId,
-          subjectId: args.subjectId,
+          candidateId: args.candidateId,
           execution: node.execution,
           dependsOn: node.dependsOn,
           now: args.now,
@@ -117,6 +123,23 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
     }
   }
   return jobs.filter((job, index) => jobs.findIndex((entry) => entry.id === job.id) === index);
+}
+
+function sampleIndexesForCase(args: {
+  caseId: string;
+  samples: number;
+  sampleIndexesByCase?: ReadonlyMap<string, readonly number[]>;
+}): number[] {
+  if (!args.sampleIndexesByCase) {
+    return Array.from({ length: args.samples }, (_, index) => index);
+  }
+  return [...new Set(args.sampleIndexesByCase.get(args.caseId) ?? [])]
+    .filter((sampleIndex) =>
+      Number.isSafeInteger(sampleIndex) &&
+      sampleIndex >= 0 &&
+      sampleIndex < args.samples
+    )
+    .sort((left, right) => left - right);
 }
 
 export function engineCaseIds(engineCases: readonly WorkbenchEngineCase[]): string[] {
@@ -137,7 +160,7 @@ export function engineCaseForCase(
 export function createWorkbenchExecutionJob(args: {
   projectId: string;
   runId: string;
-  subjectId: string;
+  candidateId: string;
   execution: WorkbenchExecutionSpec;
   dependsOn: readonly string[];
   now: string;
@@ -152,7 +175,7 @@ export function createWorkbenchExecutionJob(args: {
     id: workbenchExecutionJobId(args.execution.id),
     projectId: args.projectId,
     runId: args.runId,
-    subjectId: args.subjectId,
+    candidateId: args.candidateId,
     kind: "execute",
     status: "queued",
     attempt: 0,
@@ -161,7 +184,7 @@ export function createWorkbenchExecutionJob(args: {
     input: {
       execution: args.execution,
       dependsOn: args.dependsOn.map(workbenchExecutionJobId),
-      subjectId: args.subjectId,
+      candidateId: args.candidateId,
       attemptIndex,
       sampleIndex,
       caseId,
@@ -172,18 +195,18 @@ export function createWorkbenchExecutionJob(args: {
   };
 }
 
-export function createBaselineSubjectExecution(args: {
+export function createBaselineCandidateExecution(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  subjectId: string;
+  candidateId: string;
   attemptIndex: number;
 }): WorkbenchExecutionSpec {
   return {
     id: `exec_${args.runId.replace(/[^a-z0-9_]/giu, "_")}_attempt_${String(args.attemptIndex).padStart(3, "0")}_case_current_sample_000_improve`,
     projectId: args.projectId,
     runId: args.runId,
-    subjectId: args.subjectId,
+    candidateId: args.candidateId,
     purpose: "improve",
     adapter: {
       use: "baseline",
@@ -191,12 +214,12 @@ export function createBaselineSubjectExecution(args: {
     },
     sandbox: {
       kind: "snapshot",
-      ref: "workbench/baseline-subject",
+      ref: "workbench/baseline-candidate",
     },
     inputs: [],
     outputs: [{
-      name: "subject_patch",
-      schema: "workbench.subject_patch.v1",
+      name: "candidate_patch",
+      schema: "workbench.candidate_patch.v1",
       required: true,
     }],
     policy: {
@@ -220,22 +243,22 @@ export function createBaselineSubjectExecution(args: {
   };
 }
 
-export function createBaselineSubjectJob(args: {
+export function createBaselineCandidateJob(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  subjectId: string;
+  candidateId: string;
   files: readonly SurfaceSnapshotFile[];
   now: string;
   baseId: string | null;
   attemptIndex: number;
   fileSet?: Json;
 }): HostedWorkbenchJob {
-  const execution = createBaselineSubjectExecution({
+  const execution = createBaselineCandidateExecution({
     ownerUserId: args.ownerUserId,
     projectId: args.projectId,
     runId: args.runId,
-    subjectId: args.subjectId,
+    candidateId: args.candidateId,
     attemptIndex: args.attemptIndex,
   });
   const files = args.files.map((file) => ({ ...file }));
@@ -243,7 +266,7 @@ export function createBaselineSubjectJob(args: {
     id: workbenchExecutionJobId(execution.id),
     projectId: args.projectId,
     runId: args.runId,
-    subjectId: args.subjectId,
+    candidateId: args.candidateId,
     kind: "execute",
     status: "succeeded",
     attempt: 1,
@@ -254,7 +277,7 @@ export function createBaselineSubjectJob(args: {
     input: {
       execution,
       dependsOn: [],
-      subjectId: args.subjectId,
+      candidateId: args.candidateId,
       attemptIndex: args.attemptIndex,
       baseline: true,
     } as unknown as Json,
@@ -262,10 +285,10 @@ export function createBaselineSubjectJob(args: {
       ok: true,
       executionId: execution.id,
       purpose: "improve",
-      subjectId: args.subjectId,
+      candidateId: args.candidateId,
       attemptIndex: args.attemptIndex,
       baseId: args.baseId,
-      subjectPatch: {
+      candidatePatch: {
         files,
         fileChanges: [],
       },

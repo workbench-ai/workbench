@@ -1,18 +1,14 @@
-import ELK from "elkjs/lib/elk.bundled.js";
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
 
 import type {
-  EvaluationSummary,
-  SubjectSummary,
+  CandidateSummary,
   BenchmarkSnapshot,
 } from "../types";
-import { formatSubjectSelectionLabel, statusLabel } from "./format";
+import { formatCandidateSelectionLabel, statusLabel } from "./format";
 import {
-  buildLatestEvaluationBySubject,
-  resolveSubjectEvaluationDisplay,
-} from "./subject-evaluation-display";
-
-const elk = new ELK();
+  buildCandidateEvaluationRollups,
+  resolveCandidateEvaluationRollupDisplay,
+} from "./candidate-evaluation-display";
 
 export const LINEAGE_NODE_WIDTH = 208;
 const LINEAGE_NODE_INITIAL_HEIGHT = 96;
@@ -20,13 +16,13 @@ const LINEAGE_NODE_CLASS_NAME =
   "nodrag nopan grid min-h-24 w-full content-start gap-1.5 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted/40 data-[active=true]:border-primary/20 data-[active=true]:bg-muted/35 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring";
 
 export interface LineageNodeData extends Record<string, unknown> {
-  summary: SubjectSummary;
+  summary: CandidateSummary;
   active: boolean;
   statusText: string | null;
   scoreText: string;
 }
 
-export type LineageNode = Node<LineageNodeData, "subject">;
+export type LineageNode = Node<LineageNodeData, "candidate">;
 export type LineageEdge = Edge<Record<string, never>>;
 interface LineageSemanticEdge {
   id: string;
@@ -35,17 +31,29 @@ interface LineageSemanticEdge {
   targetId: string;
 }
 
-interface SubjectLineageNode {
+interface CandidateLineageNode {
   id: string;
   active: boolean;
-  summary: SubjectSummary;
+  summary: CandidateSummary;
 }
 
-interface SubjectLineageGraph {
+interface CandidateLineageGraph {
   activeId: string | null;
-  nodes: SubjectLineageNode[];
+  nodes: CandidateLineageNode[];
   edges: LineageSemanticEdge[];
 }
+
+interface ElkInstance {
+  layout(graph: Record<string, unknown>): Promise<{
+    children?: Array<{
+      id?: string;
+      x?: number;
+      y?: number;
+    }>;
+  }>;
+}
+
+let elkInstancePromise: Promise<ElkInstance> | null = null;
 
 const EDGE_STROKE = "var(--muted-foreground)";
 const EDGE_MARKER_END = {
@@ -59,15 +67,15 @@ const BASE_EDGE_STYLE = {
   strokeLinecap: "round" as const,
 };
 
-export function lineageSubjectNodeId(subjectId: string): string {
-  return `subject:${subjectId}`;
+export function lineageCandidateNodeId(candidateId: string): string {
+  return `candidate:${candidateId}`;
 }
 
-export function lineageNodeTestId(subjectId: string): string {
-  return `lineage-node-${subjectId}`;
+export function lineageNodeTestId(candidateId: string): string {
+  return `lineage-node-${candidateId}`;
 }
 
-export function getSelectedLineageSubjectId(
+export function getSelectedLineageCandidateId(
   nodes: ReadonlyArray<Pick<LineageNode, "data">>,
 ): string | null {
   return nodes[0]?.data.summary.id ?? null;
@@ -85,27 +93,26 @@ export async function buildLineageFlow(
   nodes: LineageNode[];
   edges: LineageEdge[];
 }> {
-  const lineage = buildSubjectLineage({
+  const lineage = buildCandidateLineage({
     summaries: snapshot.summaries,
     activeId: snapshot.activeId,
   });
-  const latestEvaluationBySubject = buildLatestEvaluationBySubject(snapshot.evaluations);
+  const rollupByCandidate = buildCandidateEvaluationRollups(snapshot.evaluations);
   const summaryById = new Map(snapshot.summaries.map((summary) => [summary.id, summary]));
   const nodes = lineage.nodes.map((node) => {
     const { summary, active } = node;
     const baseSummary = summary.baseId ? summaryById.get(summary.baseId) ?? null : null;
-    const latestEvaluation = latestEvaluationBySubject.get(summary.id) ?? null;
-    const evaluationDisplay = resolveSubjectEvaluationDisplay({
-      latestEvaluation,
-    });
+    const rollupDisplay = resolveCandidateEvaluationRollupDisplay(
+      rollupByCandidate.get(summary.id),
+    );
     return {
-      id: lineageSubjectNodeId(node.id),
-      type: "subject",
+      id: lineageCandidateNodeId(node.id),
+      type: "candidate",
       position: { x: 0, y: 0 },
       data: buildLineageNodeData({
         summary,
         active,
-        latestEvaluation,
+        scoreText: rollupDisplay.scoreText,
       }),
       className: LINEAGE_NODE_CLASS_NAME,
       initialWidth: LINEAGE_NODE_WIDTH,
@@ -113,11 +120,11 @@ export async function buildLineageFlow(
       focusable: true,
       selectable: true,
       ariaRole: "button",
-      ariaLabel: formatSubjectSelectionLabel({
+      ariaLabel: formatCandidateSelectionLabel({
         summary,
         baseSummary,
         active,
-        details: [evaluationDisplay.ariaText],
+        details: [rollupDisplay.ariaText],
       }),
       domAttributes: createLineageNodeDomAttributes({
         "data-testid": lineageNodeTestId(summary.id),
@@ -131,8 +138,8 @@ export async function buildLineageFlow(
   const edges = lineage.edges.map((edge) => ({
     id: edge.id,
     kind: edge.kind,
-    sourceId: lineageSubjectNodeId(edge.sourceId),
-    targetId: lineageSubjectNodeId(edge.targetId),
+    sourceId: lineageCandidateNodeId(edge.sourceId),
+    targetId: lineageCandidateNodeId(edge.targetId),
   }));
 
   return {
@@ -148,9 +155,10 @@ export async function buildLineageFlow(
 }
 
 async function layoutLineageNodes<T extends LineageNodeData>(
-  nodes: ReadonlyArray<Node<T, "subject">>,
+  nodes: ReadonlyArray<Node<T, "candidate">>,
   edges: ReadonlyArray<LineageSemanticEdge | LineageEdge>,
-): Promise<Array<Node<T, "subject">>> {
+): Promise<Array<Node<T, "candidate">>> {
+  const elk = await getElkInstance();
   const layout = await elk.layout({
     id: "lineage-root",
     layoutOptions: {
@@ -187,28 +195,33 @@ async function layoutLineageNodes<T extends LineageNodeData>(
   }));
 }
 
+async function getElkInstance(): Promise<ElkInstance> {
+  elkInstancePromise ??= import("elkjs/lib/elk.bundled.js").then((module) => {
+    const Elk = module.default as new () => ElkInstance;
+    return new Elk();
+  });
+  return elkInstancePromise;
+}
+
 function buildLineageNodeData(args: {
-  summary: SubjectSummary;
+  summary: CandidateSummary;
   active: boolean;
-  latestEvaluation: EvaluationSummary | null;
+  scoreText: string;
 }): LineageNodeData {
   const { summary, active } = args;
   const statusText = summary.status === "evaluated" ? null : statusLabel(summary.status);
-  const evaluationDisplay = resolveSubjectEvaluationDisplay({
-    latestEvaluation: args.latestEvaluation,
-  });
   return {
     summary,
     active,
     statusText,
-    scoreText: evaluationDisplay.scoreText,
+    scoreText: args.scoreText,
   };
 }
 
-function buildSubjectLineage(args: {
-  summaries: readonly SubjectSummary[];
+function buildCandidateLineage(args: {
+  summaries: readonly CandidateSummary[];
   activeId: string | null;
-}): SubjectLineageGraph {
+}): CandidateLineageGraph {
   const orderedSummaries = args.summaries
     .slice()
     .sort((left, right) => {
@@ -218,7 +231,7 @@ function buildSubjectLineage(args: {
   const summaryIds = new Set(orderedSummaries.map((summary) => summary.id));
   return {
     activeId: args.activeId,
-    nodes: orderedSummaries.map((summary): SubjectLineageNode => ({
+    nodes: orderedSummaries.map((summary): CandidateLineageNode => ({
       id: summary.id,
       active: args.activeId === summary.id,
       summary,
@@ -228,7 +241,7 @@ function buildSubjectLineage(args: {
 }
 
 function buildLineageEdges(
-  summary: SubjectSummary,
+  summary: CandidateSummary,
   summaryIds: ReadonlySet<string>,
 ): LineageSemanticEdge[] {
   const edges: LineageSemanticEdge[] = [];

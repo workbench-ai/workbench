@@ -5,6 +5,7 @@ import path from "node:path";
 
 import {
   BENCHMARK_SPEC_FILE,
+  CANDIDATE_SPEC_FILE,
   buildWorkbenchProjectSourceFiles,
   engineResolveInvocationForSpec,
   normalizeSurfaceFiles,
@@ -44,9 +45,8 @@ import { createAdapterCommandEnv } from "./adapter-command-env.js";
 import YAML from "yaml";
 
 export const WORKBENCH_BENCHMARK_FILE = BENCHMARK_SPEC_FILE;
-export const WORKBENCH_SUBJECTS_DIR = "subjects";
-export const WORKBENCH_OPTIMIZERS_DIR = "optimizers";
-export const WORKBENCH_SUBJECT_FILE = "subject.yaml";
+export const WORKBENCH_CANDIDATES_DIR = "candidates";
+export const WORKBENCH_CANDIDATE_FILE = CANDIDATE_SPEC_FILE;
 
 export type HostedFile = WorkspaceSnapshotFile;
 
@@ -57,20 +57,20 @@ export interface LocalProjectSource {
   spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>;
   benchmarkPath: string;
   benchmarkSource: string;
-  subjectName: string;
-  subjectDir: string;
-  subjectFilesPath: string;
-  subjectSpecPath: string;
-  subjectSource: string;
-  optimizerPath?: string;
-  optimizerSource?: string;
+  candidateName: string;
+  candidateDir: string;
+  candidateFilesPath: string;
+  candidateSpecPath: string;
+  candidateSource: string;
+  candidateRunId: string;
+  candidateRunIds: string[];
   benchmarkAdapterSources: string[];
   benchmarkAdapterIds: string[];
   dockerfilePath: string;
   dockerfile: string;
   runtimeDockerfile: string;
   dockerfileFiles: HostedFile[];
-  subjectFiles: HostedFile[];
+  candidateFiles: HostedFile[];
   engineResolveFiles: HostedFile[];
   adapters: ResolvedWorkbenchAdapter[];
   adapterFiles: HostedFile[];
@@ -88,11 +88,9 @@ export interface LocalAuthoredProjectSource {
   specSource: string;
   benchmarkPath: string;
   benchmarkSource: string;
-  subjectDir: string;
-  subjectSpecPath: string;
-  subjectSource: string;
-  optimizerPath?: string;
-  optimizerSource?: string;
+  candidateDir: string;
+  candidateSpecPath: string;
+  candidateSource: string;
   sourceFiles: SurfaceSnapshotFile[];
 }
 
@@ -103,7 +101,7 @@ export interface LocalEngineResolveInvocation {
 }
 
 interface LocalProjectSourceOptions {
-  optimizerPath?: string;
+  runId?: string;
 }
 
 function rootAdapterInvocations(
@@ -125,28 +123,22 @@ export async function readLocalProjectSource(
   const {
     dir,
     benchmarkPath,
-    subjectSpecPath,
-    subjectDir,
-    optimizerPath,
+    candidateSpecPath,
+    candidateDir,
   } = paths;
   const benchmarkSource = await readRequiredTextFile(benchmarkPath, WORKBENCH_BENCHMARK_FILE);
-  const subjectSource = await readRequiredTextFile(subjectSpecPath, "subject YAML");
-  const optimizerSource = optimizerPath
-    ? await readRequiredTextFile(optimizerPath, "optimizer YAML")
-    : undefined;
+  const candidateSource = await readRequiredTextFile(candidateSpecPath, "candidate YAML");
   const normalizedSources = await normalizeSourceYamlForExecution({
     dir,
     benchmarkPath,
     benchmarkSource,
-    subjectSpecPath,
-    subjectSource,
-    optimizerPath,
-    optimizerSource,
+    candidateSpecPath,
+    candidateSource,
   });
   const resolvedSource = parseWorkbenchSourceFiles({
     benchmarkSource: normalizedSources.benchmarkSource,
-    subjectSource: normalizedSources.subjectSource,
-    optimizerSource: normalizedSources.optimizerSource,
+    candidateSource: normalizedSources.candidateSource,
+    runId: options.runId,
   });
   const specSource = serializeWorkbenchResolvedSourceYaml(resolvedSource);
   const validation = validateWorkbenchResolvedSourceYaml(specSource);
@@ -178,10 +170,10 @@ export async function readLocalProjectSource(
     adapters,
   );
   const adapterFiles = adapterSourceFiles(adapters);
-  const absoluteSubjectFilesPath = resolveProjectPath(dir, spec.subject.files.path);
-  const subjectFilesPath = absoluteSubjectFilesPath;
-  const subjectFiles = await directoryExists(absoluteSubjectFilesPath)
-    ? normalizeSurfaceFiles(await readSnapshotFiles(absoluteSubjectFilesPath))
+  const absoluteCandidateFilesPath = resolveProjectPath(dir, spec.candidate.files.path);
+  const candidateFilesPath = absoluteCandidateFilesPath;
+  const candidateFiles = await directoryExists(absoluteCandidateFilesPath)
+    ? normalizeSurfaceFiles(await readSnapshotFiles(absoluteCandidateFilesPath))
     : [];
   const rawEngineResolveFiles = engineResolveFilesFromBundles(normalizedSources.engineCases);
   const engineResolveFiles = toHostedFiles(rawEngineResolveFiles);
@@ -199,19 +191,20 @@ export async function readLocalProjectSource(
     spec,
     benchmarkPath,
     benchmarkSource,
-    subjectName: path.basename(subjectDir),
-    subjectDir,
-    subjectFilesPath,
-    subjectSpecPath,
-    subjectSource,
-    ...(optimizerSource !== undefined && optimizerPath ? { optimizerPath, optimizerSource } : {}),
+    candidateName: path.basename(candidateDir),
+    candidateDir,
+    candidateFilesPath,
+    candidateSpecPath,
+    candidateSource,
+    candidateRunId: spec.candidate.selectedRunId,
+    candidateRunIds: Object.keys(spec.candidate.runs).sort(),
     benchmarkAdapterSources: [...resolvedSource.benchmark.adapters],
     benchmarkAdapterIds,
     dockerfilePath,
     dockerfile,
     runtimeDockerfile: composedDockerfile,
     dockerfileFiles: toHostedFiles(dockerfileSourceFiles(dockerfileSources)),
-    subjectFiles: toHostedFiles(subjectFiles),
+    candidateFiles: toHostedFiles(candidateFiles),
     engineResolveFiles,
     adapters,
     adapterFiles: toHostedFiles(adapterFiles),
@@ -225,13 +218,10 @@ export async function readLocalProjectSource(
     sourceFiles: buildWorkbenchProjectSourceFiles({
       specFiles: [
         textSourceFile(toRootRelativePath(dir, benchmarkPath), benchmarkSource),
-        textSourceFile(toRootRelativePath(dir, subjectSpecPath), subjectSource),
-        ...(optimizerSource !== undefined && optimizerPath
-          ? [textSourceFile(toRootRelativePath(dir, optimizerPath), optimizerSource)]
-          : []),
+        textSourceFile(toRootRelativePath(dir, candidateSpecPath), candidateSource),
       ],
-      subjectFilesPath: spec.subject.files.path,
-      subjectFiles,
+      candidateFilesPath: spec.candidate.files.path,
+      candidateFiles: candidateFiles,
       engineResolveFilesPath: normalizedSources.engineResolveFingerprintPath,
       engineResolveFiles: rawEngineResolveFiles,
       adapterFiles,
@@ -247,19 +237,15 @@ export async function readLocalAuthoredProjectSource(
   const {
     dir,
     benchmarkPath,
-    subjectSpecPath,
-    subjectDir,
-    optimizerPath,
+    candidateSpecPath,
+    candidateDir,
   } = await resolveLocalProjectSourcePaths(source, options);
   const benchmarkSource = await readRequiredTextFile(benchmarkPath, WORKBENCH_BENCHMARK_FILE);
-  const subjectSource = await readRequiredTextFile(subjectSpecPath, "subject YAML");
-  const optimizerSource = optimizerPath
-    ? await readRequiredTextFile(optimizerPath, "optimizer YAML")
-    : undefined;
+  const candidateSource = await readRequiredTextFile(candidateSpecPath, "candidate YAML");
   const resolvedSource = parseWorkbenchSourceFiles({
     benchmarkSource,
-    subjectSource,
-    optimizerSource,
+    candidateSource,
+    runId: options.runId,
   });
   const specSource = serializeWorkbenchResolvedSourceYaml(resolvedSource);
   return {
@@ -268,16 +254,12 @@ export async function readLocalAuthoredProjectSource(
     specSource,
     benchmarkPath,
     benchmarkSource,
-    subjectDir,
-    subjectSpecPath,
-    subjectSource,
-    ...(optimizerPath && optimizerSource !== undefined ? { optimizerPath, optimizerSource } : {}),
+    candidateDir,
+    candidateSpecPath,
+    candidateSource,
     sourceFiles: [
       textSourceFile(toRootRelativePath(dir, benchmarkPath), benchmarkSource),
-      textSourceFile(toRootRelativePath(dir, subjectSpecPath), subjectSource),
-      ...(optimizerPath && optimizerSource !== undefined
-        ? [textSourceFile(toRootRelativePath(dir, optimizerPath), optimizerSource)]
-        : []),
+      textSourceFile(toRootRelativePath(dir, candidateSpecPath), candidateSource),
     ],
   };
 }
@@ -288,169 +270,97 @@ async function resolveLocalProjectSourcePaths(
 ): Promise<{
   dir: string;
   benchmarkPath: string;
-  subjectDir: string;
-  subjectSpecPath: string;
-  optimizerPath?: string;
+  candidateDir: string;
+  candidateSpecPath: string;
 }> {
   const resolved = path.resolve(source);
   const stat = await fs.stat(resolved).catch(() => null);
   if (stat?.isFile()) {
     const sourceRecord = await readYamlRecordFile(resolved);
-    if (isSubjectSourceRecord(sourceRecord)) {
-      const subjectDir = path.dirname(resolved);
-      const dir = projectRootForSubjectDir(subjectDir);
+    if (isCandidateSourceRecord(sourceRecord)) {
+      const candidateDir = path.dirname(resolved);
+      const dir = projectRootForCandidateDir(candidateDir);
       return {
         dir,
         benchmarkPath: path.join(dir, WORKBENCH_BENCHMARK_FILE),
-        subjectDir,
-        subjectSpecPath: resolved,
-        optimizerPath: await resolveOptimizerPath(dir, options.optimizerPath, path.basename(subjectDir)),
+        candidateDir,
+        candidateSpecPath: resolved,
       };
     }
     if (isBenchmarkSourceRecord(sourceRecord)) {
       const dir = path.dirname(resolved);
-      const subjectPaths = await resolveSubjectPaths(dir);
+      const candidatePaths = await resolveCandidatePaths(dir);
       return {
         dir,
         benchmarkPath: resolved,
-        ...subjectPaths,
-        optimizerPath: await resolveOptimizerPath(
-          dir,
-          options.optimizerPath,
-          path.basename(subjectPaths.subjectDir),
-        ),
+        ...candidatePaths,
       };
-    }
-    if (isOptimizerSourceRecord(sourceRecord)) {
-      throw new WorkspaceSnapshotError(
-        `Optimizer source must be passed with --optimizer; pass a source directory or subject YAML as SOURCE: ${resolved}`,
-      );
     }
     throw new WorkspaceSnapshotError(`Unsupported Workbench YAML source: ${resolved}`);
   }
   const dir = resolved;
-  const directorySubject = await subjectPathsForSubjectDirectory(dir);
-  if (directorySubject) {
-    return {
-      ...directorySubject,
-      optimizerPath: await resolveOptimizerPath(
-        directorySubject.dir,
-        options.optimizerPath,
-        path.basename(directorySubject.subjectDir),
-      ),
-    };
+  const directoryCandidate = await candidatePathsForCandidateDirectory(dir);
+  if (directoryCandidate) {
+    return directoryCandidate;
   }
-  const subjectPaths = await resolveSubjectPathsWithOptimizer(
-    dir,
-    options.optimizerPath,
-  );
+  const candidatePaths = await resolveCandidatePaths(dir);
   return {
     dir,
     benchmarkPath: path.join(dir, WORKBENCH_BENCHMARK_FILE),
-    ...subjectPaths,
+    ...candidatePaths,
   };
 }
 
-async function resolveSubjectPathsWithOptimizer(
-  dir: string,
-  explicitOptimizerPath: string | undefined,
-): Promise<{
-  subjectDir: string;
-  subjectSpecPath: string;
-  optimizerPath?: string;
+async function resolveCandidatePaths(dir: string): Promise<{
+  candidateDir: string;
+  candidateSpecPath: string;
 }> {
-  const subjectPaths = await resolveSubjectPaths(dir);
-  return {
-    ...subjectPaths,
-    optimizerPath: await resolveOptimizerPath(
-      dir,
-      explicitOptimizerPath,
-      path.basename(subjectPaths.subjectDir),
-    ),
-  };
-}
-
-async function resolveSubjectPaths(dir: string): Promise<{
-  subjectDir: string;
-  subjectSpecPath: string;
-}> {
-  const subjectsDir = path.join(dir, WORKBENCH_SUBJECTS_DIR);
-  const subjects = await listSubjectManifestFiles(subjectsDir);
-  if (subjects.length === 1) {
-    const subjectSpecPath = subjects[0]!;
-    const subjectDir = path.dirname(subjectSpecPath);
+  const candidatesDir = path.join(dir, WORKBENCH_CANDIDATES_DIR);
+  const candidates = await listCandidateManifestFiles(candidatesDir);
+  if (candidates.length === 1) {
+    const candidateSpecPath = candidates[0]!;
+    const candidateDir = path.dirname(candidateSpecPath);
     return {
-      subjectDir,
-      subjectSpecPath,
+      candidateDir,
+      candidateSpecPath,
     };
   }
-  if (subjects.length > 1) {
+  if (candidates.length > 1) {
     throw new WorkspaceSnapshotError(
-        `Multiple subject directories found under ${subjectsDir}; pass subjects/NAME or subjects/NAME/subject.yaml explicitly.`,
+        `Multiple candidate directories found under ${candidatesDir}; pass candidates/NAME or candidates/NAME/candidate.yaml explicitly.`,
     );
   }
   throw new WorkspaceSnapshotError(
-    `No subject directories found under ${subjectsDir}; create subjects/NAME/subject.yaml with files.path.`,
+    `No candidate directories found under ${candidatesDir}; create candidates/NAME/candidate.yaml with files.path.`,
   );
-}
-
-async function resolveOptimizerPath(
-  dir: string,
-  explicit: string | undefined,
-  subjectName?: string,
-): Promise<string | undefined> {
-  if (explicit) {
-    return path.resolve(dir, explicit);
-  }
-  if (subjectName) {
-    const named = path.join(dir, WORKBENCH_OPTIMIZERS_DIR, `${subjectName}.yaml`);
-    if (await fileExists(named)) {
-      return named;
-    }
-  }
-  const optimizersDir = path.join(dir, WORKBENCH_OPTIMIZERS_DIR);
-  const optimizers = await listYamlFiles(optimizersDir);
-  if (optimizers.length === 1) {
-    return optimizers[0]!;
-  }
-  return undefined;
 }
 
 async function normalizeSourceYamlForExecution(args: {
   dir: string;
   benchmarkPath: string;
   benchmarkSource: string;
-  subjectSpecPath: string;
-  subjectSource: string;
-  optimizerPath?: string;
-  optimizerSource?: string;
+  candidateSpecPath: string;
+  candidateSource: string;
 }): Promise<{
   benchmarkSource: string;
-  subjectSource: string;
-  optimizerSource?: string;
+  candidateSource: string;
   engineResolveFingerprintPath: string;
   engineResolve: LocalEngineResolveInvocation;
   engineResolveEnvironment?: WorkbenchEngineResolveResult["environment"];
   engineCases: WorkbenchEngineCase[];
 }> {
   const benchmark = parseYamlRecord(args.benchmarkSource, args.benchmarkPath);
-  const subject = parseYamlRecord(args.subjectSource, args.subjectSpecPath);
-  const optimizer = args.optimizerSource === undefined || args.optimizerPath === undefined
-    ? undefined
-    : parseYamlRecord(args.optimizerSource, args.optimizerPath);
+  const candidate = parseYamlRecord(args.candidateSource, args.candidateSpecPath);
 
   const benchmarkDir = path.dirname(args.benchmarkPath);
-  const subjectDir = path.dirname(args.subjectSpecPath);
+  const candidateDir = path.dirname(args.candidateSpecPath);
   normalizeAdapterSourcePaths(args.dir, benchmark, benchmarkDir);
-  normalizeAdapterSourcePaths(args.dir, subject, subjectDir);
-  if (optimizer && args.optimizerPath) {
-    normalizeAdapterSourcePaths(args.dir, optimizer, path.dirname(args.optimizerPath));
-  }
+  normalizeAdapterSourcePaths(args.dir, candidate, candidateDir);
   const engine = yamlRecord(benchmark.engine);
   if (!engine || typeof engine.use !== "string" || !engine.use.trim()) {
     throw new WorkspaceSnapshotError("benchmark.yaml engine must declare an adapter invocation with use.");
   }
-  normalizeEngineForExecution(args.dir, benchmarkDir, subjectDir, benchmark, subject);
+  normalizeEngineForExecution(args.dir, benchmarkDir, candidateDir, benchmark, candidate);
   const authoredEngineResolve = engineResolveInvocationFromRecord(engine);
   const engineResolve = await resolveEngineResolveAdapter({
     root: args.dir,
@@ -463,31 +373,28 @@ async function normalizeSourceYamlForExecution(args: {
   applyEngineResolveEnvironment(benchmark, engineResolve.environment);
   return {
     benchmarkSource: YAML.stringify(benchmark).trimEnd() + "\n",
-    subjectSource: YAML.stringify(subject).trimEnd() + "\n",
+    candidateSource: YAML.stringify(candidate).trimEnd() + "\n",
     engineResolveFingerprintPath,
     engineResolve: authoredEngineResolve,
     ...(engineResolve.environment ? { engineResolveEnvironment: engineResolve.environment } : {}),
     engineCases: engineResolve.engineCases,
-    ...(optimizer
-      ? { optimizerSource: YAML.stringify(optimizer).trimEnd() + "\n" }
-      : {}),
   };
 }
 
 function normalizeEngineForExecution(
   root: string,
   benchmarkDir: string,
-  subjectDir: string,
+  candidateDir: string,
   benchmark: Record<string, unknown>,
-  subject: Record<string, unknown>,
+  candidate: Record<string, unknown>,
 ): void {
-  const subjectFiles = yamlRecord(subject.files);
-  if (subjectFiles && typeof subjectFiles.path === "string") {
-    subjectFiles.path = toRootRelativePath(
+  const candidateFiles = yamlRecord(candidate.files);
+  if (candidateFiles && typeof candidateFiles.path === "string") {
+    candidateFiles.path = toRootRelativePath(
       root,
-      resolveYamlReference(subjectDir, subjectFiles.path),
+      resolveYamlReference(candidateDir, candidateFiles.path),
     );
-    subject.files = subjectFiles;
+    candidate.files = candidateFiles;
   }
   const engine = yamlRecord(benchmark.engine);
   const engineConfig = yamlRecord(engine?.with) ?? {};
@@ -889,45 +796,41 @@ function isBenchmarkSourceRecord(record: Record<string, unknown>): boolean {
   return record.engine !== undefined;
 }
 
-function isSubjectSourceRecord(record: Record<string, unknown>): boolean {
-  return record.run !== undefined;
-}
-
-function isOptimizerSourceRecord(record: Record<string, unknown>): boolean {
-  return record.edits !== undefined && record.improve !== undefined;
+function isCandidateSourceRecord(record: Record<string, unknown>): boolean {
+  return record.runs !== undefined;
 }
 
 async function readYamlRecordFile(filePath: string): Promise<Record<string, unknown>> {
   return parseYamlRecord(await readRequiredTextFile(filePath, path.basename(filePath)), filePath);
 }
 
-async function subjectPathsForSubjectDirectory(sourceDir: string): Promise<{
+async function candidatePathsForCandidateDirectory(sourceDir: string): Promise<{
   dir: string;
   benchmarkPath: string;
-  subjectDir: string;
-  subjectSpecPath: string;
+  candidateDir: string;
+  candidateSpecPath: string;
 } | null> {
-  const subjectSpecPath = path.join(sourceDir, WORKBENCH_SUBJECT_FILE);
-  if (!(await fileExists(subjectSpecPath))) {
+  const candidateSpecPath = path.join(sourceDir, WORKBENCH_CANDIDATE_FILE);
+  if (!(await fileExists(candidateSpecPath))) {
     return null;
   }
-  const dir = projectRootForSubjectDir(sourceDir);
+  const dir = projectRootForCandidateDir(sourceDir);
   return {
     dir,
     benchmarkPath: path.join(dir, WORKBENCH_BENCHMARK_FILE),
-    subjectDir: sourceDir,
-    subjectSpecPath,
+    candidateDir: sourceDir,
+    candidateSpecPath,
   };
 }
 
-function projectRootForSubjectDir(subjectDir: string): string {
-  const parent = path.basename(path.dirname(subjectDir));
-  if (parent !== WORKBENCH_SUBJECTS_DIR) {
+function projectRootForCandidateDir(candidateDir: string): string {
+  const parent = path.basename(path.dirname(candidateDir));
+  if (parent !== WORKBENCH_CANDIDATES_DIR) {
     throw new WorkspaceSnapshotError(
-      `Subject directory must be under ${WORKBENCH_SUBJECTS_DIR}/NAME: ${subjectDir}`,
+      `Candidate directory must be under ${WORKBENCH_CANDIDATES_DIR}/NAME: ${candidateDir}`,
     );
   }
-  return path.dirname(path.dirname(subjectDir));
+  return path.dirname(path.dirname(candidateDir));
 }
 
 function parseYamlRecord(source: string, label: string): Record<string, unknown> {
@@ -971,7 +874,7 @@ async function directoryExists(filePath: string): Promise<boolean> {
   return await fs.stat(filePath).then((stat) => stat.isDirectory(), () => false);
 }
 
-async function listSubjectManifestFiles(dir: string): Promise<string[]> {
+async function listCandidateManifestFiles(dir: string): Promise<string[]> {
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return [];
@@ -982,25 +885,12 @@ async function listSubjectManifestFiles(dir: string): Promise<string[]> {
     entries
       .filter((entry) => entry.isDirectory())
       .map(async (entry) => {
-        const manifestPath = path.join(dir, entry.name, WORKBENCH_SUBJECT_FILE);
+        const manifestPath = path.join(dir, entry.name, WORKBENCH_CANDIDATE_FILE);
         return await fileExists(manifestPath) ? manifestPath : null;
       }),
   );
   return manifests
     .filter((entry): entry is string => Boolean(entry))
-    .sort((left, right) => left.localeCompare(right));
-}
-
-async function listYamlFiles(dir: string): Promise<string[]> {
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  });
-  return entries
-    .filter((entry) => entry.isFile() && /\.ya?ml$/iu.test(entry.name))
-    .map((entry) => path.join(dir, entry.name))
     .sort((left, right) => left.localeCompare(right));
 }
 

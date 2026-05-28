@@ -3,18 +3,13 @@ export const EVALUATION_CATEGORY_AXIS_LINE_HEIGHT = 12;
 const CATEGORY_AXIS_CHARACTER_WIDTH = 6.4;
 const CATEGORY_AXIS_LABEL_PADDING = 16;
 const CATEGORY_AXIS_ROW_PADDING = 18;
-const CATEGORY_LABEL_LONG_THRESHOLD = 18;
-const CATEGORY_X_AXIS_MAX_CHARS_PER_LINE = 16;
 const CATEGORY_Y_AXIS_MIN_WIDTH = 128;
 const CATEGORY_Y_AXIS_MAX_WIDTH = 320;
 const CATEGORY_Y_AXIS_MIN_CHARS_PER_LINE = 12;
 const CATEGORY_Y_AXIS_WIDTH_CHARS_CAP = 42;
 
 export interface EvaluationCategoryAxisLayout {
-  hasLongLabels: boolean;
   rowHeight: number;
-  xAxisHeight: number;
-  xAxisMaxCharsPerLine: number;
   yAxisMaxCharsPerLine: number;
   yAxisWidth: number;
 }
@@ -41,19 +36,12 @@ export function buildEvaluationCategoryAxisLayout(
     Math.floor((yAxisWidth - CATEGORY_AXIS_LABEL_PADDING) / CATEGORY_AXIS_CHARACTER_WIDTH),
   );
   const yAxisMaxLineCount = maxWrappedLineCount(normalizedLabels, yAxisMaxCharsPerLine);
-  const xAxisMaxLineCount = maxWrappedLineCount(normalizedLabels, CATEGORY_X_AXIS_MAX_CHARS_PER_LINE);
 
   return {
-    hasLongLabels: normalizedLabels.some((label) => label.length > CATEGORY_LABEL_LONG_THRESHOLD),
     rowHeight: Math.max(
       34,
       yAxisMaxLineCount * EVALUATION_CATEGORY_AXIS_LINE_HEIGHT + CATEGORY_AXIS_ROW_PADDING,
     ),
-    xAxisHeight: Math.max(
-      36,
-      xAxisMaxLineCount * EVALUATION_CATEGORY_AXIS_LINE_HEIGHT + 24,
-    ),
-    xAxisMaxCharsPerLine: CATEGORY_X_AXIS_MAX_CHARS_PER_LINE,
     yAxisMaxCharsPerLine,
     yAxisWidth,
   };

@@ -18,17 +18,18 @@ These commands exercise the open Workbench packages: `workbench-contract`, `work
 
 Run `pnpm workbench:public-source:validate` from the monorepo root when package, docs, UI, adapter, or skill changes should be proven against the source-backed public repository layout.
 
-Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox execution, same-environment attempts, Docker local execution, subject materialization, runs, lineage, traces, and the public sandbox adapter runner.
+Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox execution, same-environment attempts, Docker local execution, candidate materialization, runs, lineage, traces, and the public sandbox adapter runner.
 
 Useful manual spot checks:
 
 - `pnpm cli --help`
 - `tmpdir=$(mktemp -d); pnpm cli init "$tmpdir" --command smoke-command --json`
 - `pnpm cli check --dir "$tmpdir" --json`
-- `pnpm cli eval "$tmpdir/subjects/command" --samples 1 --json`
-- `pnpm cli improve "$tmpdir/subjects/command" --optimizer "$tmpdir/optimizers/command.yaml" --budget 1 --samples 1 --json`
+- `pnpm cli eval "$tmpdir/candidates/command" --samples 1 --json`
+- `pnpm cli eval "$tmpdir/candidates/command" --runs all --samples 1 --json`
+- `pnpm cli improve "$tmpdir/candidates/command" --budget 1 --samples 1 --json`
 - `pnpm cli runs list --dir "$tmpdir" --json`
-- `pnpm cli subjects list --dir "$tmpdir" --json`
+- `pnpm cli candidates list --dir "$tmpdir" --json`
 - `pnpm cli open --dir "$tmpdir" --no-open --json`
 - `pnpm cli push --help`
 - `pnpm cli clone --help`
@@ -53,7 +54,7 @@ Run:
 
 ```bash
 pnpm cli check --dir "$tmpdir" --json
-pnpm cli eval "$tmpdir/subjects/command" --samples 1 --json
+pnpm cli eval "$tmpdir/candidates/command" --samples 1 --json
 ```
 
 The score should come from Harbor's normalized result through the adapter. Harbor-specific reward conventions, artifact copying rules, verifier sandboxing, and health-check semantics stay in Harbor `task.toml` and the Harbor runtime. If no Harbor engine adapter source is declared, this smoke is expected to fail adapter resolution rather than fall back to a hidden built-in.
@@ -83,16 +84,16 @@ That smoke command starts the cloud-owned builder, host supervisor, and sandbox 
 
 ## Three-Statement Bench
 
-Use the real benchmark package as a local regression target for version-3 Workbench-engine source:
+Use the real benchmark package as a local regression target for version-4 benchmark/candidate source:
 
 ```bash
 pnpm cli check --dir ../three-statement-bench --json
 pnpm cli runs list --dir ../three-statement-bench --json
-pnpm cli subjects list --dir ../three-statement-bench --json
+pnpm cli candidates list --dir ../three-statement-bench --json
 pnpm cli open --dir ../three-statement-bench --no-open --json
 ```
 
-When validating in a browser, open the URL returned by `workbench open`. The subject-centric flow should move from `/subjects` to a subject, open an evaluation in place, select a case, and inspect the attempt traces directly under that case. Also verify the benchmark master pane, the one-way details-pane collapse button in the benchmark master pane on object routes, version selector, Manifest and Files tabs, route-backed `/subjects`, `/subjects?view=lineage`, and `/evaluations` index pages, subject detail Manifest and Files tabs, and breadcrumbs that navigate to the matching index route. Run ids remain operational CLI/API resources, but they are not a browser navigation surface.
+When validating in a browser, open the URL returned by `workbench open`. The candidate-centric flow should move from `/candidates` to a candidate, open an evaluation in place, select a case, and inspect the attempt traces directly under that case. Also verify the benchmark master pane, the one-way details-pane collapse button in the benchmark master pane on object routes, version selector, Manifest and Files tabs, route-backed `/candidates`, `/candidates?view=lineage`, and `/evaluations` index pages, candidate detail Manifest and Files tabs, and breadcrumbs that navigate to the matching index route. Run ids remain operational CLI/API resources, but they are not a browser navigation surface.
 
 ## Release
 

@@ -10,6 +10,7 @@ import type {
 
 import {
   executeWorkbenchAgentTurn,
+  resolveAgentTurnTimeouts,
 } from "../src/agent-turn.ts";
 import {
   executeWorkbenchBuiltInAdapterCommand,
@@ -31,7 +32,7 @@ describe("built-in Workbench adapters", () => {
     const workbench = builtinWorkbenchAdapterManifest("workbench");
 
     expect(manifest?.setup.join("\n")).not.toContain("/usr/local/bin/workbench-adapter-codex");
-    expect(manifest?.operations["subject.run"]?.command).toBe("workbench-adapter-codex");
+    expect(manifest?.operations["candidate.run"]?.command).toBe("workbench-adapter-codex");
     expect(workbench?.setup).toEqual([]);
     expect(workbench?.operations).toMatchObject({
       "engine.resolve": { command: "workbench-adapter-workbench" },
@@ -41,17 +42,17 @@ describe("built-in Workbench adapters", () => {
 
   test("executes Codex-shaped agent adapters through an operation request", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-agent-"));
-    await fs.mkdir(path.join(root, "input", "subject"), { recursive: true });
+    await fs.mkdir(path.join(root, "input", "candidate"), { recursive: true });
     await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
-    await fs.writeFile(path.join(root, "input", "subject", "SKILL.md"), "Do the task.\n");
+    await fs.writeFile(path.join(root, "input", "candidate", "SKILL.md"), "Do the task.\n");
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_agent_run",
       jobId: "job_agent_run",
-      operation: "subject.run",
+      operation: "candidate.run",
       invocation: {
         use: "codex",
         with: {
@@ -82,11 +83,11 @@ describe("built-in Workbench adapters", () => {
           name: "adapter-smoke",
           description: "Smoke test first-party adapter command.",
         },
-        subject: {
-          id: "subject_123",
-          path: "subject/skill",
+        candidate: {
+          id: "candidate_123",
+          path: "candidate/files",
         },
-        optimizer: {
+        improve: {
           edits: ["SKILL.md"],
         },
         attempt: {
@@ -150,9 +151,9 @@ describe("built-in Workbench adapters", () => {
     expect(seenRequests[0]!.prompt).toContain("Write one durable output file.");
     await expect(fs.readFile(path.join(root, "output", "answer.md"), "utf8"))
       .resolves.toBe("agent output\n");
-    await expect(fs.readFile(path.join(root, "output", "subject-summary.md"), "utf8"))
+    await expect(fs.readFile(path.join(root, "output", "candidate-summary.md"), "utf8"))
       .resolves.toBe("agent output");
-    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "subject.run");
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "candidate.run");
     expect(result.usage.runner.provider).toBe("openai/codex");
   });
 
@@ -160,6 +161,55 @@ describe("built-in Workbench adapters", () => {
     const { codexHarness } = await import("@workbench-ai/agent-driver-openai-codex");
 
     expect(codexHarness().manifest.defaults.model).toBe("gpt-5.5");
+  });
+
+  test("keeps agent stall timeout shorter than the full turn timeout", () => {
+    expect(resolveAgentTurnTimeouts({})).toEqual({
+      turnTimeoutMs: 3_600_000,
+      stallTimeoutMs: 300_000,
+    });
+    expect(resolveAgentTurnTimeouts({
+      turn_timeout_ms: 120_000,
+      stall_timeout_ms: 300_000,
+    })).toEqual({
+      turnTimeoutMs: 120_000,
+      stallTimeoutMs: 120_000,
+    });
+    expect(resolveAgentTurnTimeouts({
+      turn_timeout_ms: 3_600_000,
+      stall_timeout_ms: 90_000,
+    })).toEqual({
+      turnTimeoutMs: 3_600_000,
+      stallTimeoutMs: 90_000,
+    });
+  });
+
+  test("retries stalled agent turns as transient failures", async () => {
+    const request = {
+      role: "engine" as const,
+      provider: { use: "codex" },
+      workspaceRoot: "/workspace",
+      cwd: "/workspace",
+      prompt: "Score the task.",
+      traceRoot: "/workspace/.workbench/trace",
+      jobId: "job_stall_retry",
+    };
+    const executor = vi.fn(async () => {
+      if (executor.mock.calls.length === 1) {
+        throw new Error("turn stalled after 300000ms");
+      }
+      return {
+        output: "ok",
+        traceFiles: [],
+        metadata: { retried: true },
+      };
+    });
+
+    await expect(executeWorkbenchAgentTurn(executor, request)).resolves.toMatchObject({
+      output: "ok",
+      metadata: { retried: true },
+    });
+    expect(executor).toHaveBeenCalledTimes(2);
   });
 
   test("executes rubric criteria as bounded parallel judge turns and aggregates weighted metrics", async () => {
@@ -254,8 +304,8 @@ describe("built-in Workbench adapters", () => {
     expect(engineResult.feedback.judge).toBe("codex");
     const evidenceScorecard = JSON.parse(
       await fs.readFile(path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "scorecard.json"), "utf8"),
-    ) as { safeForOptimizer?: boolean; criteria?: Array<{ id?: string; rationale?: string }> };
-    expect(evidenceScorecard.safeForOptimizer).toBe(true);
+    ) as { safeForImprover?: boolean; criteria?: Array<{ id?: string; rationale?: string }> };
+    expect(evidenceScorecard.safeForImprover).toBe(true);
     expect(evidenceScorecard.criteria?.map((criterion) => criterion.id).sort()).toEqual(["accuracy", "completeness", "style"]);
     await expect(fs.readFile(
       path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "result.json"),
@@ -439,12 +489,12 @@ describe("built-in Workbench adapters", () => {
 
   test("delegates shared Workbench engine grading through one runtime-control sandbox", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-shared-"));
-    await fs.mkdir(path.join(root, "input", "subject"), { recursive: true });
+    await fs.mkdir(path.join(root, "input", "candidate"), { recursive: true });
     await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
     await fs.mkdir(path.join(root, "private", "engine"), { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
-    await fs.writeFile(path.join(root, "input", "subject", "SKILL.md"), "Do the shared work.\n");
+    await fs.writeFile(path.join(root, "input", "candidate", "SKILL.md"), "Do the shared work.\n");
     await fs.writeFile(path.join(root, "input", "case", "prompt.md"), "Public shared task.\n");
     await fs.writeFile(path.join(root, "private", "engine", "secret.txt"), "shared hidden\n");
     const calls: unknown[] = [];
@@ -461,18 +511,18 @@ describe("built-in Workbench adapters", () => {
       expect(body.collectWorkspace).toBeUndefined();
       expect(body).toMatchObject({
         operations: [
-          { label: "subject", operation: "subject.run" },
+          { label: "candidate", operation: "candidate.run" },
           { label: "score", operation: "engine.run" },
         ],
       });
       const inputs = body.inputs as {
-        subject?: Array<{ path: string; content: string }>;
+        candidate?: Array<{ path: string; content: string }>;
         case?: Array<{ path: string; content: string }>;
         enginePrivate?: Array<{ path: string; content: string }>;
         output?: unknown[];
         workspace?: unknown[];
       };
-      expect(inputs.subject).toEqual([
+      expect(inputs.candidate).toEqual([
         expect.objectContaining({ path: "SKILL.md", content: "Do the shared work.\n" }),
       ]);
       expect(inputs.case).toEqual([
@@ -496,7 +546,7 @@ describe("built-in Workbench adapters", () => {
         fileChanges: ["shared-score.txt"],
         operationResults: [{
           protocol: "workbench.adapter-result.v1",
-          operation: "subject.run",
+          operation: "candidate.run",
           ok: true,
           usage: {
             total: {
@@ -541,17 +591,17 @@ describe("built-in Workbench adapters", () => {
         },
       },
       context: {
-        subject: {
+        candidate: {
           run: {
-            use: "inline-subject",
-            command: "subject-command",
+            use: "inline-candidate",
+            command: "candidate-command",
           },
         },
         attempt: {
           caseId: "task-001",
         },
         case: {
-          prompt: "Run subject and score in one sandbox.",
+          prompt: "Run candidate and score in one sandbox.",
         },
       },
       paths: adapterCommandPaths(root),
@@ -577,12 +627,12 @@ describe("built-in Workbench adapters", () => {
 
   test("delegates separate Workbench engine runner and grader sandboxes through runtime-control", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-private-"));
-    await fs.mkdir(path.join(root, "input", "subject"), { recursive: true });
+    await fs.mkdir(path.join(root, "input", "candidate"), { recursive: true });
     await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
     await fs.mkdir(path.join(root, "private", "engine"), { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
-    await fs.writeFile(path.join(root, "input", "subject", "SKILL.md"), "Do the work.\n");
+    await fs.writeFile(path.join(root, "input", "candidate", "SKILL.md"), "Do the work.\n");
     await fs.writeFile(path.join(root, "input", "case", "prompt.md"), "Public task.\n");
     await fs.writeFile(path.join(root, "private", "engine", "secret.txt"), "hidden\n");
     const calls: unknown[] = [];
@@ -600,17 +650,17 @@ describe("built-in Workbench adapters", () => {
         expect(body.prepare).toBe(true);
         expect(body.collectWorkspace).toBe(true);
         expect(body).toMatchObject({
-          operations: [{ operation: "subject.run" }],
+          operations: [{ operation: "candidate.run" }],
         });
         expect((body.inputs as { enginePrivate?: unknown[] }).enginePrivate).toBeUndefined();
         response.end(`${JSON.stringify({
           ok: true,
           files: [{
-            path: "subject-artifact.txt",
+            path: "candidate-artifact.txt",
             kind: "text",
             encoding: "utf8",
             executable: false,
-            content: "subject\n",
+            content: "candidate\n",
           }, {
             path: ".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json",
             kind: "text",
@@ -618,7 +668,7 @@ describe("built-in Workbench adapters", () => {
             executable: false,
             content: "{\"trace\":true}\n",
           }],
-          fileChanges: ["subject-artifact.txt", ".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json"],
+          fileChanges: ["candidate-artifact.txt", ".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json"],
           workspaceFiles: [{
             path: "answer.txt",
             kind: "text",
@@ -628,7 +678,7 @@ describe("built-in Workbench adapters", () => {
           }],
           operationResults: [{
             protocol: "workbench.adapter-result.v1",
-            operation: "subject.run",
+            operation: "candidate.run",
             ok: true,
           }],
           usage: {
@@ -655,7 +705,7 @@ describe("built-in Workbench adapters", () => {
         expect.objectContaining({ path: "answer.txt", content: "workspace\n" }),
       ]);
       expect(inputs.output).toEqual([
-        expect.objectContaining({ path: "subject-artifact.txt", content: "subject\n" }),
+        expect.objectContaining({ path: "candidate-artifact.txt", content: "candidate\n" }),
       ]);
       expect(inputs.output?.map((file) => file.path)).not.toContain(".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json");
       expect(inputs.enginePrivate).toEqual([
@@ -709,17 +759,17 @@ describe("built-in Workbench adapters", () => {
         },
       },
       context: {
-        subject: {
+        candidate: {
           run: {
-            use: "inline-subject",
-            command: "subject-command",
+            use: "inline-candidate",
+            command: "candidate-command",
           },
         },
         attempt: {
           caseId: "task-001",
         },
         case: {
-          prompt: "Run subject and score.",
+          prompt: "Run candidate and score.",
         },
       },
       paths: adapterCommandPaths(root),
@@ -740,8 +790,8 @@ describe("built-in Workbench adapters", () => {
     expect(result.usage?.runner?.costUsd).toBe(0.04);
     expect(result.usage?.engine?.costUsd).toBe(0.06);
     expect((result.value as { usage?: unknown }).usage).toBeUndefined();
-    await expect(fs.readFile(path.join(root, "output", "subject-artifact.txt"), "utf8"))
-      .resolves.toBe("subject\n");
+    await expect(fs.readFile(path.join(root, "output", "candidate-artifact.txt"), "utf8"))
+      .resolves.toBe("candidate\n");
     await expect(fs.readFile(path.join(root, "output", "score-artifact.txt"), "utf8"))
       .resolves.toBe("score\n");
     await expect(fs.readFile(path.join(root, "output", ".workbench", "traces", "exec_workbench_engine_private", "runner", "trace.json"), "utf8"))
@@ -830,7 +880,7 @@ function adapterCommandPaths(root: string) {
     workspace: root,
     output: path.join(root, "output"),
     result: path.join(root, "output", "workbench-result.json"),
-    subject: path.join(root, "input", "subject"),
+    candidate: path.join(root, "input", "candidate"),
     case: path.join(root, "input", "case"),
     traces: path.join(root, "input", "traces"),
     enginePrivate: path.join(root, "private", "engine"),
@@ -895,8 +945,8 @@ async function writeRubricRequest(
         name: "rubric-smoke",
         description: "Smoke test rubric adapter command.",
       },
-      subject: {
-        id: "subject_123",
+      candidate: {
+        id: "candidate_123",
       },
       attempt: {
         attemptIndex: 0,

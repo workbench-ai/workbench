@@ -1,11 +1,7 @@
-import type {
-  SubjectWorkspaceFileSummary,
-  AuthoredWorkbenchSourceDocument,
-} from "../types";
+import type { CandidateWorkspaceFileSummary } from "../types";
 
-export function pickDefaultSubjectFile(
-  files: readonly SubjectWorkspaceFileSummary[],
-  _specDocument: AuthoredWorkbenchSourceDocument | null,
+export function pickDefaultCandidateFile(
+  files: readonly CandidateWorkspaceFileSummary[],
 ): string | null {
   if (files.length === 0) {
     return null;
@@ -13,21 +9,21 @@ export function pickDefaultSubjectFile(
 
   return files
     .map((entry) => entry.path)
-    .sort(compareSubjectFilePreference)[0] ?? null;
+    .sort(compareCandidateFilePreference)[0] ?? null;
 }
 
-function compareSubjectFilePreference(
+function compareCandidateFilePreference(
   left: string,
   right: string,
 ): number {
-  const order = scoreSubjectFilePreference(left) - scoreSubjectFilePreference(right);
+  const order = scoreCandidateFilePreference(left) - scoreCandidateFilePreference(right);
   if (order !== 0) {
     return order;
   }
   return left.localeCompare(right);
 }
 
-function scoreSubjectFilePreference(path: string): number {
+function scoreCandidateFilePreference(path: string): number {
   if (isSkillFile(path)) {
     return 0;
   }

@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
-  applyWorkbenchSubjectPatch,
+  applyWorkbenchCandidatePatch,
   compileWorkbenchExecutionGraph,
   collectSandboxAllocationScopeIssues,
   collectExecutionCapabilityScopeIssues,
@@ -68,10 +68,10 @@ function engineCase(
 }
 
 describe("generic sandbox execution contract", () => {
-  test("parses split benchmark/subject/optimizer source without leaking runtime-specific role schemas", () => {
+  test("parses split benchmark/candidate source without leaking runtime-specific role schemas", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
 
-    expect(spec.version).toBe(3);
+    expect(spec.version).toBe(4);
     expect(spec.description).toBe("Exercise generic file-output execution with command running and rubric scoring.");
     expect(spec.improve).toEqual({
       use: "codex",
@@ -80,14 +80,14 @@ describe("generic sandbox execution contract", () => {
       },
     });
     expect(spec.environment.dockerfile).toBe("environment/Dockerfile");
-    expect(spec.subject.prepare).toEqual({ command: "cp -R input/subject/. ." });
+    expect(spec.candidate.prepare).toEqual({ command: "cp -R input/candidate/. ." });
     expect(spec.run.use).toBe("command");
     expect(spec.engineRun.use).toBe("workbench");
     expect(spec.engineRun.with).toMatchObject({ score: { use: "rubric" } });
     expect(engineResolveInvocationForSpec(spec).use).toBe("workbench");
   });
 
-  test("source spec validation is the split benchmark/subject/optimizer contract", () => {
+  test("source spec validation is the split benchmark/candidate contract", () => {
     const validation = validateWorkbenchResolvedSourceYaml(genericSpec());
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
 
@@ -97,10 +97,10 @@ describe("generic sandbox execution contract", () => {
     expect(spec.run.with).toMatchObject({
       command: "python scripts/evaluate.py --run",
     });
-    expect(spec.subject.prepare?.command).toBe("cp -R input/subject/. .");
+    expect(spec.candidate.prepare?.command).toBe("cp -R input/candidate/. .");
     expect(spec.engineRun.use).toBe("workbench");
     expect(spec.engineRun.with).toMatchObject({ score: { use: "rubric" } });
-    expect(spec.optimizer?.edits).toEqual(["prompt.md", "scripts/evaluate.py"]);
+    expect(spec.candidate.improve?.edits).toEqual(["prompt.md", "scripts/evaluate.py"]);
   });
 
   test("rejects unsupported adapter envelope fields", () => {
@@ -116,9 +116,9 @@ describe("generic sandbox execution contract", () => {
 
   test("adapter manifest slots drive nested default auth without role-specific logic", () => {
     const spec = resolveWorkbenchResolvedSourceYaml([
-      "version: 3",
+      "version: 4",
       "benchmark:",
-      "  version: 3",
+      "  version: 4",
       "  name: nested-auth",
       "  description: Exercise manifest-declared nested adapter auth.",
       "  engine:",
@@ -130,23 +130,23 @@ describe("generic sandbox execution contract", () => {
       "        use: command",
       "        with:",
       "          command: 'true'",
-      "subject:",
-      "  version: 3",
+      "candidate:",
+      "  version: 4",
       "  name: nested-auth",
-      "  description: Subject runner for nested auth.",
+      "  description: Candidate runner for nested auth.",
       "  files:",
-      "    path: subjects/nested-auth/files",
-      "  run:",
-      "    use: orchestrator",
-      "    with:",
-      "      child:",
-      "        use: secret-agent",
-      "optimizer:",
-      "  version: 3",
-      "  name: nested-auth optimizer",
-      "  edits:",
-      "    - SKILL.md",
+      "    path: candidates/nested-auth/files",
+      "  defaultRun: orchestrator",
+      "  runs:",
+      "    orchestrator:",
+      "      name: Orchestrator",
+      "      use: orchestrator",
+      "      with:",
+      "        child:",
+      "          use: secret-agent",
       "  improve:",
+      "    edits:",
+      "      - SKILL.md",
       "    use: command",
       "    with:",
       "      command: 'true'",
@@ -157,14 +157,14 @@ describe("generic sandbox execution contract", () => {
         id: "orchestrator",
         protocol: "workbench.adapter.v3" as const,
         setup: [],
-        operations: { "subject.run": { command: "workbench-adapter-orchestrator" } },
-        slots: { child: { path: "/child", operation: "subject.run" as const } },
+        operations: { "candidate.run": { command: "workbench-adapter-orchestrator" } },
+        slots: { child: { path: "/child", operation: "candidate.run" as const } },
       },
       {
         id: "secret-agent",
         protocol: "workbench.adapter.v3" as const,
         setup: [],
-        operations: { "subject.run": { command: "workbench-adapter-secret-agent" } },
+        operations: { "candidate.run": { command: "workbench-adapter-secret-agent" } },
         auth: { methods: { "api-key": { env: [{ name: "SECRET_AGENT_KEY" }] } } },
       },
     ];
@@ -178,9 +178,9 @@ describe("generic sandbox execution contract", () => {
 
   test("defaults multi-slot adapter auth to each declared slot", () => {
     const spec = resolveWorkbenchResolvedSourceYaml([
-      "version: 3",
+      "version: 4",
       "benchmark:",
-      "  version: 3",
+      "  version: 4",
       "  name: deployer-eval",
       "  description: Exercise multi-slot adapter auth defaults.",
       "  engine:",
@@ -192,20 +192,20 @@ describe("generic sandbox execution contract", () => {
       "        use: command",
       "        with:",
       "          command: 'true'",
-      "subject:",
-      "  version: 3",
+      "candidate:",
+      "  version: 4",
       "  name: deployer-eval",
-      "  description: Subject runner for deployer auth.",
+      "  description: Candidate runner for deployer auth.",
       "  files:",
-      "    path: subjects/deployer/files",
-      "  run:",
-      "    use: deployer",
-      "optimizer:",
-      "  version: 3",
-      "  name: deployer-eval optimizer",
-      "  edits:",
-      "    - prompt.md",
+      "    path: candidates/deployer/files",
+      "  defaultRun: deployer",
+      "  runs:",
+      "    deployer:",
+      "      name: Deployer",
+      "      use: deployer",
       "  improve:",
+      "    edits:",
+      "      - prompt.md",
       "    use: command",
       "    with:",
       "      command: 'true'",
@@ -215,7 +215,7 @@ describe("generic sandbox execution contract", () => {
       id: "deployer",
       protocol: "workbench.adapter.v3" as const,
       setup: [],
-      operations: { "subject.run": { command: "workbench-adapter-deployer" } },
+      operations: { "candidate.run": { command: "workbench-adapter-deployer" } },
       auth: {
         slots: {
           github: { methods: { oauth: { command: "deployer auth github --json" } } },
@@ -240,7 +240,7 @@ describe("generic sandbox execution contract", () => {
       "id: typo-auth",
       "protocol: workbench.adapter.v3",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  methods:",
       "    api-key:",
@@ -253,7 +253,7 @@ describe("generic sandbox execution contract", () => {
       "id: typo-auth",
       "protocol: workbench.adapter.v3",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  slots:",
       "    github:",
@@ -267,7 +267,7 @@ describe("generic sandbox execution contract", () => {
       "id: typo-auth",
       "protocol: workbench.adapter.v3",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "auth:",
       "  methods:",
       "    api-key:",
@@ -280,18 +280,18 @@ describe("generic sandbox execution contract", () => {
 
   test("rejects absolute resolved paths instead of normalizing them", () => {
     const validation = validateWorkbenchResolvedSourceYaml(genericSpec().replace(
-      "    path: subjects/generic-file-output-eval/files",
-      "    path: /subjects/generic-file-output-eval/files",
+      "    path: candidates/generic-file-output-eval/files",
+      "    path: /candidates/generic-file-output-eval/files",
     ));
 
     expect(validation.ok).toBe(false);
-    expect(validation.errors).toContain("resolved Workbench source.subject.files.path must be a relative path, not an absolute path.");
+    expect(validation.errors).toContain("resolved Workbench source.candidate.files.path must be a relative path, not an absolute path.");
   });
 
-  test("rejects globs in resolved subject file paths", () => {
+  test("rejects globs in resolved candidate file paths", () => {
     const rootValidation = validateWorkbenchResolvedSourceYaml(genericSpec().replace(
-      "    path: subjects/generic-file-output-eval/files",
-      "    path: subjects/**",
+      "    path: candidates/generic-file-output-eval/files",
+      "    path: candidates/**",
     ));
     const editsValidation = validateWorkbenchResolvedSourceYaml(genericSpec().replace(
       "    - scripts/evaluate.py",
@@ -299,9 +299,9 @@ describe("generic sandbox execution contract", () => {
     ));
 
     expect(rootValidation.ok).toBe(false);
-    expect(rootValidation.errors).toContain("resolved Workbench source.subject.files.path must be a literal path, not a glob.");
+    expect(rootValidation.errors).toContain("resolved Workbench source.candidate.files.path must be a literal path, not a glob.");
     expect(editsValidation.ok).toBe(false);
-    expect(editsValidation.errors).toContain("optimizer YAML.edits[1] must be a literal path, not a glob.");
+    expect(editsValidation.errors).toContain("resolved Workbench source.candidate.improve.edits[1] must be a literal path, not a glob.");
   });
 
   test("reports authored Dockerfile environment fields without internal adapter labels", () => {
@@ -336,8 +336,8 @@ describe("generic sandbox execution contract", () => {
 
   test("treats command runner output fields as adapter-owned with data", () => {
     const yaml = genericSpec().replace(
-      "      command: python scripts/evaluate.py --run",
-      "      command: python scripts/evaluate.py --run\n      output: runner-output.json",
+      "        command: python scripts/evaluate.py --run",
+      "        command: python scripts/evaluate.py --run\n        output: runner-output.json",
     );
     const validation = validateWorkbenchResolvedSourceYaml(yaml);
     const spec = resolveWorkbenchResolvedSourceYaml(yaml);
@@ -348,14 +348,14 @@ describe("generic sandbox execution contract", () => {
 
   test("treats command environment fields as adapter-owned with data", () => {
     const yaml = genericSpec().replace(
-      "      command: python scripts/evaluate.py --run",
-      "      command: python scripts/evaluate.py --run\n      cwd: subject",
+      "        command: python scripts/evaluate.py --run",
+      "        command: python scripts/evaluate.py --run\n        cwd: candidate",
     );
     const validation = validateWorkbenchResolvedSourceYaml(yaml);
     const spec = resolveWorkbenchResolvedSourceYaml(yaml);
 
     expect(validation.ok).toBe(true);
-    expect(spec.run.with).toMatchObject({ cwd: "subject" });
+    expect(spec.run.with).toMatchObject({ cwd: "candidate" });
   });
 
   test("treats rubric fields as adapter-owned with data", () => {
@@ -412,13 +412,15 @@ describe("generic sandbox execution contract", () => {
   test("treats runner provider with data as adapter-owned with data", () => {
     const yaml = genericSpec()
       .replace(
-        "  run:\n    use: command\n    with:\n      command: python scripts/evaluate.py --run",
+        "  runs:\n    command:\n      name: Command\n      use: command\n      with:\n        command: python scripts/evaluate.py --run",
         [
-          "  run:",
-          "    use: codex",
-          "    with:",
-          "      model: gpt-5.4-mini",
-          "      temperature: 0.2",
+          "  runs:",
+          "    command:",
+          "      name: Codex",
+          "      use: codex",
+          "      with:",
+          "        model: gpt-5.4-mini",
+          "        temperature: 0.2",
         ].join("\n"),
       );
     const validation = validateWorkbenchResolvedSourceYaml(yaml);
@@ -434,7 +436,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       sampleIndex: 0,
       spec,
@@ -445,12 +447,20 @@ describe("generic sandbox execution contract", () => {
     expect(graph.executions.map((execution) => execution.adapter.use)).toEqual(["codex", "workbench"]);
     expect(graph.executions[1]?.metadata.engineCase).toMatchObject({ prompt: "Run the test task." });
     expect(graph.executions[0]?.outputs).toContainEqual({
-      name: "subject_patch",
-      schema: "workbench.subject_patch.v1",
+      name: "candidate_patch",
+      schema: "workbench.candidate_patch.v1",
       required: true,
     });
-    expect(graph.executions[1]?.inputs.find((input) => input.name === "subject")?.writable).toBe(false);
-    expect(graph.executions[1]?.inputs.map((input) => input.name)).toEqual(["subject", "case"]);
+    expect(graph.executions[0]?.inputs.find((input) => input.name === "candidate")).toMatchObject({
+      mountPath: "/workspace",
+      writable: true,
+    });
+    expect(graph.executions[0]?.inputs.find((input) => input.name === "traces")).toMatchObject({
+      mountPath: "/workspace/input/traces",
+      writable: false,
+    });
+    expect(graph.executions[1]?.inputs.find((input) => input.name === "candidate")?.writable).toBe(false);
+    expect(graph.executions[1]?.inputs.map((input) => input.name)).toEqual(["candidate", "case"]);
     expect(graph.executions[1]?.outputs).toContainEqual({
       name: "result",
       schema: "workbench.result.v1",
@@ -468,7 +478,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       sampleIndex: 0,
       caseId: "figma",
@@ -477,8 +487,8 @@ describe("generic sandbox execution contract", () => {
     });
 
     expect(graph.executions.map((execution) => execution.purpose)).toEqual(["attempt"]);
-    expect(graph.executions[0]?.inputs.find((input) => input.name === "subject")?.ref)
-      .toBe("workbench://benchmarks/project_123/subjects/subject_123");
+    expect(graph.executions[0]?.inputs.find((input) => input.name === "candidate")?.ref)
+      .toBe("workbench://benchmarks/project_123/candidates/candidate_123");
     expect(graph.executions[0]?.inputs.find((input) => input.name === "case")?.ref)
       .toBe("workbench://benchmarks/project_123/engine-cases/figma");
   });
@@ -489,7 +499,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       sampleIndex: 0,
       spec,
@@ -499,30 +509,30 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       sampleIndex: 1,
       spec,
       workflow: "improve",
     });
 
-    const firstOptimizer = firstSample.executions.find((execution) => execution.purpose === "improve");
-    const secondOptimizer = secondSample.executions.find((execution) => execution.purpose === "improve");
+    const firstImprover = firstSample.executions.find((execution) => execution.purpose === "improve");
+    const secondImprover = secondSample.executions.find((execution) => execution.purpose === "improve");
 
-    expect(firstOptimizer?.id).toBe(secondOptimizer?.id);
+    expect(firstImprover?.id).toBe(secondImprover?.id);
     expect(secondSample.nodes.find((node) => node.execution.purpose === "attempt")?.dependsOn)
-      .toEqual([firstOptimizer!.id]);
+      .toEqual([firstImprover!.id]);
   });
 
   test("plans one generic durable attempt job per sample", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const engineCases = [engineCase("task-001", "Run the generic task.")];
     const caseIds = engineCases.map((bundle) => bundle.id);
-    const optimizerJobs = planWorkbenchExecutionJobsForPurpose({
+    const improverJobs = planWorkbenchExecutionJobsForPurpose({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       samples: 2,
       spec,
@@ -536,7 +546,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       samples: 2,
       spec,
@@ -547,9 +557,9 @@ describe("generic sandbox execution contract", () => {
       now: "2026-04-27T00:00:00.000Z",
     });
 
-    expect(optimizerJobs).toHaveLength(1);
+    expect(improverJobs).toHaveLength(1);
     expect(attemptJobs).toHaveLength(2);
-    expect([...optimizerJobs, ...attemptJobs].every((job) => job.kind === "execute")).toBe(true);
+    expect([...improverJobs, ...attemptJobs].every((job) => job.kind === "execute")).toBe(true);
     expect(attemptJobs.every((job) => {
       const input = job.input as { dependsOn?: unknown };
       return Array.isArray(input.dependsOn) && input.dependsOn.length === 1;
@@ -562,7 +572,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       samples: 1,
       caseIds: ["task-a"],
@@ -578,13 +588,43 @@ describe("generic sandbox execution contract", () => {
     });
   });
 
+  test("plans selected case sample pairs for repair and top-up runs", () => {
+    const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
+    const jobs = planWorkbenchExecutionJobsForPurpose({
+      ownerUserId: "user_123",
+      projectId: "project_123",
+      runId: "run_123",
+      candidateId: "candidate_123",
+      attemptIndex: 0,
+      samples: 3,
+      caseIds: ["task-a", "task-b"],
+      sampleIndexesByCase: new Map([
+        ["task-a", [2]],
+        ["task-b", [0, 2]],
+      ]),
+      engineCases: [
+        engineCase("task-a", "Run task A."),
+        engineCase("task-b", "Run task B."),
+      ],
+      spec,
+      workflow: "eval",
+      purpose: "attempt",
+      now: "2026-04-27T00:00:00.000Z",
+    });
+
+    expect(jobs.map((job) => {
+      const input = job.input as { caseId?: string; sampleIndex?: number };
+      return `${input.caseId}:${input.sampleIndex}`;
+    })).toEqual(["task-a:2", "task-b:0", "task-b:2"]);
+  });
+
   test("compiled executions satisfy sandbox isolation invariants", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const graph = compileTestExecutionGraph({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
@@ -599,7 +639,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -628,7 +668,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -639,13 +679,13 @@ describe("generic sandbox execution contract", () => {
     });
 
     expect(capability.executionId).toBe(execution.id);
-    expect(capability.subject).toMatchObject({
+    expect(capability.candidate).toMatchObject({
       tenantId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
     });
-    expect(capability.inputs.map((input) => input.name)).toEqual(["subject", "case"]);
+    expect(capability.inputs.map((input) => input.name)).toEqual(["candidate", "case"]);
     expect(capability.outputPrefix).toBe(`executions/${execution.id}/outputs/`);
     expect(collectExecutionCapabilityScopeIssues(capability, execution, { now: "2026-04-27T00:00:01.000Z" })).toEqual([]);
 
@@ -669,7 +709,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -710,7 +750,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -736,20 +776,20 @@ describe("generic sandbox execution contract", () => {
     }, allocation, execution)).toContain(`Sandbox handle lifecycle id does not match allocation ${allocation.lifecycleId}.`);
   });
 
-  test("subject patch outputs cannot modify paths outside optimizer edits", () => {
+  test("candidate patch outputs cannot modify paths outside improve edits", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const graph = compileTestExecutionGraph({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
     });
 
     expect(() => validateWorkbenchExecutionOutputPayloads(graph.executions[0]!, {
-      subject_patch: {
+      candidate_patch: {
         files: [{
           path: "secrets.txt",
           kind: "text",
@@ -759,23 +799,23 @@ describe("generic sandbox execution contract", () => {
         }],
         fileChanges: ["secrets.txt"],
       },
-    })).toThrow(/outside optimizer edits: secrets\.txt/u);
+    })).toThrow(/outside improve edits: secrets\.txt/u);
   });
 
-  test("subject patch file entries default missing kind and encoding", () => {
+  test("candidate patch file entries default missing kind and encoding", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const graph = compileTestExecutionGraph({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
     });
 
     const output = validateWorkbenchExecutionOutputPayloads(graph.executions[0]!, {
-      subject_patch: {
+      candidate_patch: {
         files: [{
           path: "prompt.md",
           content: "updated prompt",
@@ -784,7 +824,7 @@ describe("generic sandbox execution contract", () => {
       },
     });
 
-    expect(output.subjectPatch?.files).toEqual([{
+    expect(output.candidatePatch?.files).toEqual([{
       path: "prompt.md",
       kind: "text",
       encoding: "utf8",
@@ -799,7 +839,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -863,7 +903,7 @@ describe("generic sandbox execution contract", () => {
       },
     });
 
-    expect(materialized).toEqual(["subject", "case"]);
+    expect(materialized).toEqual(["candidate", "case"]);
     expect(result.payloads.result?.score).toBe(0.75);
   });
 
@@ -873,7 +913,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -924,7 +964,7 @@ describe("generic sandbox execution contract", () => {
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
@@ -937,7 +977,7 @@ describe("generic sandbox execution contract", () => {
         id: "codex",
         protocol: "workbench.adapter.v3",
         setup: [],
-        operations: { "optimizer.improve": { command: "workbench-adapter-codex" } },
+        operations: { "candidate.improve": { command: "workbench-adapter-codex" } },
         auth: { methods: { oauth: { files: [{ path: ".codex/auth.json" }] } } },
       }],
     )).toEqual([{ adapterId: "codex", profile: "default" }]);
@@ -956,7 +996,7 @@ const output = process.env.WORKBENCH_OUTPUT;
 fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
   protocol: "workbench.adapter-result.v1",
-  operation: "optimizer.improve",
+  operation: "candidate.improve",
   ok: true,
   value: {
     files: [{ path: "prompt.md", encoding: "utf8", content: "changed\\n", executable: false }],
@@ -970,7 +1010,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         id: "codex",
         protocol: "workbench.adapter.v3",
         setup: [],
-        operations: { "optimizer.improve": { command: `node ${shellWord(adapterPath)}` } },
+        operations: { "candidate.improve": { command: `node ${shellWord(adapterPath)}` } },
         auth: { methods: { oauth: { files: [{ path: ".codex/auth.json" }] } } },
       }],
     );
@@ -978,7 +1018,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
@@ -987,7 +1027,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1000,7 +1040,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         id: "codex",
         protocol: "workbench.adapter.v3",
         setup: [],
-        operations: { "optimizer.improve": { command: `node ${shellWord(adapterPath)}` } },
+        operations: { "candidate.improve": { command: `node ${shellWord(adapterPath)}` } },
         auth: { methods: { oauth: { files: [{ path: ".codex/auth.json" }] } } },
       }],
       adapterAuthProfiles: [{
@@ -1045,12 +1085,12 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
     });
-    const commandOptimizerExecution = {
+    const commandImproverExecution = {
       ...graph.executions[0]!,
       adapter: {
         use: "command",
@@ -1066,8 +1106,8 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
-      execution: commandOptimizerExecution,
+      candidateId: "candidate_123",
+      execution: commandImproverExecution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
     });
@@ -1080,7 +1120,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         id: "my-agent",
         protocol: "workbench.adapter.v3",
         setup: [],
-        operations: { "subject.run": { command: "workbench-adapter-my-agent" } },
+        operations: { "candidate.run": { command: "workbench-adapter-my-agent" } },
         auth: {
           methods: {
             "api-key": {
@@ -1099,27 +1139,27 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       }],
       engineResolveFiles: [],
       engineCases: [],
-    }, commandOptimizerExecution, "2026-04-27T00:00:00.000Z", createWorkbenchExecutionCapability(commandOptimizerExecution, {
+    }, commandImproverExecution, "2026-04-27T00:00:00.000Z", createWorkbenchExecutionCapability(commandImproverExecution, {
       now: "2026-04-27T00:00:00.000Z",
     }));
 
     expect(completed.status).toBe("succeeded");
-    expect((completed.output as { subjectPatch?: { fileChanges?: string[] } }).subjectPatch?.fileChanges)
+    expect((completed.output as { candidatePatch?: { fileChanges?: string[] } }).candidatePatch?.fileChanges)
       .toEqual(["prompt.md"]);
-    expect((completed.output as { subjectPatch?: { files?: Array<{ kind?: string; executable?: boolean }> } }).subjectPatch?.files)
+    expect((completed.output as { candidatePatch?: { files?: Array<{ kind?: string; executable?: boolean }> } }).candidatePatch?.files)
       .toContainEqual(expect.objectContaining({ kind: "text", executable: false }));
   });
 
   test("sandbox adapter runtime uses execution adapter with data as the authority", async () => {
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const task = { version: 3 as const, task: "Run execution adapter output." };
-    const runCommand = "node -e 'const fs=require(\"fs\");const path=require(\"path\");const r=JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST,\"utf8\"));if (\"enginePrivate\" in r.paths) process.exit(33);if (r.paths.subject!==path.join(r.paths.workspace,\"input\",\"subject\")) process.exit(34);if (r.paths.case!==path.join(r.paths.workspace,\"input\",\"case\")) process.exit(35);if (!fs.existsSync(path.join(r.paths.case,\"request.md\"))) process.exit(36);if (fs.existsSync(path.join(r.paths.case,\"secret.txt\"))) process.exit(37);if (fs.existsSync(path.join(r.paths.workspace,\"request.md\"))) process.exit(38);if (fs.existsSync(path.join(r.paths.workspace,\"private\",\"engine\",\"secret.txt\"))) process.exit(39);fs.mkdirSync(r.paths.output,{recursive:true});fs.writeFileSync(path.join(r.paths.output,\"runner-output.txt\"),\"execution-adapter\\n\");' && test -z \"${WORKBENCH_TASK_DIR:-}\" && test -z \"${WORKBENCH_TASK_ID:-}\"";
+    const runCommand = "node -e 'const fs=require(\"fs\");const path=require(\"path\");const r=JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST,\"utf8\"));if (\"enginePrivate\" in r.paths) process.exit(33);if (r.paths.candidate!==path.join(r.paths.workspace,\"input\",\"candidate\")) process.exit(34);if (r.paths.case!==path.join(r.paths.workspace,\"input\",\"case\")) process.exit(35);if (!fs.existsSync(path.join(r.paths.case,\"request.md\"))) process.exit(36);if (fs.existsSync(path.join(r.paths.case,\"secret.txt\"))) process.exit(37);if (fs.existsSync(path.join(r.paths.workspace,\"request.md\"))) process.exit(38);if (fs.existsSync(path.join(r.paths.workspace,\"private\",\"engine\",\"secret.txt\"))) process.exit(39);fs.mkdirSync(r.paths.output,{recursive:true});fs.writeFileSync(path.join(r.paths.output,\"runner-output.txt\"),\"execution-adapter\\n\");' && test -z \"${WORKBENCH_TASK_DIR:-}\" && test -z \"${WORKBENCH_TASK_ID:-}\"";
     const runtimeSpec = {
       ...spec,
-      subject: {
-        ...spec.subject,
+      candidate: {
+        ...spec.candidate,
         prepare: {
-          command: "test -z \"${WORKBENCH_ADAPTER_REQUEST:-}\" && test -z \"${WORKBENCH_RESULT:-}\" && test -n \"${WORKBENCH_OUTPUT:-}\" && test ! -e private/engine/secret.txt && cp -R input/subject/. .",
+          command: "test -z \"${WORKBENCH_ADAPTER_REQUEST:-}\" && test -z \"${WORKBENCH_RESULT:-}\" && test -n \"${WORKBENCH_OUTPUT:-}\" && test ! -e private/engine/secret.txt && cp -R input/candidate/. .",
         },
       },
       run: {
@@ -1147,7 +1187,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec: runtimeSpec,
       task,
@@ -1159,14 +1199,14 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       adapter: {
         use: "command",
         with: {
-          command: "node -e 'const fs=require(\"fs\");const path=require(\"path\");const r=JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST,\"utf8\"));if (r.paths.subject!==path.join(r.paths.workspace,\"input\",\"subject\")) process.exit(40);if (r.paths.case!==path.join(r.paths.workspace,\"input\",\"case\")) process.exit(41);if (r.paths.enginePrivate!==path.join(r.paths.workspace,\"private\",\"engine\")) process.exit(42);if (!fs.existsSync(path.join(r.paths.enginePrivate,\"secret.txt\"))) process.exit(43);if (!fs.existsSync(path.join(r.paths.case,\"request.md\"))) process.exit(44);if (fs.existsSync(path.join(r.paths.workspace,\"request.md\"))) process.exit(45);fs.mkdirSync(r.paths.output,{recursive:true});fs.writeFileSync(path.join(r.paths.output,\"runner-output.txt\"),\"runner\\n\");fs.writeFileSync(path.join(r.paths.output,\"workbench-result.json\"),JSON.stringify({protocol:\"workbench.adapter-result.v1\",operation:\"engine.run\",ok:true,value:{score:1}}));'",
+          command: "node -e 'const fs=require(\"fs\");const path=require(\"path\");const r=JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST,\"utf8\"));if (r.paths.candidate!==path.join(r.paths.workspace,\"input\",\"candidate\")) process.exit(40);if (r.paths.case!==path.join(r.paths.workspace,\"input\",\"case\")) process.exit(41);if (r.paths.enginePrivate!==path.join(r.paths.workspace,\"private\",\"engine\")) process.exit(42);if (!fs.existsSync(path.join(r.paths.enginePrivate,\"secret.txt\"))) process.exit(43);if (!fs.existsSync(path.join(r.paths.case,\"request.md\"))) process.exit(44);if (fs.existsSync(path.join(r.paths.workspace,\"request.md\"))) process.exit(45);fs.mkdirSync(r.paths.output,{recursive:true});fs.writeFileSync(path.join(r.paths.output,\"runner-output.txt\"),\"runner\\n\");fs.writeFileSync(path.join(r.paths.output,\"workbench-result.json\"),JSON.stringify({protocol:\"workbench.adapter-result.v1\",operation:\"engine.run\",ok:true,value:{score:1}}));'",
         },
       },
     };
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1195,7 +1235,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       .toContain("runner-output.txt");
   });
 
-  test("host executor runs the adapter locally without sandbox allocation or subject prepare", async () => {
+  test("host executor runs the adapter locally without sandbox allocation or candidate prepare", async () => {
     const adapterSource = `import fs from "node:fs";
 import path from "node:path";
 const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, "utf8"));
@@ -1203,7 +1243,7 @@ if (request.operation !== "engine.run") process.exit(11);
 if (request.invocation?.use !== "host-engine") process.exit(12);
 if (process.cwd() !== process.env.WORKBENCH_ADAPTER_ROOT) process.exit(18);
 if (fs.existsSync(path.join(request.paths.workspace, "prepare-ran"))) process.exit(13);
-if (!fs.existsSync(path.join(request.paths.subject, "prompt.md"))) process.exit(14);
+if (!fs.existsSync(path.join(request.paths.candidate, "prompt.md"))) process.exit(14);
 if (!fs.existsSync(path.join(request.paths.case, "request.md"))) process.exit(15);
 if (fs.existsSync(path.join(request.paths.case, "secret.txt"))) process.exit(16);
 if (!fs.existsSync(path.join(request.paths.enginePrivate, "secret.txt"))) process.exit(17);
@@ -1218,8 +1258,8 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
     const baseSpec = resolveWorkbenchResolvedSourceYaml(genericSpec());
     const spec = {
       ...baseSpec,
-      subject: {
-        ...baseSpec.subject,
+      candidate: {
+        ...baseSpec.candidate,
         prepare: {
           command: "printf prepare-ran > prepare-ran && exit 42",
         },
@@ -1247,7 +1287,7 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       caseId: "case-001",
@@ -1257,7 +1297,7 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1362,7 +1402,7 @@ fs.writeFileSync(request.paths.result, JSON.stringify({
         ownerUserId: "user_123",
         projectId: "project_123",
         runId: "run_123",
-        subjectId: "subject_123",
+        candidateId: "candidate_123",
         attemptIndex: 0,
         spec,
         caseId: "case-001",
@@ -1372,7 +1412,7 @@ fs.writeFileSync(request.paths.result, JSON.stringify({
       const job = createWorkbenchExecutionJob({
         projectId: "project_123",
         runId: "run_123",
-        subjectId: "subject_123",
+        candidateId: "candidate_123",
         execution,
         dependsOn: [],
         now: "2026-04-27T00:00:00.000Z",
@@ -1476,7 +1516,7 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       caseId: "case-001",
@@ -1486,7 +1526,7 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1630,7 +1670,7 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec: runtimeSpec,
       task,
@@ -1650,7 +1690,7 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1690,13 +1730,13 @@ if (!root) process.exit(12);
 if (request.auth?.adapters?.["my-agent"]?.default?.filesRoot !== root) process.exit(14);
 if (fs.readFileSync(path.join(root, ".my-agent/config.json"), "utf8") !== "{\\"token\\":\\"file\\"}") process.exit(13);
 fs.mkdirSync(process.env.WORKBENCH_OUTPUT, { recursive: true });
-if (request.operation !== "subject.run") {
+if (request.operation !== "candidate.run") {
   fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "authed\\n");
   fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"), "{\\"protocol\\":\\"workbench.adapter-result.v1\\",\\"operation\\":\\"engine.run\\",\\"ok\\":true,\\"value\\":{\\"score\\":1}}\\n");
   process.exit(0);
 }
 fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "authed\\n");
-fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"), "{\\"protocol\\":\\"workbench.adapter-result.v1\\",\\"operation\\":\\"subject.run\\",\\"ok\\":true}\\n");
+fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"), "{\\"protocol\\":\\"workbench.adapter-result.v1\\",\\"operation\\":\\"candidate.run\\",\\"ok\\":true}\\n");
 `, { mode: 0o755 });
     vi.stubEnv("PATH", `${binRoot}:${process.env.PATH ?? ""}`);
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
@@ -1713,7 +1753,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec: runtimeSpec,
       engineCase: { version: 3, prompt: "Use adapter auth." },
@@ -1731,7 +1771,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1786,13 +1826,13 @@ if (process.env.SECRET_AGENT_KEY !== "nested-secret") process.exit(11);
 if (request.auth?.default) process.exit(12);
 if (request.auth?.adapters?.["secret-agent"]?.default?.env?.SECRET_AGENT_KEY !== "materialized") process.exit(13);
 fs.mkdirSync(process.env.WORKBENCH_OUTPUT, { recursive: true });
-if (request.operation !== "subject.run") {
+if (request.operation !== "candidate.run") {
   fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "nested auth\\n");
   fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"), "{\\"protocol\\":\\"workbench.adapter-result.v1\\",\\"operation\\":\\"engine.run\\",\\"ok\\":true,\\"value\\":{\\"score\\":1}}\\n");
   process.exit(0);
 }
 fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "nested auth\\n");
-fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"), "{\\"protocol\\":\\"workbench.adapter-result.v1\\",\\"operation\\":\\"subject.run\\",\\"ok\\":true}\\n");
+fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"), "{\\"protocol\\":\\"workbench.adapter-result.v1\\",\\"operation\\":\\"candidate.run\\",\\"ok\\":true}\\n");
     `, { mode: 0o755 });
     vi.stubEnv("PATH", `${binRoot}:${process.env.PATH ?? ""}`);
     const spec = resolveWorkbenchResolvedSourceYaml(genericSpec());
@@ -1809,7 +1849,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec: runtimeSpec,
       engineCase: { version: 3, prompt: "Use nested adapter auth." },
@@ -1831,7 +1871,7 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1882,18 +1922,18 @@ fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "workbench-result.json"
       .toContain("runner-output.txt");
   });
 
-  test("agent improve adapter outputs only subject files covered by optimizer edits", async () => {
+  test("agent improve adapter outputs only candidate files covered by improve edits", async () => {
     const binRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-codex-improve-"));
     const adapterPath = path.join(binRoot, "codex-improve.mjs");
     await fs.writeFile(adapterPath, `import fs from "node:fs";
 import path from "node:path";
 const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, "utf8"));
-if (request.invocation.use !== "codex" || request.operation !== "optimizer.improve") process.exit(11);
+if (request.invocation.use !== "codex" || request.operation !== "candidate.improve") process.exit(11);
 const output = process.env.WORKBENCH_OUTPUT;
 fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
   protocol: "workbench.adapter-result.v1",
-  operation: "optimizer.improve",
+  operation: "candidate.improve",
   ok: true,
   value: {
     files: [{ path: "prompt.md", encoding: "utf8", content: "changed\\n", executable: false }],
@@ -1906,7 +1946,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
@@ -1915,7 +1955,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     const job = createWorkbenchExecutionJob({
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       execution,
       dependsOn: [],
       now: "2026-04-27T00:00:00.000Z",
@@ -1928,7 +1968,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         id: "codex",
         protocol: "workbench.adapter.v3",
         setup: [],
-        operations: { "optimizer.improve": { command: `node ${shellWord(adapterPath)}` } },
+        operations: { "candidate.improve": { command: `node ${shellWord(adapterPath)}` } },
       }],
       baseFiles: [
         {
@@ -1953,12 +1993,12 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     }));
 
     const output = completed.output as {
-      subjectPatch?: { fileChanges?: string[] };
+      candidatePatch?: { fileChanges?: string[] };
       files?: Array<{ path: string }>;
       fileChanges?: string[];
     };
     expect(completed.status).toBe("succeeded");
-    expect(output.subjectPatch?.fileChanges).toEqual(["prompt.md"]);
+    expect(output.candidatePatch?.fileChanges).toEqual(["prompt.md"]);
     expect(output.fileChanges).toEqual(["prompt.md"]);
     expect(output.files?.map((file) => file.path).sort()).toEqual(["prompt.md", "scripts/evaluate.py"]);
   });
@@ -1996,7 +2036,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -2029,7 +2069,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
@@ -2055,7 +2095,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -2091,7 +2131,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -2106,7 +2146,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         job: createWorkbenchExecutionJob({
           projectId: "project_123",
           runId: "run_123",
-          subjectId: "subject_123",
+          candidateId: "candidate_123",
           execution,
           dependsOn: [],
           now: "2026-04-27T00:00:00.000Z",
@@ -2127,7 +2167,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         job: createWorkbenchExecutionJob({
           projectId: "project_123",
           runId: "run_123",
-          subjectId: "subject_123",
+          candidateId: "candidate_123",
           execution,
           dependsOn: [],
           now: "2026-04-27T00:00:00.000Z",
@@ -2163,7 +2203,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "eval",
@@ -2172,11 +2212,11 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     const capability = createWorkbenchExecutionCapability(execution, {
       now: new Date().toISOString(),
     });
-    const subjectFile: SurfaceSnapshotFile = {
+    const candidateFile: SurfaceSnapshotFile = {
       path: "prompt.md",
       kind: "text",
       encoding: "utf8",
-      content: "subject\n",
+      content: "candidate\n",
       executable: false,
     };
     const caseFile: SurfaceSnapshotFile = {
@@ -2191,7 +2231,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         job: createWorkbenchExecutionJob({
           projectId: "project_123",
           runId: "run_123",
-          subjectId: "subject_123",
+          candidateId: "candidate_123",
           execution,
           dependsOn: [],
           now: "2026-04-27T00:00:00.000Z",
@@ -2201,12 +2241,12 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       execution,
       capability,
       inputBundle: inputBundleForExecution(execution, {
-        subject: [subjectFile],
+        candidate: [candidateFile],
         case: [caseFile],
       }),
     });
 
-    expect(validated.jobInput.baseFiles).toEqual([subjectFile]);
+    expect(validated.jobInput.baseFiles).toEqual([candidateFile]);
     expect(validated.jobInput.engineResolveFiles).toEqual([caseFile]);
     expect(validated.jobInput.traceFiles).toEqual([]);
     expect(validated.jobInput.job.input?.archive).toBeUndefined();
@@ -2215,17 +2255,17 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       ownerUserId: "user_123",
       projectId: "project_123",
       runId: "run_123",
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       attemptIndex: 0,
       spec,
       workflow: "improve",
     });
     const improveExecution = improveGraph.executions.find((entry) => entry.purpose === "improve")!;
     const traceFile: SurfaceSnapshotFile = {
-      path: "manifest.json",
+      path: "index.json",
       kind: "text",
       encoding: "utf8",
-      content: "{\"jobs\":[]}\n",
+      content: "{\"schema\":\"workbench.optimizer-traces.v1\",\"executions\":[]}\n",
       executable: false,
     };
     const improveCapability = createWorkbenchExecutionCapability(improveExecution, {
@@ -2236,7 +2276,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         job: createWorkbenchExecutionJob({
           projectId: "project_123",
           runId: "run_123",
-          subjectId: "subject_123",
+          candidateId: "candidate_123",
           execution: improveExecution,
           dependsOn: [],
           now: "2026-04-27T00:00:00.000Z",
@@ -2246,7 +2286,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       execution: improveExecution,
       capability: improveCapability,
       inputBundle: inputBundleForExecution(improveExecution, {
-        subject: [subjectFile],
+        candidate: [candidateFile],
         traces: [traceFile],
       }),
     });
@@ -2257,7 +2297,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         job: createWorkbenchExecutionJob({
           projectId: "project_123",
           runId: "run_123",
-          subjectId: "subject_123",
+          candidateId: "candidate_123",
           execution,
           dependsOn: [],
           now: "2026-04-27T00:00:00.000Z",
@@ -2285,8 +2325,8 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     })).rejects.toThrow(/outside the execution capability/u);
   });
 
-  test("subject patch application preserves immutable files and updates optimizer edit paths", () => {
-    const files = applyWorkbenchSubjectPatch({
+  test("candidate patch application preserves immutable files and updates improver edit paths", () => {
+    const files = applyWorkbenchCandidatePatch({
       edits: ["prompt.md", "scripts"],
       baseFiles: [{
         path: "prompt.md",
@@ -2324,8 +2364,8 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     expect(files.find((file) => file.path === "README.md")?.content).toBe("unchanged\n");
   });
 
-  test("subject patch application rejects changes outside optimizer edits", () => {
-    expect(() => applyWorkbenchSubjectPatch({
+  test("candidate patch application rejects changes outside improve edits", () => {
+    expect(() => applyWorkbenchCandidatePatch({
       edits: ["prompt.md"],
       baseFiles: [],
       patch: {
@@ -2338,9 +2378,9 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
           executable: false,
         }],
       },
-    })).toThrow(/outside optimizer edits: package\.json/u);
+    })).toThrow(/outside improve edits: package\.json/u);
 
-    expect(() => applyWorkbenchSubjectPatch({
+    expect(() => applyWorkbenchCandidatePatch({
       edits: ["SKILL.md"],
       baseFiles: [{
         path: "SKILL.md",
@@ -2350,16 +2390,16 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         executable: false,
       }],
       patch: {
-        fileChanges: ["subjects/my-skill/files/SKILL.md"],
+        fileChanges: ["candidates/my-skill/files/SKILL.md"],
         files: [{
-          path: "subjects/my-skill/files/SKILL.md",
+          path: "candidates/my-skill/files/SKILL.md",
           kind: "text",
           encoding: "utf8",
           content: "bad\n",
           executable: false,
         }],
       },
-    })).toThrow(/outside optimizer edits: subjects\/my-skill\/files\/SKILL\.md/u);
+    })).toThrow(/outside improve edits: candidates\/my-skill\/files\/SKILL\.md/u);
   });
 });
 
@@ -2378,7 +2418,7 @@ function adapterCommandPaths(root: string) {
     workspace: root,
     output: path.join(root, "output"),
     result: path.join(root, "output", "workbench-result.json"),
-    subject: path.join(root, "input", "subject"),
+    candidate: path.join(root, "input", "candidate"),
     case: path.join(root, "input", "case"),
     traces: path.join(root, "input", "traces"),
   };
@@ -2387,7 +2427,7 @@ function adapterCommandPaths(root: string) {
 function inputBundleForExecution(
   execution: Parameters<typeof createWorkbenchExecutionCapability>[0],
   data: {
-    subject?: SurfaceSnapshotFile[];
+    candidate?: SurfaceSnapshotFile[];
     case?: SurfaceSnapshotFile[];
     traces?: SurfaceSnapshotFile[];
   } = {},
@@ -2396,7 +2436,7 @@ function inputBundleForExecution(
     inputs: execution.inputs.map((input) => {
       const key = input.name === "case"
         ? "case"
-        : input.name as "subject" | "traces";
+        : input.name as "candidate" | "traces";
       return {
         input,
         mountPath: input.mountPath,
@@ -2419,9 +2459,9 @@ function scoreConfig(
 
 function genericSpec(): string {
   return [
-    "version: 3",
+    "version: 4",
     "benchmark:",
-    "  version: 3",
+    "  version: 4",
     "  name: generic-file-output-eval",
     "  description: Exercise generic file-output execution with command running and rubric scoring.",
     "  engine:",
@@ -2447,25 +2487,25 @@ function genericSpec(): string {
     "            - id: correctness",
     "              description: Output satisfies the task requirements.",
     "              weight: 1",
-    "subject:",
-    "  version: 3",
+    "candidate:",
+    "  version: 4",
     "  name: generic-file-output-eval",
-    "  description: Subject runner for the generic file-output benchmark.",
-  "  files:",
-  "    path: subjects/generic-file-output-eval/files",
-  "  prepare:",
-  "    command: cp -R input/subject/. .",
-  "  run:",
-    "    use: command",
-    "    with:",
-    "      command: python scripts/evaluate.py --run",
-    "optimizer:",
-    "  version: 3",
-    "  name: generic-file-output-optimizer",
-    "  edits:",
-    "    - prompt.md",
-    "    - scripts/evaluate.py",
+    "  description: Candidate runner for the generic file-output benchmark.",
+    "  files:",
+    "    path: candidates/generic-file-output-eval/files",
+    "  prepare:",
+    "    command: cp -R input/candidate/. .",
+    "  defaultRun: command",
+    "  runs:",
+    "    command:",
+    "      name: Command",
+    "      use: command",
+    "      with:",
+    "        command: python scripts/evaluate.py --run",
     "  improve:",
+    "    edits:",
+    "      - prompt.md",
+    "      - scripts/evaluate.py",
     "    use: codex",
     "    with:",
     "      model: gpt-5.4-mini",
@@ -2500,8 +2540,8 @@ if (result.status !== 0) {
 }
 const resultPath = process.env.WORKBENCH_RESULT || request.paths.result || \`\${request.paths.output}/workbench-result.json\`;
 if (!fs.existsSync(resultPath)) {
-  if (request.operation === "optimizer.improve") {
-    const files = (request.context?.optimizer?.edits || [])
+  if (request.operation === "candidate.improve") {
+    const files = (request.context?.improve?.edits || [])
       .filter((filePath) => fs.existsSync(filePath) && fs.statSync(filePath).isFile())
       .map((filePath) => ({
         path: filePath,
@@ -2533,9 +2573,9 @@ if (!fs.existsSync(resultPath)) {
     protocol: "workbench.adapter.v3" as const,
     setup: [],
     operations: {
-      "subject.run": { command: `node ${shellWord(file)}` },
+      "candidate.run": { command: `node ${shellWord(file)}` },
       "engine.run": { command: `node ${shellWord(file)}` },
-      "optimizer.improve": { command: `node ${shellWord(file)}` },
+      "candidate.improve": { command: `node ${shellWord(file)}` },
     },
   };
 }

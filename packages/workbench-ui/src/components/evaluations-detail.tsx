@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ChartColumnIcon } from "lucide-react";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
+import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
 import {
   Card,
   CardAction,
@@ -9,60 +10,101 @@ import {
   CardTitle,
 } from "@workbench-ai/cli-web-ui/components/ui/card";
 
-import { formatSubjectDisplayName } from "../lib/format";
+import {
+  buildEvaluationCandidateColorMap,
+  buildEvaluationCandidatePresentations,
+  formatEvaluationConfigurationLabel,
+  resolveEvaluationCandidateDisplay,
+} from "../lib/candidate-evaluation-display";
 import { buildEvaluationMetricDescriptors } from "../lib/evaluation-metrics";
+import type { EvaluationRuntimeRow } from "../lib/runtime-state";
+import { shortId, statusLabel } from "../lib/format";
 import type {
   LabeledEvaluationSummary,
   EvaluationSummary,
 } from "../types";
 import { EvaluationCharts } from "./evaluation-charts";
-import { EvaluationsDataTable } from "./evaluations-data-table";
-import { SubjectComparisonFilter, type SubjectFilterOption } from "./subject-comparison-filter";
+import { EvaluationsDataTable, type EvaluationDataTableRow } from "./evaluations-data-table";
+import { CandidateComparisonFilter } from "./candidate-comparison-filter";
 
 export function EvaluationsDetail({
   evaluations,
+  rows,
+  candidateLabelById,
   hasEvaluations,
   onSelectEvaluation,
 }: {
   evaluations: EvaluationSummary[];
+  rows: EvaluationRuntimeRow[];
+  candidateLabelById?: ReadonlyMap<string, string>;
   hasEvaluations: boolean;
   onSelectEvaluation?: (evaluationId: string) => void;
 }) {
+  const candidateOptions = React.useMemo(
+    () => mergeEvaluationCandidatePresentations(
+      buildEvaluationCandidatePresentations(evaluations),
+      rows,
+      candidateLabelById,
+    ),
+    [candidateLabelById, evaluations, rows],
+  );
+  const resolvedCandidateLabelById = React.useMemo(
+    () => new Map(candidateOptions.map((candidate) => [candidate.id, candidate.label])),
+    [candidateOptions],
+  );
   const labeledEvaluations = React.useMemo(
-    () => evaluations.map(toLabeledEvaluation),
-    [evaluations],
+    () => evaluations.map((evaluation) => toLabeledEvaluation(evaluation, resolvedCandidateLabelById)),
+    [evaluations, resolvedCandidateLabelById],
   );
-  const subjectOptions = React.useMemo(
-    () => buildSubjectFilterOptions(labeledEvaluations),
-    [labeledEvaluations],
+  const tableRows = React.useMemo(
+    () => rows.map((row) => toEvaluationDataTableRow(row, resolvedCandidateLabelById)),
+    [resolvedCandidateLabelById, rows],
   );
-  const allSubjectIds = React.useMemo(
-    () => subjectOptions.map((option) => option.id),
-    [subjectOptions],
+  const candidateColorById = React.useMemo(
+    () => buildEvaluationCandidateColorMap(candidateOptions),
+    [candidateOptions],
   );
-  const [selectedSubjectIds, setSelectedSubjectIds] = React.useState<Set<string> | null>(
+  const allCandidateIds = React.useMemo(
+    () => candidateOptions.map((option) => option.id),
+    [candidateOptions],
+  );
+  const [selectedCandidateIds, setSelectedCandidateIds] = React.useState<Set<string> | null>(
     null,
   );
-  const selectedSubjectIdSet = React.useMemo(() => {
-    if (selectedSubjectIds === null) {
-      return new Set(allSubjectIds);
+  const selectedCandidateIdSet = React.useMemo(() => {
+    if (selectedCandidateIds === null) {
+      return new Set(allCandidateIds);
     }
 
-    const available = new Set(allSubjectIds);
+    const available = new Set(allCandidateIds);
     return new Set(
-      [...selectedSubjectIds].filter((subjectId) => available.has(subjectId)),
+      [...selectedCandidateIds].filter((candidateId) => available.has(candidateId)),
     );
-  }, [allSubjectIds, selectedSubjectIds]);
+  }, [allCandidateIds, selectedCandidateIds]);
+  const filteredRows = React.useMemo(() => {
+    if (selectedCandidateIdSet.size === candidateOptions.length) {
+      return tableRows;
+    }
+    return tableRows.filter((row) =>
+      selectedCandidateIdSet.has(row.candidateId),
+    );
+  }, [tableRows, selectedCandidateIdSet, candidateOptions.length]);
   const filteredEvaluations = React.useMemo(() => {
-    if (selectedSubjectIdSet.size === subjectOptions.length) {
+    if (selectedCandidateIdSet.size === candidateOptions.length) {
       return labeledEvaluations;
     }
     return labeledEvaluations.filter((evaluation) =>
-      selectedSubjectIdSet.has(evaluation.subjectId),
+      selectedCandidateIdSet.has(evaluation.candidateId),
     );
-  }, [labeledEvaluations, selectedSubjectIdSet, subjectOptions.length]);
+  }, [labeledEvaluations, selectedCandidateIdSet, candidateOptions.length]);
+  const filteredCandidateOptions = React.useMemo(
+    () => candidateOptions.filter((candidate) =>
+      selectedCandidateIdSet.has(candidate.id),
+    ),
+    [candidateOptions, selectedCandidateIdSet],
+  );
 
-  if (evaluations.length === 0) {
+  if (rows.length === 0) {
     return (
       <EmptyState
         icon={ChartColumnIcon}
@@ -83,37 +125,38 @@ export function EvaluationsDetail({
     <div className="grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3">
       <Card size="sm" className="min-w-0">
         <CardHeader>
-          <CardTitle>Scorecards</CardTitle>
-          {subjectOptions.length > 1 ? (
+          <CardTitle>Runs and scorecards</CardTitle>
+          {candidateOptions.length > 1 ? (
             <CardAction>
-              <SubjectComparisonFilter
-                options={subjectOptions}
-                selectedSubjectIds={selectedSubjectIdSet}
-                testId="evaluations-subject-filter"
-                onSelectAll={() => setSelectedSubjectIds(null)}
-                onClear={() => setSelectedSubjectIds(new Set())}
-                onToggleSubject={(subjectId, checked) => {
-                  setSelectedSubjectIds((current) => {
+              <CandidateComparisonFilter
+                options={candidateOptions}
+                selectedCandidateIds={selectedCandidateIdSet}
+                testId="evaluations-candidate-filter"
+                onSelectAll={() => setSelectedCandidateIds(null)}
+                onClear={() => setSelectedCandidateIds(new Set())}
+                onToggleCandidate={(candidateId, checked) => {
+                  setSelectedCandidateIds((current) => {
                     const next = new Set(
-                      current === null ? allSubjectIds : [...current],
+                      current === null ? allCandidateIds : [...current],
                     );
                     if (checked) {
-                      next.add(subjectId);
+                      next.add(candidateId);
                     } else {
-                      next.delete(subjectId);
+                      next.delete(candidateId);
                     }
-                    return next.size === allSubjectIds.length ? null : next;
+                    return next.size === allCandidateIds.length ? null : next;
                   });
                 }}
               />
             </CardAction>
           ) : null}
         </CardHeader>
-        {filteredEvaluations.length > 0 ? (
+        {filteredRows.length > 0 ? (
           <CardContent className="overflow-x-auto py-0">
             <EvaluationsDataTable
-              evaluations={filteredEvaluations}
+              rows={filteredRows}
               descriptors={descriptors}
+              candidates={filteredCandidateOptions}
               onSelectEvaluation={onSelectEvaluation}
             />
           </CardContent>
@@ -121,8 +164,8 @@ export function EvaluationsDetail({
           <CardContent className="py-6">
             <EmptyState
               icon={ChartColumnIcon}
-              title="No subjects selected"
-              message="Select at least one subject to compare scorecards."
+              title="No candidates selected"
+              message="Select at least one candidate to compare scorecards."
               size="sm"
             />
           </CardContent>
@@ -133,38 +176,100 @@ export function EvaluationsDetail({
         <EvaluationCharts
           evaluations={filteredEvaluations}
           descriptors={descriptors}
+          candidates={filteredCandidateOptions}
+          candidateColorById={candidateColorById}
         />
       ) : null}
     </div>
   );
 }
 
-function toLabeledEvaluation(evaluation: EvaluationSummary): LabeledEvaluationSummary {
+function mergeEvaluationCandidatePresentations(
+  evaluationCandidates: ReturnType<typeof buildEvaluationCandidatePresentations>,
+  rows: readonly EvaluationRuntimeRow[],
+  candidateLabelById: ReadonlyMap<string, string> | undefined,
+): ReturnType<typeof buildEvaluationCandidatePresentations> {
+  const byId = new Map<string, { id: string; label: string; color?: string }>(
+    evaluationCandidates.map((candidate) => [candidate.id, candidate]),
+  );
+  for (const row of rows) {
+    if (byId.has(row.candidateId)) {
+      continue;
+    }
+    byId.set(row.candidateId, {
+      id: row.candidateId,
+      label: candidateLabelById?.get(row.candidateId) ?? shortId(row.candidateId) ?? row.candidateId,
+    });
+  }
+  return [...byId.values()]
+    .sort((left, right) => left.label.localeCompare(right.label))
+    .map((candidate, index) => ({
+      ...candidate,
+      color: candidate.color ?? getCategoricalChartColor(index),
+    }));
+}
+
+function toEvaluationDataTableRow(
+  row: EvaluationRuntimeRow,
+  candidateLabelById: ReadonlyMap<string, string>,
+): EvaluationDataTableRow {
+  if (row.kind === "evaluation") {
+    const evaluation = toLabeledEvaluation(row.evaluation, candidateLabelById);
+    return {
+      rowId: row.rowId,
+      candidateId: row.candidateId,
+      label: evaluation.label,
+      configurationLabel: formatEvaluationConfigurationLabel(row.evaluation),
+      statusLabel: statusLabel(row.evaluation.status),
+      sampleText: formatEvaluationSampleText(row.evaluation),
+      evaluation,
+      evaluationId: row.evaluation.id,
+    };
+  }
   return {
-    ...evaluation,
-    label: formatEvaluationLabel(evaluation),
+    rowId: row.rowId,
+    candidateId: row.candidateId,
+    label: `${candidateLabelById.get(row.candidateId) ?? shortId(row.candidateId)} · ${formatRunConfigurationLabel(row)}`,
+    configurationLabel: formatRunConfigurationLabel(row),
+    statusLabel: row.statusLabel,
+    sampleText: formatRunSampleText(row),
+    evaluation: null,
+    evaluationId: null,
   };
 }
 
-function buildSubjectFilterOptions(
-  evaluations: LabeledEvaluationSummary[],
-): SubjectFilterOption[] {
-  const optionsById = new Map<string, SubjectFilterOption>();
-  for (const evaluation of evaluations) {
-    if (!optionsById.has(evaluation.subjectId)) {
-      optionsById.set(evaluation.subjectId, {
-        id: evaluation.subjectId,
-        label: evaluation.label,
-      });
-    }
-  }
-  return [...optionsById.values()].sort((left, right) =>
-    left.label.localeCompare(right.label),
+function formatEvaluationSampleText(evaluation: EvaluationSummary): string {
+  const errorText = evaluation.errorSampleCount > 0 ? ` error ${evaluation.errorSampleCount}` : "";
+  return `${evaluation.completedSampleCount}/${evaluation.sampleCount}${errorText}`;
+}
+
+function formatRunConfigurationLabel(row: Extract<EvaluationRuntimeRow, { kind: "run" }>): string {
+  return row.run.candidateRunName ?? row.run.candidateRunId ?? (
+    row.run.workflow === "eval" ? "Evaluation run" : "Improve run"
   );
+}
+
+function formatRunSampleText(row: Extract<EvaluationRuntimeRow, { kind: "run" }>): string {
+  const attempts = `${row.run.attemptsExecuted}/${row.run.attemptsRequested} attempts`;
+  const samples = row.run.samples === 1 ? "1 sample" : `${row.run.samples} samples`;
+  return `${attempts} · ${samples}`;
+}
+
+function toLabeledEvaluation(
+  evaluation: EvaluationSummary,
+  candidateLabelById: ReadonlyMap<string, string>,
+): LabeledEvaluationSummary {
+  return {
+    ...evaluation,
+    label: formatEvaluationLabel(evaluation, candidateLabelById),
+  };
 }
 
 function formatEvaluationLabel(
   evaluation: EvaluationSummary,
+  candidateLabelById: ReadonlyMap<string, string>,
 ): string {
-  return formatSubjectDisplayName(evaluation);
+  const display = resolveEvaluationCandidateDisplay(evaluation);
+  const candidateLabel = candidateLabelById.get(evaluation.candidateId) ?? display.candidateLabel;
+  return `${candidateLabel} · ${display.configurationLabel}`;
 }

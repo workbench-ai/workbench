@@ -102,7 +102,7 @@ export async function resolveWorkbenchAdaptersForProject(
         continue;
       }
       throw new Error(
-        `Adapter ${id} is referenced by benchmark/subject/optimizer YAML but is not installed. List its source under adapters in the YAML file that uses it.`,
+        `Adapter ${id} is referenced by benchmark/candidate YAML but is not installed. List its source under adapters in the YAML file that uses it.`,
       );
     }
   }
@@ -348,8 +348,8 @@ function rootAdapterOperationRequirements(spec: GenericSpec): WorkbenchAdapterOp
   return [
     { invocation: engineResolveInvocationForSpec(spec), operation: "engine.resolve" as const },
     { invocation: spec.engineRun, operation: "engine.run" as const },
-    ...(spec.improve ? [{ invocation: spec.improve, operation: "optimizer.improve" as const }] : []),
-    { invocation: spec.run, operation: "subject.run" as const },
+    ...(spec.improve ? [{ invocation: spec.improve, operation: "candidate.improve" as const }] : []),
+    { invocation: spec.run, operation: "candidate.run" as const },
   ];
 }
 

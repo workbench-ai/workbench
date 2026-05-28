@@ -35,7 +35,7 @@ export interface WorkbenchAdapterDefinition<TContext = unknown> {
   auth?: WorkbenchAdapterAuthManifest;
   engineResolve?: WorkbenchAdapterOperationDefinition<TContext>;
   engineRun?: WorkbenchAdapterOperationDefinition<TContext>;
-  subject?: WorkbenchAdapterOperationDefinition<TContext>;
+  candidate?: WorkbenchAdapterOperationDefinition<TContext>;
   improve?: WorkbenchAdapterOperationDefinition<TContext>;
   slots?: Record<string, WorkbenchAdapterSlotManifest>;
 }
@@ -88,7 +88,7 @@ export function defineEngineResolver<TContext = unknown>(
   return definition;
 }
 
-export function defineSubject<TContext = unknown>(
+export function defineCandidate<TContext = unknown>(
   definition: WorkbenchAdapterOperationDefinition<TContext> = {},
 ): WorkbenchAdapterOperationDefinition<TContext> {
   return definition;
@@ -100,7 +100,7 @@ export function defineEngineRunner<TContext = unknown>(
   return definition;
 }
 
-export function defineOptimizer<TContext = unknown>(
+export function defineImprover<TContext = unknown>(
   definition: WorkbenchAdapterOperationDefinition<TContext> = {},
 ): WorkbenchAdapterOperationDefinition<TContext> {
   return definition;
@@ -119,8 +119,8 @@ export function workbenchAdapterManifestFromDefinition(
   const operations: WorkbenchAdapterManifest["operations"] = {};
   addOperation(operations, definition.id, "engine.resolve", definition.engineResolve);
   addOperation(operations, definition.id, "engine.run", definition.engineRun);
-  addOperation(operations, definition.id, "subject.run", definition.subject);
-  addOperation(operations, definition.id, "optimizer.improve", definition.improve);
+  addOperation(operations, definition.id, "candidate.run", definition.candidate);
+  addOperation(operations, definition.id, "candidate.improve", definition.improve);
   if (Object.keys(operations).length === 0) {
     throw new Error(`Adapter ${definition.id} must define at least one operation.`);
   }
@@ -183,10 +183,10 @@ export function operationDefinitionForRequest<TContext = unknown>(
   if (operation === "engine.run") {
     return definition.engineRun;
   }
-  if (operation === "subject.run") {
-    return definition.subject;
+  if (operation === "candidate.run") {
+    return definition.candidate;
   }
-  if (operation === "optimizer.improve") {
+  if (operation === "candidate.improve") {
     return definition.improve;
   }
   return undefined;

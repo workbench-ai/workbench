@@ -81,7 +81,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("bg-muted/30");
     expect(appSource).toContain("<WorkbenchBreadcrumbs");
     expect(appSource).toContain("route={route}");
-    expect(appSource).toContain("route.kind === \"subject\"");
+    expect(appSource).toContain("route.kind === \"candidate\"");
     expect(appSource).toContain('route.kind === "benchmark"');
     expect(appSource).toContain("Benchmark");
     expect(appSource).toContain("createBenchmarkRoute()");
@@ -125,8 +125,8 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("ExecutionFilesSurface");
     expect(appSource).toContain("CaseFeedbackCard");
     expect(appSource).toContain("formatEvaluationDisplayName");
-    expect(appSource).toContain("formatSubjectDisplayName");
-    expect(appSource).not.toContain('SurfaceSection title="Subject Overview"');
+    expect(appSource).toContain("formatCandidateDisplayName");
+    expect(appSource).not.toContain('SurfaceSection title="Candidate Overview"');
     expect(appSource).not.toContain('SurfaceSection title="Run" icon={ActivityIcon}');
     expect(appSource).not.toContain('SurfaceSection title="Scorecard"');
     expect(appSource).not.toContain('SurfaceSection title="Trace"');
@@ -157,7 +157,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain("traceSessions.length === 1");
     expect(appSource).not.toContain("onSelectJob(selected ? null");
     expect(appSource).not.toContain("defaultValue={traceSessions[0]");
-    expect(appSource).not.toContain(">Open Subject<");
+    expect(appSource).not.toContain(">Open Candidate<");
     expect(appSource).not.toContain(">Open Run<");
     expect(appSource).not.toContain("caseReviewShouldPoll");
     expect(appSource).toContain("useExecutionTrace");
@@ -185,10 +185,12 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("function CaseAttemptTable");
     expect(appSource).not.toContain('SurfaceSection title="Executions"');
     expect(appSource).toContain("function EvaluationSummaryTable");
-    expect(appSource).toContain("const latestEvaluation = subjectEvaluations[0] ?? null;");
-    expect(appSource).not.toContain("const latestEvaluation = subjectEvaluations.at(-1)");
+    expect(appSource).toContain("buildCandidateEvaluationRollup(");
+    expect(appSource).toContain('title="Best score"');
+    expect(appSource).toContain('title="Best configuration"');
+    expect(appSource).not.toContain("const latestEvaluation = candidateEvaluations.at(-1)");
     expect(appSource).not.toContain("function RunSummaryTable");
-    expect(appSource).toContain('<TableHead>{showSubject ? "Subject" : "Evaluation"}</TableHead>');
+    expect(appSource).toContain('<TableHead>{showCandidate ? "Candidate" : "Configuration"}</TableHead>');
     expect(appSource).not.toContain("<TableHead>Run</TableHead>");
     expect(appSource).not.toContain("<TableHead>Workflow</TableHead>");
     expect(appSource).not.toContain("<TableHead>Outcome</TableHead>");
@@ -227,11 +229,11 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain('CardContent className="min-h-[360px] py-0"');
     expect(appSource).not.toContain("Live Progress");
     expect(appSource).not.toContain("resolveProgressDisplayEvents");
-    expect(appSource).not.toContain('value="subject-surface"');
+    expect(appSource).not.toContain('value="candidate-surface"');
     expect(appSource).not.toContain('summary={<Badge');
     expect(appSource).not.toContain('label="Discovered"');
     expect(appSource).not.toContain("function BenchmarkStringBadges");
-    expect(appSource).not.toContain('description="Runs the subject');
+    expect(appSource).not.toContain('description="Runs the candidate');
     expect(appSource).not.toContain('className="border-border/60 bg-muted/10"');
     expect(appSource).not.toContain('defaultValue="overview"');
     expect(appSource).toContain('className="min-w-0 rounded-xl bg-muted/35 px-4 py-3"');
@@ -248,20 +250,20 @@ describe("workbench browser layout contracts", () => {
       new URL("../src/components/loading-states.tsx", import.meta.url),
       "utf8",
     );
-    const subjectListSource = readFileSync(
-      new URL("../src/components/subject-list.tsx", import.meta.url),
+    const candidateListSource = readFileSync(
+      new URL("../src/components/candidate-list.tsx", import.meta.url),
       "utf8",
     );
     const combinedSource = [
       appSource,
       loadingStatesSource,
-      subjectListSource,
+      candidateListSource,
     ].join("\n");
 
     for (const forbidden of [
       "local-benchmark-ux-fixture",
       "local-inspect",
-      "subject_local_seed",
+      "candidate_local_seed",
       "eval_local_seed",
       "run_local_seed",
       "Figma",
@@ -332,8 +334,8 @@ describe("workbench browser layout contracts", () => {
   });
 
   test("benchmark object indexes are route-backed sibling pages", () => {
-    const subjectListSource = readFileSync(
-      new URL("../src/components/subject-list.tsx", import.meta.url),
+    const candidateListSource = readFileSync(
+      new URL("../src/components/candidate-list.tsx", import.meta.url),
       "utf8",
     );
     const appSource = readFileSync(
@@ -349,18 +351,21 @@ describe("workbench browser layout contracts", () => {
       "utf8",
     );
 
-    expect(subjectListSource).not.toContain("shadow-sm");
-    expect(subjectListSource).not.toContain("font-mono text-sm font-semibold");
-    expect(appSource).toContain("evaluation.metrics?.score");
+    expect(candidateListSource).not.toContain("shadow-sm");
+    expect(candidateListSource).not.toContain("font-mono text-sm font-semibold");
+    expect(appSource).toContain("readEvaluationScore(evaluation)");
     expect(appSource).not.toContain(["usage", "har" + "ness"].join("."));
-    expect(appSource).toContain('route.kind === "subjects"');
+    expect(appSource).toContain('route.kind === "candidates"');
     expect(appSource).toContain('route.kind === "evaluations"');
     expect(appSource).toContain('if (evaluationIdsToLoad.length === 0)');
+    expect(appSource).toContain("function readInitialWorkbenchRoute");
+    expect(appSource).toContain("window.location.pathname");
+    expect(appSource).toContain("window.location.search");
     expect(appSource).toContain("function WorkbenchBenchmarkNavigation");
     expect(appSource).toContain('<nav aria-label="Benchmark navigation"');
     expect(appSource).not.toContain('value: "benchmark"');
-    expect(appSource).toContain('value: "subjects"');
-    expect(appSource).toContain("route: createSubjectsRoute()");
+    expect(appSource).toContain('value: "candidates"');
+    expect(appSource).toContain("route: createCandidatesRoute()");
     expect(appSource).not.toContain('value: "runs"');
     expect(appSource).toContain('value: "evaluations"');
     expect(appSource).toContain("route: createEvaluationsRoute()");
@@ -378,14 +383,14 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).not.toContain("onBenchmarkFingerprintChange={onBenchmarkFingerprintChange}");
     expect(appSource).toContain("function orderRunSummaries");
     expect(appSource).not.toContain("function RunsSurface");
-    expect(appSource).toContain("function SubjectsIndexSurface");
+    expect(appSource).toContain("function CandidatesIndexSurface");
     expect(appSource).toContain("function ScrollableObjectSurface");
-    expect(appSource).toContain("subjectCount={currentBenchmarkSummaries.length}");
+    expect(appSource).toContain("candidateCount={currentBenchmarkSummaries.length}");
     expect(appSource).toContain("currentBenchmarkRuns={currentBenchmarkRuns}");
     expect(appSource).not.toContain("currentBenchmarkStandaloneRuns");
     expect(appSource).not.toContain("currentBenchmarkRuns.filter(isStandaloneRun)");
-    expect(appSource).not.toContain("function isStandaloneRunForSubject");
-    expect(appSource).toContain("evaluationCount={currentBenchmarkEvaluations.length}");
+    expect(appSource).not.toContain("function isStandaloneRunForCandidate");
+    expect(appSource).toContain("evaluationCount={currentBenchmarkEvaluationRows.length}");
     expect(appSource).not.toContain('<Badge variant="outline">{formatRunWorkflow(run.workflow)}</Badge>');
     expect(appSource).not.toContain("<RunStatusBadge run={run} />");
     expect(appSource).not.toContain("{formatRunDuration(run, nowMs)}");
@@ -393,9 +398,9 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain('className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-1"');
     expect(appSource).toContain('"grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3"');
     expect(appSource).toContain('{ value: "manifest", label: "Manifest", icon: FileCode2Icon }');
-    expect(appSource).toContain('title="Subject Manifest"');
-    expect(appSource).toContain('title="Subject Files"');
-    expect(appSource).toContain("Files that make up this subject version.");
+    expect(appSource).toContain('title="Candidate Manifest"');
+    expect(appSource).toContain('title="Candidate Files"');
+    expect(appSource).toContain("Files that make up this candidate version.");
     expect(lineageSource).not.toContain("shadow-sm");
     expect(lineageSource).toContain('"elk.layered.spacing.nodeNodeBetweenLayers"');
     expect(lineageSource).toContain('"elk.spacing.nodeNode"');
@@ -422,21 +427,34 @@ describe("workbench browser layout contracts", () => {
 
     expect(chartSource).toContain("buildEvaluationCategoryAxisLayout");
     expect(chartSource).toContain("wrapEvaluationCategoryAxisLabel");
-    expect(chartSource).toContain("categoryAxisLayout.hasLongLabels");
-    expect(chartSource).toContain("function EvaluationCategoryAxisTick");
-    expect(chartSource).toContain("<EvaluationCategoryAxisTick");
+    expect(chartSource).toContain("Cell");
+    expect(chartSource).toContain("candidateColorById");
+    expect(chartSource).toContain("function EvaluationGroupedAxisTick");
+    expect(chartSource).toContain("<EvaluationGroupedAxisTick");
+    expect(chartSource).toContain("key={entry.rowKey}");
+    expect(chartSource).toContain('fill={entry.kind === "evaluation" ? entry.color : "transparent"}');
+    expect(chartSource).toContain("buildEvaluationMetricChartRows(data, candidates)");
+    expect(chartSource).toContain('dataKey="rowKey"');
+    expect(chartSource).toContain('rowKey: `candidate:${candidate.id}`');
+    expect(chartSource).toContain('rowKey: `evaluation:${row.evaluationId}`');
+    expect(chartSource).toContain("buildEvaluationMetricData(evaluations, descriptor, candidateColorById)");
+    expect(chartSource).toContain("buildEvaluationTradeoffData(evaluations, pair, candidateColorById)");
+    expect(chartSource).toContain("function CandidateColorKey");
+    expect(chartSource).toContain('data-testid="evaluations-tradeoff-legend"');
+    expect(chartSource).toContain("buildCandidateLegendItems(candidates, data)");
+    expect(chartSource).toContain("isAnimationActive={false}");
+    expect(chartSource).toContain("animationDuration={0}");
     expect(chartSource).toContain("width={categoryAxisLayout.yAxisWidth}");
-    expect(chartSource).toContain("height={layout.xAxisHeight}");
     expect(chartSource).toContain("interval={0}");
-    expect(chartSource).toContain("minTickGap={16}");
     expect(chartSource).not.toContain("formatEvaluationAxisTickLabel");
     expect(chartSource).not.toContain("EVALUATION_AXIS_TICK_MAX_CHARS");
-    expect(chartSource).toContain("padding={{ left: 24, right: 24 }}");
     expect(chartSource).toContain('CardContent className="w-full min-w-0 max-w-full"');
     expect(chartSource).toContain('barCategoryGap="20%"');
-    expect(chartSource).toContain("VERTICAL_BAR_CHART_THRESHOLD");
+    expect(chartSource).not.toContain("VERTICAL_BAR_CHART_THRESHOLD");
+    expect(chartSource).not.toContain("function EvaluationCategoryAxisTick");
+    expect(chartSource).not.toContain("function EvaluationXAxis");
     expect(chartSource).toContain('layout="vertical"');
-    expect(chartSource).toContain("data.length * categoryAxisLayout.rowHeight + 72");
+    expect(chartSource).toContain("chartRows.length * categoryAxisLayout.rowHeight + 72");
     expect(chartSource).toContain("function evaluationMetricAxisDomain");
     expect(chartSource).toContain("entry.value >= 0 && entry.value <= 1");
     expect(chartSource).toContain("!aspect-auto");
@@ -449,6 +467,11 @@ describe("workbench browser layout contracts", () => {
     expect(chartSource).not.toContain("useMediaQuery");
     expect(chartSource).not.toContain("<Label");
     expect(detailSource).toContain('Card size="sm" className="min-w-0"');
+    expect(detailSource).toContain("buildEvaluationCandidatePresentations");
+    expect(detailSource).toContain("buildEvaluationCandidateColorMap");
+    expect(detailSource).toContain("filteredCandidateOptions");
+    expect(detailSource).toContain("candidates={filteredCandidateOptions}");
+    expect(detailSource).toContain("candidateColorById={candidateColorById}");
     expect(detailSource).toContain("grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3");
     expect(detailSource).not.toContain("grid w-full min-w-0 max-w-full grid-cols-[minmax(0,1fr)] gap-3 overflow-hidden");
     expect(detailSource).toContain('CardContent className="overflow-x-auto py-0"');
@@ -462,6 +485,29 @@ describe("workbench browser layout contracts", () => {
     expect(chartSource).not.toContain("BAR_CHART_LABEL_VIEWPORT_QUERY");
     expect(chartSource).not.toContain("VariantAxisTick");
     expect(chartSource).not.toContain("wrapVariantAxisLabel");
+  });
+
+  test("evaluation scorecards group run rows under candidate headers", () => {
+    const tableSource = readFileSync(
+      new URL("../src/components/evaluations-data-table.tsx", import.meta.url),
+      "utf8",
+    );
+    const filterSource = readFileSync(
+      new URL("../src/components/candidate-comparison-filter.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(tableSource).toContain("buildEvaluationGroups");
+    expect(tableSource).toContain('data-testid="evaluations-candidate-group"');
+    expect(tableSource).toContain('label="Configuration"');
+    expect(tableSource).toContain('className="min-w-[18rem] pl-8"');
+    expect(tableSource).toContain('className="min-w-[18rem] align-top whitespace-normal pl-8"');
+    expect(tableSource).toContain("row.configurationLabel");
+    expect(tableSource).not.toContain("backgroundColor: group.candidate.color");
+    expect(tableSource).not.toContain('label="Candidate / Run"');
+    expect(tableSource).not.toContain('label="Run / Configuration"');
+    expect(filterSource).toContain("color?: string");
+    expect(filterSource).toContain("backgroundColor: option.color");
   });
 
   test("loading states use skeletons instead of empty-state placeholders", () => {
@@ -486,30 +532,31 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain('./components/loading-states');
     expect(appSource).toContain("const [snapshotLoading, setSnapshotLoading] = useState(true)");
     expect(appSource).toContain("const [specLoading, setSpecLoading] = useState(true)");
-    expect(appSource).toContain("setSnapshotLoading(true)");
+    expect(appSource).toContain("setSnapshotLoading(snapshot === null)");
+    expect(appSource).toContain("setSnapshotRefreshing(snapshot !== null)");
     expect(appSource).toContain("setSpecLoading(true)");
     expect(loadingStatesSource).toContain('components/ui/skeleton');
     expect(loadingStatesSource).toContain('data-testid="benchmark-loading-state"');
     expect(loadingStatesSource).toContain('data-testid="source-yaml-loading"');
-    expect(loadingStatesSource).toContain('data-testid="subject-manifest-loading"');
+    expect(loadingStatesSource).toContain('data-testid="candidate-manifest-loading"');
     expect(loadingStatesSource).not.toContain('data-testid="run-detail-loading"');
     expect(loadingStatesSource).not.toContain('data-testid="run-job-loading"');
     expect(loadingStatesSource).toContain('data-testid="execution-trace-loading"');
     expect(loadingStatesSource).toContain('data-testid="evaluation-detail-loading"');
-    expect(loadingStatesSource).toContain('data-testid="subject-archive-loading"');
-    expect(loadingStatesSource).toContain('data-testid="subject-overview-loading"');
+    expect(loadingStatesSource).toContain('data-testid="candidate-archive-loading"');
+    expect(loadingStatesSource).toContain('data-testid="candidate-overview-loading"');
     expect(loadingStatesSource).toContain('data-testid="evaluation-case-loading"');
     expect(loadingStatesSource).toContain('data-testid="evaluations-loading-state"');
     expect(loadingStatesSource).toContain('data-testid="lineage-loading-state"');
     expect(loadingStatesSource).not.toContain("evaluations-last-run-card");
     expect(loadingStatesSource).not.toContain('h-full min-h-0 flex-1 rounded-lg border border-border/60 bg-background');
     expect(appSource).not.toContain("Loading manifest");
-    expect(appSource).not.toContain("Loading subject");
+    expect(appSource).not.toContain("Loading candidate");
     expect(appSource).not.toContain("Loading run");
     expect(appSource).not.toContain("Loading execution trace");
     expect(appSource).not.toContain("Loading evaluation");
     expect(appSource).not.toContain("Loading cases");
-    expect(appSource).not.toContain("Loading subject evaluation");
+    expect(appSource).not.toContain("Loading candidate evaluation");
     expect(appSource).not.toContain("Loading case review");
     expect(appSource).toContain("EvaluationsDetailSkeleton");
     expect(evaluationsSource).not.toContain("evaluations-last-run-card");

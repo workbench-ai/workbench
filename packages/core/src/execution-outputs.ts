@@ -2,7 +2,7 @@ import type {
   EvalCaseResult,
   Json,
   SurfaceSnapshotFile,
-  WorkbenchSubjectPatch,
+  WorkbenchCandidatePatch,
   WorkbenchExecutionOutputContract,
   WorkbenchExecutionSpec,
   WorkbenchResult,
@@ -11,7 +11,7 @@ import type {
 import { normalizeUsageSummary } from "./execution-usage.ts";
 
 export interface WorkbenchExecutionOutputPayloads {
-  subjectPatch?: WorkbenchSubjectPatch;
+  candidatePatch?: WorkbenchCandidatePatch;
   result?: WorkbenchResult;
 }
 
@@ -39,8 +39,8 @@ export function validateWorkbenchExecutionOutputPayloads(
       continue;
     }
     switch (contract.schema) {
-      case "workbench.subject_patch.v1":
-        validated.subjectPatch = normalizeSubjectPatch(payload, execution, contract, issues);
+      case "workbench.candidate_patch.v1":
+        validated.candidatePatch = normalizeCandidatePatch(payload, execution, contract, issues);
         break;
       case "workbench.result.v1":
         validated.result = normalizeResult(payload, execution, contract, issues);
@@ -91,7 +91,7 @@ export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExe
     if (!expectedInputs.has(input.name)) {
       issues.push(`Execution ${execution.id} declares unsupported input ${input.name} for purpose ${execution.purpose}.`);
     }
-    const expectedMountPath = `/workspace/input/${input.name}`;
+    const expectedMountPath = expectedInputMountPath(execution.purpose, input.name);
     if (input.mountPath !== expectedMountPath) {
       issues.push(`Execution ${execution.id} input ${input.name} must mount at ${expectedMountPath}.`);
     }
@@ -99,8 +99,13 @@ export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExe
       issues.push(`Execution ${execution.id} declares duplicate mount path ${input.mountPath}.`);
     }
     mountPaths.add(input.mountPath);
-    if (input.writable) {
-      issues.push(`Execution ${execution.id} inputs must be read-only.`);
+    const expectedWritable = expectedInputWritable(execution.purpose, input.name);
+    if (input.writable !== expectedWritable) {
+      issues.push(
+        expectedWritable
+          ? `Execution ${execution.id} input ${input.name} must be writable.`
+          : `Execution ${execution.id} input ${input.name} must be read-only.`,
+      );
     }
   }
   for (const expectedInput of expectedInputs) {
@@ -142,17 +147,34 @@ export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExe
 
 function expectedInputsForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): ReadonlySet<string> {
   if (purpose === "improve") {
-    return new Set(["subject", "traces"]);
+    return new Set(["candidate", "traces"]);
   }
   if (purpose === "attempt") {
-    return new Set(["subject", "case"]);
+    return new Set(["candidate", "case"]);
   }
   return new Set();
 }
 
+function expectedInputMountPath(
+  purpose: WorkbenchExecutionSpec["purpose"],
+  name: string,
+): string {
+  if (purpose === "improve" && name === "candidate") {
+    return "/workspace";
+  }
+  return `/workspace/input/${name}`;
+}
+
+function expectedInputWritable(
+  purpose: WorkbenchExecutionSpec["purpose"],
+  name: string,
+): boolean {
+  return purpose === "improve" && name === "candidate";
+}
+
 function expectedOutputForPurpose(purpose: WorkbenchExecutionSpec["purpose"]): string | null {
   if (purpose === "improve") {
-    return "subject_patch";
+    return "candidate_patch";
   }
   if (purpose === "attempt") {
     return "result";
@@ -172,7 +194,7 @@ function outputAllowedForPurpose(
   output: WorkbenchExecutionOutputContract,
 ): boolean {
   if (purpose === "improve") {
-    return output.schema === "workbench.subject_patch.v1";
+    return output.schema === "workbench.candidate_patch.v1";
   }
   if (purpose === "attempt") {
     return output.schema === "workbench.result.v1";
@@ -180,29 +202,29 @@ function outputAllowedForPurpose(
   return false;
 }
 
-function normalizeSubjectPatch(
+function normalizeCandidatePatch(
   value: Json,
   execution: WorkbenchExecutionSpec,
   contract: WorkbenchExecutionOutputContract,
   issues: string[],
-): WorkbenchSubjectPatch {
+): WorkbenchCandidatePatch {
   const record = readRecord(value, contract.name, issues);
   const files = normalizeSnapshotFiles(record?.files, `${contract.name}.files`, issues);
   const fileChanges = normalizeStringArray(record?.fileChanges, `${contract.name}.fileChanges`, issues);
   const edits = normalizeMetadataStringArray(execution.metadata.edits);
   if (edits.length === 0) {
-    issues.push(`Execution ${execution.id} subject patch validation requires metadata.edits.`);
+    issues.push(`Execution ${execution.id} candidate patch validation requires metadata.edits.`);
   }
   for (const file of files) {
     if (!isAllowedEditPath(file.path, edits)) {
-      issues.push(`${contract.name}.files contains path outside optimizer edits: ${file.path}.`);
+      issues.push(`${contract.name}.files contains path outside improve edits: ${file.path}.`);
     }
   }
   for (const fileChange of fileChanges) {
     if (!isSafeRelativePath(fileChange)) {
       issues.push(`${contract.name}.fileChanges contains unsafe path ${fileChange}.`);
     } else if (!isAllowedEditPath(fileChange, edits)) {
-      issues.push(`${contract.name}.fileChanges contains path outside optimizer edits: ${fileChange}.`);
+      issues.push(`${contract.name}.fileChanges contains path outside improve edits: ${fileChange}.`);
     }
   }
   return {

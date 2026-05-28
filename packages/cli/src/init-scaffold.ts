@@ -1,10 +1,10 @@
 import { defaultWorkbenchInitTemplatePack } from "./init-template-pack.js";
 
-export type InitSubjectKind = "skill" | "command";
+export type InitCandidateKind = "skill" | "command";
 export type InitAgent = string;
 
 export interface WorkbenchInitScaffoldOptions {
-  kind: InitSubjectKind;
+  kind: InitCandidateKind;
   name: string;
   agent?: InitAgent;
   example: boolean;
@@ -16,9 +16,9 @@ export interface WorkbenchInitScaffoldFile {
 }
 
 export interface WorkbenchInitScaffold {
-  kind: InitSubjectKind;
+  kind: InitCandidateKind;
   name: string;
-  subjectRoot: string;
+  candidateRoot: string;
   seedFileTarget: string;
   seedDirectoryTarget: string;
   files: WorkbenchInitScaffoldFile[];
@@ -37,7 +37,7 @@ export function createWorkbenchInitScaffold(options: WorkbenchInitScaffoldOption
   return {
     kind: template.kind,
     name: options.name,
-    subjectRoot: template.subjectRoot(context),
+    candidateRoot: template.candidateRoot(context),
     seedFileTarget: template.seedFileTarget(context),
     seedDirectoryTarget: template.seedDirectoryTarget(context),
     files: template.files(context),
@@ -53,5 +53,5 @@ function requireAgent(options: WorkbenchInitScaffoldOptions): InitAgent {
 
 function slugify(value: string): string {
   const slug = value.trim().toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "");
-  return slug || "workbench-subject";
+  return slug || "workbench-candidate";
 }

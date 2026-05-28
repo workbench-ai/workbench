@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
-  buildSubjectCaseExecutionRefs,
+  buildCandidateCaseExecutionRefs,
   buildWorkbenchExecutionEvidence,
   finalizeWorkbenchExecutionTraceForJob,
   type HostedWorkbenchJob,
@@ -15,9 +15,9 @@ describe("workbench execution evidence", () => {
       executionJob({ id: "new_attempt", runId: "run_new", minute: 2 }),
     ];
 
-    expect(buildSubjectCaseExecutionRefs({
+    expect(buildCandidateCaseExecutionRefs({
       jobs,
-      subjectId: "subject_123",
+      candidateId: "candidate_123",
       caseId: "astera-labs",
       sampleIndex: 0,
     })).toMatchObject([
@@ -79,7 +79,7 @@ describe("workbench execution evidence", () => {
     ]);
   });
 
-  test("does not expose baseline materialization jobs as optimizer trace evidence", () => {
+  test("does not expose baseline materialization jobs as improver trace evidence", () => {
     const jobs = [
       executionJob({ id: "baseline_job", minute: 0, purpose: "improve", baseline: true }),
       executionJob({ id: "attempt_job", minute: 1 }),
@@ -163,7 +163,7 @@ function executionJob(args: {
     id: args.id,
     projectId: "wb_test",
     runId: args.runId ?? "run_current",
-    subjectId: "subject_123",
+    candidateId: "candidate_123",
     kind: "execute",
     status: "succeeded",
     attempt: 1,
@@ -176,7 +176,7 @@ function executionJob(args: {
         id: `exec_${args.id}`,
         purpose: args.purpose ?? "attempt",
         metadata: {
-          subjectId: "subject_123",
+          candidateId: "candidate_123",
           caseId: args.baseline ? "current" : "astera-labs",
           sampleIndex: 0,
           ...(args.baseline ? { baseline: true } : {}),
@@ -188,7 +188,7 @@ function executionJob(args: {
 
 function traceForJob(
   jobId: string,
-  role: "optimizer" | "runner" | "engine",
+  role: "improver" | "runner" | "engine",
 ): WorkbenchExecutionTrace {
   return {
     trace_id: `trace_${jobId}`,

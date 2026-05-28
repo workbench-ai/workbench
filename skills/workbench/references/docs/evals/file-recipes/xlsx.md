@@ -4,7 +4,7 @@ Use for workbooks, models, calculators, schedules, and exported tables.
 
 ## Runtime Essentials
 
-- Include a workbook parser such as `openpyxl` or an equivalent when the subject runner or scoring helper needs to inspect sheets, cells, formulas, tables, or workbook structure.
+- Include a workbook parser such as `openpyxl` or an equivalent when the candidate runner or scoring helper needs to inspect sheets, cells, formulas, tables, or workbook structure.
 - Include LibreOffice/`soffice` when formula caches, Office fidelity checks, PDF conversion, or visual rendering matter.
 - Add `poppler-utils` only when converting rendered PDFs into page images.
 

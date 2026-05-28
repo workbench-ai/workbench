@@ -20,14 +20,14 @@ export interface CompileExecutionGraphInput {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  subjectId: string;
+  candidateId: string;
   attemptIndex: number;
   sampleIndex?: number;
   caseId?: string;
   engineCase?: GenericEngineCaseSpec;
   spec: GenericRunSpec;
   workflow?: "eval" | "improve";
-  subjectRef?: string;
+  candidateRef?: string;
   caseRef?: string;
   environmentRef?: string;
 }
@@ -46,7 +46,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const workflow = input.workflow ?? "improve";
   const sampleIndex = input.sampleIndex ?? 0;
   const caseId = input.caseId ?? "current";
-  const subjectRef = input.subjectRef ?? `workbench://benchmarks/${input.projectId}/subjects/${input.subjectId}`;
+  const candidateRef = input.candidateRef ?? `workbench://benchmarks/${input.projectId}/candidates/${input.candidateId}`;
   const caseRef = input.caseRef ?? `workbench://benchmarks/${input.projectId}/engine-cases/${caseId}`;
   if (!input.engineCase) {
     throw new Error("Execution graph compilation requires an engine case.");
@@ -59,42 +59,42 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
 
   const nodes: WorkbenchExecutionGraphNode[] = [];
   const executions: WorkbenchExecutionSpec[] = [];
-  const optimizerExecutionId = executionId(input, "improve", "current", 0);
-  const optimizerOutputRef = `execution://${optimizerExecutionId}/subject_patch`;
+  const improveExecutionId = executionId(input, "improve", "current", 0);
+  const improveOutputRef = `execution://${improveExecutionId}/candidate_patch`;
   const engineAdapter = input.spec.engineRun;
   if (workflow === "improve") {
-    if (!input.spec.optimizer || !input.spec.improve) {
-      throw new Error("Optimizer YAML is required for improve execution graphs.");
+    if (!input.spec.candidate.improve || !input.spec.improve) {
+      throw new Error("Candidate improve configuration is required for improve execution graphs.");
     }
     pushExecution(nodes, executions, createExecution({
       input,
       purpose: "improve",
       adapter: input.spec.improve,
       inputs: [
-        inputRef("subject", subjectRef, "/workspace/input/subject", false),
+        inputRef("candidate", candidateRef, "/workspace", true),
         inputRef("traces", `workbench://benchmarks/${input.projectId}/runs/${input.runId}/traces`, "/workspace/input/traces", false),
       ],
-      outputs: [outputContract("subject_patch", "workbench.subject_patch.v1")],
+      outputs: [outputContract("candidate_patch", "workbench.candidate_patch.v1")],
       metadata: {
         attemptIndex: input.attemptIndex,
         sampleIndex: 0,
         caseId: "current",
         benchmark: input.spec.benchmark.name,
-        edits: input.spec.optimizer.edits,
+        edits: input.spec.candidate.improve.edits,
       },
       runtime: input.spec.environment,
-      idOverride: optimizerExecutionId,
+      idOverride: improveExecutionId,
     }), []);
   }
 
-  const runSubjectRef = workflow === "improve" ? optimizerOutputRef : subjectRef;
+  const runCandidateRef = workflow === "improve" ? improveOutputRef : candidateRef;
   const attemptExecutionId = executionId(input, "attempt", caseId, sampleIndex);
   pushExecution(nodes, executions, createExecution({
     input,
     purpose: "attempt",
     adapter: engineAdapter,
     inputs: [
-      inputRef("subject", runSubjectRef, "/workspace/input/subject", false),
+      inputRef("candidate", runCandidateRef, "/workspace/input/candidate", false),
       inputRef("case", caseRef, "/workspace/input/case", false),
     ],
     outputs: [outputContract("result", "workbench.result.v1")],
@@ -107,7 +107,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
     },
     runtime: executionConfig.environment,
     idOverride: attemptExecutionId,
-  }), workflow === "improve" ? [optimizerExecutionId] : []);
+  }), workflow === "improve" ? [improveExecutionId] : []);
 
   return { nodes, executions };
 }
@@ -144,7 +144,7 @@ function createExecution(args: {
     ),
     projectId: args.input.projectId,
     runId: args.input.runId,
-    subjectId: args.input.subjectId,
+    candidateId: args.input.candidateId,
     purpose: args.purpose,
     adapter: args.adapter,
     sandbox: args.input.environmentRef

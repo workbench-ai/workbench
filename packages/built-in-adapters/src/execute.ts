@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type {
@@ -8,7 +9,7 @@ import type {
   SurfaceSnapshotFile,
   UsageSummary,
   WorkbenchResult,
-  WorkbenchSubjectPatch,
+  WorkbenchCandidatePatch,
 } from "@workbench-ai/workbench-contract";
 import {
   ensureWorkbenchAdapterOutputDir,
@@ -73,13 +74,13 @@ interface AdapterWorkload {
     name: string;
     description: string;
   };
-  subject: {
+  candidate: {
     path: string;
   };
-  optimizer: {
+  improve: {
     edits: string[];
   };
-  subjectId: string;
+  candidateId: string;
   attemptIndex: number;
   sampleIndex: number;
   caseId: string;
@@ -135,8 +136,8 @@ export async function executeWorkbenchBuiltInAdapterCommand(
   if (isBuiltInAgentAdapterId(adapterId)) {
     const workload = workloadFromAdapterOperationRequest(request);
     const agent = builtInAgentSpecFromRequest(request);
-    if (request.operation === "optimizer.improve") {
-      await writeAgentSubjectRevisionOutput(request, workload, agent, {
+    if (request.operation === "candidate.improve") {
+      await writeAgentCandidateRevisionOutput(request, workload, agent, {
         agentExecutor: args.agentExecutor,
         adapterAuthRoot: args.adapterAuthRoot,
         adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
@@ -144,8 +145,8 @@ export async function executeWorkbenchBuiltInAdapterCommand(
       });
       return;
     }
-    if (request.operation === "subject.run") {
-      await writeAgentSubjectOutput(request, workload, agent, {
+    if (request.operation === "candidate.run") {
+      await writeAgentCandidateOutput(request, workload, agent, {
         agentExecutor: args.agentExecutor,
         adapterAuthRoot: args.adapterAuthRoot,
         adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
@@ -227,7 +228,7 @@ async function workbenchEngineOutcomeUsage(
     ? undefined
     : runtime.mergeUsageSummaries(
       outcome.operationResults.map((result) => {
-        if (result.operation === "subject.run") {
+        if (result.operation === "candidate.run") {
           return runtime.assignUsageRole("runner", result.usage);
         }
         if (result.operation === "engine.run") {
@@ -278,16 +279,16 @@ function workbenchEngineScoreInvocation(request: WorkbenchAdapterOperationReques
   };
 }
 
-function workbenchEngineSubjectInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
-  const subject = request.context?.subject?.run;
-  if (!subject?.use || !subject.command) {
-    throw new Error("Workbench engine requires context.subject.run.use and context.subject.run.command.");
+function workbenchEngineCandidateInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
+  const candidate = request.context?.candidate?.run;
+  if (!candidate?.use || !candidate.command) {
+    throw new Error("Workbench engine requires context.candidate.run.use and context.candidate.run.command.");
   }
   return {
-    use: subject.use,
-    with: (subject.with ?? {}) as Json,
-    ...(subject.auth !== undefined ? { auth: subject.auth as Json } : {}),
-    command: subject.command,
+    use: candidate.use,
+    with: (candidate.with ?? {}) as Json,
+    ...(candidate.auth !== undefined ? { auth: candidate.auth as Json } : {}),
+    command: candidate.command,
   };
 }
 
@@ -311,13 +312,13 @@ async function runWorkbenchEngineSharedGrading(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
   const inputs = await workbenchEngineRuntimeInputs(request);
-  const subject = workbenchEngineSubjectInvocation(request);
+  const candidate = workbenchEngineCandidateInvocation(request);
   const score = workbenchEngineScoreInvocation(request);
   const result = await runWorkbenchRuntimeOperationSequence({
     inputs,
     prepare: true,
     operations: [
-      { label: "subject", operation: "subject.run", invocation: subject },
+      { label: "candidate", operation: "candidate.run", invocation: candidate },
       { label: "score", operation: "engine.run", invocation: score },
     ],
   });
@@ -329,25 +330,25 @@ async function runWorkbenchEngineSeparateGrading(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
   const inputs = await workbenchEngineRuntimeInputs(request);
-  const subject = workbenchEngineSubjectInvocation(request);
+  const candidate = workbenchEngineCandidateInvocation(request);
   const score = workbenchEngineScoreInvocation(request);
   const runtime = await importWorkbenchRuntime();
   const runner = await runWorkbenchRuntimeOperationSequence({
     inputs: {
-      subject: inputs.subject,
+      candidate: inputs.candidate,
       case: inputs.case,
       traces: inputs.traces,
     },
     prepare: true,
     collectWorkspace: true,
     operations: [
-      { label: "subject", operation: "subject.run", invocation: subject },
+      { label: "candidate", operation: "candidate.run", invocation: candidate },
     ],
   });
   assertRuntimeControlResultOk(runner, "Workbench separate runner");
   const grader = await runWorkbenchRuntimeOperationSequence({
     inputs: {
-      subject: inputs.subject,
+      candidate: inputs.candidate,
       case: inputs.case,
       enginePrivate: inputs.enginePrivate,
       traces: inputs.traces,
@@ -372,14 +373,14 @@ async function runWorkbenchEngineSeparateGrading(
 async function workbenchEngineRuntimeInputs(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<NonNullable<Parameters<typeof runWorkbenchRuntimeOperationSequence>[0]["inputs"]>> {
-  const [subject, caseFiles, enginePrivate, traces] = await Promise.all([
-    readOptionalSurfaceFiles(request.paths.subject),
+  const [candidate, caseFiles, enginePrivate, traces] = await Promise.all([
+    readOptionalSurfaceFiles(request.paths.candidate),
     readOptionalSurfaceFiles(request.paths.case),
     readOptionalSurfaceFiles(request.paths.enginePrivate),
     readOptionalSurfaceFiles(request.paths.traces),
   ]);
   return {
-    subject,
+    candidate,
     case: caseFiles,
     enginePrivate,
     traces,
@@ -452,12 +453,19 @@ async function executeCommandAdapterRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   const command = requiredAdapterCommandString(request, "command");
-  await runAdapterShellCommand(command, request.paths.workspace);
-  if (request.operation === "engine.run") {
-    await requireCommandScoreResult(request);
-    return;
+  const before = request.operation === "candidate.improve"
+    ? await snapshotEditableCandidateWorkspace(request)
+    : null;
+  try {
+    await runAdapterShellCommand(command, request.paths.workspace);
+    if (request.operation === "engine.run") {
+      await requireCommandScoreResult(request);
+      return;
+    }
+    await writeOperationOkUnlessPresent(request, before?.root);
+  } finally {
+    await before?.cleanup();
   }
-  await writeOperationOkUnlessPresent(request);
 }
 
 async function requireCommandScoreResult(
@@ -542,15 +550,16 @@ async function runAdapterShellCommand(
 
 async function writeOperationOkUnlessPresent(
   request: WorkbenchAdapterOperationRequest,
+  beforeRoot?: string,
 ): Promise<void> {
   if (await fileExists(workbenchAdapterOperationResultPath(request.paths.output))) {
     return;
   }
-  if (request.operation === "optimizer.improve") {
-    const patch = await createSubjectPatchFromWorkspace({
-      beforeRoot: requiredRequestPath(request.paths.subject, "paths.subject"),
+  if (request.operation === "candidate.improve") {
+    const patch = await createCandidatePatchFromWorkspace({
+      beforeRoot: beforeRoot ?? requiredRequestPath(request.paths.candidate, "paths.candidate"),
       afterRoot: request.paths.workspace,
-      edits: request.context?.optimizer?.edits ?? [],
+      edits: request.context?.improve?.edits ?? [],
     });
     await writeWorkbenchAdapterOperationResult(request.paths.output, {
       protocol: "workbench.adapter-result.v1",
@@ -565,6 +574,50 @@ async function writeOperationOkUnlessPresent(
     operation: request.operation,
     ok: true,
   });
+}
+
+async function snapshotEditableCandidateWorkspace(
+  request: WorkbenchAdapterOperationRequest,
+): Promise<{ root: string; cleanup: () => Promise<void> }> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-candidate-before-"));
+  const edits = request.context?.improve?.edits ?? [];
+  const files = await readEditableCandidateWorkspaceFiles(request.paths.workspace, edits);
+  await writeSurfaceFiles(root, files);
+  return {
+    root,
+    cleanup: async () => {
+      await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
+    },
+  };
+}
+
+async function readEditableCandidateWorkspaceFiles(
+  root: string,
+  edits: readonly string[],
+): Promise<SurfaceSnapshotFile[]> {
+  const files: SurfaceSnapshotFile[] = [];
+  for (const edit of edits) {
+    const normalized = normalizeRelativePath(edit);
+    if (!normalized || isRuntimeWorkspacePath(normalized)) {
+      continue;
+    }
+    const absolutePath = path.join(root, normalized);
+    const stat = await fs.stat(absolutePath).catch(() => null);
+    if (!stat) {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      await readSurfaceFilesInto(root, normalized, files);
+      continue;
+    }
+    if (stat.isFile()) {
+      files.push(await readSurfaceFile(root, normalized));
+    }
+  }
+  return dedupeSurfaceFiles(files.filter((file) =>
+    isCandidateEditPath(file.path, edits) &&
+    !isRuntimeWorkspacePath(file.path)
+  ));
 }
 
 async function firstExistingFile(files: readonly string[]): Promise<string | null> {
@@ -738,20 +791,28 @@ async function readSurfaceFilesInto(
     if (!entry.isFile()) {
       continue;
     }
-    const [body, stat] = await Promise.all([
-      fs.readFile(absolutePath),
-      fs.stat(absolutePath),
-    ]);
-    const text = body.toString("utf8");
-    const isUtf8 = Buffer.from(text, "utf8").equals(body);
-    result.push({
-      path: relativePath,
-      kind: isUtf8 ? "text" : "binary",
-      encoding: isUtf8 ? "utf8" : "base64",
-      content: isUtf8 ? text : body.toString("base64"),
-      executable: (stat.mode & 0o111) !== 0,
-    });
+    result.push(await readSurfaceFile(root, relativePath));
   }
+}
+
+async function readSurfaceFile(
+  root: string,
+  relativePath: string,
+): Promise<SurfaceSnapshotFile> {
+  const absolutePath = path.join(root, normalizeRelativePath(relativePath));
+  const [body, stat] = await Promise.all([
+    fs.readFile(absolutePath),
+    fs.stat(absolutePath),
+  ]);
+  const text = body.toString("utf8");
+  const isUtf8 = Buffer.from(text, "utf8").equals(body);
+  return {
+    path: normalizeRelativePath(relativePath),
+    kind: isUtf8 ? "text" : "binary",
+    encoding: isUtf8 ? "utf8" : "base64",
+    content: isUtf8 ? text : body.toString("base64"),
+    executable: (stat.mode & 0o111) !== 0,
+  };
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -859,13 +920,13 @@ function workloadFromAdapterOperationRequest(
       name: context.benchmark?.name ?? "",
       description: context.benchmark?.description ?? "",
     },
-    subject: {
-      path: context.subject?.path ?? "",
+    candidate: {
+      path: context.candidate?.path ?? "",
     },
-    optimizer: {
-      edits: context.optimizer?.edits ?? [],
+    improve: {
+      edits: context.improve?.edits ?? [],
     },
-    subjectId: context.subject?.id ?? "",
+    candidateId: context.candidate?.id ?? "",
     attemptIndex: attempt.attemptIndex ?? 0,
     sampleIndex: attempt.sampleIndex ?? 0,
     caseId: attempt.caseId ?? "",
@@ -971,10 +1032,10 @@ async function executeBuiltInAgentTurn(
   return await executeWorkbenchAgentTurn(executor ?? defaultWorkbenchAgentTurnExecutor, request);
 }
 
-async function writeAgentSubjectOutput(
+async function writeAgentCandidateOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
-  subject: BuiltInAgentAdapterSpec,
+  candidate: BuiltInAgentAdapterSpec,
   options: {
     agentExecutor?: WorkbenchAgentTurnExecutor;
     adapterAuthRoot?: string;
@@ -982,34 +1043,34 @@ async function writeAgentSubjectOutput(
     adapterAuthEnv?: Record<string, string>;
   } = {},
 ): Promise<void> {
-  if (request.operation !== "subject.run") {
-    throw new Error("Agent subject results can only complete subject.run operations.");
+  if (request.operation !== "candidate.run") {
+    throw new Error("Agent candidate results can only complete candidate.run operations.");
   }
-  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-subject");
+  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-candidate");
   const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
     role: "runner",
-    provider: subject.agent,
+    provider: candidate.agent,
     adapterAuthRoot: options.adapterAuthRoot,
     adapterAuthRequest: options.adapterAuthRequest,
     adapterAuthEnv: options.adapterAuthEnv,
     workspaceRoot: request.paths.workspace,
     cwd: request.paths.workspace,
-    prompt: buildAgentSubjectPrompt(workload, subject),
+    prompt: buildAgentCandidatePrompt(workload, candidate),
     traceRoot,
     jobId: workload.job.id,
   });
-  const outputPath = path.join(request.paths.output, "subject-summary.md");
+  const outputPath = path.join(request.paths.output, "candidate-summary.md");
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, agentResult.output);
   const trace: SurfaceSnapshotFile = {
-    path: `.workbench/traces/${workload.job.id}/subject.json`,
+    path: `.workbench/traces/${workload.job.id}/candidate.json`,
     kind: "text",
     encoding: "utf8",
     executable: false,
     content: `${JSON.stringify({
-      kind: "agent_subject",
-      provider: subject.agent.use,
-      subjectId: workload.subjectId,
+      kind: "agent_candidate",
+      provider: candidate.agent.use,
+      candidateId: workload.candidateId,
       attemptIndex: workload.attemptIndex,
       sampleIndex: workload.sampleIndex,
       summary: agentResult.output,
@@ -1021,29 +1082,29 @@ async function writeAgentSubjectOutput(
   const usage = runtime.assignUsageRole("runner", agentResult.usage);
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "subject.run",
+    operation: "candidate.run",
     ok: true,
     ...(agentResult.output ? { summary: agentResult.output } : {}),
     feedback: {
-      subject: "agent",
-      agent: subject.agent.use,
+      candidate: "agent",
+      agent: candidate.agent.use,
       metadata: agentResult.metadata,
     },
     ...(usage ? { usage } : {}),
   });
 }
 
-function buildAgentSubjectPrompt(
+function buildAgentCandidatePrompt(
   workload: AdapterWorkload,
-  subject: BuiltInAgentAdapterSpec,
+  candidate: BuiltInAgentAdapterSpec,
 ): string {
   return [
-    ...(subject.instructions ? ["Instructions:", subject.instructions, ""] : []),
+    ...(candidate.instructions ? ["Instructions:", candidate.instructions, ""] : []),
     "Context:",
-    "- Subject source files are mounted at /workspace/input/subject.",
-    "- Follow any subject guidance, skill files, scripts, or configuration under /workspace/input/subject.",
+    "- Candidate source files are mounted at /workspace/input/candidate.",
+    "- Follow any candidate guidance, skill files, scripts, or configuration under /workspace/input/candidate.",
     "- The mutable working directory is /workspace.",
-    "- If the subject declares prepare.command, it has already run and may have copied files into /workspace.",
+    "- If the candidate declares prepare.command, it has already run and may have copied files into /workspace.",
     ...(workload.case?.prompt ? ["Case:", workload.case.prompt, ""] : []),
     "- Public case files are mounted at /workspace/input/case.",
     "- Verifier tests are not present while you run.",
@@ -1052,10 +1113,10 @@ function buildAgentSubjectPrompt(
   ].join("\n");
 }
 
-async function writeAgentSubjectRevisionOutput(
+async function writeAgentCandidateRevisionOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
-  optimizer: BuiltInAgentAdapterSpec,
+  improver: BuiltInAgentAdapterSpec,
   options: {
     agentExecutor?: WorkbenchAgentTurnExecutor;
     adapterAuthRoot?: string;
@@ -1063,89 +1124,90 @@ async function writeAgentSubjectRevisionOutput(
     adapterAuthEnv?: Record<string, string>;
   },
 ): Promise<void> {
-  if (request.operation !== "optimizer.improve") {
-    throw new Error("Agent subject revision results can only complete optimizer.improve operations.");
+  if (request.operation !== "candidate.improve") {
+    throw new Error("Agent improve results can only complete candidate.improve operations.");
   }
-  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-optimizer");
-  const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
-    role: "optimizer",
-    provider: optimizer.agent,
-    adapterAuthRoot: options.adapterAuthRoot,
-    adapterAuthRequest: options.adapterAuthRequest,
-    adapterAuthEnv: options.adapterAuthEnv,
-    workspaceRoot: request.paths.workspace,
-    cwd: request.paths.workspace,
-    prompt: buildAgentOptimizerPrompt(workload),
-    traceRoot,
-    jobId: workload.job.id,
-  });
-  const subjectPatch = await createSubjectPatchFromWorkspace({
-    beforeRoot: requiredRequestPath(request.paths.subject, "paths.subject"),
-    afterRoot: request.paths.workspace,
-    edits: workload.optimizer.edits,
-  });
-  const changedSubjectPaths = subjectPatch.fileChanges.filter((filePath) =>
-    isSubjectEditPath(filePath, workload.optimizer.edits),
-  );
-  if (changedSubjectPaths.length === 0) {
-    throw new Error("Agent improve adapter completed without changing a subject file covered by optimizer edits.");
+  const before = await snapshotEditableCandidateWorkspace(request);
+  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-improver");
+  try {
+    const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
+      role: "improver",
+      provider: improver.agent,
+      adapterAuthRoot: options.adapterAuthRoot,
+      adapterAuthRequest: options.adapterAuthRequest,
+      adapterAuthEnv: options.adapterAuthEnv,
+      workspaceRoot: request.paths.workspace,
+      cwd: request.paths.workspace,
+      prompt: buildAgentImproverPrompt(workload),
+      traceRoot,
+      jobId: workload.job.id,
+    });
+    const candidatePatch = await createCandidatePatchFromWorkspace({
+      beforeRoot: before.root,
+      afterRoot: request.paths.workspace,
+      edits: workload.improve.edits,
+    });
+    const changedCandidatePaths = candidatePatch.fileChanges.filter((filePath) =>
+      isCandidateEditPath(filePath, workload.improve.edits),
+    );
+    if (changedCandidatePaths.length === 0) {
+      throw new Error("Agent improve adapter completed without changing a candidate file covered by improve edits.");
+    }
+    const trace: SurfaceSnapshotFile = {
+      path: `.workbench/traces/${workload.job.id}/improver.json`,
+      kind: "text",
+      encoding: "utf8",
+      executable: false,
+      content: `${JSON.stringify({
+        kind: "agent_improver",
+        provider: improver.agent.use,
+        candidateId: workload.candidateId,
+        attemptIndex: workload.attemptIndex,
+        changedPaths: changedCandidatePaths,
+        summary: agentResult.output,
+        metadata: agentResult.metadata,
+      }, null, 2)}\n`,
+    };
+    await writeSurfaceFiles(request.paths.output, [trace, ...agentResult.traceFiles]);
+    const runtime = await importWorkbenchRuntime();
+    const usage = runtime.assignUsageRole("improver", agentResult.usage);
+    await writeWorkbenchAdapterOperationResult(request.paths.output, {
+      protocol: "workbench.adapter-result.v1",
+      operation: "candidate.improve",
+      ok: true,
+      value: {
+        ...candidatePatch,
+        fileChanges: changedCandidatePaths,
+      },
+      ...(agentResult.output ? { summary: agentResult.output } : {}),
+      feedback: {
+        improver: improver.agent.use,
+        changedPaths: changedCandidatePaths,
+        metadata: agentResult.metadata,
+      },
+      ...(usage ? { usage } : {}),
+    });
+  } finally {
+    await before.cleanup();
   }
-  const trace: SurfaceSnapshotFile = {
-    path: `.workbench/traces/${workload.job.id}/optimizer.json`,
-    kind: "text",
-    encoding: "utf8",
-    executable: false,
-    content: `${JSON.stringify({
-      kind: "agent_optimizer",
-      provider: optimizer.agent.use,
-      subjectId: workload.subjectId,
-      attemptIndex: workload.attemptIndex,
-      changedPaths: changedSubjectPaths,
-      summary: agentResult.output,
-      metadata: agentResult.metadata,
-    }, null, 2)}\n`,
-  };
-  await writeSurfaceFiles(request.paths.output, [trace, ...agentResult.traceFiles]);
-  const runtime = await importWorkbenchRuntime();
-  const usage = runtime.assignUsageRole("optimizer", agentResult.usage);
-  await writeWorkbenchAdapterOperationResult(request.paths.output, {
-    protocol: "workbench.adapter-result.v1",
-    operation: "optimizer.improve",
-    ok: true,
-    value: {
-      ...subjectPatch,
-      fileChanges: changedSubjectPaths,
-    },
-    ...(agentResult.output ? { summary: agentResult.output } : {}),
-    feedback: {
-      optimizer: optimizer.agent.use,
-      changedPaths: changedSubjectPaths,
-      metadata: agentResult.metadata,
-    },
-    ...(usage ? { usage } : {}),
-  });
 }
 
-function buildAgentOptimizerPrompt(workload: AdapterWorkload): string {
+function buildAgentImproverPrompt(workload: AdapterWorkload): string {
   return [
     "Benchmark:",
     workload.benchmark.description || workload.benchmark.name,
     "",
-    "Context:",
-    "- Subject source files are mounted at /workspace/input/subject.",
-    "- Follow any subject guidance, skill files, scripts, or configuration under /workspace/input/subject.",
-    "- The mutable working directory is /workspace.",
-    "- If the subject declares prepare.command, it has already run and may have copied files into /workspace.",
-    "- Prior run traces are mounted at /workspace/input/traces.",
-    "- Use /workspace/input/traces as the source of truth for what happened in prior attempts.",
-    "- Do not mutate /workspace/input.",
+    "Improve the candidate for this benchmark.",
     "",
-    "Editable subject paths:",
-    workload.optimizer.edits.map((entry) => `- ${entry}`).join("\n"),
+    "Candidate files are in the current directory.",
+    "Prior adapter executions are in /workspace/input/traces.",
     "",
-    "Output:",
-    "- Create or mutate editable subject files directly in the current working directory.",
-    "- Include at least one changed subject file covered by the optimizer edits list.",
+    "Editable paths:",
+    workload.improve.edits.map((entry) => `- ${entry}`).join("\n"),
+    "",
+    "Rules:",
+    "- Modify only editable paths.",
+    "- Change at least one editable file.",
   ].join("\n");
 }
 
@@ -1237,9 +1299,9 @@ async function writeRubricEvidenceFiles(args: {
   const root = `.workbench/traces/${args.workload.job.id}/engine/rubric`;
   const scorecard = {
     schema: "workbench.engine.rubric.evidence.v1",
-    safeForOptimizer: true,
+    safeForImprover: true,
     jobId: args.workload.job.id,
-    subjectId: args.workload.subjectId,
+    candidateId: args.workload.candidateId,
     attemptIndex: args.workload.attemptIndex,
     sampleIndex: args.workload.sampleIndex,
     caseId: args.workload.caseId,
@@ -1267,7 +1329,7 @@ async function writeRubricEvidenceFiles(args: {
     ...args.criterionRuns.map((run) =>
       jsonSurfaceFile(`${root}/criteria/${safeInternalPathSegment(run.result.criterion_id)}/result.json`, {
         schema: "workbench.engine.rubric.criterion-evidence.v1",
-        safeForOptimizer: true,
+        safeForImprover: true,
         criterion: args.engine.criteria.find((criterion) => criterion.id === run.result.criterion_id) ?? {
           id: run.result.criterion_id,
         },
@@ -1419,8 +1481,8 @@ function buildRubricCriterionJudgePrompt(
     JSON.stringify(criterion, null, 2),
     "",
     "Context:",
-    "- The subject already ran in this same working directory.",
-    "- Subject outputs are available in the current working directory.",
+    "- The candidate already ran in this same working directory.",
+    "- Candidate outputs are available in the current working directory.",
     "- Public case files are mounted at /workspace/input/case.",
     "- Verifier-private files are mounted at /workspace/private/engine when the task provides them.",
     "- Score only from the current working directory, public case files, verifier-private files, and the criterion above.",
@@ -1651,11 +1713,11 @@ function requireWorkloadTask(workload: AdapterWorkload, label: string): void {
   }
 }
 
-async function createSubjectPatchFromWorkspace(args: {
+async function createCandidatePatchFromWorkspace(args: {
   beforeRoot: string;
   afterRoot: string;
   edits: readonly string[];
-}): Promise<WorkbenchSubjectPatch> {
+}): Promise<WorkbenchCandidatePatch> {
   const before = new Map(
     (await readSurfaceFilesRecursive(args.beforeRoot))
       .map((file) => [normalizeRelativePath(file.path), file]),
@@ -1663,7 +1725,7 @@ async function createSubjectPatchFromWorkspace(args: {
   const changedFiles = (await readSurfaceFilesRecursive(args.afterRoot))
     .map((file) => ({ ...file, path: normalizeRelativePath(file.path) }))
     .filter((file) =>
-      isSubjectEditPath(file.path, args.edits) &&
+      isCandidateEditPath(file.path, args.edits) &&
       !isRuntimeWorkspacePath(file.path) &&
       !sameSurfaceFile(before.get(file.path), file)
     )
@@ -1714,7 +1776,7 @@ async function writeSurfaceFiles(
   }
 }
 
-function isSubjectEditPath(filePath: string, edits: readonly string[]): boolean {
+function isCandidateEditPath(filePath: string, edits: readonly string[]): boolean {
   const normalized = normalizeRelativePath(filePath);
   return edits.some((entry) => {
     const editPath = normalizeRelativePath(entry).replace(/\/+$/u, "");

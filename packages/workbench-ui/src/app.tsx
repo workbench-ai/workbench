@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, startTransition, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   ActivityIcon,
   ChartColumnIcon,
@@ -10,6 +10,7 @@ import {
   InfoIcon,
   ListChecksIcon,
   PanelRightCloseIcon,
+  RefreshCwIcon,
   Settings2Icon,
 } from "lucide-react";
 import { CodeBlockSurface } from "@workbench-ai/cli-web-ui/components/shared/code-block-surface";
@@ -76,14 +77,18 @@ import {
 import { supportedPreviewModes } from "@workbench-ai/cli-web-ui/lib/file-preview";
 import { useMediaQuery } from "@workbench-ai/cli-web-ui/lib/use-media-query";
 import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
-import { badgeToneProps, type BadgeTone } from "@workbench-ai/cli-web-ui/lib/badge";
+import { badgeToneProps } from "@workbench-ai/cli-web-ui/lib/badge";
 
-import { SubjectList } from "./components/subject-list";
+import { CandidateList } from "./components/candidate-list";
+import {
+  CandidateRuntimeBadge,
+  shouldShowCandidateRuntimeBadge,
+} from "./components/candidate-runtime-badge";
 import { EvaluationsDetail } from "./components/evaluations-detail";
 import {
-  SubjectArchiveSkeleton,
-  SubjectOverviewSkeleton,
-  SubjectFilesSurfaceSkeleton,
+  CandidateArchiveSkeleton,
+  CandidateOverviewSkeleton,
+  CandidateFilesSurfaceSkeleton,
   EvaluationCaseRowsSkeleton,
   EvaluationDetailSurfaceSkeleton,
   EvaluationCaseDetailSkeleton,
@@ -92,23 +97,31 @@ import {
   LineageSurfaceSkeleton,
   BenchmarkSurfaceSkeleton,
   SourceYamlSkeleton,
-  SubjectManifestSkeleton,
+  CandidateManifestSkeleton,
 } from "./components/loading-states";
 import { LineageGraph } from "./components/lineage-graph";
 import { StatusBadge } from "./components/status-badge";
-import { SubjectComparisonFilter, type SubjectFilterOption } from "./components/subject-comparison-filter";
+import { CandidateComparisonFilter, type CandidateFilterOption } from "./components/candidate-comparison-filter";
 import { SurfaceSection } from "./components/surface-section";
 import { requestJson, toMessage } from "./lib/api";
-import { pickDefaultSubjectFile } from "./lib/subject-file-preference";
-import { orderSubjectFiles } from "./lib/subject-files";
 import {
-  filterSubjectSummariesByBenchmark,
+  buildCandidateEvaluationRollup,
+  formatEvaluationConfigurationLabel,
+  readEvaluationScore,
+  resolveCandidateEvaluationRollupDisplay,
+} from "./lib/candidate-evaluation-display";
+import { pickDefaultCandidateFile } from "./lib/candidate-file-preference";
+import { orderCandidateFiles } from "./lib/candidate-files";
+import {
+  filterCandidateSummariesByBenchmark,
   normalizeBenchmarkFingerprint,
-} from "./lib/subject-scope";
+} from "./lib/candidate-scope";
 import {
   formatDurationMs,
   formatMetricValue,
-  formatSubjectDisplayName,
+  formatCandidateDisplayName,
+  formatCandidateName,
+  formatCandidateVersionLabel,
   formatTimestamp,
   shortId,
   statusLabel,
@@ -116,26 +129,32 @@ import {
 import {
   buildWorkbenchLocationHref,
   createEvaluationsRoute,
-  createSubjectRoute,
-  createSubjectsRoute,
+  createCandidateRoute,
+  createCandidatesRoute,
   createBenchmarkRoute,
   parseWorkbenchLocation,
   parseWorkbenchRoute,
-  type SubjectDialog,
-  type SubjectView,
+  type CandidateDialog,
+  type CandidateView,
   type WorkbenchPersistentSearchParams,
   type WorkbenchRoute,
 } from "./lib/routes";
+import {
+  activeRunSummaryLabel,
+  buildWorkbenchRuntimeState,
+  type CandidateRuntimeState,
+  type EvaluationRuntimeRow,
+  type WorkbenchRuntimeState,
+} from "./lib/runtime-state";
 import type {
-  SubjectCaseReview,
-  SubjectPreviewMode,
-  SubjectRecord,
-  SubjectSummary,
-  EvaluationRecord,
+  CandidateCaseReview,
+  CandidatePreviewMode,
+  CandidateRecord,
+  CandidateSummary,
   EvaluationScorecard,
   EvaluationSummary,
-  SubjectWorkspaceFilePreview,
-  SubjectWorkspaceFileSummary,
+  CandidateWorkspaceFilePreview,
+  CandidateWorkspaceFileSummary,
   AuthoredWorkbenchSourceDocument,
   HostedWorkbenchJob,
   RunSummary,
@@ -153,10 +172,10 @@ const EMPTY_PERSISTENT_SEARCH_PARAMS: WorkbenchPersistentSearchParams = {};
 
 type TraceSessionView = WorkbenchExecutionEvidence["sessions"][number];
 
-interface SubjectRecordState {
+interface CandidateRecordState {
   loading: boolean;
   error: string | null;
-  record: SubjectRecord | null;
+  record: CandidateRecord | null;
 }
 
 interface EvaluationRecordsState {
@@ -168,14 +187,14 @@ interface EvaluationRecordsState {
 interface CaseReviewDetailState {
   loading: boolean;
   error: string | null;
-  review: SubjectCaseReview | null;
+  review: CandidateCaseReview | null;
   requestKey: string | null;
 }
 
-interface SubjectFilesState {
+interface CandidateFilesState {
   loading: boolean;
   error: string | null;
-  files: SubjectWorkspaceFileSummary[];
+  files: CandidateWorkspaceFileSummary[];
 }
 
 interface SourceYamlFile {
@@ -183,7 +202,7 @@ interface SourceYamlFile {
   content: string;
 }
 
-type SubjectCaseExecution = SubjectCaseReview["executions"][number];
+type CandidateCaseExecution = CandidateCaseReview["executions"][number];
 type TimedExecutionRecord = {
   status: HostedWorkbenchJob["status"];
   createdAt?: string;
@@ -203,17 +222,17 @@ interface EvaluationCaseRow {
   split: string | null;
 }
 
-interface SubjectPreviewState {
+interface CandidatePreviewState {
   loading: boolean;
   error: string | null;
-  preview: SubjectWorkspaceFilePreview | null;
+  preview: CandidateWorkspaceFilePreview | null;
 }
 
 type BenchmarkSurfaceTab = "processed" | "manifest" | "files";
 
 interface BenchmarkFingerprintOption {
   fingerprint: string;
-  subjectCount: number;
+  candidateCount: number;
   evaluationCount: number;
   runCount: number;
   current: boolean;
@@ -228,13 +247,13 @@ interface TraceDetailState {
 interface ExecutionFilesState {
   loading: boolean;
   error: string | null;
-  files: SubjectWorkspaceFileSummary[];
+  files: CandidateWorkspaceFileSummary[];
 }
 
 interface ExecutionPreviewState {
   loading: boolean;
   error: string | null;
-  preview: SubjectWorkspaceFilePreview | null;
+  preview: CandidateWorkspaceFilePreview | null;
 }
 
 function clampDesktopDetailLeftPercent(value: number): number {
@@ -284,10 +303,12 @@ export function WorkbenchWorkspace({
   const [snapshot, setSnapshot] = useState<BenchmarkSnapshot | null>(null);
   const [specDocument, setSpecDocument] = useState<AuthoredWorkbenchSourceDocument | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(true);
+  const [snapshotRefreshing, setSnapshotRefreshing] = useState(false);
   const [specLoading, setSpecLoading] = useState(true);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
-  const [recordState, setRecordState] = useState<SubjectRecordState>({
+  const [snapshotRefreshKey, setSnapshotRefreshKey] = useState(0);
+  const [recordState, setRecordState] = useState<CandidateRecordState>({
     loading: false,
     error: null,
     record: null,
@@ -299,25 +320,25 @@ export function WorkbenchWorkspace({
   });
   const [benchmarkSurfaceTab, setBenchmarkSurfaceTab] = useState<BenchmarkSurfaceTab>("processed");
   const [selectedBenchmarkFingerprint, setSelectedBenchmarkFingerprint] = useState<string | null>(null);
-  const [subjectFilesState, setSubjectFilesState] = useState<SubjectFilesState>({
+  const [candidateFilesState, setCandidateFilesState] = useState<CandidateFilesState>({
     loading: false,
     error: null,
     files: [],
   });
-  const [subjectPreviewState, setSubjectPreviewState] = useState<SubjectPreviewState>({
+  const [candidatePreviewState, setCandidatePreviewState] = useState<CandidatePreviewState>({
     loading: false,
     error: null,
     preview: null,
   });
-  const [benchmarkFilesState, setBenchmarkFilesState] = useState<SubjectFilesState>({
+  const [benchmarkFilesState, setBenchmarkFilesState] = useState<CandidateFilesState>({
     loading: false,
     error: null,
     files: [],
   });
   const [selectedBenchmarkFilePath, setSelectedBenchmarkFilePath] = useState<string | null>(null);
-  const [benchmarkPreviewMode, setBenchmarkPreviewMode] = useState<SubjectPreviewMode>("rendered");
+  const [benchmarkPreviewMode, setBenchmarkPreviewMode] = useState<CandidatePreviewMode>("rendered");
   const [benchmarkDirectoryPath, setBenchmarkDirectoryPath] = useState<string | null>(null);
-  const [benchmarkPreviewState, setBenchmarkPreviewState] = useState<SubjectPreviewState>({
+  const [benchmarkPreviewState, setBenchmarkPreviewState] = useState<CandidatePreviewState>({
     loading: false,
     error: null,
     preview: null,
@@ -325,11 +346,20 @@ export function WorkbenchWorkspace({
   const [desktopDetailLeftPercent, setDesktopDetailLeftPercent] = useState(readDesktopDetailLeftPercent);
   const benchmarkSurfaceFillsBody = benchmarkSurfaceTab === "files";
   const shouldLoadBenchmarkSourceFiles = benchmarkSurfaceTab === "files";
+  const refreshSnapshot = useCallback(() => {
+    setSnapshotRefreshKey((current) => current + 1);
+  }, []);
+  const routeRefreshHref = useMemo(
+    () => buildWorkbenchLocationHref(route, routeBasePath, persistentSearchParams),
+    [persistentSearchParams, route, routeBasePath],
+  );
+  const didMountRouteRefresh = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
     let cancelled = false;
-    setSnapshotLoading(true);
+    setSnapshotLoading(snapshot === null);
+    setSnapshotRefreshing(snapshot !== null);
     setSnapshotError(null);
 
     async function loadSnapshot() {
@@ -344,11 +374,13 @@ export function WorkbenchWorkspace({
           setSnapshot(next);
           setSnapshotError(null);
           setSnapshotLoading(false);
+          setSnapshotRefreshing(false);
         });
       } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
           setSnapshotError(toMessage(error));
           setSnapshotLoading(false);
+          setSnapshotRefreshing(false);
         }
       }
     }
@@ -359,33 +391,67 @@ export function WorkbenchWorkspace({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath]);
+  }, [apiPath, snapshotRefreshKey]);
 
-  const orderedSubjectSummaries = useMemo(
-    () => snapshot ? orderSubjectSummaries(snapshot.summaries) : [],
+  useEffect(() => {
+    if (!didMountRouteRefresh.current) {
+      didMountRouteRefresh.current = true;
+      return;
+    }
+    refreshSnapshot();
+  }, [refreshSnapshot, routeRefreshHref]);
+
+  const runtimeState = useMemo(
+    () => buildWorkbenchRuntimeState(snapshot),
+    [snapshot],
+  );
+
+  const orderedCandidateSummaries = useMemo(
+    () => snapshot ? orderCandidateSummaries(snapshot.summaries) : [],
     [snapshot],
   );
   const currentBenchmarkFingerprint = normalizeBenchmarkFingerprint(snapshot?.currentBenchmarkFingerprint);
   const benchmarkFingerprintOptions = useMemo(
     () => buildBenchmarkFingerprintOptions({
       currentBenchmarkFingerprint,
-      summaries: orderedSubjectSummaries,
+      summaries: orderedCandidateSummaries,
       evaluations: snapshot?.evaluations ?? [],
       runs: snapshot?.runs ?? [],
     }),
-    [currentBenchmarkFingerprint, orderedSubjectSummaries, snapshot?.evaluations, snapshot?.runs],
+    [currentBenchmarkFingerprint, orderedCandidateSummaries, snapshot?.evaluations, snapshot?.runs],
   );
+  const activeBenchmarkFingerprint = useMemo(
+    () =>
+      normalizeBenchmarkFingerprint(
+        snapshot?.activeId
+          ? orderedCandidateSummaries.find((summary) => summary.id === snapshot.activeId)?.benchmarkFingerprint
+          : null,
+      ),
+    [orderedCandidateSummaries, snapshot?.activeId],
+  );
+  const routeBenchmarkFingerprint = useMemo(
+    () =>
+      normalizeBenchmarkFingerprint(
+        route.kind === "candidate" && route.candidateId
+          ? orderedCandidateSummaries.find((summary) => summary.id === route.candidateId)?.benchmarkFingerprint
+          : null,
+      ),
+    [orderedCandidateSummaries, route],
+  );
+  const preferredBenchmarkFingerprint =
+    routeBenchmarkFingerprint ?? activeBenchmarkFingerprint ?? currentBenchmarkFingerprint;
   const scopedBenchmarkFingerprint =
-    selectedBenchmarkFingerprint &&
+    routeBenchmarkFingerprint ??
+    (selectedBenchmarkFingerprint &&
       benchmarkFingerprintOptions.some((option) => option.fingerprint === selectedBenchmarkFingerprint)
       ? selectedBenchmarkFingerprint
-      : currentBenchmarkFingerprint ?? benchmarkFingerprintOptions[0]?.fingerprint ?? null;
+      : preferredBenchmarkFingerprint ?? benchmarkFingerprintOptions[0]?.fingerprint ?? null);
   const currentBenchmarkSummaries = useMemo(
-    () => filterSubjectSummariesByBenchmark({
-      summaries: orderedSubjectSummaries,
+    () => filterCandidateSummariesByBenchmark({
+      summaries: orderedCandidateSummaries,
       benchmarkFingerprint: scopedBenchmarkFingerprint,
     }),
-    [orderedSubjectSummaries, scopedBenchmarkFingerprint],
+    [orderedCandidateSummaries, scopedBenchmarkFingerprint],
   );
   const currentBenchmarkEvaluations = useMemo(
     () => snapshot
@@ -395,6 +461,12 @@ export function WorkbenchWorkspace({
       : [],
     [scopedBenchmarkFingerprint, snapshot],
   );
+  const currentBenchmarkEvaluationRows = useMemo(
+    () => runtimeState.evaluationRows.filter(
+      (row) => normalizeBenchmarkFingerprint(row.benchmarkFingerprint) === scopedBenchmarkFingerprint,
+    ),
+    [runtimeState.evaluationRows, scopedBenchmarkFingerprint],
+  );
   const currentBenchmarkRuns = useMemo(
     () => snapshot
       ? orderRunSummaries(snapshot.runs).filter(
@@ -403,8 +475,15 @@ export function WorkbenchWorkspace({
       : [],
     [scopedBenchmarkFingerprint, snapshot],
   );
+  const currentBenchmarkCandidateLabelById = useMemo(
+    () => new Map(currentBenchmarkSummaries.map((summary) => [
+      summary.id,
+      formatCandidateDisplayName(summary),
+    ])),
+    [currentBenchmarkSummaries],
+  );
   const routeEvaluationDialog =
-    (route.kind === "subject" || route.kind === "evaluations") &&
+    (route.kind === "candidate" || route.kind === "evaluations") &&
     route.dialog?.kind === "evaluation"
       ? route.dialog
       : null;
@@ -426,34 +505,33 @@ export function WorkbenchWorkspace({
     () => evaluationIdsToLoad.join("|"),
     [evaluationIdsToLoad],
   );
-  const selectedSubjectId = resolveSelectedSubjectId({
+  const selectedCandidateId = resolveSelectedCandidateId({
     route,
     activeId: snapshot?.activeId ?? null,
     summaries: currentBenchmarkSummaries,
   });
-  const selectedSubjectSummary = selectedSubjectId
-    ? currentBenchmarkSummaries.find((summary) => summary.id === selectedSubjectId) ?? null
+  const selectedCandidateSummary = selectedCandidateId
+    ? currentBenchmarkSummaries.find((summary) => summary.id === selectedCandidateId) ?? null
     : null;
-  const selectedSubjectHasInspectableFiles = Boolean(selectedSubjectSummary);
-  const orderedSubjectFiles = useMemo(
-    () => orderSubjectFiles(subjectFilesState.files),
-    [subjectFilesState.files],
+  const selectedCandidateHasInspectableFiles = Boolean(selectedCandidateSummary);
+  const orderedCandidateFiles = useMemo(
+    () => orderCandidateFiles(candidateFilesState.files),
+    [candidateFilesState.files],
   );
   const orderedBenchmarkFiles = useMemo(
-    () => orderSubjectFiles(benchmarkFilesState.files),
+    () => orderCandidateFiles(benchmarkFilesState.files),
     [benchmarkFilesState.files],
   );
-  const selectedSubjectFilePath = route.kind === "subject" && route.view === "files"
-    ? resolveSelectedSubjectFilePath({
+  const selectedCandidateFilePath = route.kind === "candidate" && route.view === "files"
+    ? resolveSelectedCandidateFilePath({
         routeFilePath: route.filePath,
-        files: orderedSubjectFiles,
-        specDocument,
+        files: orderedCandidateFiles,
       })
     : null;
-  const subjectPreviewMode = route.kind === "subject" && route.view === "files"
+  const candidatePreviewMode = route.kind === "candidate" && route.view === "files"
     ? route.previewMode
     : "rendered";
-  const subjectDirectoryPath = route.kind === "subject" && route.view === "files"
+  const candidateDirectoryPath = route.kind === "candidate" && route.view === "files"
     ? route.directoryPath
     : null;
   const prefersCompactWorkspaceLayout = useMediaQuery(COMPACT_WORKSPACE_LAYOUT_MEDIA_QUERY);
@@ -534,7 +612,7 @@ export function WorkbenchWorkspace({
       params.set("fingerprint", scopedBenchmarkFingerprint);
     }
 
-    void requestJson<SubjectWorkspaceFileSummary[]>(
+    void requestJson<CandidateWorkspaceFileSummary[]>(
       apiPath(`/api/source/files${params.size ? `?${params.toString()}` : ""}`),
       { signal: controller.signal },
     ).then((files) => {
@@ -567,14 +645,20 @@ export function WorkbenchWorkspace({
 
   useEffect(() => {
     const nextBenchmarkFingerprint =
-      selectedBenchmarkFingerprint &&
+      routeBenchmarkFingerprint ??
+      (selectedBenchmarkFingerprint &&
         benchmarkFingerprintOptions.some((option) => option.fingerprint === selectedBenchmarkFingerprint)
         ? selectedBenchmarkFingerprint
-        : currentBenchmarkFingerprint ?? benchmarkFingerprintOptions[0]?.fingerprint ?? null;
+        : preferredBenchmarkFingerprint ?? benchmarkFingerprintOptions[0]?.fingerprint ?? null);
     if (nextBenchmarkFingerprint !== selectedBenchmarkFingerprint) {
       setSelectedBenchmarkFingerprint(nextBenchmarkFingerprint);
     }
-  }, [benchmarkFingerprintOptions, currentBenchmarkFingerprint, selectedBenchmarkFingerprint]);
+  }, [
+    benchmarkFingerprintOptions,
+    preferredBenchmarkFingerprint,
+    routeBenchmarkFingerprint,
+    selectedBenchmarkFingerprint,
+  ]);
 
   useEffect(() => {
     const nextFilePath =
@@ -612,7 +696,7 @@ export function WorkbenchWorkspace({
       params.set("fingerprint", scopedBenchmarkFingerprint);
     }
 
-    void requestJson<SubjectWorkspaceFilePreview>(
+    void requestJson<CandidateWorkspaceFilePreview>(
       apiPath(`/api/source/preview?${params.toString()}`),
       { signal: controller.signal },
     ).then((preview) => {
@@ -644,21 +728,21 @@ export function WorkbenchWorkspace({
   }, [apiPath, selectedBenchmarkFilePath, benchmarkPreviewMode, scopedBenchmarkFingerprint, shouldLoadBenchmarkSourceFiles]);
 
   useEffect(() => {
-    if (route.kind !== "subject") {
+    if (route.kind !== "candidate") {
       return;
     }
     if (snapshot === null) {
       return;
     }
-    if (!selectedSubjectId) {
-      navigate(createSubjectsRoute(), { replace: true });
+    if (!selectedCandidateId) {
+      navigate(createCandidatesRoute(), { replace: true });
       return;
     }
 
-    if (route.subjectId !== selectedSubjectId) {
+    if (route.candidateId !== selectedCandidateId) {
       navigate(
-        createSubjectRoute({
-          subjectId: selectedSubjectId,
+        createCandidateRoute({
+          candidateId: selectedCandidateId,
           view: route.view,
           filePath: route.view === "files" ? route.filePath : null,
           directoryPath: route.view === "files" ? route.directoryPath : null,
@@ -670,25 +754,24 @@ export function WorkbenchWorkspace({
       return;
     }
 
-  }, [navigate, orderedSubjectSummaries.length, route, selectedSubjectId, snapshot]);
+  }, [navigate, orderedCandidateSummaries.length, route, selectedCandidateId, snapshot]);
 
   useEffect(() => {
-    if (route.kind !== "subject" || route.view !== "files" || !selectedSubjectId) {
+    if (route.kind !== "candidate" || route.view !== "files" || !selectedCandidateId) {
       return;
     }
-    if (subjectFilesState.loading || subjectFilesState.error) {
+    if (candidateFilesState.loading || candidateFilesState.error) {
       return;
     }
 
-    const nextFilePath = resolveSelectedSubjectFilePath({
+    const nextFilePath = resolveSelectedCandidateFilePath({
       routeFilePath: route.filePath,
-      files: orderedSubjectFiles,
-      specDocument,
+      files: orderedCandidateFiles,
     });
     if (nextFilePath !== route.filePath) {
       navigate(
-        createSubjectRoute({
-          subjectId: selectedSubjectId,
+        createCandidateRoute({
+          candidateId: selectedCandidateId,
           view: "files",
           filePath: nextFilePath,
           directoryPath: route.directoryPath ?? directoryPathForFile(nextFilePath),
@@ -699,16 +782,16 @@ export function WorkbenchWorkspace({
       );
     }
   }, [
-    subjectFilesState.error,
-    subjectFilesState.loading,
+    candidateFilesState.error,
+    candidateFilesState.loading,
     navigate,
-    orderedSubjectFiles,
+    orderedCandidateFiles,
     route,
-    selectedSubjectId,
+    selectedCandidateId,
   ]);
 
   useEffect(() => {
-    if (route.kind !== "subject" || route.view !== "manifest" || !selectedSubjectId) {
+    if (route.kind !== "candidate" || route.view !== "manifest" || !selectedCandidateId) {
       setRecordState({
         loading: false,
         error: null,
@@ -723,12 +806,12 @@ export function WorkbenchWorkspace({
       error: null,
       record: null,
     });
-    const subjectId = selectedSubjectId;
+    const candidateId = selectedCandidateId;
 
     async function loadRecord() {
       try {
-        const record = await requestJson<SubjectRecord>(
-          apiPath(`/api/record?id=${encodeURIComponent(subjectId)}`),
+        const record = await requestJson<CandidateRecord>(
+          apiPath(`/api/record?id=${encodeURIComponent(candidateId)}`),
         );
         if (cancelled) {
           return;
@@ -755,7 +838,7 @@ export function WorkbenchWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [apiPath, route, selectedSubjectId]);
+  }, [apiPath, route, selectedCandidateId]);
 
   useEffect(() => {
     if (evaluationIdsToLoad.length === 0) {
@@ -812,12 +895,12 @@ export function WorkbenchWorkspace({
 
   useEffect(() => {
     if (
-      route.kind !== "subject" ||
+      route.kind !== "candidate" ||
       route.view !== "files" ||
-      !selectedSubjectId ||
-      !selectedSubjectHasInspectableFiles
+      !selectedCandidateId ||
+      !selectedCandidateHasInspectableFiles
     ) {
-      setSubjectFilesState({
+      setCandidateFilesState({
         loading: false,
         error: null,
         files: [],
@@ -826,23 +909,23 @@ export function WorkbenchWorkspace({
     }
 
     let cancelled = false;
-    setSubjectFilesState({
+    setCandidateFilesState({
       loading: true,
       error: null,
       files: [],
     });
-    const subjectId = selectedSubjectId;
+    const candidateId = selectedCandidateId;
 
     async function loadFiles() {
       try {
-        const files = await requestJson<SubjectWorkspaceFileSummary[]>(
-          apiPath(`/api/subject/files?id=${encodeURIComponent(subjectId)}`),
+        const files = await requestJson<CandidateWorkspaceFileSummary[]>(
+          apiPath(`/api/candidate/files?id=${encodeURIComponent(candidateId)}`),
         );
         if (cancelled) {
           return;
         }
         startTransition(() => {
-          setSubjectFilesState({
+          setCandidateFilesState({
             loading: false,
             error: null,
             files,
@@ -850,7 +933,7 @@ export function WorkbenchWorkspace({
         });
       } catch (error) {
         if (!cancelled) {
-          setSubjectFilesState({
+          setCandidateFilesState({
             loading: false,
             error: toMessage(error),
             files: [],
@@ -863,17 +946,17 @@ export function WorkbenchWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [apiPath, route, selectedSubjectHasInspectableFiles, selectedSubjectId]);
+  }, [apiPath, route, selectedCandidateHasInspectableFiles, selectedCandidateId]);
 
   useEffect(() => {
     if (
-      route.kind !== "subject" ||
+      route.kind !== "candidate" ||
       route.view !== "files" ||
-      !selectedSubjectId ||
-      !selectedSubjectHasInspectableFiles ||
-      !selectedSubjectFilePath
+      !selectedCandidateId ||
+      !selectedCandidateHasInspectableFiles ||
+      !selectedCandidateFilePath
     ) {
-      setSubjectPreviewState({
+      setCandidatePreviewState({
         loading: false,
         error: null,
         preview: null,
@@ -882,29 +965,29 @@ export function WorkbenchWorkspace({
     }
 
     let cancelled = false;
-    setSubjectPreviewState({
+    setCandidatePreviewState({
       loading: true,
       error: null,
       preview: null,
     });
-    const subjectId = selectedSubjectId;
-    const filePath = selectedSubjectFilePath;
+    const candidateId = selectedCandidateId;
+    const filePath = selectedCandidateFilePath;
 
     async function loadPreview() {
       try {
         const params = new URLSearchParams({
-          id: subjectId,
+          id: candidateId,
           path: filePath,
-          view: subjectPreviewMode,
+          view: candidatePreviewMode,
         });
-        const preview = await requestJson<SubjectWorkspaceFilePreview>(
-          apiPath(`/api/subject/preview?${params.toString()}`),
+        const preview = await requestJson<CandidateWorkspaceFilePreview>(
+          apiPath(`/api/candidate/preview?${params.toString()}`),
         );
         if (cancelled) {
           return;
         }
         startTransition(() => {
-          setSubjectPreviewState({
+          setCandidatePreviewState({
             loading: false,
             error: null,
             preview,
@@ -912,7 +995,7 @@ export function WorkbenchWorkspace({
         });
       } catch (error) {
         if (!cancelled) {
-          setSubjectPreviewState({
+          setCandidatePreviewState({
             loading: false,
             error: toMessage(error),
             preview: null,
@@ -925,66 +1008,66 @@ export function WorkbenchWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [apiPath, subjectPreviewMode, route, selectedSubjectFilePath, selectedSubjectHasInspectableFiles, selectedSubjectId]);
+  }, [apiPath, candidatePreviewMode, route, selectedCandidateFilePath, selectedCandidateHasInspectableFiles, selectedCandidateId]);
 
   const routeEvaluationScorecard = routeEvaluationId
     ? evaluationRecordsState.records.find((record) => record.id === routeEvaluationId) ?? null
     : null;
-  const routeEvaluationSubjectId =
-    routeEvaluationScorecard?.subjectId ??
-    routeEvaluationSummary?.subjectId ??
+  const routeEvaluationCandidateId =
+    routeEvaluationScorecard?.candidateId ??
+    routeEvaluationSummary?.candidateId ??
     null;
   const evaluationCaseReviewState = useCaseReview(
     apiPath,
-    routeEvaluationCaseId ? routeEvaluationSubjectId : null,
+    routeEvaluationCaseId ? routeEvaluationCandidateId : null,
     routeEvaluationCaseId ? (routeEvaluationSummary?.runId ?? routeEvaluationScorecard?.runId ?? null) : null,
     routeEvaluationCaseId,
   );
 
-  function navigateToSubject(args: {
-    subjectId: string;
-    view?: SubjectView;
+  function navigateToCandidate(args: {
+    candidateId: string;
+    view?: CandidateView;
     filePath?: string | null;
     directoryPath?: string | null;
-    previewMode?: SubjectPreviewMode;
-    dialog?: SubjectDialog | null;
+    previewMode?: CandidatePreviewMode;
+    dialog?: CandidateDialog | null;
     replace?: boolean;
   }) {
-    const view = args.view ?? (route.kind === "subject" ? route.view : "overview");
+    const view = args.view ?? (route.kind === "candidate" ? route.view : "overview");
     navigate(
-      createSubjectRoute({
-        subjectId: args.subjectId,
+      createCandidateRoute({
+        candidateId: args.candidateId,
         view,
-        filePath: view === "files" ? args.filePath ?? (route.kind === "subject" ? route.filePath : null) : null,
+        filePath: view === "files" ? args.filePath ?? (route.kind === "candidate" ? route.filePath : null) : null,
         directoryPath: view === "files"
-          ? args.directoryPath ?? (route.kind === "subject" && route.view === "files" ? route.directoryPath : null)
+          ? args.directoryPath ?? (route.kind === "candidate" && route.view === "files" ? route.directoryPath : null)
           : null,
         previewMode: view === "files"
-          ? args.previewMode ?? (route.kind === "subject" && route.view === "files" ? route.previewMode : "rendered")
+          ? args.previewMode ?? (route.kind === "candidate" && route.view === "files" ? route.previewMode : "rendered")
           : "rendered",
-        dialog: args.dialog ?? (route.kind === "subject" ? route.dialog : null),
+        dialog: args.dialog ?? (route.kind === "candidate" ? route.dialog : null),
       }),
       args.replace ? { replace: true } : undefined,
     );
   }
 
-  function handleSelectSubject(subjectId: string) {
-    navigateToSubject({
-      subjectId,
-      view: route.kind === "subject" ? route.view : "overview",
-      filePath: route.kind === "subject" && route.view === "files" ? route.filePath : null,
-      directoryPath: route.kind === "subject" && route.view === "files" ? route.directoryPath : null,
-      previewMode: route.kind === "subject" && route.view === "files" ? route.previewMode : "rendered",
+  function handleSelectCandidate(candidateId: string) {
+    navigateToCandidate({
+      candidateId,
+      view: route.kind === "candidate" ? route.view : "overview",
+      filePath: route.kind === "candidate" && route.view === "files" ? route.filePath : null,
+      directoryPath: route.kind === "candidate" && route.view === "files" ? route.directoryPath : null,
+      previewMode: route.kind === "candidate" && route.view === "files" ? route.previewMode : "rendered",
       dialog: null,
     });
   }
 
-  function createCurrentSubjectRoute(dialog: SubjectDialog | null): WorkbenchRoute | null {
-    if (route.kind !== "subject" || !selectedSubjectId) {
+  function createCurrentCandidateRoute(dialog: CandidateDialog | null): WorkbenchRoute | null {
+    if (route.kind !== "candidate" || !selectedCandidateId) {
       return null;
     }
-    return createSubjectRoute({
-      subjectId: selectedSubjectId,
+    return createCandidateRoute({
+      candidateId: selectedCandidateId,
       view: route.view,
       filePath: route.view === "files" ? route.filePath : null,
       directoryPath: route.view === "files" ? route.directoryPath : null,
@@ -994,64 +1077,62 @@ export function WorkbenchWorkspace({
   }
 
   const objectSurface = (() => {
-    if (route.kind === "subject" && route.view === "manifest") {
+    if (route.kind === "candidate" && route.view === "manifest") {
       return (
-        <SubjectYamlSurface
-          specError={specError}
+        <CandidateYamlSurface
           snapshotError={snapshotError}
           snapshotLoading={snapshotLoading}
-          selectedSubjectSummary={selectedSubjectSummary}
+          selectedCandidateSummary={selectedCandidateSummary}
           recordState={recordState}
         />
       );
     }
 
-    if (route.kind === "subject" && route.view === "files") {
+    if (route.kind === "candidate" && route.view === "files") {
       return (
-        <SubjectFilesSurface
-          specError={specError}
+        <CandidateFilesSurface
           snapshotError={snapshotError}
           snapshotLoading={snapshotLoading}
-          selectedSubjectSummary={selectedSubjectSummary}
-          subjectFilesState={subjectFilesState}
-          selectedSubjectFilePath={selectedSubjectFilePath}
-          subjectPreviewMode={subjectPreviewMode}
-          subjectDirectoryPath={subjectDirectoryPath}
-          subjectPreviewState={subjectPreviewState}
-          onSelectSubjectFile={(filePath) => {
-            if (!selectedSubjectId) {
+          selectedCandidateSummary={selectedCandidateSummary}
+          candidateFilesState={candidateFilesState}
+          selectedCandidateFilePath={selectedCandidateFilePath}
+          candidatePreviewMode={candidatePreviewMode}
+          candidateDirectoryPath={candidateDirectoryPath}
+          candidatePreviewState={candidatePreviewState}
+          onSelectCandidateFile={(filePath) => {
+            if (!selectedCandidateId) {
               return;
             }
             const directoryPath = directoryPathForFile(filePath);
-            navigateToSubject({
-              subjectId: selectedSubjectId,
+            navigateToCandidate({
+              candidateId: selectedCandidateId,
               view: "files",
               filePath,
               directoryPath,
-              previewMode: subjectPreviewMode,
+              previewMode: candidatePreviewMode,
             });
           }}
-          onSubjectDirectoryChange={(directoryPath) => {
-            if (!selectedSubjectId) {
+          onCandidateDirectoryChange={(directoryPath) => {
+            if (!selectedCandidateId) {
               return;
             }
-            navigateToSubject({
-              subjectId: selectedSubjectId,
+            navigateToCandidate({
+              candidateId: selectedCandidateId,
               view: "files",
-              filePath: selectedSubjectFilePath,
+              filePath: selectedCandidateFilePath,
               directoryPath,
-              previewMode: subjectPreviewMode,
+              previewMode: candidatePreviewMode,
             });
           }}
-          onSubjectPreviewModeChange={(mode) => {
-            if (!selectedSubjectId) {
+          onCandidatePreviewModeChange={(mode) => {
+            if (!selectedCandidateId) {
               return;
             }
-            navigateToSubject({
-              subjectId: selectedSubjectId,
+            navigateToCandidate({
+              candidateId: selectedCandidateId,
               view: "files",
-              filePath: selectedSubjectFilePath,
-              directoryPath: subjectDirectoryPath,
+              filePath: selectedCandidateFilePath,
+              directoryPath: candidateDirectoryPath,
               previewMode: mode,
             });
           }}
@@ -1059,16 +1140,19 @@ export function WorkbenchWorkspace({
       );
     }
 
-    if (route.kind === "subject" && route.view === "overview") {
+    if (route.kind === "candidate" && route.view === "overview") {
       return (
-        <SubjectOverviewSurface
+        <CandidateOverviewSurface
           snapshot={snapshot}
           snapshotError={snapshotError}
           snapshotLoading={snapshotLoading}
-          selectedSubjectSummary={selectedSubjectSummary}
+          selectedCandidateSummary={selectedCandidateSummary}
+          selectedCandidateRuntimeState={selectedCandidateId
+            ? runtimeState.candidateStateById.get(selectedCandidateId) ?? null
+            : null}
           evaluations={currentBenchmarkEvaluations}
           onOpenEvaluation={(evaluationId) => {
-            const next = createCurrentSubjectRoute({ kind: "evaluation", evaluationId });
+            const next = createCurrentCandidateRoute({ kind: "evaluation", evaluationId });
             if (next) {
               navigate(next);
             }
@@ -1084,6 +1168,8 @@ export function WorkbenchWorkspace({
             snapshotError={snapshotError}
             snapshotLoading={snapshotLoading}
             evaluations={currentBenchmarkEvaluations}
+            rows={currentBenchmarkEvaluationRows}
+            candidateLabelById={currentBenchmarkCandidateLabelById}
             onSelectEvaluation={(evaluationId) => navigate(createEvaluationsRoute({
               dialog: { kind: "evaluation", evaluationId },
             }))}
@@ -1093,17 +1179,18 @@ export function WorkbenchWorkspace({
     }
 
     return (
-      <SubjectsIndexSurface
+      <CandidatesIndexSurface
         snapshot={snapshot}
         snapshotError={snapshotError}
         snapshotLoading={snapshotLoading}
         currentBenchmarkSummaries={currentBenchmarkSummaries}
         currentBenchmarkEvaluations={currentBenchmarkEvaluations}
         currentBenchmarkRuns={currentBenchmarkRuns}
-        selectedSubjectId={selectedSubjectId}
-        view={route.kind === "subjects" ? route.view : "archive"}
-        onViewChange={(view) => navigate(createSubjectsRoute({ view }))}
-        onSelectSubject={handleSelectSubject}
+        candidateStateById={runtimeState.candidateStateById}
+        selectedCandidateId={selectedCandidateId}
+        view={route.kind === "candidates" ? route.view : "archive"}
+        onViewChange={(view) => navigate(createCandidatesRoute({ view }))}
+        onSelectCandidate={handleSelectCandidate}
       />
     );
   })();
@@ -1190,12 +1277,21 @@ export function WorkbenchWorkspace({
           <div className="min-w-0">
             <WorkbenchBreadcrumbs
               route={route}
-              selectedSubjectSummary={selectedSubjectSummary}
+              selectedCandidateSummary={selectedCandidateSummary}
               routeHref={routeHref}
               onNavigate={navigate}
             />
           </div>
-          {benchmarkNavigation}
+          <div className="flex min-w-0 flex-wrap items-center justify-start gap-2 md:justify-end">
+            <WorkbenchActivitySummary
+              runtimeState={runtimeState}
+              loading={snapshotLoading}
+              refreshing={snapshotRefreshing}
+              error={snapshotError}
+              onRefresh={refreshSnapshot}
+            />
+            {benchmarkNavigation}
+          </div>
         </div>
       </div>
     </div>
@@ -1212,9 +1308,9 @@ export function WorkbenchWorkspace({
     </WorkspacePane>
   );
 
-  const subjectDetailViewSwitch = route.kind === "subject" ? (
+  const candidateDetailViewSwitch = route.kind === "candidate" ? (
     <ViewSwitch
-      ariaLabel="Subject views"
+      ariaLabel="Candidate views"
       value={route.view}
       className="self-start"
       items={[
@@ -1223,69 +1319,72 @@ export function WorkbenchWorkspace({
         { value: "files", label: "Files", icon: FolderOpenIcon },
       ]}
       onValueChange={(value) => {
-        if (!selectedSubjectId) {
+        if (!selectedCandidateId) {
           return;
         }
-        const nextView: SubjectView =
+        const nextView: CandidateView =
           value === "files" ? "files" : value === "manifest" ? "manifest" : "overview";
-        navigateToSubject({
-          subjectId: selectedSubjectId,
+        navigateToCandidate({
+          candidateId: selectedCandidateId,
           view: nextView,
-          directoryPath: nextView === "files" ? subjectDirectoryPath : null,
-          previewMode: nextView === "files" ? subjectPreviewMode : "rendered",
+          directoryPath: nextView === "files" ? candidateDirectoryPath : null,
+          previewMode: nextView === "files" ? candidatePreviewMode : "rendered",
         });
       }}
     />
   ) : null;
   const objectSurfaceFillsBody =
-    (route.kind === "subject" && route.view === "files") ||
-    route.kind === "subjects" ||
+    (route.kind === "candidate" && route.view === "files") ||
+    route.kind === "candidates" ||
     route.kind === "evaluations";
 
   const objectPane = (
     <WorkspacePane
       title={objectPaneTitle({
         route,
-        selectedSubjectSummary,
+        selectedCandidateSummary,
       })}
       badges={(
         <ObjectPaneBadges
           route={route}
           snapshot={snapshot}
-          subjectCount={currentBenchmarkSummaries.length}
-          evaluationCount={currentBenchmarkEvaluations.length}
-          selectedSubjectSummary={selectedSubjectSummary}
+          candidateCount={currentBenchmarkSummaries.length}
+          evaluationCount={currentBenchmarkEvaluationRows.length}
+          selectedCandidateSummary={selectedCandidateSummary}
+          selectedCandidateRuntimeState={selectedCandidateId
+            ? runtimeState.candidateStateById.get(selectedCandidateId) ?? null
+            : null}
         />
       )}
-      subnav={subjectDetailViewSwitch}
+      subnav={candidateDetailViewSwitch}
       scrollBody={!objectSurfaceFillsBody}
       contentClassName={objectSurfaceFillsBody ? "flex h-full min-h-0 flex-col" : undefined}
     >
       {objectSurface}
     </WorkspacePane>
   );
-  const subjectContextDialog = route.kind === "subject" ? route.dialog : null;
+  const candidateContextDialog = route.kind === "candidate" ? route.dialog : null;
   const evaluationsContextDialog = route.kind === "evaluations" ? route.dialog : null;
   const contextualDialogs = (
     <>
-      {subjectContextDialog?.kind === "evaluation" ? (
+      {candidateContextDialog?.kind === "evaluation" ? (
         <EvaluationDetailDialog
           open
-          evaluationId={subjectContextDialog.evaluationId}
+          evaluationId={candidateContextDialog.evaluationId}
           evaluationSummary={routeEvaluationSummary}
           state={evaluationRecordsState}
-          selectedCaseId={subjectContextDialog.caseId ?? null}
+          selectedCaseId={candidateContextDialog.caseId ?? null}
           caseReviewState={evaluationCaseReviewState}
           onClose={() => {
-            const next = createCurrentSubjectRoute(null);
+            const next = createCurrentCandidateRoute(null);
             if (next) {
               navigate(next);
             }
           }}
           onSelectCase={(caseId) => {
-            const next = createCurrentSubjectRoute({
+            const next = createCurrentCandidateRoute({
               kind: "evaluation",
-              evaluationId: subjectContextDialog.evaluationId,
+              evaluationId: candidateContextDialog.evaluationId,
               caseId,
             });
             if (next) {
@@ -1367,10 +1466,7 @@ function useWorkbenchRoute(
   initialSearch: string,
 ): [WorkbenchRoute, (route: WorkbenchRoute, options?: { replace?: boolean }) => void] {
   const [route, setRoute] = useState<WorkbenchRoute>(() =>
-    parseWorkbenchRoute({
-      pathname: initialPath,
-      search: initialSearch,
-    }));
+    readInitialWorkbenchRoute(routeBasePath, initialPath, initialSearch));
 
   useEffect(() => {
     const readCurrentRoute = () => parseWorkbenchLocation({
@@ -1413,6 +1509,23 @@ function useWorkbenchRoute(
   return [route, navigate];
 }
 
+function readInitialWorkbenchRoute(
+  routeBasePath: string,
+  initialPath: string,
+  initialSearch: string,
+): WorkbenchRoute {
+  if (typeof window !== "undefined") {
+    return parseWorkbenchLocation({
+      pathname: window.location.pathname,
+      search: window.location.search,
+    }, routeBasePath);
+  }
+  return parseWorkbenchRoute({
+    pathname: initialPath,
+    search: initialSearch,
+  });
+}
+
 function WorkbenchBenchmarkNavigation({
   route,
   routeHref,
@@ -1423,16 +1536,16 @@ function WorkbenchBenchmarkNavigation({
   onNavigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
 }) {
   const value =
-    route.kind === "subjects" || route.kind === "subject"
-      ? "subjects"
+    route.kind === "candidates" || route.kind === "candidate"
+      ? "candidates"
       : route.kind === "evaluations"
           ? "evaluations"
           : null;
   const items = [
     {
-      value: "subjects",
-      label: "Subjects",
-      route: createSubjectsRoute(),
+      value: "candidates",
+      label: "Candidates",
+      route: createCandidatesRoute(),
     },
     {
       value: "evaluations",
@@ -1472,31 +1585,31 @@ function WorkbenchBenchmarkNavigation({
 
 function objectPaneTitle(args: {
   route: WorkbenchRoute;
-  selectedSubjectSummary: SubjectSummary | null;
+  selectedCandidateSummary: CandidateSummary | null;
 }): string {
-  if (args.route.kind === "subjects") {
-    return "Subjects";
+  if (args.route.kind === "candidates") {
+    return "Candidates";
   }
   if (args.route.kind === "evaluations") {
     return "Evaluations";
   }
-  if (args.route.kind !== "subject") {
+  if (args.route.kind !== "candidate") {
     return "Benchmark";
   }
-  if (!args.selectedSubjectSummary) {
-    return "Subject";
+  if (!args.selectedCandidateSummary) {
+    return "Candidate";
   }
-  return formatSubjectDisplayName(args.selectedSubjectSummary);
+  return formatCandidateName(args.selectedCandidateSummary);
 }
 
 function WorkbenchBreadcrumbs({
   route,
-  selectedSubjectSummary,
+  selectedCandidateSummary,
   routeHref,
   onNavigate,
 }: {
   route: WorkbenchRoute;
-  selectedSubjectSummary: SubjectSummary | null;
+  selectedCandidateSummary: CandidateSummary | null;
   routeHref: (route: WorkbenchRoute) => string;
   onNavigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
 }) {
@@ -1512,18 +1625,18 @@ function WorkbenchBreadcrumbs({
     );
   }
 
-  const terminalLabel = route.kind === "subject"
-    ? selectedSubjectSummary
-      ? formatSubjectDisplayName(selectedSubjectSummary)
-      : "Subject"
+  const terminalLabel = route.kind === "candidate"
+    ? selectedCandidateSummary
+      ? formatCandidateName(selectedCandidateSummary)
+      : "Candidate"
     : route.kind === "evaluations"
-        ? "Evaluations"
-        : "Subjects";
+      ? "Evaluations"
+      : "Candidates";
   const parentRoute =
-    route.kind === "subject" ? createSubjectsRoute() :
+    route.kind === "candidate" ? createCandidatesRoute() :
     null;
   const parentLabel =
-    route.kind === "subject" ? "Subjects" :
+    route.kind === "candidate" ? "Candidates" :
     null;
 
   return (
@@ -1569,42 +1682,126 @@ function WorkbenchBreadcrumbs({
   );
 }
 
+function WorkbenchActivitySummary({
+  runtimeState,
+  loading,
+  refreshing,
+  error,
+  onRefresh,
+}: {
+  runtimeState: WorkbenchRuntimeState;
+  loading: boolean;
+  refreshing: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const label = loading && !runtimeState.lastUpdatedAt
+    ? "Loading state"
+    : activeRunSummaryLabel(runtimeState.activeRuns);
+  const secondary = activitySecondaryLabel(runtimeState, refreshing, error);
+  const tone = badgeToneProps(error
+    ? "destructive"
+    : runtimeState.hasActiveWork
+      ? "warning"
+      : "outline");
+
+  return (
+    <div
+      data-testid="workbench-activity-summary"
+      className="flex min-w-0 items-center gap-2 text-xs"
+    >
+      <Badge
+        variant={tone.variant}
+        className={cn("max-w-[11rem] truncate", tone.className)}
+        title={label}
+      >
+        {label}
+      </Badge>
+      <span
+        className="hidden min-w-0 max-w-[14rem] truncate text-muted-foreground lg:inline"
+        title={secondary}
+      >
+        {secondary}
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        aria-label="Refresh Workbench state"
+        title="Refresh Workbench state"
+        disabled={loading || refreshing}
+        onClick={onRefresh}
+      >
+        <RefreshCwIcon className={refreshing ? "animate-spin" : undefined} />
+        <span className="sr-only">Refresh</span>
+      </Button>
+    </div>
+  );
+}
+
+function activitySecondaryLabel(
+  runtimeState: WorkbenchRuntimeState,
+  refreshing: boolean,
+  error: string | null,
+): string {
+  if (error) {
+    return "Snapshot unavailable";
+  }
+  if (refreshing) {
+    return "Refreshing";
+  }
+  if (runtimeState.lastUpdatedAt) {
+    return `Updated ${formatTimestamp(runtimeState.lastUpdatedAt)}`;
+  }
+  return formatCount(runtimeState.recentRuns.length, "run");
+}
+
 function ObjectPaneBadges({
   route,
   snapshot,
-  subjectCount,
+  candidateCount,
   evaluationCount,
-  selectedSubjectSummary,
+  selectedCandidateSummary,
+  selectedCandidateRuntimeState,
 }: {
   route: WorkbenchRoute;
   snapshot: BenchmarkSnapshot | null;
-  subjectCount: number;
+  candidateCount: number;
   evaluationCount: number;
-  selectedSubjectSummary: SubjectSummary | null;
+  selectedCandidateSummary: CandidateSummary | null;
+  selectedCandidateRuntimeState: CandidateRuntimeState | null;
 }) {
   if (route.kind === "evaluations") {
     return snapshot ? <Badge variant="outline">{formatCount(evaluationCount, "evaluation")}</Badge> : null;
   }
 
   if (route.kind === "benchmark") {
-    return snapshot ? <Badge variant="outline">{formatCount(subjectCount, "subject")}</Badge> : null;
+    return snapshot ? <Badge variant="outline">{formatCount(candidateCount, "candidate")}</Badge> : null;
   }
 
-  if (route.kind !== "subject") {
+  if (route.kind !== "candidate") {
     return snapshot ? (
       <Badge variant="outline">
-        {formatCount(subjectCount, "subject")}
+        {formatCount(candidateCount, "candidate")}
       </Badge>
     ) : null;
   }
 
   return (
     <>
-      {selectedSubjectSummary ? (
+      {selectedCandidateSummary ? (
+        <Badge variant="outline">
+          {formatCandidateVersionLabel(selectedCandidateSummary) ?? "unversioned"}
+        </Badge>
+      ) : null}
+      {selectedCandidateSummary ? (
         <StatusBadge
-          status={selectedSubjectSummary.status}
-          active={snapshot?.activeId === selectedSubjectSummary.id}
+          status={selectedCandidateSummary.status}
+          active={snapshot?.activeId === selectedCandidateSummary.id}
         />
+      ) : null}
+      {shouldShowCandidateRuntimeBadge(selectedCandidateRuntimeState) ? (
+        <CandidateRuntimeBadge state={selectedCandidateRuntimeState} />
       ) : null}
     </>
   );
@@ -1680,14 +1877,14 @@ function BenchmarkSurface({
   benchmarkFingerprintOptions: BenchmarkFingerprintOption[];
   specDocument: AuthoredWorkbenchSourceDocument | null;
   specError: string | null;
-  sourceFilesState: SubjectFilesState;
+  sourceFilesState: CandidateFilesState;
   selectedSourceFilePath: string | null;
-  sourcePreviewMode: SubjectPreviewMode;
+  sourcePreviewMode: CandidatePreviewMode;
   sourceDirectoryPath: string | null;
-  sourcePreviewState: SubjectPreviewState;
+  sourcePreviewState: CandidatePreviewState;
   onSelectSourceFile: (filePath: string) => void;
   onSourceDirectoryChange: (directoryPath: string | null) => void;
-  onSourcePreviewModeChange: (mode: SubjectPreviewMode) => void;
+  onSourcePreviewModeChange: (mode: CandidatePreviewMode) => void;
   onBenchmarkFingerprintChange: (fingerprint: string | null) => void;
   loading: boolean;
   actions?: ReactNode;
@@ -1858,7 +2055,7 @@ function BenchmarkSurface({
         <TabsContent value="manifest" className="min-w-0">
           <SourceYamlSection
             title="Benchmark Manifest"
-            description="The benchmark manifest defines the engine, subject, optimizer, and source files."
+            description="The benchmark manifest defines the engine, cases, and source files."
             source={benchmarkYamlSource}
             testId="benchmark-yaml-source"
           />
@@ -1872,7 +2069,7 @@ function BenchmarkSurface({
           >
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <FilesBrowser
-                changes={orderSubjectFiles(sourceFilesState.files)}
+                changes={orderCandidateFiles(sourceFilesState.files)}
                 selectedFilePath={selectedSourceFilePath}
                 browseMode="folders"
                 currentDirectory={sourceDirectoryPath}
@@ -1890,7 +2087,7 @@ function BenchmarkSurface({
                 previewErrorMessage="Couldn't load the engine case file preview."
                 onSelectFile={onSelectSourceFile}
                 onDirectoryChange={onSourceDirectoryChange}
-                onPreviewModeChange={(mode) => onSourcePreviewModeChange(mode as SubjectPreviewMode)}
+                onPreviewModeChange={(mode) => onSourcePreviewModeChange(mode as CandidatePreviewMode)}
               />
             </div>
           </SurfaceSection>
@@ -2199,7 +2396,7 @@ function BenchmarkFingerprintSelector({
                 {shortDigest(option.fingerprint)}
                 {option.fingerprint === currentBenchmarkFingerprint ? " · current" : ""}
                 {" · "}
-                {formatCount(option.subjectCount, "subject")}
+                {formatCount(option.candidateCount, "candidate")}
               </SelectItem>
             ))}
           </SelectGroup>
@@ -2209,67 +2406,69 @@ function BenchmarkFingerprintSelector({
   );
 }
 
-function SubjectsIndexSurface({
+function CandidatesIndexSurface({
   snapshot,
   snapshotError,
   snapshotLoading,
   currentBenchmarkSummaries,
   currentBenchmarkEvaluations,
   currentBenchmarkRuns,
-  selectedSubjectId,
+  candidateStateById,
+  selectedCandidateId,
   view,
   onViewChange,
-  onSelectSubject,
+  onSelectCandidate,
 }: {
   snapshot: BenchmarkSnapshot | null;
   snapshotError: string | null;
   snapshotLoading: boolean;
-  currentBenchmarkSummaries: SubjectSummary[];
+  currentBenchmarkSummaries: CandidateSummary[];
   currentBenchmarkEvaluations: EvaluationSummary[];
   currentBenchmarkRuns: RunSummary[];
-  selectedSubjectId: string | null;
+  candidateStateById: ReadonlyMap<string, CandidateRuntimeState>;
+  selectedCandidateId: string | null;
   view: "archive" | "lineage";
   onViewChange: (view: "archive" | "lineage") => void;
-  onSelectSubject: (subjectId: string) => void;
+  onSelectCandidate: (candidateId: string) => void;
 }) {
-  const subjectFilterOptions = useMemo(
+  const candidateFilterOptions = useMemo(
     () => currentBenchmarkSummaries
-      .map((summary): SubjectFilterOption => ({
+      .map((summary): CandidateFilterOption => ({
         id: summary.id,
-        label: formatSubjectDisplayName(summary),
+        label: formatCandidateDisplayName(summary),
       }))
       .sort((left, right) => left.label.localeCompare(right.label)),
     [currentBenchmarkSummaries],
   );
-  const allSubjectIds = useMemo(
-    () => subjectFilterOptions.map((option) => option.id),
-    [subjectFilterOptions],
+  const allCandidateIds = useMemo(
+    () => candidateFilterOptions.map((option) => option.id),
+    [candidateFilterOptions],
   );
-  const [selectedSubjectIds, setSelectedSubjectIds] = useState<Set<string> | null>(null);
-  const selectedSubjectIdSet = useMemo(() => {
-    if (selectedSubjectIds === null) {
-      return new Set(allSubjectIds);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string> | null>(null);
+  const selectedCandidateIdSet = useMemo(() => {
+    if (selectedCandidateIds === null) {
+      return new Set(allCandidateIds);
     }
 
-    const availableSubjectIds = new Set(allSubjectIds);
+    const availableCandidateIds = new Set(allCandidateIds);
     return new Set(
-      [...selectedSubjectIds].filter((subjectId) => availableSubjectIds.has(subjectId)),
+      [...selectedCandidateIds].filter((candidateId) => availableCandidateIds.has(candidateId)),
     );
-  }, [allSubjectIds, selectedSubjectIds]);
-  const filteredSubjectSummaries = useMemo(
-    () => selectedSubjectIdSet.size === subjectFilterOptions.length
+  }, [allCandidateIds, selectedCandidateIds]);
+  const filteredCandidateSummaries = useMemo(
+    () => selectedCandidateIdSet.size === candidateFilterOptions.length
       ? currentBenchmarkSummaries
-      : currentBenchmarkSummaries.filter((summary) => selectedSubjectIdSet.has(summary.id)),
-    [currentBenchmarkSummaries, selectedSubjectIdSet, subjectFilterOptions.length],
+      : currentBenchmarkSummaries.filter((summary) => selectedCandidateIdSet.has(summary.id)),
+    [currentBenchmarkSummaries, selectedCandidateIdSet, candidateFilterOptions.length],
   );
   const filteredEvaluations = useMemo(
-    () => selectedSubjectIdSet.size === subjectFilterOptions.length
+    () => selectedCandidateIdSet.size === candidateFilterOptions.length
       ? currentBenchmarkEvaluations
-      : currentBenchmarkEvaluations.filter((evaluation) => selectedSubjectIdSet.has(evaluation.subjectId)),
-    [currentBenchmarkEvaluations, selectedSubjectIdSet, subjectFilterOptions.length],
+      : currentBenchmarkEvaluations.filter((evaluation) => selectedCandidateIdSet.has(evaluation.candidateId)),
+    [currentBenchmarkEvaluations, selectedCandidateIdSet, candidateFilterOptions.length],
   );
   const scopedActiveId =
-    snapshot?.activeId && filteredSubjectSummaries.some((summary) => summary.id === snapshot.activeId)
+    snapshot?.activeId && filteredCandidateSummaries.some((summary) => summary.id === snapshot.activeId)
       ? snapshot.activeId
       : null;
   const scopedSnapshot = useMemo(
@@ -2278,11 +2477,11 @@ function SubjectsIndexSurface({
           ...snapshot,
           activeId: scopedActiveId,
           currentBenchmarkFingerprint:
-            filteredSubjectSummaries[0]?.benchmarkFingerprint ??
+            filteredCandidateSummaries[0]?.benchmarkFingerprint ??
             filteredEvaluations[0]?.benchmarkFingerprint ??
             currentBenchmarkRuns[0]?.benchmarkFingerprint ??
             null,
-          summaries: filteredSubjectSummaries,
+          summaries: filteredCandidateSummaries,
           evaluations: filteredEvaluations,
           runs: currentBenchmarkRuns,
         }
@@ -2290,7 +2489,7 @@ function SubjectsIndexSurface({
     [
       currentBenchmarkRuns,
       filteredEvaluations,
-      filteredSubjectSummaries,
+      filteredCandidateSummaries,
       scopedActiveId,
       snapshot,
     ],
@@ -2308,7 +2507,7 @@ function SubjectsIndexSurface({
         className="flex min-h-0 min-w-0 flex-1 flex-col gap-4"
       >
         <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-          <TabsList variant="line" aria-label="Subject index views" className="min-w-0">
+          <TabsList variant="line" aria-label="Candidate index views" className="min-w-0">
             <TabsTrigger value="archive">
               <FolderOpenIcon data-icon="inline-start" />
               Archive
@@ -2318,24 +2517,24 @@ function SubjectsIndexSurface({
               Lineage
             </TabsTrigger>
           </TabsList>
-          {subjectFilterOptions.length > 1 ? (
-            <SubjectComparisonFilter
-              options={subjectFilterOptions}
-              selectedSubjectIds={selectedSubjectIdSet}
-              testId="subjects-subject-filter"
-              onSelectAll={() => setSelectedSubjectIds(null)}
-              onClear={() => setSelectedSubjectIds(new Set())}
-              onToggleSubject={(subjectId, checked) => {
-                setSelectedSubjectIds((current) => {
+          {candidateFilterOptions.length > 1 ? (
+            <CandidateComparisonFilter
+              options={candidateFilterOptions}
+              selectedCandidateIds={selectedCandidateIdSet}
+              testId="candidates-candidate-filter"
+              onSelectAll={() => setSelectedCandidateIds(null)}
+              onClear={() => setSelectedCandidateIds(new Set())}
+              onToggleCandidate={(candidateId, checked) => {
+                setSelectedCandidateIds((current) => {
                   const next = new Set(
-                    current === null ? allSubjectIds : [...current],
+                    current === null ? allCandidateIds : [...current],
                   );
                   if (checked) {
-                    next.add(subjectId);
+                    next.add(candidateId);
                   } else {
-                    next.delete(subjectId);
+                    next.delete(candidateId);
                   }
-                  return next.size === allSubjectIds.length ? null : next;
+                  return next.size === allCandidateIds.length ? null : next;
                 });
               }}
             />
@@ -2347,14 +2546,15 @@ function SubjectsIndexSurface({
           className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
           <ScrollableObjectSurface>
-            <SubjectsArchiveSurface
-              summaries={filteredSubjectSummaries}
+            <CandidatesArchiveSurface
+              summaries={filteredCandidateSummaries}
               evaluations={filteredEvaluations}
+              candidateStateById={candidateStateById}
               activeId={scopedActiveId}
               snapshotError={snapshotError}
               loading={snapshotLoading}
-              selectedSubjectId={selectedSubjectId}
-              onSelectSubject={onSelectSubject}
+              selectedCandidateId={selectedCandidateId}
+              onSelectCandidate={onSelectCandidate}
             />
           </ScrollableObjectSurface>
         </TabsContent>
@@ -2364,12 +2564,12 @@ function SubjectsIndexSurface({
           className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
           <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col p-1">
-            <SubjectsLineageSurface
+            <CandidatesLineageSurface
               snapshot={scopedSnapshot}
               snapshotError={snapshotError}
               loading={snapshotLoading}
-              selectedSubjectId={selectedSubjectId}
-              onSelectSubject={onSelectSubject}
+              selectedCandidateId={selectedCandidateId}
+              onSelectCandidate={onSelectCandidate}
             />
           </div>
         </TabsContent>
@@ -2378,22 +2578,24 @@ function SubjectsIndexSurface({
   );
 }
 
-function SubjectsArchiveSurface({
+function CandidatesArchiveSurface({
   summaries,
   evaluations,
+  candidateStateById,
   activeId,
   snapshotError,
   loading,
-  selectedSubjectId,
-  onSelectSubject,
+  selectedCandidateId,
+  onSelectCandidate,
 }: {
-  summaries: SubjectSummary[];
+  summaries: CandidateSummary[];
   evaluations: EvaluationSummary[];
+  candidateStateById: ReadonlyMap<string, CandidateRuntimeState>;
   activeId: string | null;
   snapshotError: string | null;
   loading: boolean;
-  selectedSubjectId: string | null;
-  onSelectSubject: (subjectId: string) => void;
+  selectedCandidateId: string | null;
+  onSelectCandidate: (candidateId: string) => void;
 }) {
   if (snapshotError) {
     return (
@@ -2404,34 +2606,35 @@ function SubjectsArchiveSurface({
   }
 
   if (loading) {
-    return <SubjectArchiveSkeleton />;
+    return <CandidateArchiveSkeleton />;
   }
 
   return (
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3">
-      <SubjectList
+      <CandidateList
         summaries={summaries}
         evaluations={evaluations}
+        candidateStateById={candidateStateById}
         activeId={activeId}
-        selectedId={selectedSubjectId}
-        onSelect={onSelectSubject}
+        selectedId={selectedCandidateId}
+        onSelect={onSelectCandidate}
       />
     </div>
   );
 }
 
-function SubjectsLineageSurface({
+function CandidatesLineageSurface({
   snapshot,
   snapshotError,
   loading,
-  selectedSubjectId,
-  onSelectSubject,
+  selectedCandidateId,
+  onSelectCandidate,
 }: {
   snapshot: BenchmarkSnapshot | null;
   snapshotError: string | null;
   loading: boolean;
-  selectedSubjectId: string | null;
-  onSelectSubject: (subjectId: string) => void;
+  selectedCandidateId: string | null;
+  onSelectCandidate: (candidateId: string) => void;
 }) {
   if (snapshotError) {
     return (
@@ -2449,8 +2652,8 @@ function SubjectsLineageSurface({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <LineageGraph
         snapshot={snapshot}
-        selectedSubjectId={selectedSubjectId}
-        onSelectSubject={onSelectSubject}
+        selectedCandidateId={selectedCandidateId}
+        onSelectCandidate={onSelectCandidate}
       />
     </div>
   );
@@ -2477,27 +2680,17 @@ function ScrollableObjectSurface({
   );
 }
 
-function SubjectYamlSurface({
-  specError,
+function CandidateYamlSurface({
   snapshotError,
   snapshotLoading,
-  selectedSubjectSummary,
+  selectedCandidateSummary,
   recordState,
 }: {
-  specError: string | null;
   snapshotError: string | null;
   snapshotLoading: boolean;
-  selectedSubjectSummary: SubjectSummary | null;
-  recordState: SubjectRecordState;
+  selectedCandidateSummary: CandidateSummary | null;
+  recordState: CandidateRecordState;
 }) {
-  if (specError) {
-    return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{specError}</CardContent>
-      </Card>
-    );
-  }
-
   if (snapshotError) {
     return (
       <Card>
@@ -2507,15 +2700,15 @@ function SubjectYamlSurface({
   }
 
   if (snapshotLoading) {
-    return <SubjectManifestSkeleton />;
+    return <CandidateManifestSkeleton />;
   }
 
-  if (!selectedSubjectSummary) {
+  if (!selectedCandidateSummary) {
     return (
       <EmptyState
         icon={FileCode2Icon}
-        title="No subject selected"
-        message="Select a subject from Subjects or Lineage to inspect its manifest."
+        title="No candidate selected"
+        message="Select a candidate from Candidates or Lineage to inspect its manifest."
         variant="hero"
         size="sm"
       />
@@ -2524,52 +2717,42 @@ function SubjectYamlSurface({
 
   return (
     <SourceYamlSection
-      title="Subject Manifest"
-      description="The subject manifest defines how to run the subject."
-      source={sourceYamlFileFromSubjectRecord(recordState.record)}
+      title="Candidate Manifest"
+      description="The candidate manifest defines files, runs, and improvement."
+      source={sourceYamlFileFromCandidateRecord(recordState.record)}
       loading={recordState.loading}
       error={recordState.error}
-      testId="subject-yaml-source"
+      testId="candidate-yaml-source"
     />
   );
 }
 
-function SubjectFilesSurface({
-  specError,
+function CandidateFilesSurface({
   snapshotError,
   snapshotLoading,
-  selectedSubjectSummary,
-  subjectFilesState,
-  selectedSubjectFilePath,
-  subjectPreviewMode,
-  subjectDirectoryPath,
-  subjectPreviewState,
-  onSelectSubjectFile,
-  onSubjectDirectoryChange,
-  onSubjectPreviewModeChange,
+  selectedCandidateSummary,
+  candidateFilesState,
+  selectedCandidateFilePath,
+  candidatePreviewMode,
+  candidateDirectoryPath,
+  candidatePreviewState,
+  onSelectCandidateFile,
+  onCandidateDirectoryChange,
+  onCandidatePreviewModeChange,
 }: {
-  specError: string | null;
   snapshotError: string | null;
   snapshotLoading: boolean;
-  selectedSubjectSummary: SubjectSummary | null;
-  subjectFilesState: SubjectFilesState;
-  selectedSubjectFilePath: string | null;
-  subjectPreviewMode: SubjectPreviewMode;
-  subjectDirectoryPath: string | null;
-  subjectPreviewState: SubjectPreviewState;
-  onSelectSubjectFile: (filePath: string) => void;
-  onSubjectDirectoryChange: (directoryPath: string | null) => void;
-  onSubjectPreviewModeChange: (mode: SubjectPreviewMode) => void;
+  selectedCandidateSummary: CandidateSummary | null;
+  candidateFilesState: CandidateFilesState;
+  selectedCandidateFilePath: string | null;
+  candidatePreviewMode: CandidatePreviewMode;
+  candidateDirectoryPath: string | null;
+  candidatePreviewState: CandidatePreviewState;
+  onSelectCandidateFile: (filePath: string) => void;
+  onCandidateDirectoryChange: (directoryPath: string | null) => void;
+  onCandidatePreviewModeChange: (mode: CandidatePreviewMode) => void;
 }) {
   const prefersStackedFilesLayout = useMediaQuery("(max-width: 900px)");
-
-  if (specError) {
-    return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{specError}</CardContent>
-      </Card>
-    );
-  }
 
   if (snapshotError) {
     return (
@@ -2580,55 +2763,55 @@ function SubjectFilesSurface({
   }
 
   if (snapshotLoading) {
-    return <SubjectFilesSurfaceSkeleton />;
+    return <CandidateFilesSurfaceSkeleton />;
   }
 
-  if (!selectedSubjectSummary) {
+  if (!selectedCandidateSummary) {
     return (
       <EmptyState
         icon={FolderOpenIcon}
-        title="No subject selected"
-        message="Select a subject from Subjects or Lineage to inspect its files."
+        title="No candidate selected"
+        message="Select a candidate from Candidates or Lineage to inspect its files."
         variant="hero"
         size="sm"
       />
     );
   }
 
-  const emptyMessage = "No subject files are available for this subject.";
+  const emptyMessage = "No candidate files are available for this candidate.";
 
   return (
     <SurfaceSection
-      title="Subject Files"
+      title="Candidate Files"
       icon={FolderOpenIcon}
-      description="Files that make up this subject version."
+      description="Files that make up this candidate version."
       className="flex min-h-0 flex-1 flex-col"
     >
       <div className="flex flex-wrap gap-2">
-        <StatusBadge status={selectedSubjectSummary.status} active={false} />
-        <Badge variant="outline">digest {shortFingerprint(selectedSubjectSummary.subjectFingerprint)}</Badge>
+        <StatusBadge status={selectedCandidateSummary.status} active={false} />
+        <Badge variant="outline">digest {shortFingerprint(selectedCandidateSummary.candidateFingerprint)}</Badge>
       </div>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <FilesBrowser
-          changes={orderSubjectFiles(subjectFilesState.files)}
-          selectedFilePath={selectedSubjectFilePath}
+          changes={orderCandidateFiles(candidateFilesState.files)}
+          selectedFilePath={selectedCandidateFilePath}
           browseMode="folders"
-          currentDirectory={subjectDirectoryPath}
-          previewMode={subjectPreviewMode}
+          currentDirectory={candidateDirectoryPath}
+          previewMode={candidatePreviewMode}
           availablePreviewModes={supportedPreviewModes()}
-          preview={subjectPreviewState.preview}
-          changesError={subjectFilesState.error}
-          previewError={subjectPreviewState.error}
-          isChangesLoading={subjectFilesState.loading}
-          isPreviewLoading={subjectPreviewState.loading}
+          preview={candidatePreviewState.preview}
+          changesError={candidateFilesState.error}
+          previewError={candidatePreviewState.error}
+          isChangesLoading={candidateFilesState.loading}
+          isPreviewLoading={candidatePreviewState.loading}
           layout={prefersStackedFilesLayout ? "stacked" : "split"}
           emptyMessage={emptyMessage}
-          emptySelectionMessage="Select a mounted subject file to preview."
-          listErrorMessage="Couldn't load the mounted subject file list."
-          previewErrorMessage="Couldn't load the mounted subject file preview."
-          onSelectFile={onSelectSubjectFile}
-          onDirectoryChange={onSubjectDirectoryChange}
-          onPreviewModeChange={(mode) => onSubjectPreviewModeChange(mode as SubjectPreviewMode)}
+          emptySelectionMessage="Select a mounted candidate file to preview."
+          listErrorMessage="Couldn't load the mounted candidate file list."
+          previewErrorMessage="Couldn't load the mounted candidate file preview."
+          onSelectFile={onSelectCandidateFile}
+          onDirectoryChange={onCandidateDirectoryChange}
+          onPreviewModeChange={(mode) => onCandidatePreviewModeChange(mode as CandidatePreviewMode)}
         />
       </div>
     </SurfaceSection>
@@ -2715,7 +2898,7 @@ function useExecutionTrace(
 
 function useCaseReview(
   apiPath: (pathname: string) => string,
-  subjectId: string | null,
+  candidateId: string | null,
   runId: string | null,
   caseId: string | null,
 ): CaseReviewDetailState {
@@ -2727,7 +2910,7 @@ function useCaseReview(
   });
 
   useEffect(() => {
-    if (!subjectId || !runId || !caseId) {
+    if (!candidateId || !runId || !caseId) {
       setState({
         loading: false,
         error: null,
@@ -2739,10 +2922,10 @@ function useCaseReview(
 
     let cancelled = false;
     const controller = new AbortController();
-    const nextSubjectId = subjectId;
+    const nextCandidateId = candidateId;
     const nextRunId = runId;
     const nextCaseId = caseId;
-    const nextRequestKey = `${nextSubjectId}\0${nextRunId}\0${nextCaseId}`;
+    const nextRequestKey = `${nextCandidateId}\0${nextRunId}\0${nextCaseId}`;
     setState((current) => ({
       loading: true,
       error: null,
@@ -2754,8 +2937,8 @@ function useCaseReview(
 
     async function loadReview() {
       try {
-        const review = await requestJson<SubjectCaseReview>(
-          apiPath(`/api/case-review?id=${encodeURIComponent(nextSubjectId)}&run=${encodeURIComponent(nextRunId)}&case=${encodeURIComponent(nextCaseId)}`),
+        const review = await requestJson<CandidateCaseReview>(
+          apiPath(`/api/case-review?id=${encodeURIComponent(nextCandidateId)}&run=${encodeURIComponent(nextRunId)}&case=${encodeURIComponent(nextCaseId)}`),
           { signal: controller.signal },
         );
         if (cancelled) {
@@ -2787,23 +2970,25 @@ function useCaseReview(
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, caseId, runId, subjectId]);
+  }, [apiPath, caseId, runId, candidateId]);
 
   return state;
 }
 
-function SubjectOverviewSurface({
+function CandidateOverviewSurface({
   snapshot,
   snapshotError,
   snapshotLoading,
-  selectedSubjectSummary,
+  selectedCandidateSummary,
+  selectedCandidateRuntimeState,
   evaluations,
   onOpenEvaluation,
 }: {
   snapshot: BenchmarkSnapshot | null;
   snapshotError: string | null;
   snapshotLoading: boolean;
-  selectedSubjectSummary: SubjectSummary | null;
+  selectedCandidateSummary: CandidateSummary | null;
+  selectedCandidateRuntimeState: CandidateRuntimeState | null;
   evaluations: EvaluationSummary[];
   onOpenEvaluation: (evaluationId: string) => void;
 }) {
@@ -2816,58 +3001,66 @@ function SubjectOverviewSurface({
   }
 
   if (snapshotLoading) {
-    return <SubjectOverviewSkeleton />;
+    return <CandidateOverviewSkeleton />;
   }
 
-  if (!snapshot || snapshot.summaries.length === 0 || !selectedSubjectSummary) {
+  if (!snapshot || snapshot.summaries.length === 0 || !selectedCandidateSummary) {
     return (
       <EmptyState
         icon={InfoIcon}
-        title="No subject selected"
-        message="Select or create a subject to inspect its overview."
+        title="No candidate selected"
+        message="Select or create a candidate to inspect its overview."
         variant="hero"
         size="sm"
       />
     );
   }
 
-  const subjectEvaluations = orderEvaluationSummaries(
-    evaluations.filter((evaluation) => evaluation.subjectId === selectedSubjectSummary.id),
+  const candidateEvaluations = orderEvaluationSummaries(
+    evaluations.filter((evaluation) => evaluation.candidateId === selectedCandidateSummary.id),
   );
-  const latestEvaluation = subjectEvaluations[0] ?? null;
-  const metricKeys = resolveEvaluationMetricKeys(selectedSubjectSummary.metrics, "score", latestEvaluation?.metrics);
-  const primaryMetricKey = metricKeys[0] ?? null;
-  const primaryMetricValue = primaryMetricKey
-    ? selectedSubjectSummary.metrics?.[primaryMetricKey]
-    : undefined;
-  const primaryMetricStats = primaryMetricKey ? latestEvaluation?.metrics?.[primaryMetricKey] : undefined;
+  const rollup = buildCandidateEvaluationRollup(
+    selectedCandidateSummary.id,
+    candidateEvaluations,
+  );
+  const rollupDisplay = resolveCandidateEvaluationRollupDisplay(rollup);
 
   return (
     <div className="grid gap-6">
       <section className="grid min-w-0 gap-3">
-        <div className="grid gap-3 md:grid-cols-3">
-          <FactItem title="Created" value={formatTimestamp(selectedSubjectSummary.createdAt)} />
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+          <FactItem title="Created" value={formatTimestamp(selectedCandidateSummary.createdAt)} />
           <FactItem
-            title={primaryMetricKey ? formatLabelText(primaryMetricKey) : "Score"}
-            value={formatSubjectMetricStats(primaryMetricStats, primaryMetricValue)}
+            title="Version"
+            value={formatCandidateVersionLabel(selectedCandidateSummary) ?? "—"}
           />
           <FactItem
-            title="Samples"
-            value={latestEvaluation ? `${latestEvaluation.completedSampleCount}/${latestEvaluation.sampleCount}` : "—"}
+            title="Run state"
+            value={selectedCandidateRuntimeState?.label ?? "No runs"}
+          />
+          <FactItem title="Best score" value={rollup.bestScore === null ? "—" : formatMetricValue(rollup.bestScore)} />
+          <FactItem
+            title="Best configuration"
+            value={rollup.bestConfigurationLabel ?? "—"}
+          />
+          <FactItem title="Mean score" value={rollup.meanScore === null ? "—" : formatMetricValue(rollup.meanScore)} />
+          <FactItem
+            title="Evaluations"
+            value={rollupDisplay.countText}
           />
         </div>
 
       </section>
 
       <SurfaceSection title="Evaluations" icon={ChartColumnIcon}>
-        {subjectEvaluations.length > 0 ? (
+        {candidateEvaluations.length > 0 ? (
           <EvaluationSummaryTable
-            evaluations={subjectEvaluations}
-            showSubject={false}
+            evaluations={candidateEvaluations}
+            showCandidate={false}
             onSelectEvaluation={onOpenEvaluation}
           />
         ) : (
-          <p className="text-sm text-muted-foreground">No evaluations are recorded for this subject yet.</p>
+          <p className="text-sm text-muted-foreground">No evaluations are recorded for this candidate yet.</p>
         )}
       </SurfaceSection>
     </div>
@@ -2876,11 +3069,11 @@ function SubjectOverviewSurface({
 
 function EvaluationSummaryTable({
   evaluations,
-  showSubject,
+  showCandidate,
   onSelectEvaluation,
 }: {
   evaluations: EvaluationSummary[];
-  showSubject: boolean;
+  showCandidate: boolean;
   onSelectEvaluation: (evaluationId: string) => void;
 }) {
   return (
@@ -2890,44 +3083,45 @@ function EvaluationSummaryTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>{showSubject ? "Subject" : "Evaluation"}</TableHead>
+                <TableHead>{showCandidate ? "Candidate" : "Configuration"}</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Score</TableHead>
                 <TableHead className="text-right">Samples</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {evaluations.map((evaluation) => (
-                <TableRow
-                  key={evaluation.id}
-                  aria-label={`Open ${formatEvaluationDisplayName(evaluation)}`}
-                  role="button"
-                  tabIndex={0}
-                  className="cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  onClick={() => onSelectEvaluation(evaluation.id)}
-                  onKeyDown={(event) => {
-                    if (isKeyboardActivation(event)) {
-                      event.preventDefault();
-                      onSelectEvaluation(evaluation.id);
-                    }
-                  }}
-                >
-                  <TableCell className="font-medium">
-                    {showSubject
-                      ? formatSubjectDisplayName(evaluation)
-                      : formatEvaluationDisplayName(evaluation)}
-                  </TableCell>
-                  <TableCell>{statusLabel(evaluation.status)}</TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {typeof evaluation.metrics?.score?.mean === "number"
-                      ? formatMetricValue(evaluation.metrics.score.mean)
-                      : "—"}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {evaluation.completedSampleCount}/{evaluation.sampleCount}
-                  </TableCell>
-                </TableRow>
-              ))}
+              {evaluations.map((evaluation) => {
+                const score = readEvaluationScore(evaluation);
+                return (
+                  <TableRow
+                    key={evaluation.id}
+                    aria-label={`Open ${formatEvaluationDisplayName(evaluation)}`}
+                    role="button"
+                    tabIndex={0}
+                    className="cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    onClick={() => onSelectEvaluation(evaluation.id)}
+                    onKeyDown={(event) => {
+                      if (isKeyboardActivation(event)) {
+                        event.preventDefault();
+                        onSelectEvaluation(evaluation.id);
+                      }
+                    }}
+                  >
+                    <TableCell className="font-medium">
+                      {showCandidate
+                        ? formatCandidateDisplayName(evaluation)
+                        : formatEvaluationDisplayName(evaluation)}
+                    </TableCell>
+                    <TableCell>{statusLabel(evaluation.status)}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {score !== null ? formatMetricValue(score) : "—"}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {evaluation.completedSampleCount}/{evaluation.sampleCount}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
@@ -2940,7 +3134,7 @@ function CaseAttemptTable({
   executions,
   apiPath,
 }: {
-  executions: SubjectCaseExecution[];
+  executions: CandidateCaseExecution[];
   apiPath: (pathname: string) => string;
 }) {
   const rows = executions.flatMap((execution, executionIndex) =>
@@ -3165,11 +3359,12 @@ function EvaluationDetailDialog({
     ? state.records.find((record) => record.id === evaluationId) ?? null
     : null;
   const summary = scorecard ?? evaluationSummary;
+  const score = summary ? readEvaluationScore(summary) : null;
   const title = "Evaluation";
   const description = summary
     ? [
         statusLabel(summary.status),
-        typeof summary.metrics?.score?.mean === "number" ? `score ${formatMetricValue(summary.metrics.score.mean)}` : null,
+        score !== null ? `score ${formatMetricValue(score)}` : null,
         `${summary.completedSampleCount}/${summary.sampleCount} samples`,
       ].filter((part): part is string => Boolean(part)).join(" · ")
     : "Evaluation details";
@@ -3223,6 +3418,7 @@ function EvaluationDetailSurface({
     ? state.records.find((record) => record.id === evaluationId) ?? null
     : null;
   const summary = scorecard ?? evaluationSummary;
+  const score = summary ? readEvaluationScore(summary) : null;
   const cases = scorecard ? resolveScorecardCaseRows(scorecard) : [];
 
   if (state.loading && !scorecard) {
@@ -3264,7 +3460,7 @@ function EvaluationDetailSurface({
           <FactItem title="Samples" value={`${summary.completedSampleCount}/${summary.sampleCount}`} />
           <FactItem
             title="Score"
-            value={typeof summary.metrics?.score?.mean === "number" ? formatMetricValue(summary.metrics.score.mean) : "not recorded"}
+            value={score !== null ? formatMetricValue(score) : "not recorded"}
           />
         </FactGrid>
       </section>
@@ -3518,11 +3714,15 @@ function EvaluationsSurface({
   snapshotError,
   snapshotLoading,
   evaluations,
+  rows,
+  candidateLabelById,
   onSelectEvaluation,
 }: {
   snapshotError: string | null;
   snapshotLoading: boolean;
   evaluations: EvaluationSummary[];
+  rows: EvaluationRuntimeRow[];
+  candidateLabelById: ReadonlyMap<string, string>;
   onSelectEvaluation: (evaluationId: string) => void;
 }) {
   if (snapshotError) {
@@ -3540,7 +3740,9 @@ function EvaluationsSurface({
   return (
     <EvaluationsDetail
       evaluations={evaluations}
-      hasEvaluations={evaluations.length > 0}
+      rows={rows}
+      candidateLabelById={candidateLabelById}
+      hasEvaluations={rows.length > 0}
       onSelectEvaluation={onSelectEvaluation}
     />
   );
@@ -3563,7 +3765,7 @@ function resolveScorecardCaseRows(scorecard: EvaluationScorecard): EvaluationCas
 }
 
 function formatEvaluationDisplayName(evaluation: EvaluationSummary): string {
-  return `Evaluation ${formatTimestamp(evaluation.updatedAt)}`;
+  return formatEvaluationConfigurationLabel(evaluation);
 }
 
 function resolveTraceSessionsForJob(
@@ -3593,46 +3795,6 @@ function asUiRecord(value: unknown): Record<string, unknown> | null {
 function firstMetricStatsValue(metrics: Record<string, { mean: number }>): number | null {
   const [value] = Object.values(metrics);
   return typeof value?.mean === "number" ? value.mean : null;
-}
-
-function resolveEvaluationMetricKeys(
-  subjectMetrics: Record<string, number> | undefined,
-  preferredMetricKey: string | null,
-  aggregateMetrics?: EvaluationRecord["metrics"],
-): string[] {
-  const available = new Set<string>();
-  for (const key of Object.keys(subjectMetrics ?? {})) {
-    available.add(key);
-  }
-  for (const key of Object.keys(aggregateMetrics ?? {})) {
-    available.add(key);
-  }
-
-  const ordered: string[] = [];
-  const add = (key: string | null | undefined) => {
-    if (key && available.has(key) && !ordered.includes(key)) {
-      ordered.push(key);
-    }
-  };
-
-  add(preferredMetricKey);
-  add("score");
-  for (const key of Array.from(available).sort()) {
-    add(key);
-  }
-  return ordered;
-}
-
-function formatSubjectMetricStats(
-  stats: NonNullable<EvaluationRecord["metrics"]>[string] | undefined,
-  directValue: number | undefined,
-): string {
-  if (stats) {
-    return stats.count > 1
-      ? `${formatMetricValue(stats.mean)} ± ${formatMetricValue(stats.stddev)}`
-      : formatMetricValue(stats.mean);
-  }
-  return typeof directValue === "number" ? formatMetricValue(directValue) : "—";
 }
 
 function StructuredValueCard({
@@ -3701,7 +3863,7 @@ function formatOptionalDuration(durationMs: number | null): string {
   return durationMs === null ? "—" : formatDurationMs(durationMs);
 }
 
-function resolveCaseReviewStatus(review: SubjectCaseReview): string | null {
+function resolveCaseReviewStatus(review: CandidateCaseReview): string | null {
   if (review.status) {
     return review.status;
   }
@@ -3711,7 +3873,7 @@ function resolveCaseReviewStatus(review: SubjectCaseReview): string | null {
 }
 
 function resolveCaseReviewDurationMs(
-  review: SubjectCaseReview,
+  review: CandidateCaseReview,
   nowMs: number,
 ): number | null {
   const activeDurationMs = resolveExecutionRefsDurationMs(review.executions, nowMs);
@@ -3722,7 +3884,7 @@ function resolveCaseReviewDurationMs(
 }
 
 function resolveExecutionRefsDurationMs(
-  executions: SubjectCaseExecution[],
+  executions: CandidateCaseExecution[],
   nowMs: number,
 ): number | null {
   return resolveTimedExecutionRecordsDurationMs(executions, nowMs);
@@ -3830,7 +3992,7 @@ function formatExecutionKindLabel(purpose: string): string {
     return "Attempt";
   }
   if (purpose === "improve") {
-    return "Optimizer";
+    return "Improve";
   }
   return formatLabelText(purpose);
 }
@@ -3844,7 +4006,7 @@ function ExecutionFilesSurface({
   review,
 }: {
   apiPath: (pathname: string) => string;
-  review: SubjectCaseReview;
+  review: CandidateCaseReview;
 }) {
   const outputExecution = review.executions[0] ?? null;
   const outputJobId = outputExecution?.jobIds[0] ?? null;
@@ -3856,14 +4018,14 @@ function ExecutionFilesSurface({
   });
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [directoryPath, setDirectoryPath] = useState<string | null>(null);
-  const [previewMode, setPreviewMode] = useState<SubjectPreviewMode>("rendered");
+  const [previewMode, setPreviewMode] = useState<CandidatePreviewMode>("rendered");
   const [previewState, setPreviewState] = useState<ExecutionPreviewState>({
     loading: false,
     error: null,
     preview: null,
   });
   const orderedFiles = useMemo(
-    () => orderSubjectFiles(executionFilesState.files),
+    () => orderCandidateFiles(executionFilesState.files),
     [executionFilesState.files],
   );
 
@@ -3876,7 +4038,7 @@ function ExecutionFilesSurface({
       error: null,
       preview: null,
     });
-  }, [review.subjectId, review.caseId, outputExecution?.runId, outputJobId]);
+  }, [review.candidateId, review.caseId, outputExecution?.runId, outputJobId]);
 
   useEffect(() => {
     if (!outputExecution || !outputJobId) {
@@ -3900,7 +4062,7 @@ function ExecutionFilesSurface({
       id: outputJobId,
     });
 
-    void requestJson<SubjectWorkspaceFileSummary[]>(
+    void requestJson<CandidateWorkspaceFileSummary[]>(
       apiPath(`/api/execution/files?${params.toString()}`),
       { signal: controller.signal },
     ).then((files) => {
@@ -3966,7 +4128,7 @@ function ExecutionFilesSurface({
       view: previewMode,
     });
 
-    void requestJson<SubjectWorkspaceFilePreview>(
+    void requestJson<CandidateWorkspaceFilePreview>(
       apiPath(`/api/execution/preview?${params.toString()}`),
       { signal: controller.signal },
     ).then((preview) => {
@@ -4021,7 +4183,7 @@ function ExecutionFilesSurface({
           setDirectoryPath(directoryPathForFile(filePath));
         }}
         onDirectoryChange={setDirectoryPath}
-        onPreviewModeChange={(mode) => setPreviewMode(mode as SubjectPreviewMode)}
+        onPreviewModeChange={(mode) => setPreviewMode(mode as CandidatePreviewMode)}
       />
     </div>
   );
@@ -4061,15 +4223,15 @@ function FactItem({
   );
 }
 
-function resolveSelectedSubjectId(args: {
+function resolveSelectedCandidateId(args: {
   route: WorkbenchRoute;
   activeId: string | null;
-  summaries: SubjectSummary[];
+  summaries: CandidateSummary[];
 }): string | null {
-  if (args.route.kind === "subject") {
-    const subjectId = args.route.subjectId;
-    if (subjectId && args.summaries.some((summary) => summary.id === subjectId)) {
-      return subjectId;
+  if (args.route.kind === "candidate") {
+    const candidateId = args.route.candidateId;
+    if (candidateId && args.summaries.some((summary) => summary.id === candidateId)) {
+      return candidateId;
     }
   }
   if (args.activeId && args.summaries.some((summary) => summary.id === args.activeId)) {
@@ -4078,19 +4240,18 @@ function resolveSelectedSubjectId(args: {
   return args.summaries[0]?.id ?? null;
 }
 
-function resolveSelectedSubjectFilePath(args: {
+function resolveSelectedCandidateFilePath(args: {
   routeFilePath: string | null;
-  files: SubjectWorkspaceFileSummary[];
-  specDocument: AuthoredWorkbenchSourceDocument | null;
+  files: CandidateWorkspaceFileSummary[];
 }): string | null {
   if (args.routeFilePath && args.files.some((entry) => entry.path === args.routeFilePath)) {
     return args.routeFilePath;
   }
-  return pickDefaultSubjectFile(args.files, args.specDocument);
+  return pickDefaultCandidateFile(args.files);
 }
 
 function resolvePreferredBenchmarkFilePath(
-  files: SubjectWorkspaceFileSummary[],
+  files: CandidateWorkspaceFileSummary[],
 ): string | null {
   return files[0]?.path ?? null;
 }
@@ -4103,7 +4264,7 @@ function sourceYamlFileFromDocument(
   return source ? { path: source.path, content: source.content } : null;
 }
 
-function sourceYamlFileFromSubjectRecord(record: SubjectRecord | null): SourceYamlFile | null {
+function sourceYamlFileFromCandidateRecord(record: CandidateRecord | null): SourceYamlFile | null {
   const source = asUiRecord(record?.meta)?.source;
   const files = asUiRecord(source)?.files;
   if (!Array.isArray(files)) {
@@ -4114,7 +4275,7 @@ function sourceYamlFileFromSubjectRecord(record: SubjectRecord | null): SourceYa
     const file = asUiRecord(value);
     const filePath = typeof file?.path === "string" ? file.path : "";
     const content = typeof file?.content === "string" ? file.content : null;
-    if (/^subjects\/[^/]+\/subject\.ya?ml$/iu.test(filePath) && content !== null) {
+    if (/^candidates\/[^/]+\/candidate\.ya?ml$/iu.test(filePath) && content !== null) {
       return { path: filePath, content };
     }
   }
@@ -4130,10 +4291,13 @@ function directoryPathForFile(filePath: string | null | undefined): string | nul
   return segments.length ? segments.join("/") : null;
 }
 
-function orderSubjectSummaries(summaries: SubjectSummary[]): SubjectSummary[] {
+function orderCandidateSummaries(summaries: CandidateSummary[]): CandidateSummary[] {
   return summaries
     .slice()
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    .sort((left, right) =>
+      left.version - right.version ||
+      left.createdAt.localeCompare(right.createdAt),
+    );
 }
 
 function orderEvaluationSummaries(evaluations: EvaluationSummary[]): EvaluationSummary[] {
@@ -4162,7 +4326,7 @@ function orderRunSummaries(runs: RunSummary[]): RunSummary[] {
 
 function buildBenchmarkFingerprintOptions(args: {
   currentBenchmarkFingerprint: string | null;
-  summaries: SubjectSummary[];
+  summaries: CandidateSummary[];
   evaluations: EvaluationSummary[];
   runs: RunSummary[];
 }): BenchmarkFingerprintOption[] {
@@ -4179,7 +4343,7 @@ function buildBenchmarkFingerprintOptions(args: {
     }
     const option: BenchmarkFingerprintOption = {
       fingerprint: normalized,
-      subjectCount: 0,
+      candidateCount: 0,
       evaluationCount: 0,
       runCount: 0,
       current: normalized === args.currentBenchmarkFingerprint,
@@ -4192,7 +4356,7 @@ function buildBenchmarkFingerprintOptions(args: {
   for (const summary of args.summaries) {
     const option = ensure(summary.benchmarkFingerprint);
     if (option) {
-      option.subjectCount += 1;
+      option.candidateCount += 1;
     }
   }
   for (const evaluation of args.evaluations) {
@@ -4212,7 +4376,7 @@ function buildBenchmarkFingerprintOptions(args: {
     if (left.current !== right.current) {
       return left.current ? -1 : 1;
     }
-    return right.subjectCount - left.subjectCount ||
+    return right.candidateCount - left.candidateCount ||
       right.evaluationCount - left.evaluationCount ||
       right.runCount - left.runCount ||
       left.fingerprint.localeCompare(right.fingerprint);

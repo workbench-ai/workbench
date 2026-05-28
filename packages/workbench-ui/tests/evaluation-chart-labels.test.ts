@@ -6,7 +6,7 @@ import {
 } from "../src/lib/evaluation-chart-labels";
 
 describe("evaluation chart labels", () => {
-  test("wraps long labels without truncating subject names", () => {
+  test("wraps long labels without truncating candidate names", () => {
     const label = "Claude Code w/ Opus 4.6 (Skill v3)";
     const lines = wrapEvaluationCategoryAxisLabel(label, 16);
 
@@ -21,7 +21,6 @@ describe("evaluation chart labels", () => {
       "Claude Code w/ Opus 4.6 (Skill v3)",
     ]);
 
-    expect(layout.hasLongLabels).toBe(true);
     expect(layout.yAxisWidth).toBeGreaterThan(128);
     expect(layout.yAxisMaxCharsPerLine).toBeGreaterThanOrEqual(
       "Claude Code w/ Opus 4.6 (Skill v3)".length,

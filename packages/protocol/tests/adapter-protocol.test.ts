@@ -14,8 +14,8 @@ import {
   defineAdapter,
   defineEngineResolver,
   defineEngineRunner,
-  defineSubject,
-  defineOptimizer,
+  defineCandidate,
+  defineImprover,
   normalizeWorkbenchAdapterOperationRequest,
   normalizeWorkbenchAdapterOperationResult,
   normalizeWorkbenchEngineResolveResult,
@@ -35,8 +35,8 @@ describe("Workbench adapter protocol", () => {
       "id: codex",
       "protocol: workbench.adapter.v3",
       "operations:",
-      "  subject.run: {}",
-      "  optimizer.improve: {}",
+      "  candidate.run: {}",
+      "  candidate.improve: {}",
       "auth:",
       "  methods:",
       "    oauth:",
@@ -46,9 +46,9 @@ describe("Workbench adapter protocol", () => {
     ].join("\n"));
     const invocation = withDefaultWorkbenchAdapterAuth({ use: "codex" }, [manifest]);
 
-    expect(manifest.operations["subject.run"]?.command).toBe("workbench-adapter-codex");
-    expect(manifest.operations["subject.run"]?.executor).toBe("sandbox");
-    expect(workbenchAdapterManifestSupportsOperation(manifest, "optimizer.improve")).toBe(true);
+    expect(manifest.operations["candidate.run"]?.command).toBe("workbench-adapter-codex");
+    expect(manifest.operations["candidate.run"]?.executor).toBe("sandbox");
+    expect(workbenchAdapterManifestSupportsOperation(manifest, "candidate.improve")).toBe(true);
     expect(invocation.auth).toBe("default");
     expect(collectWorkbenchAdapterAuthRequirements([invocation], [manifest])).toEqual([
       { adapterId: "codex", profile: "default" },
@@ -88,15 +88,15 @@ describe("Workbench adapter protocol", () => {
         use: "command",
       },
       context: {
-        subject: {
-          prepare: { command: "cp -R input/subject/. ." },
+        candidate: {
+          prepare: { command: "cp -R input/candidate/. ." },
         },
       },
       paths: {
         workspace: "/workspace",
         output: "/workspace/output",
         result: "/workspace/output/workbench-result.json",
-        subject: "/workspace/input/subject",
+        candidate: "/workspace/input/candidate",
         traces: "/workspace/input/traces",
         enginePrivate: "/workspace/private/engine",
       },
@@ -108,15 +108,15 @@ describe("Workbench adapter protocol", () => {
         with: {},
       },
       context: {
-        subject: {
-          prepare: { command: "cp -R input/subject/. ." },
+        candidate: {
+          prepare: { command: "cp -R input/candidate/. ." },
         },
       },
       paths: {
         workspace: "/workspace",
         output: "/workspace/output",
         result: "/workspace/output/workbench-result.json",
-        subject: "/workspace/input/subject",
+        candidate: "/workspace/input/candidate",
         traces: "/workspace/input/traces",
         enginePrivate: "/workspace/private/engine",
       },
@@ -135,7 +135,7 @@ describe("Workbench adapter protocol", () => {
         workspace: "/workspace",
         output: "/workspace/output",
         result: "/workspace/output/workbench-result.json",
-        subject: "/workspace/input/subject",
+        candidate: "/workspace/input/candidate",
         traces: "/workspace/input/traces",
         input: "/workspace/input",
         artifacts: "/workspace/output/artifacts",
@@ -148,18 +148,18 @@ describe("Workbench adapter protocol", () => {
     const manifest = workbenchAdapterManifestFromDefinition(defineAdapter({
       id: "adapter",
       engineResolve: defineEngineResolver(),
-      subject: defineSubject(),
+      candidate: defineCandidate(),
       engineRun: defineEngineRunner(),
-      improve: defineOptimizer(),
+      improve: defineImprover(),
     }));
 
     expect(manifest).toMatchObject({
       protocol: "workbench.adapter.v3",
       operations: {
         "engine.resolve": { command: "workbench-adapter-adapter" },
-        "subject.run": { command: "workbench-adapter-adapter" },
+        "candidate.run": { command: "workbench-adapter-adapter" },
         "engine.run": { command: "workbench-adapter-adapter" },
-        "optimizer.improve": { command: "workbench-adapter-adapter" },
+        "candidate.improve": { command: "workbench-adapter-adapter" },
       },
     });
   });
@@ -169,7 +169,7 @@ describe("Workbench adapter protocol", () => {
       "id: invalid-protocol",
       "protocol: workbench.adapter.invalid",
       "operations:",
-      "  subject.run: {}",
+      "  candidate.run: {}",
       "",
     ].join("\n"))).toThrow("workbench.adapter.v3");
     expect(() => parseWorkbenchAdapterManifest([
@@ -182,7 +182,7 @@ describe("Workbench adapter protocol", () => {
     expect(() => normalizeWorkbenchAdapterOperationRequest({
       protocol: "workbench.adapter.invalid",
       id: "exec_invalid_protocol",
-      operation: "subject.run",
+      operation: "candidate.run",
       invocation: { use: "invalid-protocol" },
       paths: {
         workspace: "/workspace",
@@ -247,7 +247,7 @@ describe("Workbench adapter protocol", () => {
       }
       const result = await runWorkbenchRuntimeOperationSequence({
         operations: [{
-          operation: "subject.run",
+          operation: "candidate.run",
           invocation: { use: "command" },
         }],
       }, {
@@ -281,7 +281,7 @@ describe("Workbench adapter protocol", () => {
       "slots:",
       "  judge:",
       "    path: /judge",
-      "    operation: subject.run",
+      "    operation: candidate.run",
       "",
     ].join("\n"));
     const engineOnly = parseWorkbenchAdapterManifest([
@@ -305,10 +305,10 @@ describe("Workbench adapter protocol", () => {
     expect(collectWorkbenchAdapterOperationRequirements(roots, [orchestrator, engineOnly]))
       .toMatchObject([
         { invocation: { use: "orchestrator" }, operation: "engine.run" },
-        { invocation: { use: "engine-only" }, operation: "subject.run" },
+        { invocation: { use: "engine-only" }, operation: "candidate.run" },
       ]);
     expect(collectWorkbenchAdapterOperationIssues(roots, [orchestrator, engineOnly]))
-      .toEqual(["Adapter engine-only does not implement subject.run."]);
+      .toEqual(["Adapter engine-only does not implement candidate.run."]);
   });
 
   test("normalizes engine-resolve results", () => {
@@ -428,14 +428,14 @@ describe("Workbench adapter protocol", () => {
         workspace: root,
         output: outputRoot,
         result: path.join(outputRoot, "workbench-result.json"),
-        subject: path.join(root, "input", "subject"),
+        candidate: path.join(root, "input", "candidate"),
         traces: path.join(root, "input", "traces"),
       },
     }, null, 2)}\n`);
     const adapter = defineAdapter({
       id: "handler-engine",
       slots: {
-        judge: adapterSlot("/judge", "subject.run"),
+        judge: adapterSlot("/judge", "candidate.run"),
       },
       engineRun: defineEngineRunner({
         handle(ctx) {

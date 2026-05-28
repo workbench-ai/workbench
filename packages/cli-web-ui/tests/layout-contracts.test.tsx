@@ -6,6 +6,7 @@ import { describe, expect, test } from "vitest";
 import { AppPageFrame } from "../components/shared/app-page-frame";
 import { CodeBlockSurface } from "../components/shared/code-block-surface";
 import {
+  buildDesktopWorkspaceSplitLayout,
   DesktopWorkspaceSplit,
   DesktopWorkspaceSplitToggle,
 } from "../components/shared/desktop-workspace-split";
@@ -626,11 +627,48 @@ describe("shared layout contracts", () => {
     expect(source).toContain("ResizablePanelGroup");
     expect(source).toContain("ResizablePanel");
     expect(source).toContain("ResizableHandle");
+    expect(source).toContain("groupRef");
+    expect(source).toContain("defaultLayout={layout}");
     expect(source).toContain("data-workspace-split-panel");
     expect(source).toContain("transition-[flex-grow]");
     expect(source).not.toContain("setTimeout");
     expect(source).not.toContain("window.addEventListener(\"pointermove\"");
     expect(source).not.toContain("document.body.style.cursor = \"col-resize\"");
+  });
+
+  test("desktop workspace split builds an explicit layout for fresh open and closed mounts", () => {
+    expect(buildDesktopWorkspaceSplitLayout({
+      paneOpen: true,
+      primaryPercent: 56,
+      minPrimaryPercent: 40,
+      maxPrimaryPercent: 68,
+      secondaryPaneId: "detail-pane",
+    })).toEqual({
+      "workspace-primary-pane": 56,
+      "detail-pane": 44,
+    });
+
+    expect(buildDesktopWorkspaceSplitLayout({
+      paneOpen: true,
+      primaryPercent: 5,
+      minPrimaryPercent: 40,
+      maxPrimaryPercent: 68,
+      secondaryPaneId: "detail-pane",
+    })).toEqual({
+      "workspace-primary-pane": 40,
+      "detail-pane": 60,
+    });
+
+    expect(buildDesktopWorkspaceSplitLayout({
+      paneOpen: false,
+      primaryPercent: 56,
+      minPrimaryPercent: 40,
+      maxPrimaryPercent: 68,
+      secondaryPaneId: "detail-pane",
+    })).toEqual({
+      "workspace-primary-pane": 100,
+      "detail-pane": 0,
+    });
   });
 
   test("desktop workspace split exposes a separator and secondary pane contract", () => {

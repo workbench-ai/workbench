@@ -15,7 +15,7 @@ export interface HostedWorkbenchProject {
   updatedAt: string;
   activeEnvironmentVersionId: string;
   currentSpecVersionId: string;
-  activeSubjectId?: string | null;
+  activeCandidateId?: string | null;
   sourceFingerprint?: string;
   starCount: number;
 }
@@ -29,8 +29,8 @@ export interface HostedWorkbenchProjectSummary {
   updatedAt: string;
   currentSpecVersionId: string;
   activeEnvironmentVersionId: string;
-  activeSubjectId?: string | null;
-  subjectCount: number;
+  activeCandidateId?: string | null;
+  candidateCount: number;
   evaluationCount: number;
   runCount: number;
   starCount: number;
@@ -103,7 +103,7 @@ export interface BlobObjectRef {
 }
 
 export type HostedWorkbenchSnapshotKind =
-  | "subject"
+  | "candidate"
   | "engineResolve"
   | "adapters"
   | "runtime";
@@ -164,7 +164,7 @@ export type HostedWorkbenchSnapshot =
   | HostedWorkbenchEngineResolveSnapshot
   | HostedWorkbenchStandardSnapshot;
 
-export type SubjectStatus =
+export type CandidateStatus =
   | "running"
   | "evaluated"
   | "repair_exhausted"
@@ -184,7 +184,7 @@ export type EvalCaseStatus = "completed" | "error";
 
 export type EvalCaseSource = Record<string, Json>;
 
-export interface SubjectCaseCriterionScore {
+export interface CandidateCaseCriterionScore {
   criterion_id: string;
   label: string;
   score: number;
@@ -202,10 +202,10 @@ export interface EvalCaseResult {
   metrics: Record<string, number>;
   source?: EvalCaseSource;
   feedback?: Json;
-  criteria?: SubjectCaseCriterionScore[];
+  criteria?: CandidateCaseCriterionScore[];
 }
 
-export type ExecutionRole = "optimizer" | "runner" | "engine";
+export type ExecutionRole = "improver" | "runner" | "engine";
 export type ExecutionUsageCostSource = "provider" | "estimated" | "mixed";
 
 export interface ExecutionUsage {
@@ -226,14 +226,14 @@ export interface ExecutionUsage {
 
 export interface UsageSummary {
   total?: ExecutionUsage;
-  optimizer?: ExecutionUsage;
+  improver?: ExecutionUsage;
   runner?: ExecutionUsage;
   engine?: ExecutionUsage;
 }
 
-export interface EvaluationSubjectSummary {
+export interface EvaluationCandidateSummary {
   id: string;
-  kind: "subject";
+  kind: "candidate";
   label?: string;
 }
 
@@ -243,7 +243,7 @@ export type EvaluationStatus = EvaluationSampleStatus | "partial";
 export interface EvaluationSampleRecord {
   id: string;
   index: number;
-  subject: EvaluationSubjectSummary;
+  candidate: EvaluationCandidateSummary;
   status: EvaluationSampleStatus;
   startedAt?: string;
   finishedAt?: string;
@@ -267,7 +267,7 @@ export interface EvaluationCaseStats {
 
 export interface EvaluationUsageStats {
   total?: ExecutionUsageStats;
-  optimizer?: ExecutionUsageStats;
+  improver?: ExecutionUsageStats;
   runner?: ExecutionUsageStats;
   engine?: ExecutionUsageStats;
 }
@@ -285,7 +285,7 @@ export interface ExecutionUsageStats {
 }
 
 export interface EvaluationRecord {
-  subject: EvaluationSubjectSummary;
+  candidate: EvaluationCandidateSummary;
   status: EvaluationStatus;
   sampleCount: number;
   completedSampleCount: number;
@@ -304,9 +304,12 @@ export interface EvaluationSummary {
   id: string;
   runId: string;
   benchmarkFingerprint: string;
-  subjectFingerprint: string;
-  subjectId: string;
-  subjectName?: string;
+  candidateFingerprint: string;
+  candidateId: string;
+  candidateName?: string;
+  candidateVersion: number;
+  candidateRunId?: string;
+  candidateRunName?: string;
   createdAt: string;
   updatedAt: string;
   status: EvaluationStatus;
@@ -323,51 +326,51 @@ export interface EvaluationScorecard extends EvaluationSummary {
   evaluation: EvaluationRecord;
 }
 
-export interface SubjectSummary {
+export interface CandidateSummary {
   id: string;
   name?: string;
+  version: number;
   ordinal: number;
   benchmarkFingerprint: string;
-  subjectFingerprint: string;
+  candidateFingerprint: string;
   ownerUserId?: string;
   ownerUsername?: string;
   visibility?: "private" | "public";
   createdAt: string;
   baseId?: string;
   referenceIds: string[];
-  status: SubjectStatus;
+  status: CandidateStatus;
   fileChanges: string[];
-  metrics?: Record<string, number>;
   usage?: UsageSummary;
 }
 
-export interface SubjectRecord extends SubjectSummary {
+export interface CandidateRecord extends CandidateSummary {
   eval?: EvaluationRecord;
   prompt?: string;
   meta?: Json;
 }
 
-export interface SubjectLineageNode {
+export interface CandidateLineageNode {
   id: string;
   active: boolean;
-  summary: SubjectSummary;
+  summary: CandidateSummary;
 }
 
-export interface SubjectLineageEdge {
+export interface CandidateLineageEdge {
   id: string;
   kind: "anchor";
   sourceId: string;
   targetId: string;
 }
 
-export interface SubjectLineageGraph {
+export interface CandidateLineageGraph {
   activeId: string | null;
-  nodes: SubjectLineageNode[];
-  edges: SubjectLineageEdge[];
+  nodes: CandidateLineageNode[];
+  edges: CandidateLineageEdge[];
 }
 
-export type SubjectPreviewMode = "diff" | "raw" | "rendered";
-export type SubjectPreviewKind =
+export type CandidatePreviewMode = "diff" | "raw" | "rendered";
+export type CandidatePreviewKind =
   | "text"
   | "markdown"
   | "table"
@@ -376,35 +379,35 @@ export type SubjectPreviewKind =
   | "pdf"
   | "unsupported";
 
-export type SubjectPreviewSourceEncoding = "utf8" | "base64";
-export type SubjectFileStatus = "added" | "modified" | "unchanged";
+export type CandidatePreviewSourceEncoding = "utf8" | "base64";
+export type CandidateFileStatus = "added" | "modified" | "unchanged";
 
-export interface SubjectFileSummary {
+export interface CandidateFileSummary {
   path: string;
   old_path: string | null;
-  status: SubjectFileStatus;
+  status: CandidateFileStatus;
   mime_type: string | null;
-  preview_kind: SubjectPreviewKind;
+  preview_kind: CandidatePreviewKind;
   additions: number;
   deletions: number;
 }
 
-export interface SubjectFilePreviewSource {
+export interface CandidateFilePreviewSource {
   content: string;
-  encoding: SubjectPreviewSourceEncoding;
+  encoding: CandidatePreviewSourceEncoding;
 }
 
-export interface SubjectFilePreview {
+export interface CandidateFilePreview {
   path: string;
-  view: SubjectPreviewMode;
+  view: CandidatePreviewMode;
   mime_type: string | null;
-  preview_kind: SubjectPreviewKind;
+  preview_kind: CandidatePreviewKind;
   diff: string | null;
-  source: SubjectFilePreviewSource | null;
+  source: CandidateFilePreviewSource | null;
   rendered_html: string | null;
 }
 
-export interface SubjectCaseCriterionResult {
+export interface CandidateCaseCriterionResult {
   criterion_id: string;
   pass: boolean;
   score: number;
@@ -412,7 +415,7 @@ export interface SubjectCaseCriterionResult {
   rationale?: string;
 }
 
-export interface SubjectCaseExecutionRef {
+export interface CandidateCaseExecutionRef {
   runId: string;
   kind: string;
   role: WorkbenchExecutionEventRole;
@@ -428,8 +431,8 @@ export interface SubjectCaseExecutionRef {
   attemptIndex?: number;
 }
 
-export interface SubjectCaseReview {
-  subjectId: string;
+export interface CandidateCaseReview {
+  candidateId: string;
   caseId: string;
   caseLabel: string;
   sampleId?: string;
@@ -439,8 +442,8 @@ export interface SubjectCaseReview {
   durationMs?: number;
   source?: EvalCaseSource;
   feedback?: Json;
-  executions: SubjectCaseExecutionRef[];
-  criteria_results: SubjectCaseCriterionResult[];
+  executions: CandidateCaseExecutionRef[];
+  criteria_results: CandidateCaseCriterionResult[];
 }
 
 export type RunStatus = "queued" | "running" | "finished";
@@ -452,10 +455,13 @@ export interface RunSummary {
   workflow: HostedRunWorkflow;
   benchmarkFingerprint: string;
   status: RunStatus;
+  candidateId?: string | null;
+  candidateRunId?: string;
+  candidateRunName?: string;
   startedAt: string;
   finishedAt?: string;
   durationMs?: number;
-  optimizer: string;
+  improver: string;
   engineRun: string;
   strategy: string;
   budget: number;
@@ -463,11 +469,12 @@ export interface RunSummary {
   attemptsRequested: number;
   attemptsExecuted: number;
   samples: number;
+  executionFingerprint?: string;
   stoppedReason?: "budget_exhausted" | "completed" | "dry_run" | "cancelled";
   outcome?: RunOutcome;
   error?: string;
-  activeSubjectId?: string | null;
-  outputSubjectId?: string | null;
+  activeCandidateId?: string | null;
+  outputCandidateId?: string | null;
 }
 
 export interface RuntimeEvent {
@@ -480,16 +487,16 @@ export interface RuntimeEvent {
     | "job_progress"
     | "sandbox_allocated"
     | "sandbox_stopped"
-    | "subject_created"
-    | "subject_evaluated"
+    | "candidate_created"
+    | "candidate_evaluated"
     | "active_changed"
     | "run_finished";
   runId?: string;
   jobId?: string;
-  subjectId?: string;
+  candidateId?: string;
   baseId?: string;
   activeId?: string;
-  status?: SubjectStatus | HostedWorkbenchJobStatus;
+  status?: CandidateStatus | HostedWorkbenchJobStatus;
   metrics?: Record<string, number>;
   detail?: Record<string, Json>;
 }
@@ -498,20 +505,31 @@ export interface RuntimeSnapshot {
   workspaceRoot: string;
   activeId: string | null;
   currentBenchmarkFingerprint: string | null;
-  summaries: SubjectSummary[];
+  summaries: CandidateSummary[];
   evaluations: EvaluationSummary[];
   runs: RunSummary[];
 }
 
-export interface AuthoredWorkbenchSubjectSpec {
+export interface AuthoredWorkbenchCandidateRunSpec extends WorkbenchAuthoredAdapterSpec {
+  name: string;
+}
+
+export interface AuthoredWorkbenchCandidateImproveSpec extends WorkbenchAuthoredAdapterSpec {
+  edits: string[];
+}
+
+export interface AuthoredWorkbenchCandidateSpec {
   name: string;
   description?: string;
   files: WorkbenchPathRef;
-  prepare?: WorkbenchSubjectPrepareSpec;
-  run: AuthoredWorkbenchRunSpec;
+  prepare?: WorkbenchCandidatePrepareSpec;
+  defaultRun?: string;
+  selectedRunId?: string;
+  runs: Record<string, AuthoredWorkbenchCandidateRunSpec>;
+  improve?: AuthoredWorkbenchCandidateImproveSpec;
 }
 
-export interface WorkbenchSubjectPrepareSpec {
+export interface WorkbenchCandidatePrepareSpec {
   command: string;
 }
 
@@ -562,18 +580,10 @@ export interface AuthoredWorkbenchBenchmarkSpec {
   engine: AuthoredWorkbenchEngineSpec;
 }
 
-export interface AuthoredWorkbenchOptimizerSpec {
-  name: string;
-  description?: string;
-  edits: string[];
-  improve: AuthoredWorkbenchImproveSpec;
-}
-
 export interface AuthoredWorkbenchSourceSpec {
-  version: 3;
+  version: 4;
   benchmark: AuthoredWorkbenchBenchmarkSpec;
-  subject: AuthoredWorkbenchSubjectSpec;
-  optimizer?: AuthoredWorkbenchOptimizerSpec;
+  candidate: AuthoredWorkbenchCandidateSpec;
 }
 
 export type WorkbenchExecutionPurpose = "improve" | "attempt";
@@ -608,11 +618,11 @@ export interface WorkbenchSandboxAllocation {
 
 export interface WorkbenchExecutionCapability {
   executionId: string;
-  subject: {
+  candidate: {
     tenantId: string;
     projectId: string;
     runId: string;
-    subjectId?: string;
+    candidateId?: string;
   };
   inputs: WorkbenchExecutionInputRef[];
   outputPrefix: string;
@@ -644,7 +654,7 @@ export interface WorkbenchExecutionInputRef {
 }
 
 export type WorkbenchExecutionOutputSchema =
-  | "workbench.subject_patch.v1"
+  | "workbench.candidate_patch.v1"
   | "workbench.result.v1"
   | string;
 
@@ -687,7 +697,7 @@ export interface WorkbenchExecutionSpec {
   id: string;
   projectId: string;
   runId: string;
-  subjectId?: string;
+  candidateId?: string;
   purpose: WorkbenchExecutionPurpose;
   adapter: WorkbenchAdapterInvocation;
   sandbox: WorkbenchSandboxTemplate;
@@ -697,7 +707,7 @@ export interface WorkbenchExecutionSpec {
   metadata: Record<string, Json>;
 }
 
-export interface WorkbenchSubjectPatch {
+export interface WorkbenchCandidatePatch {
   files: SurfaceSnapshotFile[];
   fileChanges: string[];
   summary?: string;
@@ -724,7 +734,7 @@ export interface WorkbenchExecutionResult {
 }
 
 export type WorkbenchExecutionEventSource = "sandbox" | "adapter" | "command";
-export type WorkbenchExecutionEventRole = "optimizer" | "runner" | "engine";
+export type WorkbenchExecutionEventRole = "improver" | "runner" | "engine";
 export type WorkbenchExecutionEventSchema =
   | "workbench.execution.step.v1"
   | "workbench.trace.delta.v1";
@@ -860,7 +870,7 @@ export interface WorkbenchExecutionEvidence {
   status: HostedWorkbenchJobStatus;
   jobIds: string[];
   executionIds: string[];
-  subjectId?: string;
+  candidateId?: string;
   caseId?: string;
   sampleIndex?: number;
   attemptIndex?: number;
@@ -904,7 +914,7 @@ export interface HostedWorkbenchJob {
   id: string;
   projectId: string;
   runId: string;
-  subjectId?: string;
+  candidateId?: string;
   kind: HostedWorkbenchJobKind;
   status: HostedWorkbenchJobStatus;
   attempt: number;
@@ -926,15 +936,19 @@ export interface HostedWorkbenchRun extends RunSummary {
   projectId: string;
   environmentVersionId?: string;
   specVersionId: string;
-  subjectId: string | null;
+  candidateId: string | null;
+  activeCandidateId?: string | null;
+  outputCandidateId?: string | null;
   input: {
     benchmarkFingerprint: string;
-    subjectFingerprint: string;
-    baseSubjectId: string | null;
-    subjectOwnerUserId?: string;
-    subjectOwnerUsername?: string;
+    candidateFingerprint: string;
+    baseCandidateId: string | null;
+    candidateOwnerUserId?: string;
+    candidateOwnerUsername?: string;
+    preserveActiveCandidateId?: string | null;
+    selectedSamples?: Array<{ caseId: string; sampleIndex: number }>;
     sourceYaml?: string;
-    subjectSourceFiles?: SurfaceSnapshotFile[];
+    candidateSourceFiles?: SurfaceSnapshotFile[];
     baseFiles: SurfaceSnapshotFile[];
     engineResolveFiles: SurfaceSnapshotFile[];
   };

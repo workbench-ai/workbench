@@ -16,6 +16,7 @@ import type {
 import YAML from "yaml";
 
 export const BENCHMARK_SPEC_FILE = "benchmark.yaml";
+export const CANDIDATE_SPEC_FILE = "candidate.yaml";
 
 export interface WorkbenchRuntimeSpec {
   dockerfile: string;
@@ -33,48 +34,50 @@ export interface WorkbenchPathRef {
   path: string;
 }
 
-export interface WorkbenchSubjectPrepareSpec {
+export interface WorkbenchCandidatePrepareSpec {
   command: string;
 }
 
 export interface AuthoredBenchmarkSpec {
-  version: 3;
+  version: 4;
   name: string;
   description: string;
   adapters: string[];
   engine: WorkbenchAdapterInvocation;
 }
 
-export interface WorkbenchSubjectManifestSpec {
-  version: 3;
+export interface WorkbenchCandidateRunSpec extends WorkbenchAdapterInvocation {
+  name: string;
+}
+
+export interface WorkbenchCandidateImproveSpec extends WorkbenchAdapterInvocation {
+  edits: string[];
+}
+
+export interface WorkbenchCandidateManifestSpec {
+  version: 4;
   name: string;
   description?: string;
   files: WorkbenchPathRef;
-  prepare?: WorkbenchSubjectPrepareSpec;
+  prepare?: WorkbenchCandidatePrepareSpec;
   adapters: string[];
-  run: WorkbenchAdapterInvocation;
+  defaultRun?: string;
+  runs: Record<string, WorkbenchCandidateRunSpec>;
+  improve?: WorkbenchCandidateImproveSpec;
 }
 
-export type ResolvedSubjectSpec = WorkbenchSubjectManifestSpec;
-
-export interface AuthoredOptimizerSpec {
-  version: 3;
-  name: string;
-  description?: string;
-  edits: string[];
-  adapters: string[];
-  improve: WorkbenchAdapterInvocation;
+export interface ResolvedCandidateSpec extends WorkbenchCandidateManifestSpec {
+  selectedRunId: string;
 }
 
 export interface WorkbenchResolvedSource {
-  version: 3;
+  version: 4;
   benchmark: AuthoredBenchmarkSpec;
-  subject: ResolvedSubjectSpec;
-  optimizer?: AuthoredOptimizerSpec;
+  candidate: ResolvedCandidateSpec;
 }
 
 export interface GenericRunSpec {
-  version: 3;
+  version: 4;
   name: string;
   description: string;
   benchmark: {
@@ -82,16 +85,18 @@ export interface GenericRunSpec {
     description: string;
     engine: WorkbenchAdapterInvocation;
   };
-  subject: {
+  candidate: {
     name: string;
     description?: string;
     files: WorkbenchPathRef;
-    prepare?: WorkbenchSubjectPrepareSpec;
-  };
-  optimizer?: {
-    name: string;
-    description?: string;
-    edits: string[];
+    prepare?: WorkbenchCandidatePrepareSpec;
+    defaultRun: string;
+    selectedRunId: string;
+    selectedRunName: string;
+    runs: Record<string, WorkbenchCandidateRunSpec>;
+    improve?: {
+      edits: string[];
+    };
   };
   environment: WorkbenchRuntimeSpec;
   adapters: string[];
@@ -155,37 +160,28 @@ export function resolveWorkbenchResolvedSourceYaml(
   rejectUnknownKeys(parsed, "resolved Workbench source", [
     "version",
     "benchmark",
-    "subject",
-    "optimizer",
+    "candidate",
   ], errors);
-  if (parsed.version !== 3) {
-    throw new Error("Resolved Workbench source version must be 3.");
+  if (parsed.version !== 4) {
+    throw new Error("Resolved Workbench source version must be 4.");
   }
   const benchmark = normalizeBenchmarkRecord(
     readRequiredRecord(parsed.benchmark, "resolved Workbench source.benchmark", errors),
     "benchmark.yaml",
     errors,
   );
-  const subject = normalizeSubjectRecord(
-    readRequiredRecord(parsed.subject, "resolved Workbench source.subject", errors),
-    "resolved Workbench source.subject",
+  const candidate = normalizeCandidateRecord(
+    readRequiredRecord(parsed.candidate, "resolved Workbench source.candidate", errors),
+    "resolved Workbench source.candidate",
     errors,
   );
-  const optimizer = parsed.optimizer === undefined
-    ? undefined
-    : normalizeOptimizerRecord(
-      readRequiredRecord(parsed.optimizer, "resolved Workbench source.optimizer", errors),
-      "optimizer YAML",
-      errors,
-    );
   if (errors.length > 0) {
     throw new Error(errors.join("\n"));
   }
   return genericSpecFromAuthoredBundle({
-    version: 3,
+    version: 4,
     benchmark: benchmark!,
-    subject: subject!,
-    ...(optimizer ? { optimizer } : {}),
+    candidate: candidate!,
   });
 }
 
@@ -210,20 +206,20 @@ export function engineResolveBindingForSpec(
 
 export function resolveWorkbenchSourceFiles(args: {
   benchmarkSource: string;
-  subjectSource: string;
-  optimizerSource?: string | null;
+  candidateSource: string;
+  runId?: string | null;
 }): GenericRunSpec {
   return genericSpecFromAuthoredBundle(parseWorkbenchSourceFiles({
     benchmarkSource: args.benchmarkSource,
-    subjectSource: args.subjectSource,
-    optimizerSource: args.optimizerSource,
+    candidateSource: args.candidateSource,
+    runId: args.runId,
   }));
 }
 
 export function parseWorkbenchSourceFiles(args: {
   benchmarkSource: string;
-  subjectSource?: string;
-  optimizerSource?: string | null;
+  candidateSource?: string;
+  runId?: string | null;
 }): WorkbenchResolvedSource {
   const errors: string[] = [];
   const benchmark = normalizeBenchmarkRecord(
@@ -231,26 +227,19 @@ export function parseWorkbenchSourceFiles(args: {
     BENCHMARK_SPEC_FILE,
     errors,
   );
-  const subject = normalizeSubjectRecord(
-    parseYamlRecord(args.subjectSource ?? "", "subject YAML"),
-    "subject YAML",
+  const candidate = normalizeCandidateRecord(
+    parseYamlRecord(args.candidateSource ?? "", "candidate YAML"),
+    "candidate YAML",
     errors,
+    args.runId ?? undefined,
   );
-  const optimizer = args.optimizerSource?.trim()
-    ? normalizeOptimizerRecord(
-      parseYamlRecord(args.optimizerSource, "optimizer YAML"),
-      "optimizer YAML",
-      errors,
-    )
-    : undefined;
   if (errors.length > 0) {
     throw new Error(errors.join("\n"));
   }
   return {
-    version: 3,
+    version: 4,
     benchmark: benchmark!,
-    subject: subject!,
-    ...(optimizer ? { optimizer } : {}),
+    candidate: candidate!,
   };
 }
 
@@ -260,8 +249,8 @@ export function serializeWorkbenchResolvedSourceYaml(
   return YAML.stringify(source).trimEnd() + "\n";
 }
 
-export function isWorkbenchSubjectManifestPath(filePath: string): boolean {
-  return /^subjects\/[^/]+\/subject\.ya?ml$/iu.test(
+export function isWorkbenchCandidateManifestPath(filePath: string): boolean {
+  return /^candidates\/[^/]+\/candidate\.ya?ml$/iu.test(
     filePath.replace(/\\/gu, "/").replace(/^\/+/u, "").replace(/^(?:\.\/)+/u, ""),
   );
 }
@@ -342,8 +331,13 @@ function genericSpecFromAuthoredBundle(
   const engineRuntime = engineRuntimeFromConfig(source.benchmark.engine);
   const engineRun = cloneEngineInvocation(source.benchmark.engine);
   const engineResolve = cloneEngineInvocation(source.benchmark.engine);
+  const candidate = source.candidate;
+  const selectedRun = candidate.runs[candidate.selectedRunId];
+  if (!selectedRun) {
+    throw new Error(`Candidate run not found: ${candidate.selectedRunId}`);
+  }
   return {
-    version: 3,
+    version: 4,
     name: source.benchmark.name,
     description: source.benchmark.description,
     benchmark: {
@@ -351,33 +345,34 @@ function genericSpecFromAuthoredBundle(
       description: source.benchmark.description,
       engine: cloneJson(source.benchmark.engine),
     },
-    subject: {
-      name: source.subject.name,
-      ...(source.subject.description ? { description: source.subject.description } : {}),
-      files: cloneJson(source.subject.files),
-      ...(source.subject.prepare ? { prepare: cloneJson(source.subject.prepare) } : {}),
+    candidate: {
+      name: candidate.name,
+      ...(candidate.description ? { description: candidate.description } : {}),
+      files: cloneJson(candidate.files),
+      ...(candidate.prepare ? { prepare: cloneJson(candidate.prepare) } : {}),
+      defaultRun: candidate.defaultRun ?? candidate.selectedRunId,
+      selectedRunId: candidate.selectedRunId,
+      selectedRunName: selectedRun.name,
+      runs: cloneJson(candidate.runs),
+      ...(candidate.improve
+        ? {
+            improve: {
+              edits: [...candidate.improve.edits],
+            },
+          }
+        : {}),
     },
-    ...(source.optimizer
-      ? {
-          optimizer: {
-            name: source.optimizer.name,
-            ...(source.optimizer.description ? { description: source.optimizer.description } : {}),
-            edits: [...source.optimizer.edits],
-          },
-        }
-      : {}),
     environment: cloneJson(engineRuntime),
     adapters: [
       ...new Set([
         ...source.benchmark.adapters,
-        ...source.subject.adapters,
-        ...(source.optimizer?.adapters ?? []),
+        ...candidate.adapters,
       ]),
     ],
     engine: cloneJson(source.benchmark.engine),
     engineResolve: cloneJson(engineResolve),
-    ...(source.optimizer ? { improve: cloneJson(source.optimizer.improve) } : {}),
-    run: cloneJson(source.subject.run),
+    ...(candidate.improve ? { improve: clonePhaseAdapter(candidate.improve) } : {}),
+    run: clonePhaseAdapter(selectedRun),
     engineRun: cloneJson(engineRun),
   };
 }
@@ -397,7 +392,7 @@ function normalizeBenchmarkRecord(
     "adapters",
     "engine",
   ], errors);
-  requireVersionThree(record.version, label, errors);
+  requireVersionFour(record.version, label, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readRequiredString(record.description, `${label}.description`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
@@ -407,7 +402,7 @@ function normalizeBenchmarkRecord(
   }
   return name && description && engine
     ? {
-        version: 3,
+        version: 4,
         name,
         description,
         adapters,
@@ -433,11 +428,12 @@ function normalizeEngineRuntimeConfig(
   }
 }
 
-function normalizeSubjectRecord(
+function normalizeCandidateRecord(
   record: Record<string, unknown> | null,
   label: string,
   errors: string[],
-): ResolvedSubjectSpec | null {
+  selectedRunId?: string,
+): ResolvedCandidateSpec | null {
   if (!record) {
     return null;
   }
@@ -448,33 +444,46 @@ function normalizeSubjectRecord(
     "files",
     "prepare",
     "adapters",
-    "run",
+    "defaultRun",
+    "runs",
+    "improve",
+    "selectedRunId",
   ], errors);
-  requireVersionThree(record.version, label, errors);
+  requireVersionFour(record.version, label, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readOptionalString(record.description, `${label}.description`, errors);
   const files = normalizePathRef(record.files, `${label}.files`, errors);
-  const prepare = normalizeSubjectPrepare(record.prepare, `${label}.prepare`, errors);
+  const prepare = normalizeCandidatePrepare(record.prepare, `${label}.prepare`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
-  const run = normalizePhaseAdapter(record.run, `${label}.run`, errors);
-  return name && files && run
+  const runs = normalizeCandidateRuns(record.runs, `${label}.runs`, errors);
+  const defaultRun = readOptionalString(record.defaultRun, `${label}.defaultRun`, errors);
+  const embeddedSelectedRun = readOptionalString(record.selectedRunId, `${label}.selectedRunId`, errors);
+  const selected = selectedRunId ?? embeddedSelectedRun ?? defaultRun ?? Object.keys(runs).sort()[0];
+  if (selected && !runs[selected]) {
+    errors.push(`${label}.selectedRunId references unknown run ${selected}.`);
+  }
+  const improve = normalizeCandidateImprove(record.improve, `${label}.improve`, errors);
+  return name && files && selected && Object.keys(runs).length > 0
     ? {
-        version: 3,
+        version: 4,
         name,
         ...(description ? { description } : {}),
         files,
         ...(prepare ? { prepare } : {}),
         adapters,
-        run,
+        ...(defaultRun ? { defaultRun } : {}),
+        runs,
+        ...(improve ? { improve } : {}),
+        selectedRunId: selected,
       }
     : null;
 }
 
-function normalizeSubjectPrepare(
+function normalizeCandidatePrepare(
   value: unknown,
   label: string,
   errors: string[],
-): WorkbenchSubjectPrepareSpec | undefined {
+): WorkbenchCandidatePrepareSpec | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -487,43 +496,75 @@ function normalizeSubjectPrepare(
   return command ? { command } : undefined;
 }
 
-function normalizeOptimizerRecord(
-  record: Record<string, unknown> | null,
+function normalizeCandidateRuns(
+  value: unknown,
   label: string,
   errors: string[],
-): AuthoredOptimizerSpec | null {
+): Record<string, WorkbenchCandidateRunSpec> {
+  const record = readRequiredRecord(value, label, errors);
   if (!record) {
-    return null;
+    return {};
   }
-  rejectUnknownKeys(record, label, [
-    "version",
-    "name",
-    "description",
-    "edits",
-    "adapters",
-    "improve",
-  ], errors);
-  requireVersionThree(record.version, label, errors);
-  const name = readRequiredString(record.name, `${label}.name`, errors);
-  const description = readOptionalString(record.description, `${label}.description`, errors);
-  const edits = normalizeRelativePathList(record.edits, `${label}.edits`, errors);
-  const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
-  const improve = normalizePhaseAdapter(record.improve, `${label}.improve`, errors);
-  return name && edits.length > 0 && improve
-    ? {
-        version: 3,
+  const runs: Record<string, WorkbenchCandidateRunSpec> = {};
+  for (const [runId, runValue] of Object.entries(record).sort(([left], [right]) => left.localeCompare(right))) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(runId)) {
+      errors.push(`${label}.${runId} must use letters, numbers, dots, underscores, or dashes.`);
+      continue;
+    }
+    const runRecord = readRequiredRecord(runValue, `${label}.${runId}`, errors);
+    if (!runRecord) {
+      continue;
+    }
+    rejectUnknownKeys(runRecord, `${label}.${runId}`, ["name", "use", "with", "auth"], errors);
+    const name = readRequiredString(runRecord.name, `${label}.${runId}.name`, errors);
+    const invocation = normalizePhaseAdapter(adapterRecordFrom(runRecord), `${label}.${runId}`, errors);
+    if (name && invocation) {
+      runs[runId] = {
         name,
-        ...(description ? { description } : {}),
-        edits,
-        adapters,
-        improve,
-      }
-    : null;
+        ...invocation,
+      };
+    }
+  }
+  if (Object.keys(runs).length === 0) {
+    errors.push(`${label} must declare at least one run.`);
+  }
+  return runs;
 }
 
-function requireVersionThree(value: unknown, label: string, errors: string[]): void {
-  if (value !== 3) {
-    errors.push(`${label}.version must be 3.`);
+function normalizeCandidateImprove(
+  value: unknown,
+  label: string,
+  errors: string[],
+): WorkbenchCandidateImproveSpec | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = readRequiredRecord(value, label, errors);
+  if (!record) {
+    return undefined;
+  }
+  rejectUnknownKeys(record, label, ["edits", "use", "with", "auth"], errors);
+  const edits = normalizeRelativePathList(record.edits, `${label}.edits`, errors);
+  const invocation = normalizePhaseAdapter(adapterRecordFrom(record), label, errors);
+  return edits.length > 0 && invocation
+    ? {
+        ...invocation,
+        edits,
+      }
+    : undefined;
+}
+
+function adapterRecordFrom(record: Record<string, unknown>): Record<string, unknown> {
+  return {
+    use: record.use,
+    ...(record.with !== undefined ? { with: record.with } : {}),
+    ...(record.auth !== undefined ? { auth: record.auth } : {}),
+  };
+}
+
+function requireVersionFour(value: unknown, label: string, errors: string[]): void {
+  if (value !== 4) {
+    errors.push(`${label}.version must be 4.`);
   }
 }
 
@@ -659,10 +700,14 @@ function engineRuntimeFromConfig(engine: WorkbenchAdapterInvocation): WorkbenchR
 }
 
 function cloneEngineInvocation(engine: WorkbenchAdapterInvocation): WorkbenchAdapterInvocation {
+  return clonePhaseAdapter(engine);
+}
+
+function clonePhaseAdapter(adapter: WorkbenchAdapterInvocation): WorkbenchAdapterInvocation {
   return {
-    use: engine.use,
-    with: cloneJson(engine.with ?? {}),
-    ...(engine.auth !== undefined ? { auth: cloneJson(engine.auth) } : {}),
+    use: adapter.use,
+    with: cloneJson(adapter.with ?? {}),
+    ...(adapter.auth !== undefined ? { auth: cloneJson(adapter.auth) } : {}),
   };
 }
 

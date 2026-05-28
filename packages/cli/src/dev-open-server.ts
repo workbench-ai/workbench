@@ -4,15 +4,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  buildSubjectCaseExecutionRefs,
+  buildCandidateCaseExecutionRefs,
   buildWorkbenchExecutionEvidence,
-  createSubjectFilePreview,
+  candidateRecordWithoutDerivedFields,
+  candidateSummaryFromRecord,
+  createCandidateFilePreview,
   createCaseReview,
   loadAuthoredWorkbenchSourceDocument,
-  summarizeSubjectFiles,
+  summarizeCandidateFiles,
   traceSessionLabel,
-  type SubjectRecord,
+  type CandidateRecord,
   type EvaluationScorecard,
+  type RunSummary,
   type SurfaceSnapshotFile,
   type WorkbenchExecutionTrace,
   type WorkbenchTraceSession,
@@ -25,8 +28,8 @@ import {
   readLocalEvaluationRecord,
   readLocalJobInRun,
   readLocalRunJobs,
-  readLocalSubjectFilesForId,
-  readLocalSubjectRecord,
+  readLocalCandidateFilesForId,
+  readLocalCandidateRecord,
   type LocalArchivedJob,
   type LocalArchiveIndex,
 } from "./local-archive.js";
@@ -212,7 +215,7 @@ async function handleApiRequest(
     case "/api/source/files":
       sendJson(
         response,
-        summarizeSubjectFiles(
+        summarizeCandidateFiles(
           await localBenchmarkMountedFiles(
             context,
             readOptionalSearchString(url.searchParams, "fingerprint"),
@@ -226,7 +229,7 @@ async function handleApiRequest(
     case "/api/source/preview":
       sendJson(
         response,
-        createSubjectFilePreview({
+        createCandidateFilePreview({
           files: await localBenchmarkMountedFiles(
             context,
             readOptionalSearchString(url.searchParams, "fingerprint"),
@@ -239,7 +242,7 @@ async function handleApiRequest(
       );
       return;
     case "/api/record":
-      sendJson(response, await readSubjectForApi(
+      sendJson(response, await readCandidateForApi(
         workspace,
         readSearchString(url.searchParams, "id"),
       ), 200, request.method);
@@ -250,26 +253,26 @@ async function handleApiRequest(
         readSearchString(url.searchParams, "id"),
       ), 200, request.method);
       return;
-    case "/api/subject/files": {
-      const subjectId = readSearchString(url.searchParams, "id");
-      const subject = await readSubjectForApi(workspace, subjectId);
+    case "/api/candidate/files": {
+      const candidateId = readSearchString(url.searchParams, "id");
+      const candidate = await readCandidateForApi(workspace, candidateId);
       sendJson(
         response,
-        summarizeSubjectFiles(
-          await readSubjectFilesForApi(workspace, subjectId),
-          subject.fileChanges,
+        summarizeCandidateFiles(
+          await readCandidateFilesForApi(workspace, candidateId),
+          candidate.fileChanges,
         ),
         200,
         request.method,
       );
       return;
     }
-    case "/api/subject/preview": {
-      const subjectId = readSearchString(url.searchParams, "id");
+    case "/api/candidate/preview": {
+      const candidateId = readSearchString(url.searchParams, "id");
       sendJson(
         response,
-        createSubjectFilePreview({
-          files: await readSubjectFilesForApi(workspace, subjectId),
+        createCandidateFilePreview({
+          files: await readCandidateFilesForApi(workspace, candidateId),
           path: readSearchString(url.searchParams, "path"),
           view: readPreviewMode(url.searchParams),
         }),
@@ -279,16 +282,16 @@ async function handleApiRequest(
       return;
     }
     case "/api/case-review": {
-      const subjectId = readSearchString(url.searchParams, "id");
+      const candidateId = readSearchString(url.searchParams, "id");
       const caseId = readSearchString(url.searchParams, "case");
       const runId = readSearchString(url.searchParams, "run");
       const jobs = await readLocalRunJobs(workspace, runId);
       sendJson(
         response,
         createCaseReview({
-          subject: await readSubjectForApi(workspace, subjectId),
+          candidate: await readCandidateForApi(workspace, candidateId),
           caseId,
-          executions: buildSubjectCaseExecutionRefs({ jobs, subjectId, caseId }),
+          executions: buildCandidateCaseExecutionRefs({ jobs, candidateId, caseId }),
         }),
         200,
         request.method,
@@ -330,7 +333,7 @@ async function handleApiRequest(
       const previewFiles = await readExecutionFilesForRun(workspace, previewRunId, previewJobId);
       sendJson(
         response,
-        createSubjectFilePreview({
+        createCandidateFilePreview({
           files: previewFiles,
           path: previewFilePath,
           view: readPreviewMode(url.searchParams),
@@ -348,11 +351,11 @@ async function handleApiRequest(
 export async function localBenchmarkSnapshot(context: LocalWorkbenchRequestContext) {
   const { workspace } = context;
   const snapshot = await loadLocalArchiveIndex(workspace);
-  const subjects = snapshot.subjects.filter(isInspectableSubjectRecord);
-  const summaries = subjects.map(subjectSummary);
-  const activeId = snapshot.activeId && subjects.some((subject) => subject.id === snapshot.activeId)
+  const candidates = snapshot.candidates.filter(isInspectableCandidateRecord);
+  const summaries = candidates.map(candidateSummary);
+  const activeId = snapshot.activeId && candidates.some((candidate) => candidate.id === snapshot.activeId)
     ? snapshot.activeId
-    : subjects.at(-1)?.id ?? null;
+    : candidates.at(-1)?.id ?? null;
   const currentBenchmarkFingerprint = await readCurrentBenchmarkFingerprint(context);
   return {
     workspaceRoot: path.resolve(workspace),
@@ -360,8 +363,13 @@ export async function localBenchmarkSnapshot(context: LocalWorkbenchRequestConte
     currentBenchmarkFingerprint,
     summaries,
     evaluations: snapshot.evaluations.map(evaluationSummary),
-    runs: snapshot.runs,
+    runs: snapshot.runs.map(publicLocalRunSummary),
   };
+}
+
+function publicLocalRunSummary(run: RunSummary): RunSummary {
+  const { executionFingerprint: _executionFingerprint, ...summary } = run;
+  return summary;
 }
 
 async function readCurrentBenchmarkFingerprint(
@@ -458,10 +466,10 @@ function localHistoricalBenchmarkDocument(
   snapshot: LocalArchiveIndex,
   benchmarkFingerprint: string,
 ) {
-  const subject = snapshot.subjects.find((entry) =>
+  const candidate = snapshot.candidates.find((entry) =>
     entry.benchmarkFingerprint === benchmarkFingerprint && readBenchmarkSourceMetadata(entry)
   );
-  const source = subject ? readBenchmarkSourceMetadata(subject) : null;
+  const source = candidate ? readBenchmarkSourceMetadata(candidate) : null;
   if (!source?.sourceYaml) {
     return null;
   }
@@ -496,13 +504,12 @@ function engineCaseFiles(bundle: WorkbenchEngineCase): SurfaceSnapshotFile[] {
     : [...(buckets.public ?? []), ...(buckets.private ?? [])];
 }
 
-function subjectSummary(subject: SubjectRecord) {
-  const { eval: _eval, prompt: _prompt, meta: _meta, ...summary } = subject;
-  return summary;
+function candidateSummary(candidate: CandidateRecord) {
+  return candidateSummaryFromRecord(candidate);
 }
 
-function isInspectableSubjectRecord(subject: SubjectRecord): boolean {
-  return Boolean(subject.eval || asRecord(asRecord(subject.meta)?.source));
+function isInspectableCandidateRecord(candidate: CandidateRecord): boolean {
+  return Boolean(candidate.eval || asRecord(asRecord(candidate.meta)?.source));
 }
 
 function evaluationSummary(evaluation: EvaluationScorecard) {
@@ -510,23 +517,24 @@ function evaluationSummary(evaluation: EvaluationScorecard) {
   return summary;
 }
 
-async function readSubjectForApi(workspace: string, subjectId: string): Promise<SubjectRecord> {
-  return await readArchiveRecord("Subject", subjectId, () => readLocalSubjectRecord(workspace, subjectId));
+async function readCandidateForApi(workspace: string, candidateId: string): Promise<CandidateRecord> {
+  const candidate = await readArchiveRecord("Candidate", candidateId, () => readLocalCandidateRecord(workspace, candidateId));
+  return candidateRecordWithoutDerivedFields(candidate);
 }
 
 async function readEvaluationForApi(workspace: string, evaluationId: string): Promise<EvaluationScorecard> {
   return await readArchiveRecord("Evaluation", evaluationId, () => readLocalEvaluationRecord(workspace, evaluationId));
 }
 
-async function readSubjectFilesForApi(workspace: string, subjectId: string): Promise<SurfaceSnapshotFile[]> {
-  return await readArchiveRecord("Subject", subjectId, () => readLocalSubjectFilesForId(workspace, subjectId));
+async function readCandidateFilesForApi(workspace: string, candidateId: string): Promise<SurfaceSnapshotFile[]> {
+  return await readArchiveRecord("Candidate", candidateId, () => readLocalCandidateFilesForId(workspace, candidateId));
 }
 
-function readBenchmarkSourceMetadata(subject: SubjectRecord): {
+function readBenchmarkSourceMetadata(candidate: CandidateRecord): {
   sourceYaml: string;
   files: SurfaceSnapshotFile[];
 } | null {
-  const benchmark = asRecord(asRecord(subject.meta)?.benchmark);
+  const benchmark = asRecord(asRecord(candidate.meta)?.benchmark);
   const files = Array.isArray(benchmark?.files)
     ? benchmark.files
         .map(readSurfaceSnapshotFile)
@@ -570,7 +578,7 @@ function normalizeOptionalFingerprint(value: string | null | undefined): string 
 }
 
 async function readArchiveRecord<T>(
-  kind: "Subject" | "Evaluation",
+  kind: "Candidate" | "Evaluation",
   id: string,
   read: () => Promise<T>,
 ): Promise<T> {
@@ -586,7 +594,7 @@ async function readArchiveRecord<T>(
 
 async function loadExecutionFiles(workspace: string, runId: string, jobId: string) {
   const files = await readExecutionFilesForRun(workspace, runId, jobId);
-  return summarizeSubjectFiles(files);
+  return summarizeCandidateFiles(files);
 }
 
 async function readExecutionFilesForRun(
@@ -639,14 +647,14 @@ function readLocalTraceSessions(
   if (!Array.isArray(job.traceSessions)) {
     return [];
   }
-  return job.traceSessions.map((session) => ({
+  return job.traceSessions.map((session: WorkbenchTraceSession) => ({
     id: typeof session.id === "string" && session.id.length > 0
       ? session.id
       : `${job.id}:trace`,
     jobId: typeof session.jobId === "string" && session.jobId.length > 0
       ? session.jobId
       : job.id,
-    role: session.role === "optimizer" || session.role === "runner" || session.role === "engine"
+    role: session.role === "improver" || session.role === "runner" || session.role === "engine"
       ? session.role
       : role,
     kind: typeof session.kind === "string" && session.kind.length > 0 ? session.kind : "trace",
@@ -663,7 +671,7 @@ function traceSessionDisplayLabel(
   session: WorkbenchTraceSession,
   fallbackRole: WorkbenchTraceSession["role"],
 ): string {
-  const role = session.role === "optimizer" || session.role === "runner" || session.role === "engine"
+  const role = session.role === "improver" || session.role === "runner" || session.role === "engine"
     ? session.role
     : fallbackRole;
   return typeof session.label === "string" && session.label.length > 0

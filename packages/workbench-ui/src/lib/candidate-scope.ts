@@ -1,4 +1,4 @@
-import type { SubjectSummary } from "../types";
+import type { CandidateSummary } from "../types";
 
 export function normalizeBenchmarkFingerprint(
   value: string | null | undefined,
@@ -7,23 +7,23 @@ export function normalizeBenchmarkFingerprint(
   return normalized ? normalized : null;
 }
 
-export function subjectBenchmarkKey(
-  summary: SubjectSummary | null | undefined,
+export function candidateBenchmarkKey(
+  summary: CandidateSummary | null | undefined,
 ): string | null {
   return normalizeBenchmarkFingerprint(summary?.benchmarkFingerprint);
 }
 
-export function filterSubjectSummariesByBenchmark({
+export function filterCandidateSummariesByBenchmark({
   summaries,
   benchmarkFingerprint,
 }: {
-  summaries: readonly SubjectSummary[];
+  summaries: readonly CandidateSummary[];
   benchmarkFingerprint: string | null | undefined;
-}): SubjectSummary[] {
+}): CandidateSummary[] {
   const benchmarkKey = normalizeBenchmarkFingerprint(benchmarkFingerprint);
   if (!benchmarkKey) {
     return [];
   }
 
-  return summaries.filter((summary) => subjectBenchmarkKey(summary) === benchmarkKey);
+  return summaries.filter((summary) => candidateBenchmarkKey(summary) === benchmarkKey);
 }

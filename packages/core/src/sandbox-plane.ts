@@ -269,7 +269,7 @@ export function createWorkbenchSandboxExecutionMetadata(args: WorkbenchSandboxEx
     },
     capability: {
       ...args.capability,
-      subject: { ...args.capability.subject },
+      candidate: { ...args.capability.candidate },
       inputs: args.capability.inputs.map((input) => ({ ...input })),
       network: { ...args.capability.network },
     },
@@ -351,11 +351,11 @@ export function createWorkbenchExecutionCapability(
   const ttlMs = options.ttlMs ?? Math.max(60_000, execution.policy.resources.timeoutMinutes * 60_000 + 60_000);
   return {
     executionId: execution.id,
-    subject: {
+    candidate: {
       tenantId: execution.policy.tenantId,
       projectId: execution.projectId,
       runId: execution.runId,
-      ...(execution.subjectId ? { subjectId: execution.subjectId } : {}),
+      ...(execution.candidateId ? { candidateId: execution.candidateId } : {}),
     },
     inputs: execution.inputs.map((input) => ({ ...input })),
     outputPrefix: options.outputPrefix ?? `executions/${execution.id}/outputs/`,
@@ -373,14 +373,14 @@ export function collectExecutionCapabilityScopeIssues(
   if (capability.executionId !== execution.id) {
     issues.push(`Capability execution id ${capability.executionId} does not match ${execution.id}.`);
   }
-  if (capability.subject.tenantId !== execution.policy.tenantId) {
+  if (capability.candidate.tenantId !== execution.policy.tenantId) {
     issues.push(`Capability tenant id does not match execution ${execution.id}.`);
   }
-  if (capability.subject.projectId !== execution.projectId || capability.subject.runId !== execution.runId) {
+  if (capability.candidate.projectId !== execution.projectId || capability.candidate.runId !== execution.runId) {
     issues.push(`Capability project/run scope does not match execution ${execution.id}.`);
   }
-  if ((capability.subject.subjectId ?? null) !== (execution.subjectId ?? null)) {
-    issues.push(`Capability subject scope does not match execution ${execution.id}.`);
+  if ((capability.candidate.candidateId ?? null) !== (execution.candidateId ?? null)) {
+    issues.push(`Capability candidate scope does not match execution ${execution.id}.`);
   }
   if (!capability.outputPrefix.startsWith(`executions/${execution.id}/`)) {
     issues.push(`Capability output prefix must be scoped under executions/${execution.id}/.`);

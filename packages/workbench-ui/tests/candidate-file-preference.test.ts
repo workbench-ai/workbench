@@ -1,30 +1,30 @@
 import { describe, expect, test } from "vitest";
 
-import { pickDefaultSubjectFile } from "../src/lib/subject-file-preference";
-import type { SubjectWorkspaceFileSummary } from "../src/types";
+import { pickDefaultCandidateFile } from "../src/lib/candidate-file-preference";
+import type { CandidateWorkspaceFileSummary } from "../src/types";
 
-describe("subject file preference", () => {
+describe("candidate file preference", () => {
   test("prefers the mounted skill file", () => {
-    const files: SubjectWorkspaceFileSummary[] = [
+    const files: CandidateWorkspaceFileSummary[] = [
       createFileSummary("helpers/extract.py"),
       createFileSummary("SKILL.md"),
     ];
 
-    expect(pickDefaultSubjectFile(files, null)).toBe("SKILL.md");
+    expect(pickDefaultCandidateFile(files)).toBe("SKILL.md");
   });
 
   test("falls back to stable mounted file ordering", () => {
-    const files: SubjectWorkspaceFileSummary[] = [
+    const files: CandidateWorkspaceFileSummary[] = [
       createFileSummary("workflow.yaml"),
       createFileSummary("README.md"),
       createFileSummary("scripts/run.py"),
     ];
 
-    expect(pickDefaultSubjectFile(files, null)).toBe("README.md");
+    expect(pickDefaultCandidateFile(files)).toBe("README.md");
   });
 });
 
-function createFileSummary(path: string): SubjectWorkspaceFileSummary {
+function createFileSummary(path: string): CandidateWorkspaceFileSummary {
   return {
     path,
     old_path: null,

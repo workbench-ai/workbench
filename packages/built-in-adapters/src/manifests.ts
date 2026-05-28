@@ -5,8 +5,8 @@ import {
   adapterSlot,
   defineAdapter,
   defineEngineResolver,
-  defineSubject,
-  defineOptimizer,
+  defineCandidate,
+  defineImprover,
   defineEngineRunner,
   workbenchAdapterManifestFromDefinition,
 } from "@workbench-ai/workbench-protocol";
@@ -37,8 +37,8 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
     }),
     codex: defineAdapter({
       id: "codex",
-      subject: defineSubject(),
-      improve: defineOptimizer(),
+      candidate: defineCandidate(),
+      improve: defineImprover(),
       setup: [
         "npm install --global @openai/codex@0.125.0",
       ],
@@ -51,8 +51,8 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
     }),
     claude: defineAdapter({
       id: "claude",
-      subject: defineSubject(),
-      improve: defineOptimizer(),
+      candidate: defineCandidate(),
+      improve: defineImprover(),
       setup: [
         "npm install --global @anthropic-ai/claude-code@2.1.119",
       ],
@@ -84,15 +84,15 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
     }),
     command: defineAdapter({
       id: "command",
-      subject: defineSubject(),
+      candidate: defineCandidate(),
       engineRun: defineEngineRunner(),
-      improve: defineOptimizer(),
+      improve: defineImprover(),
     }),
     rubric: defineAdapter({
       id: "rubric",
       engineRun: defineEngineRunner(),
       slots: {
-        judge: adapterSlot("/judge", "subject.run"),
+        judge: adapterSlot("/judge", "candidate.run"),
       },
     }),
     tests: defineAdapter({
