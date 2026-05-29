@@ -9,20 +9,21 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { rootUsage } from "../src/command-model";
 import { composeRuntimeDockerfileWithAdapters } from "../src/adapter-project";
-import { localBenchmarkFingerprint } from "../src/benchmark-fingerprint";
+import { localBenchmarkFingerprint, projectStateBenchmarkFingerprint } from "../src/benchmark-fingerprint";
 import { startLocalWorkbenchDevServer } from "../src/dev-open-server";
 import { runCli } from "../src/index";
 import { importLocalRuntimeBundle, loadLocalArchive, readLocalJobs, saveLocalArchive, saveLocalJobs, upsertLocalRun } from "../src/local-archive";
 import { readLocalProjectSource } from "../src/project-source";
 import { packageRoot, productRoot } from "./test-paths";
-import type {
-  CandidateRecord,
-  EvaluationScorecard,
-  HostedWorkbenchJob,
-  RunSummary,
-  WorkbenchRuntimeBundle,
-  WorkbenchProjectState,
-  WorkbenchProjectStateImportResult,
+import {
+  engineResolveBindingForSpec,
+  type CandidateRecord,
+  type EvaluationScorecard,
+  type HostedWorkbenchJob,
+  type RunSummary,
+  type WorkbenchRuntimeBundle,
+  type WorkbenchProjectState,
+  type WorkbenchProjectStateImportResult,
 } from "@workbench-ai/workbench-core";
 
 const loopbackAvailable = await canBindLoopback();
@@ -4064,6 +4065,99 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
     const archive = await loadLocalArchive(workspace);
     expect(archive.activeId).toBe(incumbent.id);
+  });
+
+  test("pull dry-run reports the same explicit active normalization that pull applies", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-pull-dry-run-active-"));
+    expect(await runCli(["init", workspace, "--command", "dry-run-active", "--json"], createIo())).toBe(0);
+    const source = await readLocalProjectSource(workspace);
+    await writeFile(
+      path.join(workspace, ".workbench", "origin.json"),
+      JSON.stringify(originFixture(), null, 2),
+    );
+    const state = projectStateFixture({
+      id: "wb_123456789abc",
+      owner: "alice",
+      name: "demo",
+      files: source.sourceFiles,
+    });
+    state.source = {
+      source: source.specSource,
+      files: source.sourceFiles,
+      candidateFiles: source.candidateFiles,
+      engineResolveFiles: source.engineResolveFiles,
+      engineResolveBinding: engineResolveBindingForSpec(source.spec),
+      adapterFiles: source.adapterFiles,
+      dockerfile: source.dockerfile,
+      runtimeDockerfile: source.runtimeDockerfile,
+      runtimeFiles: source.dockerfileFiles,
+      network: source.spec.environment.network?.egress === "open" ? "on" : "off",
+      resources: source.spec.environment.resources ?? {},
+      revisionId: state.source.revisionId,
+      fingerprint: state.source.fingerprint,
+    };
+    const benchmarkFingerprint = projectStateBenchmarkFingerprint(state.source);
+    const incumbent: CandidateRecord = {
+      id: "candidate_incumbent",
+      name: "Skill",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint,
+      candidateFingerprint: "candidate-incumbent",
+      visibility: "public",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+    };
+    const newer: CandidateRecord = {
+      ...incumbent,
+      id: "candidate_newer",
+      version: 2,
+      ordinal: 2,
+      candidateFingerprint: "candidate-newer",
+      createdAt: "2026-05-28T00:01:00.000Z",
+    };
+    state.runtime = {
+      schema: "workbench.runtime.bundle.v1",
+      activeId: null,
+      candidates: [incumbent, newer],
+      candidateFiles: [],
+      evaluations: [],
+      runs: [
+        localRunSummary({
+          id: "run_newer_improve",
+          workflow: "improve",
+          benchmarkFingerprint,
+          candidateId: newer.id,
+          outputCandidateId: newer.id,
+          activeCandidateId: incumbent.id,
+          finishedAt: "2026-05-28T00:02:00.000Z",
+          outcome: "ok",
+        }),
+      ],
+      jobs: [],
+      executionFiles: [],
+      events: [],
+    };
+
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url === "http://workbench.test/api/workbench/public/benchmarks/alice/demo/state") {
+        return Response.json(state);
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    expect(await runCli(["pull", "--dir", workspace, "--dry-run", "--json"], io)).toBe(0);
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      dryRun: true,
+      runtime: {
+        activeId: incumbent.id,
+      },
+    });
   });
 
   test("cloned origins do not track local writable mode when the signed-in user owns the benchmark", async () => {

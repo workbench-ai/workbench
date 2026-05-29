@@ -3,6 +3,7 @@ import {
   workbenchBenchmarkContentFingerprint,
   workbenchCandidateContentFingerprint,
   type SurfaceSnapshotFile,
+  type WorkbenchProjectStateSource,
 } from "@workbench-ai/workbench-core";
 
 import {
@@ -21,6 +22,18 @@ export function localBenchmarkFingerprint(project: LocalProjectSource): string {
     runtimeFiles: project.dockerfileFiles.map(toSurfaceFile),
     resources: project.spec.environment.resources ?? {},
     network: project.spec.environment.network?.egress === "open" ? "on" : "off",
+  });
+}
+
+export function projectStateBenchmarkFingerprint(source: WorkbenchProjectStateSource): string {
+  return workbenchBenchmarkContentFingerprint({
+    sourceYaml: source.source,
+    engineResolveFiles: source.engineResolveFiles,
+    engineResolveBinding: source.engineResolveBinding,
+    adapterFiles: source.adapterFiles,
+    runtimeFiles: source.runtimeFiles,
+    resources: source.resources,
+    network: source.network,
   });
 }
 

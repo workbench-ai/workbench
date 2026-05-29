@@ -41,6 +41,7 @@ import {
   workbenchImproveSelectionPolicy,
   workbenchProjectSourceFingerprint,
   workbenchRuntimeBundleFingerprint,
+  workbenchRuntimeExplicitActiveId,
   type CandidateRecord,
   type EvaluationScorecard,
   type EngineResolveBinding,
@@ -134,6 +135,7 @@ import {
 import {
   localBenchmarkFingerprint,
   localCandidateFingerprint,
+  projectStateBenchmarkFingerprint,
 } from "./benchmark-fingerprint.js";
 
 interface CliIo {
@@ -4410,7 +4412,7 @@ async function cloneProject(
         ref,
         outputDir,
         fileCount: state.source.files.length,
-        runtime: runtimeBundleStats(state.runtime),
+        runtime: projectStateRuntimeStats(state),
         sourceFingerprint: state.source.fingerprint ?? state.base.sourceFingerprint ?? null,
         runtimeFingerprint: state.base.runtimeFingerprint ?? null,
       },
@@ -4468,7 +4470,7 @@ async function pullProject(
         dryRun: true,
         dir,
         fileCount: state.source.files.length,
-        runtime: runtimeBundleStats(state.runtime),
+        runtime: projectStateRuntimeStats(state),
         sourceFingerprint: state.source.fingerprint ?? state.base.sourceFingerprint ?? null,
         runtimeFingerprint: state.base.runtimeFingerprint ?? null,
       },
@@ -5543,6 +5545,19 @@ function localProjectState(args: {
     source: stateSource,
     runtime,
   };
+}
+
+function projectStateRuntimeStats(state: WorkbenchProjectState): WorkbenchRuntimeBundleStats {
+  const activeId = workbenchRuntimeExplicitActiveId({
+    candidates: state.runtime.candidates,
+    runs: state.runtime.runs,
+    preferredActiveId: state.runtime.activeId ?? null,
+    benchmarkFingerprint: projectStateBenchmarkFingerprint(state.source),
+  });
+  return runtimeBundleStats({
+    ...state.runtime,
+    activeId,
+  });
 }
 
 function localCandidateRecord(candidate: CandidateRecord): CandidateRecord {
