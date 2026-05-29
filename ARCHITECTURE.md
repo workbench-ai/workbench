@@ -4,9 +4,9 @@
 
 ## Repository Shape
 
-Workbench is the open, local-first product surface:
+Workbench is the open repo-like project surface:
 
-- `packages/cli`: the published `workbench` command, command registry, local project commands, Workbench Cloud client commands, API client, config handling, output formatting, and CLI tests.
+- `packages/cli`: the published `workbench` command, command registry, project lifecycle commands, Workbench Cloud remote client, API client, config handling, output formatting, and CLI tests.
 - `packages/protocol`: the public adapter protocol. It owns adapter manifests, operation request and result parsing, adapter definition helpers, typed slots, and auth-requirement discovery for `workbench.adapter.v3`. Engine, candidate, and improve adapters use this protocol; individual protocol operations are not public authored primitives.
 - `packages/contract`: serializable DTOs shared by the CLI, Workbench Cloud API, reusable UI, and execution helpers.
 - `packages/core`: the public execution core. It owns split YAML validation, source resolution, benchmark fingerprints, candidate file snapshots, engine execution graph planning, Docker-backed local execution, sandbox capability validation, candidate/evaluation materialization, runs, lineage, file previews, and generic trace DTO helpers.
@@ -20,18 +20,18 @@ Workbench is the open, local-first product surface:
 
 `products/workbench-cloud/packages/cloud-runtime` is intentionally outside this product. It owns hosted worker entrypoints, Firecracker, Daytona, E2B, remote runtime overlays, environment builders, queue workers, and production sandbox-host behavior.
 
-The `packages/cli` package owns the `workbench` binary implementation, command registry, output formatting, and command tests. It is not the documentation or skill ownership boundary. Product docs and skills stay at the Workbench product root so the same source describes the local engine, public adapter protocol, browser UI, and optional Workbench Cloud client commands without making those concepts look CLI-owned.
+The `packages/cli` package owns the `workbench` binary implementation, command registry, output formatting, and command tests. It is not the documentation or skill ownership boundary. Product docs and skills stay at the Workbench product root so the same source describes the engine, public adapter protocol, browser UI, and optional Workbench Cloud remote behavior without making those concepts look CLI-owned.
 
 ## Ownership Boundaries
 
-- The CLI owns local project lifecycle commands and the open Cloud client surface: `login`, `clone`, `fetch`, `pull`, `push`, and `workbench cloud ...`.
+- The CLI owns project lifecycle commands and the open Cloud remote surface: `login`, `clone`, `pull`, `push`, and hosted execution through `eval --hosted`, `improve --hosted`, `retry --hosted`, and `open --hosted`.
 - The protocol package owns the stable adapter contract. Engine, candidate, and improve adapter authors should not need to import Web or cloud-runtime code.
 - The core package owns portable Workbench semantics and local Docker execution. Its authored source model is benchmark engine plus candidate manifests. It must not depend on Next.js, AWS SDKs, Stripe, Cognito, Daytona, E2B, Firecracker implementation code, Terraform, or hosted worker entrypoints.
 - The CLI ships a default adapter catalog as ordinary adapter manifests. Core can execute adapters, but it does not special-case default adapter ids. A project-declared adapter source with the same id as a default adapter intentionally overrides that default for the project; wrapping is implemented by that replacement adapter delegating however it chooses.
 - Workbench Cloud owns hosted persistence, billing, auth, Web routes, production infrastructure, queue workers, remote provider admission, and hosted sandbox providers.
 - Shared UI stays presentation-only. It renders benchmark, candidate, run, evaluation, lineage, file, and trace DTOs without owning execution rules.
 
-This is a git/GitHub-style split: `workbench` is the open client and local engine; Workbench Cloud is an optional hosted service implemented by cloud-owned private packages.
+This is a git/GitHub-style split: `workbench` is the open client and engine; Workbench Cloud is an optional hosted remote service implemented by cloud-owned private packages.
 
 ## Public Source Repository
 
@@ -69,10 +69,9 @@ Local execution uses the public Docker sandbox backend in `packages/core/src/san
 Local project state lives under `.workbench/` inside the project:
 
 - `.workbench/runtime` stores local runs, candidates, evaluations, traces, and file snapshots.
-- `.workbench/origin.json` stores the configured Workbench Cloud origin.
-- `.workbench/fetch` stores downloaded remote source before `pull` updates managed files.
+- `.workbench/origin.json` stores only `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt` for `clone`, `pull`, `push`, and hosted execution.
 
-Workbench Cloud stores hosted state separately. Production storage, queueing, billing, and sandbox-host state are not part of the public Workbench package boundary.
+`clone`, `pull`, and `push` exchange one project-state envelope: authored source plus portable runtime history. Watched or reused terminal hosted lifecycle commands import that same envelope back into a linked checkout when local source still matches the remembered base. Authored source is guarded by the last exchanged revision/fingerprint; runtime records are durable immutable facts that merge by id and reject same-id different-content conflicts. Workbench Cloud also stores owner/profile, visibility, billing, queue leases, provider capacity, and sandbox-host state; those cloud-only fields are not copied into local project state or between projects.
 
 ## Invariants
 

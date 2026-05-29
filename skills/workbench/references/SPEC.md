@@ -1,6 +1,6 @@
 # Workbench Spec
 
-Workbench is a local-first benchmark workbench built on `version: 4` benchmark/candidate source and two public authored primitives:
+Workbench is a repo-like benchmark workbench built on `version: 4` benchmark/candidate source and two public authored primitives:
 
 - Engine: the benchmark runtime and measurement contract. An engine owns tasks, environments, scoring, verifier visibility, and result normalization for its benchmark style.
 - Candidate: the thing being evaluated or improved. A candidate can be files, a command wrapper, or agent/model configuration.
@@ -74,6 +74,12 @@ improve:
   use: codex
   with:
     model: gpt-5.4-mini
+  optimizeOn:
+    split: train
+  selectBy:
+    metric: score
+    cases:
+      split: validation
 ```
 
 `tasks/<case>/task.yaml` for the built-in `workbench` engine:
@@ -81,6 +87,7 @@ improve:
 ```yaml
 version: 3
 task: Write the answer to answer.txt.
+split: train
 files:
   path: files
 tests:
@@ -88,6 +95,8 @@ tests:
 solution:
   path: solution
 ```
+
+`split` is optional case metadata. Workbench does not assign meaning to split names. Candidate `improve.optimizeOn` can explicitly choose which cases provide optimizer evidence, and `improve.selectBy` can explicitly choose the metric and cases used to select the active candidate. If `selectBy` is present, `metric` is required. Omitted policy preserves the default behavior: optimize on all cases and select by all-case `score`. There are no named case-set files or separate optimizer manifests.
 
 Explicit Harbor engine adapter:
 
@@ -127,16 +136,30 @@ Verifier files are not present during candidate prepare or in the candidate adap
 workbench init [DIR] --command NAME
 workbench check [SOURCE] [--dir DIR] [--json]
 workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--json]
+workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
 workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]
+workbench improve --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
 workbench retry TARGET_ID [--dir DIR] [--json]
+workbench retry --hosted TARGET_ID [--dir DIR] [--benchmark OWNER/BENCHMARK] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
 workbench candidates list|show|files|preview ...
 workbench traces collect|list [--providers codex,claude] [--since 30d] [--workspace DIR] [--limit N] [--json]
 workbench traces show TRACE_ID [--providers codex,claude] [--since 30d] [--workspace DIR] [--json]
 workbench open [SOURCE] [--dir DIR] [--run RUN_ID] [--host HOST] [--port N] [--no-open] [--json]
-workbench cloud retry TARGET_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
+workbench open --hosted [OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--no-open] [--json]
+workbench clone OWNER/BENCHMARK [DIR] [--dry-run] [--json]
+workbench pull [--dir DIR] [--dry-run] [--json]
+workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--json]
 ```
 
+`clone`, `pull`, and `push` exchange one project-state envelope. Source files are the authored benchmark and candidate tree. Runtime history is the durable set of candidates, evaluations, runs, jobs, events, candidate files, execution files, and the active candidate pointer. Source changes are guarded by the last exchanged revision/fingerprint; local pull refuses to overwrite changed local source, hosted push refuses to overwrite changed hosted source, and runtime history merges idempotently as immutable facts.
+
+`.workbench/origin.json` is an exact remote pointer and base record: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`.
+
+Hosted benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so `OWNER/BENCHMARK` is the only public benchmark reference shape.
+
 `workbench eval` and `workbench improve` reuse completed work only when the candidate, run configuration, source, adapters, benchmark, and requested samples/budget match; `--rerun` is the explicit duplicate-spend escape hatch. Runtime candidates are automatically versioned display snapshots such as `Skill v1`, `Skill v2`, and `Skill v3`; authored YAML owns the candidate family and run configurations, not version labels.
+
+When watched or reused hosted lifecycle work reaches a terminal state from a checkout linked to the same remote project, the CLI imports the hosted project-state envelope back into local under the same local-source guard used by `pull`. Explicit `--benchmark` targets for a different project do not mutate the current checkout.
 
 Once an active candidate exists, eval records scores without moving that active pointer. Improve output uses `outputCandidateId` for the produced version and `activeCandidateId` for the current best evaluated candidate after scoring. They can differ when a newer version scores below the incumbent.
 

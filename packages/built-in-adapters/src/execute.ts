@@ -690,11 +690,14 @@ async function readWorkbenchEngineCase(args: {
     throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} must include a task string.`);
   }
   const unsupportedTaskFields = Object.keys(taskRecord)
-    .filter((key) => !["version", "task", "files", "tests", "solution", "environment"].includes(key));
+    .filter((key) => !["version", "task", "split", "files", "tests", "solution", "environment"].includes(key));
   if (unsupportedTaskFields.length > 0) {
     throw new Error(
       `Task ${args.id} ${TASK_CONTROL_FILE} has unsupported field${unsupportedTaskFields.length === 1 ? "" : "s"}: ${unsupportedTaskFields.join(", ")}.`,
     );
+  }
+  if (taskRecord.split !== undefined && (typeof taskRecord.split !== "string" || taskRecord.split.trim().length === 0)) {
+    throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} split must be a non-empty string when provided.`);
   }
   const publicPrefix = taskDirectoryPrefix(taskRecord.files, "files", args.id);
   const testsPrefix = taskDirectoryPrefix(taskRecord.tests, "tests", args.id);
@@ -715,6 +718,7 @@ async function readWorkbenchEngineCase(args: {
     case: {
       version: 3,
       prompt: taskRecord.task,
+      ...(typeof taskRecord.split === "string" ? { split: taskRecord.split.trim() } : {}),
       ...(taskRecord.environment !== undefined
         ? { environment: taskRecord.environment as WorkbenchEngineCase["case"]["environment"] }
         : {}),

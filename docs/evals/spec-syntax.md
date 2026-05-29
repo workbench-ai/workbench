@@ -62,12 +62,19 @@ improve:
   use: codex
   with:
     model: gpt-5.4-mini
+  optimizeOn:
+    split: train
+  selectBy:
+    metric: score
+    cases:
+      split: validation
 ```
 
 ```yaml
 # tasks/smoke/task.yaml
 version: 3
 task: Create a concise report at report.md.
+split: train
 files:
   path: files
 tests:
@@ -107,10 +114,11 @@ All authored paths are portable literals. They must not be absolute, empty, `.`/
 - Candidate files from `files.path`, normally `files` next to `candidate.yaml`, are staged at `/workspace/input/candidate` for attempts. Core does not copy them into `/workspace` for attempts; use `prepare.command` for mutable working-copy setup. Improve jobs start with candidate files directly in `/workspace`.
 - Engine `with` paths, adapter sources, candidate `files.path`, task `files.path`, task `tests.path`, task `solution.path`, and `engine.with.environment.dockerfile` are relative to the YAML file that declares them.
 - `candidate.improve.edits[]` entries are resolved inside the candidate `files/` directory; edit `SKILL.md`, not `candidates/<name>/files/SKILL.md`.
+- `candidate.improve.optimizeOn` and `candidate.improve.selectBy` are optional. `optimizeOn` filters the cases used as optimizer evidence, and `selectBy` chooses the metric and cases used to select the active candidate. If `selectBy` is present, `metric` is required. Omit both for the existing all-case `score` behavior. Selectors are only `all: true` or `split: <label>`; there are no named case sets or optimizer files.
 
 ## Tasks
 
-For the built-in `workbench` engine, each native task case contains a root `task.yaml`, optional public `files/`, optional verifier-only `tests/`, optional oracle-only `solution/`, and optional task `environment`.
+For the built-in `workbench` engine, each native task case contains a root `task.yaml`, optional public `files/`, optional verifier-only `tests/`, optional oracle-only `solution/`, optional `split` metadata, and optional task `environment`.
 
 `task.yaml` is control-plane task text for native Workbench source and is not staged as a source file. The built-in `workbench` engine owns native task parsing and turns the directory into its internal task records.
 

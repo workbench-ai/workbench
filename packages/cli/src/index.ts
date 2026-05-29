@@ -14,7 +14,11 @@ import {
   evaluationMeanMetrics,
   executeWorkbenchExecutionJob,
   engineResolveBindingForSpec,
+  filterOptimizerTraceJobsForCaseIds,
   filterCandidateSourceFiles,
+  formatWorkbenchCaseSelector,
+  formatWorkbenchSelectionPolicy,
+  workbenchCaseSelectorUsesAllCases,
   workbenchExecutionPurpose,
   workbenchRunExecutionFingerprint,
   createWorkbenchAdapterAuthBundle,
@@ -31,6 +35,12 @@ import {
   validateWorkbenchRunEnvelope,
   validateWorkbenchResolvedSourceYaml,
   parseWorkbenchAdapterAuthTarget,
+  workbenchEngineCaseIdsForImproveEvaluation,
+  workbenchEngineCaseIdsForSelector,
+  workbenchImproveOptimizeSelector,
+  workbenchImproveSelectionPolicy,
+  workbenchProjectSourceFingerprint,
+  workbenchRuntimeBundleFingerprint,
   type CandidateRecord,
   type EvaluationScorecard,
   type EngineResolveBinding,
@@ -40,6 +50,11 @@ import {
   type RunSummary,
   type RuntimeEvent,
   type SurfaceSnapshotFile,
+  type WorkbenchRuntimeBundle,
+  type WorkbenchRuntimeBundleStats,
+  type WorkbenchProjectState,
+  type WorkbenchProjectStateImportResult,
+  type WorkbenchProjectStateSource,
   type WorkbenchEngineCase,
   type WorkbenchExecutionDagCapacity,
   type WorkbenchAdapterAuthBundle,
@@ -93,6 +108,9 @@ import { createAdapterCommandEnv } from "./adapter-command-env.js";
 import {
   loadLocalArchive,
   loadLocalArchiveIndex,
+  exportLocalRuntimeBundle,
+  importLocalRuntimeBundle,
+  runtimeBundleStats,
   materializeCandidateRoot,
   readLocalCandidate,
   readLocalCandidateFiles,
@@ -137,19 +155,18 @@ interface WorkbenchConfig {
 
 interface WorkbenchOrigin {
   baseUrl: string;
-  owner: string;
-  project: string;
+  remote: string;
   projectId: string;
-  writable: boolean;
-  sourceRevisionId?: string;
-  sourceFingerprint?: string;
-  upstream?: {
-    owner: string;
-    project: string;
-    projectId: string;
-    sourceRevisionId: string;
-  };
+  sourceRevisionId: string;
+  sourceFingerprint: string;
+  runtimeFingerprint: string;
   linkedAt: string;
+}
+
+interface LocalProjectStateApplyResult {
+  origin: WorkbenchOrigin;
+  files: number;
+  runtime: WorkbenchRuntimeBundleStats;
 }
 
 interface CliRuntimeOptions {}
@@ -275,11 +292,6 @@ interface WorkbenchAdapterSourceSummary {
 
 type HostedFile = WorkspaceSnapshotFile;
 
-interface HostedSourceResponse {
-  files: HostedFile[];
-  benchmark?: HostedProjectSummary;
-}
-
 interface HostedRunRecord {
   id: string;
   status: string;
@@ -372,32 +384,38 @@ export async function runCli(
     if (argv[0] === "clone") {
       return await cloneProject(argv.slice(1), io);
     }
-    if (argv[0] === "fetch") {
-      return await fetchProject(argv.slice(1), io);
-    }
     if (argv[0] === "pull") {
       return await pullProject(argv.slice(1), io);
     }
     if (argv[0] === "push") {
       return await pushBenchmark(argv.slice(1), io);
     }
-    if (argv[0] === "remote") {
-      return await runRemoteCommand(argv.slice(1), io);
-    }
     if (argv[0] === "eval") {
-      return await localEvaluateCandidate(argv.slice(1), io, runtimeOptions);
+      const hosted = extractHostedFlag(argv.slice(1));
+      return hosted.enabled
+        ? await startHostedWorkflow("eval", hosted.argv, io)
+        : await localEvaluateCandidate(hosted.argv, io, runtimeOptions);
     }
     if (argv[0] === "retry") {
-      return await localRetry(argv.slice(1), io, runtimeOptions);
+      const hosted = extractHostedFlag(argv.slice(1));
+      return hosted.enabled
+        ? await retryHostedWorkflow(hosted.argv, io)
+        : await localRetry(hosted.argv, io, runtimeOptions);
     }
     if (argv[0] === "improve") {
-      return await localRun(argv.slice(1), io, runtimeOptions);
+      const hosted = extractHostedFlag(argv.slice(1));
+      return hosted.enabled
+        ? await startHostedWorkflow("improve", hosted.argv, io)
+        : await localRun(hosted.argv, io, runtimeOptions);
     }
     if (argv[0] === "restore") {
       return await localRestore(argv.slice(1), io);
     }
     if (argv[0] === "open") {
-      return await localDevOpen(argv.slice(1), io);
+      const hosted = extractHostedFlag(argv.slice(1));
+      return hosted.enabled
+        ? await openWorkbench(hosted.argv, io)
+        : await localDevOpen(hosted.argv, io);
     }
     if (argv[0] === "auth") {
       return await runAuthCommand(argv.slice(1), io);
@@ -408,10 +426,6 @@ export async function runCli(
     if (argv[0] === "traces") {
       return await runTracesCommand(argv.slice(1), io);
     }
-    if (argv[0] === "cloud") {
-      return await runCloudCommand(argv.slice(1), io);
-    }
-
     const commandPath = argv.slice(0, 2).join(" ");
     const rest = argv.slice(2);
     switch (commandPath) {
@@ -451,9 +465,6 @@ function commandPathForHelp(argv: readonly string[]): string {
   const positionals = argv.filter(
     (arg) => arg !== "--help" && arg !== "-h" && !arg.startsWith("--"),
   );
-  if (positionals[0] === "cloud") {
-    return positionals.slice(0, 3).join(" ");
-  }
   if (
     positionals[0] === "adapters" &&
     ["create", "list", "inspect", "test"].includes(positionals[1] ?? "")
@@ -466,7 +477,7 @@ function commandPathForHelp(argv: readonly string[]): string {
   ) {
     return positionals.slice(0, 2).join(" ");
   }
-  if (positionals[0] === "auth" || positionals[0] === "remote") {
+  if (positionals[0] === "auth") {
     return positionals.slice(0, 2).join(" ");
   }
   if (
@@ -484,69 +495,20 @@ function commandPathForHelp(argv: readonly string[]): string {
   return positionals[0] ?? "";
 }
 
-async function runCloudCommand(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const command = argv[0];
-  const rest = argv.slice(1);
-  switch (command) {
-    case "eval":
-      return await startHostedWorkflow("eval", rest, io);
-    case "retry":
-      return await retryHostedWorkflow(rest, io);
-    case "improve":
-      return await startHostedWorkflow("improve", rest, io);
-    case "open":
-      return await openWorkbench(rest, io);
-    case "watch":
-      return await runWatch(rest, io);
-    case "logs":
-      return await runLogs(rest, io);
-    case "star":
-      return await starProject(rest, io, true);
-    case "unstar":
-      return await starProject(rest, io, false);
-    default:
-      break;
+function extractHostedFlag(argv: readonly string[]): {
+  enabled: boolean;
+  argv: string[];
+} {
+  let enabled = false;
+  const next: string[] = [];
+  for (const arg of argv) {
+    if (arg === "--hosted") {
+      enabled = true;
+    } else {
+      next.push(arg);
+    }
   }
-
-  const commandPath = argv.slice(0, 2).join(" ");
-  const subRest = argv.slice(2);
-  switch (commandPath) {
-    case "benchmarks list":
-      return await benchmarkList(subRest, io);
-    case "benchmarks show":
-      return await benchmarkShow(subRest, io);
-    case "benchmarks versions":
-      return await benchmarkVersions(subRest, io);
-    case "benchmarks starred":
-      return await benchmarkStarred(subRest, io);
-    case "benchmarks delete":
-      return await benchmarkDelete(subRest, io);
-    case "runs list":
-      return await runList(subRest, io);
-    case "runs show":
-      return await runShow(subRest, io);
-    case "runs cancel":
-      return await runCancel(subRest, io);
-    case "candidates list":
-      return await candidateList(subRest, io);
-    case "candidates show":
-      return await candidateShow(subRest, io);
-    case "candidates files":
-      return await candidateFiles(subRest, io);
-    case "candidates preview":
-      return await candidatePreview(subRest, io);
-    case "candidates pull":
-      return await candidateExport(subRest, io);
-    case "candidates publish":
-      return await candidateVisibility(subRest, io, "public");
-    case "candidates unpublish":
-      return await candidateVisibility(subRest, io, "private");
-    default:
-      throw new UsageError(`Unknown command: cloud ${argv.join(" ")}`);
-  }
+  return { enabled, argv: next };
 }
 
 async function localDevOpen(
@@ -1162,12 +1124,28 @@ async function localRun(
   if (caseIds.length === 0) {
     throw new UsageError("Engine resolver must emit at least one case.");
   }
+  const optimizeSelector = workbenchImproveOptimizeSelector(spec);
+  const selectionPolicy = workbenchImproveSelectionPolicy(spec);
+  const optimizeCaseIds = workbenchEngineCaseIdsForSelector(engineCases, optimizeSelector);
+  if (optimizeCaseIds.length === 0) {
+    throw new UsageError(`Improve optimizeOn selector matched no cases: ${formatWorkbenchCaseSelector(optimizeSelector)}.`);
+  }
+  const selectionCaseIds = workbenchEngineCaseIdsForSelector(engineCases, selectionPolicy.selector);
+  if (selectionCaseIds.length === 0) {
+    throw new UsageError(`Improve selectBy selector matched no cases: ${formatWorkbenchCaseSelector(selectionPolicy.selector)}.`);
+  }
+  const selectionScoreCaseIds = workbenchCaseSelectorUsesAllCases(selectionPolicy.selector)
+    ? undefined
+    : selectionCaseIds;
+  const evaluationCaseIds = workbenchEngineCaseIdsForImproveEvaluation({ spec, engineCases });
   requireValidRunEnvelope({
     workflow: "improve",
     budget,
     samples,
-    caseCount: caseIds.length,
+    caseCount: evaluationCaseIds.length,
   });
+  const optimizeOnLabel = formatWorkbenchCaseSelector(optimizeSelector);
+  const selectByLabel = formatWorkbenchSelectionPolicy(selectionPolicy);
   const environmentRefs = await ensureLocalDockerfileEnvironments(
     workspace,
     spec,
@@ -1238,7 +1216,7 @@ async function localRun(
   const events: RuntimeEvent[] = [
     createLocalEvent("run_started", startedAt, {
       runId,
-      detail: { budget, samples, strategy: "greedy" },
+      detail: { budget, samples, strategy: "greedy", optimizeOn: optimizeOnLabel, selectBy: selectByLabel },
     }),
   ];
   const runningRun: RunSummary = {
@@ -1253,6 +1231,8 @@ async function localRun(
     improver: formatSpecImprover(spec),
     engineRun: spec.engineRun.use,
     strategy: "greedy",
+    optimizeOn: optimizeOnLabel,
+    selectBy: selectByLabel,
     budget,
     repairBudget: 0,
     attemptsRequested: budget,
@@ -1290,7 +1270,10 @@ async function localRun(
       );
     }
     const candidateRevisionTraceFiles = createOptimizerTraceInputFiles({
-      jobs: [...baselineTraceJobs, ...runTraceJobs],
+      jobs: filterOptimizerTraceJobsForCaseIds(
+        [...baselineTraceJobs, ...runTraceJobs],
+        optimizeCaseIds,
+      ),
     });
     const candidateId = `candidate_${runId.replace(/^run_/u, "")}_${String(attemptIndex + 1).padStart(3, "0")}`;
     const plannedCandidateRevision = planWorkbenchExecutionJobsForPurpose({
@@ -1300,7 +1283,7 @@ async function localRun(
       candidateId,
       attemptIndex,
       samples,
-      caseIds,
+      caseIds: optimizeCaseIds,
       engineCases,
       spec,
       workflow: "improve",
@@ -1341,7 +1324,7 @@ async function localRun(
         attemptIndex,
         samples,
         now: new Date().toISOString(),
-        caseIds,
+        caseIds: evaluationCaseIds,
         engineCases,
         spec,
         environmentRefsByCase: environmentRefs.byCase,
@@ -1371,6 +1354,11 @@ async function localRun(
       jobs: completedJobs,
       previousCandidate: activeCandidate,
       existingCandidateCount: snapshot.candidates.length,
+      selection: {
+        metric: selectionPolicy.metric,
+        ...(selectionScoreCaseIds ? { caseIds: selectionScoreCaseIds } : {}),
+        label: selectByLabel,
+      },
     });
     for (const candidate of materialized.candidates) {
       outputCandidateId = candidate.id;
@@ -1434,6 +1422,8 @@ async function localRun(
     improver: formatSpecImprover(spec),
     engineRun: spec.engineRun.use,
     strategy: "greedy",
+    optimizeOn: optimizeOnLabel,
+    selectBy: selectByLabel,
     budget,
     repairBudget: 0,
     attemptsRequested: budget,
@@ -4183,13 +4173,21 @@ async function pushBenchmark(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "tag", "visibility", "dry-run", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "visibility", "dry-run", "json"]));
   const dir = resolveSourceDir(parsed);
   const source = await readLocalProjectSource(dir);
   const origin = await readWorkbenchOrigin(dir);
   const baseUrl = await effectiveBaseUrl(origin?.baseUrl);
-  const visibility = readBenchmarkVisibility(parsed.flags.visibility);
+  const visibility = readOptionalBenchmarkVisibility(parsed.flags.visibility);
+  const createVisibility = visibility ?? "public";
   const dryRun = parsed.flags["dry-run"] === true;
+  const runtime = await exportLocalRuntimeBundle(dir);
+  const state = localProjectState({
+    source,
+    runtime,
+    origin,
+    visibility: createVisibility,
+  });
   if (!origin) {
     if (dryRun) {
       writeOutput(
@@ -4200,9 +4198,11 @@ async function pushBenchmark(
           dir,
           baseUrl,
           benchmarkName: source.spec.name,
-          tag: asOptionalString(parsed.flags.tag) ?? null,
-          visibility,
+          visibility: createVisibility,
           sourceFileCount: sourceFileCount(source),
+          runtime: runtimeBundleStats(runtime),
+          sourceFingerprint: state.source.fingerprint,
+          runtimeFingerprint: state.base.runtimeFingerprint,
         },
         parsed,
         io,
@@ -4210,25 +4210,24 @@ async function pushBenchmark(
       );
       return 0;
     }
-    const { project, publishedProject, origin: nextOrigin } = await createHostedBenchmarkFromSource({
+    const { project, origin: nextOrigin, result } = await createHostedBenchmarkFromState({
       baseUrl,
       dir,
-      source,
-      visibility,
+      state,
     });
     writeOutput(
       {
         ok: true,
         action: "create",
-        benchmark: publishedProject,
-        tag: asOptionalString(parsed.flags.tag) ?? null,
-        visibility,
+        benchmark: project,
+        visibility: project.visibility ?? createVisibility,
         origin: nextOrigin,
+        source: result.source,
+        runtime: result.runtime.stats,
         urls: buildWorkbenchResourceUrls({
           baseUrl,
-          projectId: publishedProject.id ?? project.id!,
-          owner: nextOrigin.owner,
-          projectName: nextOrigin.project,
+          projectId: project.id,
+          ...originRemoteUrlParts(nextOrigin),
         }),
       },
       parsed,
@@ -4236,7 +4235,7 @@ async function pushBenchmark(
       (record) => {
         const value = record as { origin: WorkbenchOrigin; urls: WorkbenchResourceUrls };
         return [
-          `Pushed ${value.origin.owner}/${value.origin.project} (${value.origin.projectId}).`,
+          `Pushed ${value.origin.remote} (${value.origin.projectId}).`,
           `Open benchmark: ${value.urls.benchmark}`,
         ].join("\n");
       },
@@ -4248,71 +4247,6 @@ async function pushBenchmark(
   if (!projectId) {
     throw new UsageError("Missing hosted benchmark. Run workbench push from a source directory.");
   }
-  if (!origin.writable) {
-    const signedInUsername = dryRun ? null : await readAuthenticatedWorkbenchUsername(baseUrl);
-    if (signedInUsername !== origin.owner) {
-      const upstream = upstreamFromOrigin(origin);
-      if (dryRun) {
-        writeOutput(
-          {
-            ok: true,
-            dryRun: true,
-            action: "create",
-            dir,
-            baseUrl,
-            benchmarkName: source.spec.name,
-            tag: asOptionalString(parsed.flags.tag) ?? null,
-            visibility,
-            sourceFileCount: sourceFileCount(source),
-            upstream: upstream ?? null,
-          },
-          parsed,
-          io,
-          () => `Would create a writable benchmark from read-only origin ${origin.owner}/${origin.project}.`,
-        );
-        return 0;
-      }
-      const { project, publishedProject, origin: nextOrigin } = await createHostedBenchmarkFromSource({
-        baseUrl,
-        dir,
-        source,
-        visibility,
-        upstream,
-      });
-      writeOutput(
-        {
-          ok: true,
-          action: "create",
-          benchmark: publishedProject,
-          tag: asOptionalString(parsed.flags.tag) ?? null,
-          visibility,
-          origin: nextOrigin,
-          upstream: upstream ?? null,
-          urls: buildWorkbenchResourceUrls({
-            baseUrl,
-            projectId: publishedProject.id ?? project.id!,
-            owner: nextOrigin.owner,
-            projectName: nextOrigin.project,
-          }),
-        },
-        parsed,
-        io,
-        (record) => {
-          const value = record as {
-            origin: WorkbenchOrigin;
-            urls: WorkbenchResourceUrls;
-            upstream?: WorkbenchOrigin["upstream"] | null;
-          };
-          return [
-            `Pushed ${value.origin.owner}/${value.origin.project} (${value.origin.projectId}).`,
-            ...(value.upstream ? [`Upstream: ${value.upstream.owner}/${value.upstream.project}`] : []),
-            `Open benchmark: ${value.urls.benchmark}`,
-          ].join("\n");
-        },
-      );
-      return 0;
-    }
-  }
   if (dryRun) {
     writeOutput(
       {
@@ -4322,51 +4256,40 @@ async function pushBenchmark(
         dir,
         baseUrl,
         benchmarkId: projectId,
-        tag: asOptionalString(parsed.flags.tag) ?? null,
-        visibility,
+        remote: origin.remote,
+        benchmarkName: source.spec.name,
+        visibility: visibility ?? "unchanged",
         sourceFileCount: sourceFileCount(source),
+        runtime: runtimeBundleStats(runtime),
+        sourceFingerprint: state.source.fingerprint,
+        runtimeFingerprint: state.base.runtimeFingerprint,
       },
       parsed,
       io,
-      () => `Would push ${sourceFileCount(source)} source file(s) to ${projectId}.`,
+      () => `Would push ${sourceFileCount(source)} source file(s) and runtime history to ${origin.remote}.`,
     );
     return 0;
   }
-  const response = await apiRequest<{
-    changed?: boolean;
-    sourceFingerprint?: string;
-    benchmark: HostedProjectSummary & {
-      id: string;
-      name: string;
-      ownerUsername?: string;
-      sourceFingerprint?: string;
-      currentSpecVersionId?: string;
-    };
-  }>(
-    projectApiPath(projectId, "/source"),
+  const response = await apiRequest<WorkbenchProjectStateImportResult>(
+    projectApiPath(projectId, "/state"),
     {
       method: "PUT",
-      body: hostedProjectSourceRequest(source),
+      body: state,
     },
     baseUrl,
   );
-  const publishedProject =
-    visibility === "public"
-      ? (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
-          projectApiPath(response.benchmark.id, "/publish"),
-          { method: "PUT" },
-          baseUrl,
-        )).benchmark
-      : response.benchmark;
-  const nextOrigin = await writeWorkbenchOrigin(dir, {
+  const responseProject = hostedProjectSummaryFromState(response.state);
+  const publishedProject = await applyRequestedProjectVisibility({
     baseUrl,
-    owner: publishedProject.ownerUsername ?? response.benchmark.ownerUsername ?? origin.owner,
-    project: publishedProject.name ?? response.benchmark.name ?? origin.project ?? source.spec.name,
-    projectId: publishedProject.id ?? response.benchmark.id,
-    writable: true,
-    sourceRevisionId: publishedProject.currentSpecVersionId ?? response.benchmark.currentSpecVersionId,
-    sourceFingerprint: response.sourceFingerprint ?? publishedProject.sourceFingerprint ?? response.benchmark.sourceFingerprint,
-    upstream: origin.upstream,
+    projectId: responseProject.id,
+    responseProject,
+    visibility,
+  });
+  const nextOrigin = await writeWorkbenchOriginFromState(dir, {
+    baseUrl,
+    state: response.state,
+    project: publishedProject,
+    sourceFingerprint: state.source.fingerprint,
   });
   writeOutput(
     {
@@ -4374,14 +4297,14 @@ async function pushBenchmark(
       action: "update",
       changed: response.changed === true,
       benchmark: publishedProject,
-      tag: asOptionalString(parsed.flags.tag) ?? null,
-      visibility,
+      visibility: visibility ?? "unchanged",
       origin: nextOrigin,
+      source: response.source,
+      runtime: response.runtime.stats,
       urls: buildWorkbenchResourceUrls({
         baseUrl,
-        projectId: publishedProject.id ?? response.benchmark.id,
-        owner: nextOrigin.owner,
-        projectName: nextOrigin.project,
+        projectId: publishedProject.id ?? responseProject.id,
+        ...originRemoteUrlParts(nextOrigin),
       }),
     },
     parsed,
@@ -4389,7 +4312,7 @@ async function pushBenchmark(
     (record) => {
       const value = record as { changed: boolean; origin: WorkbenchOrigin; urls: WorkbenchResourceUrls };
       return [
-        `${value.changed ? "Pushed" : "Already up to date"} ${value.origin.owner}/${value.origin.project} (${value.origin.projectId}).`,
+        `${value.changed ? "Pushed" : "Already up to date"} ${value.origin.remote} (${value.origin.projectId}).`,
         `Open benchmark: ${value.urls.benchmark}`,
       ].join("\n");
     },
@@ -4397,72 +4320,67 @@ async function pushBenchmark(
   return 0;
 }
 
-async function createHostedBenchmarkFromSource(args: {
+async function createHostedBenchmarkFromState(args: {
   baseUrl: string;
   dir: string;
-  source: LocalProjectSource;
-  visibility: "private" | "public";
-  upstream?: WorkbenchOrigin["upstream"];
+  state: WorkbenchProjectState;
 }): Promise<{
-  project: HostedProjectSummary;
-  publishedProject: HostedProjectSummary;
+  project: HostedProjectSummary & { id: string; name: string; ownerUsername?: string };
   origin: WorkbenchOrigin;
+  result: WorkbenchProjectStateImportResult;
 }> {
-  const response = await apiRequest<{ benchmark: HostedProjectSummary & {
-    ownerUsername?: string;
-    sourceFingerprint?: string;
-    currentSpecVersionId?: string;
-  } }>(
-    "/api/workbench/benchmarks",
+  const result = await apiRequest<WorkbenchProjectStateImportResult>(
+    "/api/workbench/benchmarks/state",
     {
       method: "POST",
-      body: hostedProjectSourceRequest(args.source),
+      body: args.state,
     },
     args.baseUrl,
   );
-  const project = response.benchmark;
-  const publishedProject =
-    args.visibility === "public"
-      ? (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
-          projectApiPath(project.id!, "/publish"),
-          { method: "PUT" },
-          args.baseUrl,
-        )).benchmark
-      : project;
-  const origin = await writeWorkbenchOrigin(args.dir, {
+  const project = hostedProjectSummaryFromState(result.state);
+  const origin = await writeWorkbenchOriginFromState(args.dir, {
     baseUrl: args.baseUrl,
-    owner: publishedProject.ownerUsername ?? project.ownerUsername ?? "",
-    project: publishedProject.name ?? project.name ?? args.source.spec.name,
-    projectId: publishedProject.id ?? project.id!,
-    writable: true,
-    sourceRevisionId: publishedProject.currentSpecVersionId ?? project.currentSpecVersionId,
-    sourceFingerprint: publishedProject.sourceFingerprint ?? project.sourceFingerprint,
-    ...(args.upstream ? { upstream: args.upstream } : {}),
+    state: result.state,
+    project,
+    sourceFingerprint: args.state.source.fingerprint,
   });
-  return { project, publishedProject, origin };
+  return { project, origin, result };
 }
 
-async function readAuthenticatedWorkbenchUsername(baseUrl: string): Promise<string | null> {
-  const config = await loadConfig();
-  const status = await readWorkbenchProfileStatus({ ...config, baseUrl });
-  return status.authenticated ? status.profile?.username ?? null : null;
-}
-
-function upstreamFromOrigin(origin: WorkbenchOrigin): WorkbenchOrigin["upstream"] | undefined {
-  if (!origin.owner || !origin.project || !origin.projectId || !origin.sourceRevisionId) {
-    return undefined;
-  }
-  return {
-    owner: origin.owner,
-    project: origin.project,
-    projectId: origin.projectId,
-    sourceRevisionId: origin.sourceRevisionId,
+async function applyRequestedProjectVisibility(args: {
+  baseUrl: string;
+  projectId: string;
+  responseProject: HostedProjectSummary & {
+    ownerUsername?: string;
+    sourceFingerprint?: string;
+    currentSpecVersionId?: string;
   };
+  visibility?: "private" | "public";
+}): Promise<HostedProjectSummary & {
+  ownerUsername?: string;
+  sourceFingerprint?: string;
+  currentSpecVersionId?: string;
+}> {
+  if (args.visibility === "public") {
+    return (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
+      projectApiPath(args.projectId, "/publish"),
+      { method: "PUT" },
+      args.baseUrl,
+    )).benchmark;
+  }
+  if (args.visibility === "private") {
+    return (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
+      projectApiPath(args.projectId, "/publish"),
+      { method: "DELETE" },
+      args.baseUrl,
+    )).benchmark;
+  }
+  return args.responseProject;
 }
 
-function readBenchmarkVisibility(value: string | boolean | undefined): "private" | "public" {
+function readOptionalBenchmarkVisibility(value: string | boolean | undefined): "private" | "public" | undefined {
   if (value === undefined) {
-    return "public";
+    return undefined;
   }
   if (value === "private" || value === "public") {
     return value;
@@ -4479,17 +4397,11 @@ async function cloneProject(
   const ref = readRequiredBenchmarkRef(parsed);
   const outputDir = parsed.positionals[1] ?? ref.project;
   if (parsed.positionals.length > 2) {
-    throw new UsageError("workbench clone accepts OWNER/BENCHMARK[@REF] and an optional output directory.");
+    throw new UsageError("workbench clone accepts OWNER/BENCHMARK and an optional output directory.");
   }
   const baseUrl = await effectiveBaseUrl();
-  const projectResponse = await apiRequest<{ benchmark: HostedProjectSummary & {
-    id: string;
-    name: string;
-    ownerUsername: string;
-    sourceFingerprint?: string;
-  } }>(publicProjectApiPath(ref), {}, baseUrl);
-  const filesResponse = await apiRequest<HostedSourceResponse>(
-    publicProjectSourceApiPath(ref),
+  const state = await apiRequest<WorkbenchProjectState>(
+    publicProjectStateApiPath(ref),
     {},
     baseUrl,
   );
@@ -4500,7 +4412,10 @@ async function cloneProject(
         dryRun: true,
         ref,
         outputDir,
-        fileCount: filesResponse.files.length,
+        fileCount: state.source.files.length,
+        runtime: runtimeBundleStats(state.runtime),
+        sourceFingerprint: state.source.fingerprint ?? state.base.sourceFingerprint ?? null,
+        runtimeFingerprint: state.base.runtimeFingerprint ?? null,
       },
       parsed,
       io,
@@ -4508,30 +4423,24 @@ async function cloneProject(
     );
     return 0;
   }
-  await syncSourceFiles(outputDir, filesResponse.files);
-  const project = projectResponse.benchmark;
-  const sourceProject = filesResponse.benchmark;
-  const origin = await writeWorkbenchOrigin(outputDir, {
+  const applied = await applyProjectStateToLocal({
+    dir: outputDir,
     baseUrl,
-    owner: sourceProject?.ownerUsername ?? project.ownerUsername,
-    project: sourceProject?.name ?? project.name,
-    projectId: sourceProject?.id ?? project.id,
-    writable: false,
-    sourceRevisionId: sourceProject?.currentSpecVersionId ?? project.currentSpecVersionId,
-    sourceFingerprint: sourceProject?.sourceFingerprint ?? project.sourceFingerprint,
+    state,
   });
   writeOutput(
     {
       ok: true,
-      origin,
+      origin: applied.origin,
       outputDir,
-      files: filesResponse.files.length,
+      files: applied.files,
+      runtime: applied.runtime,
     },
     parsed,
     io,
     (record) => {
       const value = record as { origin: WorkbenchOrigin; outputDir: string; files: number };
-      return `Cloned ${value.origin.owner}/${value.origin.project} to ${value.outputDir} (${value.files} file(s)).`;
+      return `Cloned ${value.origin.remote} to ${value.outputDir} (${value.files} file(s)).`;
     },
   );
   return 0;
@@ -4544,51 +4453,48 @@ async function pullProject(
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "dry-run", "json"]));
   if (parsed.positionals.length > 0) {
-    throw new UsageError("workbench pull updates the current origin; use workbench clone OWNER/BENCHMARK[@REF] DIR for a new directory.");
+    throw new UsageError("workbench pull updates the current origin; use workbench clone OWNER/BENCHMARK DIR for a new directory.");
   }
   const dir = resolveDir(parsed);
   const origin = await requireWorkbenchOrigin(dir);
-  const filesResponse = origin.writable
-    ? await apiRequest<HostedSourceResponse>(
-        projectApiPath(origin.projectId, "/source"),
-        {},
-        await effectiveBaseUrl(origin.baseUrl),
-      )
-    : await apiRequest<HostedSourceResponse>(
-        publicProjectSourceApiPath({ owner: origin.owner, project: origin.project }),
-        {},
-        await effectiveBaseUrl(origin.baseUrl),
-      );
+  const baseUrl = await effectiveBaseUrl(origin.baseUrl);
+  const remoteRef = parseOriginRemote(origin);
+  const state = await apiRequest<WorkbenchProjectState>(
+    publicProjectStateApiPath(remoteRef),
+    {},
+    baseUrl,
+  );
   if (parsed.flags["dry-run"] === true) {
     writeOutput(
       {
         ok: true,
         dryRun: true,
         dir,
-        fileCount: filesResponse.files.length,
+        fileCount: state.source.files.length,
+        runtime: runtimeBundleStats(state.runtime),
+        sourceFingerprint: state.source.fingerprint ?? state.base.sourceFingerprint ?? null,
+        runtimeFingerprint: state.base.runtimeFingerprint ?? null,
       },
       parsed,
       io,
-      () => `Would pull ${filesResponse.files.length} source file(s) into ${dir}.`,
+      () => `Would pull ${state.source.files.length} source file(s) and runtime history into ${dir}.`,
     );
     return 0;
   }
-  await syncSourceFiles(dir, filesResponse.files);
-  const sourceProject = filesResponse.benchmark;
-  const nextOrigin = await writeWorkbenchOrigin(dir, {
-    ...origin,
-    ...(sourceProject?.ownerUsername ? { owner: sourceProject.ownerUsername } : {}),
-    ...(sourceProject?.name ? { project: sourceProject.name } : {}),
-    ...(sourceProject?.id ? { projectId: sourceProject.id } : {}),
-    ...(sourceProject?.currentSpecVersionId ? { sourceRevisionId: sourceProject.currentSpecVersionId } : {}),
-    ...(sourceProject?.sourceFingerprint ? { sourceFingerprint: sourceProject.sourceFingerprint } : {}),
+  const applied = await applyProjectStateToLocal({
+    dir,
+    baseUrl,
+    state,
+    origin,
+    requireCleanSource: true,
   });
   writeOutput(
     {
       ok: true,
-      origin: nextOrigin,
+      origin: applied.origin,
       dir,
-      files: filesResponse.files.length,
+      files: applied.files,
+      runtime: applied.runtime,
     },
     parsed,
     io,
@@ -4600,196 +4506,28 @@ async function pullProject(
   return 0;
 }
 
-async function fetchProject(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  if (parsed.positionals.length > 0) {
-    throw new UsageError("workbench fetch updates the current remote cache; use workbench clone OWNER/BENCHMARK[@REF] DIR for a new directory.");
+async function applyProjectStateToLocal(args: {
+  dir: string;
+  baseUrl: string;
+  state: WorkbenchProjectState;
+  origin?: WorkbenchOrigin;
+  requireCleanSource?: boolean;
+}): Promise<LocalProjectStateApplyResult> {
+  if (args.requireCleanSource === true && args.origin) {
+    await assertLocalSourceMatchesOrigin(args.dir, args.origin);
   }
-  const dir = resolveDir(parsed);
-  const origin = await requireWorkbenchOrigin(dir);
-  const filesResponse = await readRemoteSourceFiles(origin);
-  const fetchRoot = path.join(dir, ".workbench", "fetch");
-  await fs.rm(fetchRoot, { force: true, recursive: true });
-  await fs.mkdir(fetchRoot, { recursive: true });
-  await writeFiles(path.join(fetchRoot, "source"), filesResponse.files);
-  const sourceProject = filesResponse.benchmark;
-  const nextOrigin = await writeWorkbenchOrigin(dir, {
-    ...origin,
-    ...(sourceProject?.ownerUsername ? { owner: sourceProject.ownerUsername } : {}),
-    ...(sourceProject?.name ? { project: sourceProject.name } : {}),
-    ...(sourceProject?.id ? { projectId: sourceProject.id } : {}),
-    ...(sourceProject?.currentSpecVersionId ? { sourceRevisionId: sourceProject.currentSpecVersionId } : {}),
-    ...(sourceProject?.sourceFingerprint ? { sourceFingerprint: sourceProject.sourceFingerprint } : {}),
+  await syncSourceFiles(args.dir, args.state.source.files);
+  const runtimeImport = await importLocalRuntimeBundle(args.dir, args.state.runtime);
+  const origin = await writeWorkbenchOriginFromState(args.dir, {
+    baseUrl: args.baseUrl,
+    state: args.state,
+    sourceFingerprint: await localSourceFingerprint(args.dir),
   });
-  await fs.writeFile(
-    path.join(fetchRoot, "manifest.json"),
-    `${JSON.stringify({
-      fetchedAt: new Date().toISOString(),
-      origin: nextOrigin,
-      files: filesResponse.files.map((file) => file.path),
-    }, null, 2)}\n`,
-  );
-  writeOutput(
-    {
-      ok: true,
-      origin: nextOrigin,
-      dir,
-      fetchRoot,
-      files: filesResponse.files.length,
-    },
-    parsed,
-    io,
-    (record) => {
-      const value = record as { files: number; fetchRoot: string };
-      return `Fetched ${value.files} source file(s) into ${value.fetchRoot}.`;
-    },
-  );
-  return 0;
-}
-
-async function readRemoteSourceFiles(origin: WorkbenchOrigin): Promise<HostedSourceResponse> {
-  return origin.writable
-    ? await apiRequest<HostedSourceResponse>(
-        projectApiPath(origin.projectId, "/source"),
-        {},
-        await effectiveBaseUrl(origin.baseUrl),
-      )
-    : await apiRequest<HostedSourceResponse>(
-        publicProjectSourceApiPath({ owner: origin.owner, project: origin.project }),
-        {},
-        await effectiveBaseUrl(origin.baseUrl),
-      );
-}
-
-async function runRemoteCommand(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const command = argv[0] ?? "show";
-  switch (command) {
-    case "show":
-      return await remoteShow(argv.slice(1), io);
-    case "add":
-      return await remoteAdd(argv.slice(1), io, "add");
-    case "set-url":
-      return await remoteAdd(argv.slice(1), io, "set-url");
-    case "remove":
-      return await remoteRemove(argv.slice(1), io);
-    default:
-      throw new UsageError(`Unknown command: remote ${argv.join(" ")}`);
-  }
-}
-
-async function remoteShow(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  const origin = await requireWorkbenchOrigin(resolveDir(parsed));
-  writeOutput(
-    { ok: true, remote: "origin", origin },
-    parsed,
-    io,
-    (record) => {
-      const value = record as { origin: WorkbenchOrigin };
-      return [
-        `origin\t${value.origin.owner}/${value.origin.project}`,
-        `url\t${value.origin.baseUrl}`,
-        `writable\t${value.origin.writable ? "yes" : "no"}`,
-        ...(value.origin.sourceFingerprint ? [`fingerprint\t${value.origin.sourceFingerprint}`] : []),
-      ].join("\n");
-    },
-  );
-  return 0;
-}
-
-async function remoteAdd(
-  argv: readonly string[],
-  io: CliIo,
-  command: "add" | "set-url",
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  const [name, refValue] = parsed.positionals;
-  if (name !== "origin" || !refValue || parsed.positionals.length !== 2) {
-    throw new UsageError(`workbench remote ${command} accepts: origin OWNER/BENCHMARK[@REF].`);
-  }
-  const ref = parseBenchmarkRef(refValue);
-  const baseUrl = await effectiveBaseUrl();
-  const project = await resolveRemoteProject(formatBenchmarkRef(ref), baseUrl);
-  const origin = await writeWorkbenchOrigin(resolveDir(parsed), {
-    baseUrl,
-    owner: project.ownerUsername ?? ref.owner,
-    project: project.name ?? ref.project,
-    projectId: project.id,
-    writable: false,
-    ...(project.currentSpecVersionId ? { sourceRevisionId: project.currentSpecVersionId } : {}),
-    ...(project.sourceFingerprint ? { sourceFingerprint: project.sourceFingerprint } : {}),
-  });
-  writeOutput(
-    { ok: true, remote: "origin", origin },
-    parsed,
-    io,
-    () => `Set origin to ${origin.owner}/${origin.project}.`,
-  );
-  return 0;
-}
-
-async function remoteRemove(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  const [name] = parsed.positionals;
-  if (name !== "origin" || parsed.positionals.length !== 1) {
-    throw new UsageError("workbench remote remove accepts: origin.");
-  }
-  const originPath = workbenchOriginPath(resolveDir(parsed));
-  const existed = await fileIsReadable(originPath);
-  await fs.rm(originPath, { force: true });
-  writeOutput(
-    { ok: true, remote: "origin", removed: existed, path: originPath },
-    parsed,
-    io,
-    () => existed
-      ? `Removed origin (${originPath}).`
-      : `No origin configured (${originPath}).`,
-  );
-  return 0;
-}
-
-async function starProject(
-  argv: readonly string[],
-  io: CliIo,
-  starred: boolean,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["json"]));
-  const ref = readRequiredBenchmarkRef(parsed);
-  if (parsed.positionals.length > 1) {
-    throw new UsageError(`${starred ? "workbench cloud star" : "workbench cloud unstar"} accepts exactly one OWNER/BENCHMARK ref.`);
-  }
-  const response = await apiRequest<{ benchmark: HostedProjectSummary }>(
-    `${publicProjectApiPath(ref)}/star`,
-    { method: starred ? "PUT" : "DELETE" },
-    await effectiveBaseUrl(),
-  );
-  writeOutput(
-    { ok: true, benchmark: response.benchmark },
-    parsed,
-    io,
-    (record) => {
-      const value = record as { benchmark: { starCount: number } };
-      return `${starred ? "Starred" : "Unstarred"} ${formatBenchmarkRef(ref)}; ${value.benchmark.starCount} star(s).`;
-    },
-  );
-  return 0;
+  return {
+    origin,
+    files: args.state.source.files.length,
+    runtime: runtimeImport.stats,
+  };
 }
 
 interface HostedRetryTarget {
@@ -4825,7 +4563,7 @@ async function retryHostedWorkflow(
     "timeout-ms",
     "json",
   ]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud retry", 1);
+  rejectUnexpectedPositionals(parsed, "workbench retry --hosted", 1);
   const targetId = parsed.positionals[0];
   if (!targetId) {
     throw new UsageError("Missing required TARGET_ID.");
@@ -4869,6 +4607,7 @@ async function retryHostedWorkflow(
       timeoutMs: watchTimeoutMs,
     });
     const outputRun = withRunUrls(target, await withHostedRunFailureSummary(target, watched));
+    await tryImportTerminalHostedProjectState({ target, io });
     const result: RetryCommandResult = {
       ok: hostedRunSucceeded(watched),
       retried: {
@@ -4917,7 +4656,7 @@ async function resolveHostedRetryTarget(
     throw new UsageError(`Run ${run.id} is ${run.status}; wait for it to finish before retrying.`);
   }
   if (!hostedRunRecordFailed(run)) {
-    throw new UsageError(`Run ${run.id} did not fail; use workbench cloud ${run.workflow ?? "eval"} to intentionally run it again.`);
+    throw new UsageError(`Run ${run.id} did not fail; use workbench ${run.workflow ?? "eval"} --hosted to intentionally run it again.`);
   }
   if (run.workflow === "eval") {
     const candidateId = hostedRunEvaluationCandidateId(run, detail.jobs);
@@ -4978,7 +4717,7 @@ async function resolveHostedEvaluationRetryTarget(
   }
   const run = snapshot.runs.find((entry) => entry.id === evaluation.runId) ?? null;
   if (!evaluationScorecardFailed(evaluation, run)) {
-    throw new UsageError(`Evaluation ${evaluation.id} did not fail; use workbench cloud eval to intentionally run it again.`);
+    throw new UsageError(`Evaluation ${evaluation.id} did not fail; use workbench eval --hosted to intentionally run it again.`);
   }
   if (!run) {
     throw new UsageError(`Evaluation ${evaluation.id} is missing its run record.`);
@@ -5042,6 +4781,34 @@ async function readHostedRunDetail(
   );
 }
 
+async function tryImportTerminalHostedProjectState(args: {
+  target: HostedTarget;
+  io: CliIo;
+}): Promise<void> {
+  const origin = args.target.origin;
+  if (!origin || origin.projectId !== args.target.projectId) {
+    return;
+  }
+  try {
+    const state = await apiRequest<WorkbenchProjectState>(
+      projectApiPath(args.target.projectId, "/state"),
+      {},
+      args.target.baseUrl,
+    );
+    await applyProjectStateToLocal({
+      dir: args.target.dir,
+      baseUrl: args.target.baseUrl,
+      state,
+      origin,
+      requireCleanSource: true,
+    });
+  } catch (error) {
+    args.io.stderr.write(
+      `Hosted run finished, but local project state was not updated: ${errorMessage(error)}\n`,
+    );
+  }
+}
+
 function hostedRetrySourceYaml(
   run: { input?: Json },
   runId: string,
@@ -5081,12 +4848,9 @@ async function startHostedWorkflow(
     "json",
   ]));
   if (parsed.positionals.length > 1) {
-    throw new UsageError(`workbench cloud ${workflow} accepts at most one source file or directory argument.`);
+    throw new UsageError(`workbench ${workflow} --hosted accepts at most one source file or directory argument.`);
   }
-  const sourceArg = parsed.positionals[0] ?? asOptionalString(parsed.flags.dir) ?? process.cwd();
-  if (parsed.positionals.length > 0 && parsed.flags.dir !== undefined) {
-    throw new UsageError("Use either --dir or SOURCE, not both.");
-  }
+  const sourceArg = resolveSourceDir(parsed);
   const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
   const budget = workflow === "improve"
     ? parsePositiveInt(parsed.flags.budget, 1, "budget")
@@ -5101,7 +4865,7 @@ async function startHostedWorkflow(
   const defaultProjectSource = await readLocalProjectSource(path.resolve(sourceArg));
   const selectedRunIds = workflow === "eval"
     ? resolveCandidateRunSelection(defaultProjectSource, runsFlag)
-    : [singleRequestedRunId(runsFlag, `workbench cloud ${workflow}`) ?? defaultProjectSource.candidateRunId];
+    : [singleRequestedRunId(runsFlag, `workbench ${workflow} --hosted`) ?? defaultProjectSource.candidateRunId];
   if (workflow === "eval" && selectedRunIds.length > 1) {
     let failed = 0;
     const results: unknown[] = [];
@@ -5209,6 +4973,7 @@ async function startHostedWorkflow(
       adapterFiles: projectSource.adapterFiles,
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
+      io,
     });
   }
   const response = await apiRequest<{ run: HostedRunRecord; reused?: boolean }>(
@@ -5224,6 +4989,7 @@ async function startHostedWorkflow(
     ? { ...startedRun, reused: true }
     : startedRun;
   if (response.reused === true && response.run.status === "finished") {
+    await tryImportTerminalHostedProjectState({ target, io });
     writeOutput(
       {
         ok: hostedRunSucceeded(response.run),
@@ -5252,6 +5018,7 @@ async function startHostedWorkflow(
       timeoutMs: watchTimeoutMs,
     });
     const outputRun = await withHostedRunFailureSummary(target, watched);
+    await tryImportTerminalHostedProjectState({ target, io });
     writeOutput(
       withRunUrls(target, outputRun),
       parsed,
@@ -5275,6 +5042,7 @@ async function ensureHostedImproveBaseCandidate(args: {
   adapterFiles: HostedFile[];
   intervalMs: number;
   timeoutMs?: number;
+  io: CliIo;
 }): Promise<string> {
   if (args.candidateId) {
     const candidate = await readHostedCandidateSummary(args.target, args.candidateId);
@@ -5319,6 +5087,7 @@ async function ensureHostedImproveBaseCandidate(args: {
   if (!watched.candidateId) {
     throw new UsageError(`Parent candidate eval ${watched.id} did not produce a candidate.`);
   }
+  await tryImportTerminalHostedProjectState({ target: args.target, io: args.io });
   return watched.candidateId;
 }
 
@@ -5390,559 +5159,6 @@ function hostedCandidateIsEvaluated(candidate: HostedCandidateSummary): boolean 
   return candidate.status === "evaluated" || candidate.eval != null;
 }
 
-async function benchmarkList(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks list", 0);
-  const response = await apiRequest<{ benchmarks: unknown[] }>(
-    "/api/workbench/public/benchmarks",
-  );
-  writeOutput(response.benchmarks, parsed, io, (projects) => {
-    if ((projects as unknown[]).length === 0) {
-      return "No hosted Workbench benchmarks.";
-    }
-    return (
-      projects as Array<{
-        id: string;
-        name: string;
-        runCount: number;
-        candidateCount: number;
-      }>
-    )
-      .map(
-        (project) =>
-          `${project.id}\t${project.name}\t${project.runCount} runs\t${project.candidateCount} candidates`,
-      )
-      .join("\n");
-  });
-  return 0;
-}
-
-async function benchmarkShow(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks show", 1);
-  const dir = resolveDir(parsed);
-  const origin = await readWorkbenchOrigin(dir);
-  const projectRef =
-    parsed.positionals[0] ??
-    origin?.projectId;
-  if (!projectRef) {
-    throw new UsageError(
-      "Missing hosted benchmark. Pass OWNER/BENCHMARK, run workbench push, or run workbench clone.",
-    );
-  }
-  const response = await apiRequest<{ benchmark: unknown }>(
-    benchmarkApiPath(projectRef),
-    {},
-    await effectiveBaseUrl(origin?.baseUrl),
-  );
-  writeOutput(response.benchmark, parsed, io, (project) => {
-    const record = project as {
-      id: string;
-      name: string;
-      runs: unknown[];
-      candidates: unknown[];
-    };
-    return `${record.name} (${record.id})\n${record.runs.length} runs\n${record.candidates.length} candidates`;
-  });
-  return 0;
-}
-
-async function benchmarkDelete(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "dry-run", "json"]));
-  if (parsed.positionals.length > 1) {
-    throw new UsageError(
-      `Unexpected argument for workbench benchmarks delete: ${parsed.positionals.slice(1).join(" ")}`,
-    );
-  }
-  const dir = resolveDir(parsed);
-  const origin = await readWorkbenchOrigin(dir);
-  const projectRef =
-    parsed.positionals[0] ??
-    origin?.projectId;
-  if (!projectRef) {
-    throw new UsageError(
-      "Missing hosted benchmark. Pass OWNER/BENCHMARK, run workbench push, or run workbench clone.",
-    );
-  }
-  const originPath = workbenchOriginPath(dir);
-  const baseUrl = await effectiveBaseUrl(origin?.baseUrl);
-  if (parsed.flags["dry-run"] === true) {
-    const originProjectDeleted = originMatchesProjectRef(origin, projectRef);
-    writeOutput(
-      {
-        ok: true,
-        dryRun: true,
-        projectRef,
-        ...(isRemoteProjectId(projectRef) ? { projectId: projectRef } : {}),
-        ...(originProjectDeleted && origin?.project ? { projectName: origin.project } : {}),
-        baseUrl,
-        ...(originProjectDeleted ? { originPath } : {}),
-      },
-      parsed,
-      io,
-      () =>
-        originProjectDeleted
-          ? `Would delete hosted benchmark ${projectRef} and remove local origin ${originPath}.`
-          : `Would delete hosted benchmark ${projectRef}.`,
-    );
-    return 0;
-  }
-  const project = await resolveRemoteProject(projectRef, baseUrl);
-  const projectId = project.id;
-  const projectName = project.name;
-  const originProjectDeleted = origin ? origin.projectId === projectId : false;
-  await apiRequest<{ deleted: boolean }>(
-    projectApiPath(projectId),
-    { method: "DELETE" },
-    baseUrl,
-  );
-  if (originProjectDeleted) {
-    await fs.rm(originPath, { force: true });
-  }
-  writeOutput(
-    {
-      ok: true,
-      deleted: true,
-      projectId,
-      ...(projectName ? { projectName } : {}),
-      originRemoved: originProjectDeleted,
-      ...(originProjectDeleted ? { originPath } : {}),
-    },
-    parsed,
-    io,
-    () =>
-      originProjectDeleted
-        ? `Deleted benchmark ${formatProjectRef(project)} and removed local origin ${originPath}.`
-        : `Deleted benchmark ${formatProjectRef(project)}.`,
-  );
-  return 0;
-}
-
-async function benchmarkVersions(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks versions", 1);
-  const projectRef = parsed.positionals[0];
-  const origin = await readWorkbenchOrigin(resolveDir(parsed));
-  if (!projectRef && !origin) {
-    throw new UsageError("Missing benchmark ref. Pass OWNER/BENCHMARK or run from a benchmark clone.");
-  }
-  const response = await apiRequest<{ benchmark: HostedProjectSummary & {
-    currentSpecVersionId?: string;
-    sourceFingerprint?: string;
-  } }>(
-    benchmarkApiPath(projectRef ?? origin!.projectId),
-    {},
-    await effectiveBaseUrl(origin?.baseUrl),
-  );
-  const version = response.benchmark.sourceFingerprint ?? response.benchmark.currentSpecVersionId ?? "current";
-  writeOutput(
-    {
-      ok: true,
-      benchmark: response.benchmark,
-      versions: [{ ref: "main", digest: version, current: true }],
-    },
-    parsed,
-    io,
-    () => `${response.benchmark.name ?? projectRef ?? origin!.project}\tmain\t${shortDigest(version)}\tcurrent`,
-  );
-  return 0;
-}
-
-async function benchmarkStarred(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud benchmarks starred", 0);
-  const response = await apiRequest<{ benchmarks: unknown[] }>(
-    "/api/workbench/benchmarks",
-  );
-  const starred = (response.benchmarks as Array<{ viewerHasStarred?: boolean }>).filter(
-    (project) => project.viewerHasStarred === true,
-  );
-  writeOutput(starred, parsed, io, (benchmarks) => {
-    if ((benchmarks as unknown[]).length === 0) {
-      return "No starred benchmarks.";
-    }
-    return (benchmarks as Array<{ ownerUsername?: string; name?: string; starCount?: number }>)
-      .map((benchmark) =>
-        `${benchmark.ownerUsername ?? "-"} / ${benchmark.name ?? "-"}\t${benchmark.starCount ?? 0} stars`
-      )
-      .join("\n");
-  });
-  return 0;
-}
-
-async function candidateList(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud candidates list", 0);
-  const target = await resolveHostedTarget(parsed);
-  const response = await apiRequest<{ candidates: unknown[] }>(
-    projectApiPath(target.projectId, "/candidates"),
-    {},
-    target.baseUrl,
-  );
-  writeOutput(response.candidates, parsed, io, (candidates) => {
-    if ((candidates as unknown[]).length === 0) {
-      return "No candidates yet.";
-    }
-    return (
-      candidates as Array<{
-        id: string;
-        status: string;
-        fileChanges?: string[];
-      }>
-    )
-      .map(
-        (candidate) =>
-          `${candidate.id}\t${candidate.status}\t${candidate.fileChanges?.length ?? 0} files`,
-      )
-      .join("\n");
-  });
-  return 0;
-}
-
-async function candidateShow(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud candidates show", 1);
-  const target = await resolveHostedTarget(parsed);
-  const candidateId = readRequiredCandidateId(parsed);
-  const params = new URLSearchParams({ id: candidateId });
-  const candidate = await apiRequest<unknown>(
-    projectApiPath(target.projectId, `/workbench/record?${params.toString()}`),
-    {},
-    target.baseUrl,
-  );
-  writeOutput(candidate, parsed, io, (record) => {
-    const value = record as { id?: string; status?: string; benchmarkFingerprint?: string; candidateFingerprint?: string };
-    return [
-      `${value.id ?? candidateId}\t${value.status ?? "unknown"}`,
-      ...(value.benchmarkFingerprint ? [`Benchmark version: ${shortDigest(value.benchmarkFingerprint)}`] : []),
-      ...(value.candidateFingerprint ? [`Candidate digest: ${shortDigest(value.candidateFingerprint)}`] : []),
-    ].join("\n");
-  });
-  return 0;
-}
-
-async function candidateFiles(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud candidates files", 1);
-  const target = await resolveHostedTarget(parsed);
-  const candidateId = readRequiredCandidateId(parsed);
-  const response = await apiRequest<{ files: unknown[] }>(
-    projectApiPath(target.projectId, `/candidates/${encodeURIComponent(candidateId)}/files`),
-    {},
-    target.baseUrl,
-  );
-  writeOutput(
-    response.files,
-    parsed,
-    io,
-    (files) =>
-      (files as Array<{ path: string; status: string; preview_kind: string }>)
-        .map((file) => `${file.path}\t${file.status}\t${file.preview_kind}`)
-        .join("\n") || "No files.",
-  );
-  return 0;
-}
-
-async function candidatePreview(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "path", "output", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud candidates preview", 1);
-  const target = await resolveHostedTarget(parsed);
-  const candidateId = readRequiredCandidateId(parsed);
-  const filePath = requireFlag(parsed, "path");
-  const params = new URLSearchParams({ path: filePath });
-  const response = await apiRequest<{
-    preview: {
-      source: { content: string } | null;
-      rendered_html: string | null;
-      diff: string | null;
-    };
-  }>(
-    projectApiPath(
-      target.projectId,
-      `/candidates/${encodeURIComponent(candidateId)}/files?${params.toString()}`,
-    ),
-    {},
-    target.baseUrl,
-  );
-  const content =
-    response.preview.source?.content ??
-    response.preview.rendered_html ??
-    response.preview.diff ??
-    "";
-  const outputPath = asOptionalString(parsed.flags.output);
-  if (outputPath && outputPath !== "-") {
-    await fs.writeFile(outputPath, content);
-    io.stdout.write(`Wrote preview to ${outputPath}\n`);
-  } else if (parsed.flags.json === true) {
-    writeJson(response.preview, io);
-  } else {
-    io.stdout.write(content);
-  }
-  return 0;
-}
-
-async function candidateExport(
-  argv: readonly string[],
-  io: CliIo,
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "out", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud candidates pull", 1);
-  const target = await resolveHostedTarget(parsed);
-  const candidateId = readRequiredCandidateId(parsed);
-  const outputDir = requireOutDir(parsed);
-  const response = await apiRequest<{ files: HostedFile[] }>(
-    projectApiPath(target.projectId, `/candidates/${encodeURIComponent(candidateId)}/export`),
-    {},
-    target.baseUrl,
-  );
-  await writeFiles(outputDir, response.files);
-  writeOutput(
-    { ok: true, outputDir, files: response.files.length },
-    parsed,
-    io,
-    (result) => {
-      const record = result as { outputDir: string; files: number };
-      return `Exported ${record.files} file(s) to ${record.outputDir}`;
-    },
-  );
-  return 0;
-}
-
-async function candidateVisibility(
-  argv: readonly string[],
-  io: CliIo,
-  visibility: "private" | "public",
-): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, `workbench cloud candidates ${visibility === "public" ? "publish" : "unpublish"}`, 1);
-  const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
-  const candidateId = readRequiredCandidateId(parsed);
-  const response = await apiRequest<{ candidate: unknown }>(
-    projectApiPath(target.projectId, `/candidates/${encodeURIComponent(candidateId)}/publish`),
-    { method: visibility === "public" ? "PUT" : "DELETE" },
-    target.baseUrl,
-  );
-  writeOutput(
-    { ok: true, visibility, candidate: response.candidate },
-    parsed,
-    io,
-    () => `${visibility === "public" ? "Published" : "Unpublished"} candidate ${candidateId}.`,
-  );
-  return 0;
-}
-
-async function runList(argv: readonly string[], io: CliIo): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud runs list", 0);
-  const target = await resolveHostedTarget(parsed);
-  const response = await apiRequest<{ runs: unknown[] }>(
-    projectApiPath(target.projectId, "/runs"),
-    {},
-    target.baseUrl,
-  );
-  writeOutput(
-    response.runs,
-    parsed,
-    io,
-    (runs) =>
-      (
-        runs as Array<{
-          id: string;
-          status: string;
-          candidateId: string | null;
-        }>
-      )
-        .map(
-          (run) => `${run.id}\t${run.status}\t${run.candidateId ?? "pending"}`,
-        )
-        .join("\n") || "No runs.",
-  );
-  return 0;
-}
-
-async function runShow(argv: readonly string[], io: CliIo): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud runs show", 1);
-  const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
-  const runId = readRequiredRunId(parsed);
-  const response = await apiRequest<{
-    run: HostedRunRecord;
-    jobs: HostedRunJobRecord[];
-  }>(
-    projectApiPath(target.projectId, `/runs/${encodeURIComponent(runId)}`),
-    {},
-    target.baseUrl,
-  );
-  const detail = withRunDetailUrls(target, response);
-  writeOutput(detail, parsed, io, formatRunDetail);
-  return 0;
-}
-
-async function runCancel(argv: readonly string[], io: CliIo): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud runs cancel", 1);
-  const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
-  const runId = readRequiredRunId(parsed);
-  const response = await apiRequest<{ run: HostedRunRecord }>(
-    projectApiPath(target.projectId, `/runs/${encodeURIComponent(runId)}`),
-    { method: "DELETE" },
-    target.baseUrl,
-  );
-  const run = withRunUrls(target, response.run);
-  writeOutput(run, parsed, io, (record) => {
-    const value = record as HostedRunRecord;
-    return [
-      `Cancelled run ${value.id}; status ${value.status}; outcome ${value.outcome ?? "cancelled"}.`,
-      `Open benchmark: ${value.urls?.benchmark ?? buildWorkbenchResourceUrls(target).benchmark}`,
-    ].join("\n");
-  });
-  return 0;
-}
-
-async function runWatch(argv: readonly string[], io: CliIo): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "interval-ms", "timeout-ms", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud watch", 1);
-  const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
-  const runId = readRequiredRunId(parsed);
-  if (parsed.flags.json !== true) {
-    io.stdout.write(`Watching run ${runId}.\n${HOSTED_WATCH_LIFECYCLE_NOTE}\n`);
-  }
-  const run = await watchHostedRun({
-    parsed,
-    target,
-    runId,
-    intervalMs: parsePositiveInt(
-      parsed.flags["interval-ms"],
-      1000,
-      "interval-ms",
-    ),
-    timeoutMs: parseOptionalPositiveInt(
-      parsed.flags["timeout-ms"],
-      "timeout-ms",
-    ),
-  });
-  const outputRun = await withHostedRunFailureSummary(target, run);
-  writeOutput(withRunUrls(target, outputRun), parsed, io, formatHostedRunResult);
-  return hostedRunSucceeded(run) ? 0 : 1;
-}
-
-async function runLogs(argv: readonly string[], io: CliIo): Promise<number> {
-  const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "json"]));
-  rejectUnexpectedPositionals(parsed, "workbench cloud logs", 1);
-  const target = await resolveHostedTarget(parsed);
-  const requestedRunId = parsed.positionals[0];
-  if (requestedRunId) {
-    const response = await apiRequest<{
-      run: HostedRunRecord;
-      jobs: Array<{
-        id: string;
-        runId: string;
-        kind: string;
-        status: string;
-        candidateId?: string;
-        error?: string;
-      }>;
-    }>(
-      projectApiPath(target.projectId, `/runs/${encodeURIComponent(requestedRunId)}`),
-      {},
-      target.baseUrl,
-    );
-    writeOutput(
-      { runId: response.run.id, jobs: response.jobs },
-      parsed,
-      io,
-      formatRunLogs,
-    );
-    return 0;
-  }
-  const project = (
-    await apiRequest<{
-      project: {
-        runs: HostedRunRecord[];
-        jobs: Array<{
-          id: string;
-          runId: string;
-          kind: string;
-          status: string;
-          candidateId?: string;
-          error?: string;
-        }>;
-      };
-    }>(projectApiPath(target.projectId), {}, target.baseUrl)
-  ).project;
-  const runId = project.runs.at(-1)?.id;
-  if (!runId) {
-    throw new UsageError("Missing RUN_ID; the benchmark has no runs.");
-  }
-  const jobs = project.jobs.filter((job) => job.runId === runId);
-  writeOutput({ runId, jobs }, parsed, io, formatRunLogs);
-  return 0;
-}
-
-function formatRunLogs(record: unknown): string {
-  const value = record as {
-    runId: string;
-    jobs: Array<{
-      id: string;
-      kind: string;
-      status: string;
-      candidateId?: string;
-      error?: string;
-    }>;
-  };
-  return (
-    value.jobs
-      .map(
-        (job) =>
-          `${job.id}\t${job.kind}\t${job.status}\t${job.candidateId ?? "-"}${job.error ? `\t${job.error}` : ""}`,
-      )
-      .join("\n") || `No jobs for ${value.runId}.`
-  );
-}
-
 async function openWorkbench(
   argv: readonly string[],
   io: CliIo,
@@ -5951,7 +5167,7 @@ async function openWorkbench(
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "no-open", "json"]));
   if (parsed.positionals.length > 1) {
     throw new UsageError(
-      `Unexpected argument for workbench open: ${parsed.positionals.slice(1).join(" ")}`,
+      `Unexpected argument for workbench open --hosted: ${parsed.positionals.slice(1).join(" ")}`,
     );
   }
   const target = await resolveOpenTarget(parsed);
@@ -6016,11 +5232,12 @@ async function resolveHostedTarget(
       "Missing hosted benchmark. Run workbench push, workbench clone, or pass --benchmark OWNER/BENCHMARK.",
     );
   }
+  const originRemote = origin ? parseOriginRemote(origin) : null;
   return {
     projectId,
-    ...(!explicitProject && origin?.owner ? { owner: origin.owner } : {}),
-    ...(!explicitProject && origin?.project
-      ? { projectName: origin.project }
+    ...(!explicitProject && originRemote ? { owner: originRemote.owner } : {}),
+    ...(!explicitProject && originRemote
+      ? { projectName: originRemote.project }
       : {}),
     dir,
     baseUrl,
@@ -6062,13 +5279,12 @@ async function resolveHostedDryRunTarget(
     };
   }
   if (origin?.projectId) {
+    const originRemote = parseOriginRemote(origin);
     return {
-      projectRef: origin.owner && origin.project
-        ? `${origin.owner}/${origin.project}`
-        : origin.projectId,
+      projectRef: origin.remote,
       projectId: origin.projectId,
-      ...(origin.owner ? { owner: origin.owner } : {}),
-      ...(origin.project ? { projectName: origin.project } : {}),
+      owner: originRemote.owner,
+      projectName: originRemote.project,
       dir,
       baseUrl,
       origin,
@@ -6149,51 +5365,42 @@ function projectApiPath(projectRef: string, suffix = ""): string {
   return `/api/workbench/benchmarks/${encodeURIComponent(projectRef)}${suffix}`;
 }
 
-function benchmarkApiPath(benchmarkRef: string): string {
-  if (benchmarkRef.includes("/")) {
-    return publicProjectApiPath(parseBenchmarkRef(benchmarkRef));
-  }
-  return projectApiPath(benchmarkRef);
-}
-
 function publicProjectApiPath(ref: { owner: string; project: string }): string {
   return `/api/workbench/public/benchmarks/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.project)}`;
 }
 
-function publicProjectSourceApiPath(
+function publicProjectStateApiPath(
   ref: { owner: string; project: string },
 ): string {
-  return `${publicProjectApiPath(ref)}/source`;
+  return `${publicProjectApiPath(ref)}/state`;
 }
 
 interface BenchmarkRef {
   owner: string;
   project: string;
-  ref?: string;
 }
 
 function readRequiredBenchmarkRef(parsed: ParsedArgs): BenchmarkRef {
   const ref = parsed.positionals[0];
   if (!ref) {
-    throw new UsageError("Missing required OWNER/BENCHMARK ref.");
+    throw new UsageError("Missing required OWNER/BENCHMARK.");
   }
   return parseBenchmarkRef(ref);
 }
 
 function parseBenchmarkRef(value: string): BenchmarkRef {
-  const [namePart, versionRef, extraRef] = value.split("@");
-  if (extraRef !== undefined || !namePart) {
-    throw new UsageError("Benchmark refs must use OWNER/BENCHMARK[@REF].");
+  if (value.includes("@")) {
+    throw new UsageError("Benchmark refs must use OWNER/BENCHMARK.");
   }
-  const [owner, project, extra] = namePart.split("/");
+  const [owner, project, extra] = value.split("/");
   if (!owner || !project || extra !== undefined) {
-    throw new UsageError("Benchmark refs must use OWNER/BENCHMARK[@REF].");
+    throw new UsageError("Benchmark refs must use OWNER/BENCHMARK.");
   }
-  return { owner, project, ...(versionRef ? { ref: versionRef } : {}) };
+  return { owner, project };
 }
 
 function formatBenchmarkRef(ref: BenchmarkRef): string {
-  return `${ref.owner}/${ref.project}${ref.ref ? `@${ref.ref}` : ""}`;
+  return `${ref.owner}/${ref.project}`;
 }
 
 async function resolveRemoteProject(
@@ -6231,27 +5438,6 @@ async function resolveRemoteProject(
   return response.benchmark;
 }
 
-function formatProjectRef(project: { id: string; name?: string }): string {
-  return project.name ? `${project.name} (${project.id})` : project.id;
-}
-
-function originMatchesProjectRef(
-  origin: WorkbenchOrigin | null | undefined,
-  projectRef: string,
-): boolean {
-  if (!origin) {
-    return false;
-  }
-  if (origin.projectId === projectRef) {
-    return true;
-  }
-  if (!projectRef.includes("/")) {
-    return false;
-  }
-  const ref = parseBenchmarkRef(projectRef);
-  return origin.owner === ref.owner && origin.project === ref.project;
-}
-
 function withRunUrls(
   target: HostedTarget,
   run: HostedRunRecord,
@@ -6262,29 +5448,6 @@ function withRunUrls(
       runId: run.id,
       candidateId: run.outputCandidateId ?? run.candidateId,
     }),
-  };
-}
-
-function withRunDetailUrls(
-  target: HostedTarget,
-  detail: {
-    run: HostedRunRecord;
-    jobs: HostedRunJobRecord[];
-  },
-): {
-  run: HostedRunRecord;
-  jobs: HostedRunJobRecord[];
-  urls: WorkbenchResourceUrls;
-} {
-  const candidateId = hostedRunEvaluationCandidateId(detail.run, detail.jobs);
-  const run = withRunUrls(target, {
-    ...detail.run,
-    outputCandidateId: detail.run.outputCandidateId ?? candidateId,
-  });
-  return {
-    run,
-    jobs: detail.jobs,
-    urls: run.urls ?? buildWorkbenchResourceUrls(target, { runId: run.id }),
   };
 }
 
@@ -6300,6 +5463,83 @@ function hostedRunEvaluationCandidateId(
     .map((job) => job.candidateId)
     .filter((candidateId): candidateId is string => Boolean(candidateId));
   return attemptCandidates.at(-1) ?? run.candidateId ?? null;
+}
+
+function localProjectState(args: {
+  source: LocalProjectSource;
+  runtime: WorkbenchRuntimeBundle;
+  origin: WorkbenchOrigin | null;
+  visibility: "private" | "public";
+}): WorkbenchProjectState {
+  const stateSource = localProjectStateSource(args.source);
+  const runtimeFingerprint = workbenchRuntimeBundleFingerprint(args.runtime);
+  return {
+    schema: "workbench.project.state.v1",
+    project: {
+      id: args.origin?.projectId ?? "",
+      remote: args.origin?.remote ?? `local/${args.source.spec.name}`,
+      ownerUsername: args.origin ? parseOriginRemote(args.origin).owner : "local",
+      name: args.origin ? parseOriginRemote(args.origin).project : args.source.spec.name,
+      visibility: args.visibility,
+    },
+    base: {
+      ...(args.origin ? { sourceRevisionId: args.origin.sourceRevisionId } : {}),
+      ...(args.origin ? { sourceFingerprint: args.origin.sourceFingerprint } : {}),
+      runtimeFingerprint: args.origin?.runtimeFingerprint ?? runtimeFingerprint,
+    },
+    source: stateSource,
+    runtime: args.runtime,
+  };
+}
+
+function localProjectStateSource(source: LocalProjectSource): WorkbenchProjectStateSource {
+  const request = hostedProjectSourceRequest(source);
+  const stateSource: WorkbenchProjectStateSource = {
+    source: request.source,
+    files: source.sourceFiles.map((file) => ({ ...file })),
+    candidateFiles: request.candidateFiles.map(toSurfaceSnapshotFile),
+    engineResolveFiles: request.engineResolveFiles.map(toSurfaceSnapshotFile),
+    engineResolveBinding: request.engineResolveBinding,
+    adapterFiles: request.adapterFiles.map(toSurfaceSnapshotFile),
+    dockerfile: request.dockerfile,
+    runtimeDockerfile: request.runtimeDockerfile,
+    runtimeFiles: request.runtimeFiles.map(toSurfaceSnapshotFile),
+    network: request.network,
+    resources: { ...request.resources },
+  };
+  return {
+    ...stateSource,
+    fingerprint: workbenchProjectSourceFingerprint(stateSource),
+  };
+}
+
+function toSurfaceSnapshotFile(file: HostedFile | SurfaceSnapshotFile): SurfaceSnapshotFile {
+  return {
+    path: file.path,
+    kind: "kind" in file ? file.kind : file.encoding === "base64" ? "binary" : "text",
+    encoding: file.encoding ?? "utf8",
+    content: file.content,
+    executable: file.executable === true,
+  };
+}
+
+function hostedProjectSummaryFromState(
+  state: WorkbenchProjectState,
+): HostedProjectSummary & {
+  id: string;
+  name: string;
+  ownerUsername?: string;
+  sourceFingerprint?: string;
+  currentSpecVersionId?: string;
+} {
+  return {
+    id: state.project.id,
+    ownerUsername: state.project.ownerUsername,
+    name: state.project.name,
+    visibility: state.project.visibility,
+    currentSpecVersionId: state.source.revisionId ?? state.base.sourceRevisionId,
+    sourceFingerprint: state.source.fingerprint ?? state.base.sourceFingerprint,
+  };
 }
 
 function sourceFileCount(source: LocalProjectSource): number {
@@ -6489,79 +5729,11 @@ function formatHostedRunStarted(
   ].join("\n");
 }
 
-function formatRunDetail(record: unknown): string {
-  const detail = record as {
-    run: HostedRunRecord;
-    jobs: HostedRunJobRecord[];
-    urls: WorkbenchResourceUrls;
-  };
-  const { run, jobs, urls } = detail;
-  const cost = sumJobCostUsd(jobs);
-  const firstFailedJob = jobs.find((job) => job.status === "failed" && job.error);
-  const candidateId = hostedRunEvaluationCandidateId(run, jobs);
-  return [
-    `Run ${run.id}: ${run.status}${run.outcome ? ` (${run.outcome})` : ""}`,
-    `Workflow: ${run.workflow ?? "improve"}`,
-    `Candidate: ${candidateId ?? "pending"}`,
-    ...(run.activeCandidateId && candidateId && run.activeCandidateId !== candidateId
-      ? [`Active candidate: ${run.activeCandidateId}`]
-      : []),
-    `Samples: ${run.samples ?? 0}`,
-    `Attempts: ${run.attemptsExecuted ?? 0}/${run.attemptsRequested ?? run.attemptsExecuted ?? 0}`,
-    `Jobs: ${run.completedJobCount ?? jobs.filter(isTerminalRunJob).length}/${run.jobCount ?? jobs.length} completed${run.failedJobCount ? `; ${run.failedJobCount} failed` : ""}`,
-    ...(typeof run.durationMs === "number"
-      ? [`Duration: ${formatDurationMs(run.durationMs)}`]
-      : []),
-    ...(cost > 0 ? [`Cost: ${formatUsd(cost)}`] : []),
-    ...(firstFailedJob?.error
-      ? [`First failed job ${firstFailedJob.id}: ${firstFailedJob.error}`]
-      : []),
-    ...(urls.candidateEvaluation
-      ? [`Open evaluation: ${urls.candidateEvaluation}`]
-      : [`Open benchmark: ${urls.benchmark}`]),
-    ...(jobs.length > 0 ? ["", "Jobs:", ...jobs.map(formatRunJobLine)] : []),
-  ].join("\n");
-}
-
-function formatRunJobLine(job: HostedRunJobRecord): string {
-  return [
-    job.id,
-    readRunJobPurpose(job) ?? job.kind ?? "job",
-    job.status,
-    job.candidateId ?? "-",
-    job.error ?? "",
-  ].filter((value, index) => index < 4 || value !== "").join("\t");
-}
-
-function isTerminalRunJob(job: HostedRunJobRecord): boolean {
-  return job.status === "succeeded" || job.status === "failed" || job.status === "cancelled";
-}
-
 function readRunJobPurpose(job: HostedRunJobRecord): string | null {
   const input = readRecord(job.input);
   const execution = readRecord(input?.execution);
   const purpose = execution?.purpose;
   return typeof purpose === "string" && purpose ? purpose : null;
-}
-
-function sumJobCostUsd(jobs: readonly HostedRunJobRecord[]): number {
-  const sum = jobs.reduce((total, job) => total + costUsdFromUsage(readRecord(job.output)?.usage), 0);
-  return Number.isFinite(sum) ? Math.round(sum * 1_000_000) / 1_000_000 : 0;
-}
-
-function costUsdFromUsage(value: unknown): number {
-  const usage = readRecord(value);
-  if (!usage) {
-    return 0;
-  }
-  const direct = readFiniteNumber(usage.costUsd);
-  if (direct !== null) {
-    return direct;
-  }
-  return ["total", "improver", "runner", "engine"].reduce((sum, key) => {
-    const nested = readRecord(usage[key]);
-    return sum + (readFiniteNumber(nested?.costUsd) ?? 0);
-  }, 0);
 }
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -6584,27 +5756,6 @@ function integerValue(value: unknown): number | null {
 
 function readFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function formatDurationMs(durationMs: number): string {
-  if (durationMs < 1000) {
-    return `${Math.max(0, Math.round(durationMs))}ms`;
-  }
-  const seconds = durationMs / 1000;
-  if (seconds < 60) {
-    return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.round(seconds % 60);
-  return `${minutes}m ${remainingSeconds}s`;
-}
-
-function formatUsd(value: number): string {
-  return `$${value.toFixed(value < 1 ? 4 : 2)}`;
-}
-
-function shortDigest(value: string): string {
-  return value.length > 12 ? value.slice(0, 12) : value;
 }
 
 async function withHostedRunFailureSummary(
@@ -6656,26 +5807,47 @@ async function readWorkbenchOrigin(dir: string): Promise<WorkbenchOrigin | null>
   try {
     const parsed = JSON.parse(
       await fs.readFile(workbenchOriginPath(dir), "utf8"),
-    ) as Partial<WorkbenchOrigin>;
+    ) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new UsageError(`Workbench origin is malformed: ${workbenchOriginPath(dir)}`);
+    }
+    const originRecord = parsed as Partial<WorkbenchOrigin>;
+    const keys = Object.keys(originRecord).sort();
+    const expectedKeys = [
+      "baseUrl",
+      "linkedAt",
+      "projectId",
+      "remote",
+      "runtimeFingerprint",
+      "sourceFingerprint",
+      "sourceRevisionId",
+    ];
     if (
-      !parsed.projectId ||
-      !parsed.baseUrl ||
-      !parsed.owner ||
-      !parsed.project ||
-      typeof parsed.writable !== "boolean"
+      typeof originRecord.projectId !== "string" ||
+      typeof originRecord.baseUrl !== "string" ||
+      typeof originRecord.remote !== "string" ||
+      typeof originRecord.sourceRevisionId !== "string" ||
+      typeof originRecord.sourceFingerprint !== "string" ||
+      typeof originRecord.runtimeFingerprint !== "string" ||
+      typeof originRecord.linkedAt !== "string" ||
+      originRecord.projectId.length === 0 ||
+      originRecord.sourceRevisionId.length === 0 ||
+      originRecord.sourceFingerprint.length === 0 ||
+      originRecord.runtimeFingerprint.length === 0
     ) {
       throw new UsageError(`Workbench origin is malformed: ${workbenchOriginPath(dir)}`);
     }
+    if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) {
+      throw new UsageError(`Workbench origin is malformed: ${workbenchOriginPath(dir)}`);
+    }
     return {
-      baseUrl: normalizeBaseUrl(parsed.baseUrl),
-      owner: parsed.owner,
-      project: parsed.project,
-      projectId: parsed.projectId,
-      writable: parsed.writable,
-      ...(parsed.sourceRevisionId ? { sourceRevisionId: parsed.sourceRevisionId } : {}),
-      ...(parsed.sourceFingerprint ? { sourceFingerprint: parsed.sourceFingerprint } : {}),
-      ...(parsed.upstream ? { upstream: parsed.upstream } : {}),
-      linkedAt: parsed.linkedAt ?? new Date(0).toISOString(),
+      baseUrl: normalizeBaseUrl(originRecord.baseUrl),
+      remote: normalizeOriginRemote(originRecord.remote),
+      projectId: originRecord.projectId,
+      sourceRevisionId: originRecord.sourceRevisionId,
+      sourceFingerprint: originRecord.sourceFingerprint,
+      runtimeFingerprint: originRecord.runtimeFingerprint,
+      linkedAt: originRecord.linkedAt,
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -6698,14 +5870,87 @@ async function writeWorkbenchOrigin(
   input: Omit<WorkbenchOrigin, "linkedAt"> & { linkedAt?: string },
 ): Promise<WorkbenchOrigin> {
   const origin: WorkbenchOrigin = {
-    ...input,
     baseUrl: normalizeBaseUrl(input.baseUrl),
+    remote: normalizeOriginRemote(input.remote),
+    projectId: input.projectId,
+    sourceRevisionId: input.sourceRevisionId,
+    sourceFingerprint: input.sourceFingerprint,
+    runtimeFingerprint: input.runtimeFingerprint,
     linkedAt: input.linkedAt ?? new Date().toISOString(),
   };
   const filePath = workbenchOriginPath(dir);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(origin, null, 2)}\n`);
   return origin;
+}
+
+async function writeWorkbenchOriginFromState(
+  dir: string,
+  args: {
+    baseUrl: string;
+    state: WorkbenchProjectState;
+    project?: HostedProjectSummary;
+    sourceFingerprint?: string;
+  },
+): Promise<WorkbenchOrigin> {
+  const owner = args.project?.ownerUsername ?? args.state.project.ownerUsername;
+  const name = args.project?.name ?? args.state.project.name;
+  const sourceRevisionId =
+    args.project?.currentSpecVersionId ??
+    args.state.source.revisionId ??
+    args.state.base.sourceRevisionId;
+  const sourceFingerprint =
+    args.sourceFingerprint ??
+    args.project?.sourceFingerprint ??
+    args.state.source.fingerprint ??
+    args.state.base.sourceFingerprint;
+  const runtimeFingerprint =
+    args.state.base.runtimeFingerprint ??
+    workbenchRuntimeBundleFingerprint(args.state.runtime);
+  if (!sourceRevisionId || !sourceFingerprint || !runtimeFingerprint) {
+    throw new UsageError("Hosted project state is missing required origin metadata.");
+  }
+  return await writeWorkbenchOrigin(dir, {
+    baseUrl: args.baseUrl,
+    remote: `${owner}/${name}`,
+    projectId: args.project?.id ?? args.state.project.id,
+    sourceRevisionId,
+    sourceFingerprint,
+    runtimeFingerprint,
+  });
+}
+
+async function localSourceFingerprint(dir: string): Promise<string> {
+  const source = localProjectStateSource(await readLocalProjectSource(dir));
+  return source.fingerprint ?? workbenchProjectSourceFingerprint(source);
+}
+
+function parseOriginRemote(origin: WorkbenchOrigin): { owner: string; project: string } {
+  return parseRemoteName(origin.remote);
+}
+
+function parseRemoteName(remote: string): { owner: string; project: string } {
+  try {
+    return parseBenchmarkRef(remote);
+  } catch {
+    throw new UsageError(`Workbench origin remote must use OWNER/BENCHMARK: ${remote}`);
+  }
+}
+
+function normalizeOriginRemote(remote: string): string {
+  const parsed = parseRemoteName(remote.trim());
+  return `${parsed.owner}/${parsed.project}`;
+}
+
+function originRemoteUrlParts(origin: WorkbenchOrigin): {
+  owner: string;
+  projectName: string;
+} {
+  const remote = parseOriginRemote(origin);
+  return {
+    owner: remote.owner,
+    projectName: remote.project,
+  };
 }
 
 function workbenchOriginPath(dir: string): string {
@@ -6755,34 +6000,6 @@ async function readWorkbenchProfileStatus(
   } catch {
     return { authenticated: true, profile: null };
   }
-}
-
-function readOptionalCandidateId(parsed: ParsedArgs): string | undefined {
-  return asOptionalString(parsed.flags.candidate) ?? parsed.positionals[0];
-}
-
-function readRequiredCandidateId(parsed: ParsedArgs): string {
-  const candidateId = readOptionalCandidateId(parsed);
-  if (!candidateId) {
-    throw new UsageError("Missing required CANDIDATE_ID.");
-  }
-  return candidateId;
-}
-
-function readRequiredRunId(parsed: ParsedArgs): string {
-  const runId = parsed.positionals[0];
-  if (!runId) {
-    throw new UsageError("Missing required RUN_ID.");
-  }
-  return runId;
-}
-
-function requireOutDir(parsed: ParsedArgs): string {
-  const output = asOptionalString(parsed.flags.out);
-  if (!output) {
-    throw new UsageError("Missing required --out.");
-  }
-  return output;
 }
 
 async function apiRequest<T>(
@@ -7474,11 +6691,13 @@ function resolveSourceDir(parsed: ParsedArgs): string {
   if (parsed.positionals.length > 1) {
     throw new UsageError("Expected at most one source file or directory argument.");
   }
-  if (parsed.positionals.length > 0 && parsed.flags.dir !== undefined) {
-    throw new UsageError("Use either --dir or SOURCE, not both.");
+  const dir = asOptionalString(parsed.flags.dir);
+  const source = parsed.positionals[0];
+  if (dir && source) {
+    return path.resolve(dir, source);
   }
   return path.resolve(
-    asOptionalString(parsed.flags.dir) ?? parsed.positionals[0] ?? process.cwd(),
+    dir ?? source ?? process.cwd(),
   );
 }
 
@@ -7683,6 +6902,20 @@ async function syncSourceFiles(
     await removeEmptyParents(outputDir, path.dirname(previousPath));
   }
   await writeFiles(outputDir, files);
+}
+
+async function assertLocalSourceMatchesOrigin(
+  dir: string,
+  origin: WorkbenchOrigin,
+): Promise<void> {
+  const source = await readLocalProjectSource(dir);
+  const fingerprint = localProjectStateSource(source).fingerprint;
+  if (fingerprint === origin.sourceFingerprint) {
+    return;
+  }
+  throw new UsageError(
+    "Local source changed since the last pull or push. Run `workbench push` before pulling, or restore the local source changes and try again.",
+  );
 }
 
 async function readManagedSourceFilePaths(outputDir: string): Promise<Set<string>> {

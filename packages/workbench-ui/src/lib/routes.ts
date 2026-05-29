@@ -22,6 +22,10 @@ export type WorkbenchRoute =
       kind: "benchmark";
     }
   | {
+      kind: "not-found";
+      pathname: string;
+    }
+  | {
       kind: "candidates";
       view: CandidatesIndexView;
     }
@@ -60,9 +64,7 @@ export function parseWorkbenchRoute(locationLike: {
         dialog: parseEvaluationDialog(searchParams),
       };
     }
-    return {
-      kind: "benchmark",
-    };
+    return createWorkbenchNotFoundRoute(normalizedPath);
   }
 
   if (segments[0] === "candidates") {
@@ -74,6 +76,16 @@ export function parseWorkbenchRoute(locationLike: {
     }
     const candidateId = segments[1] ?? null;
     const requestedView = segments[2];
+    if (segments.length > 3) {
+      return createWorkbenchNotFoundRoute(normalizedPath);
+    }
+    if (
+      requestedView !== undefined &&
+      requestedView !== "files" &&
+      requestedView !== "manifest"
+    ) {
+      return createWorkbenchNotFoundRoute(normalizedPath);
+    }
     const view =
       requestedView === "files"
         ? "files"
@@ -91,9 +103,7 @@ export function parseWorkbenchRoute(locationLike: {
     };
   }
 
-  return {
-    kind: "benchmark",
-  };
+  return createWorkbenchNotFoundRoute(normalizedPath);
 }
 
 export function parseWorkbenchLocation(
@@ -118,6 +128,10 @@ export function buildWorkbenchHref(
 
   if (route.kind === "benchmark") {
     return withQuery("/", params);
+  }
+
+  if (route.kind === "not-found") {
+    return withQuery(route.pathname, params);
   }
 
   if (route.kind === "candidates") {
@@ -171,6 +185,13 @@ export function buildWorkbenchLocationHref(
 export function createBenchmarkRoute(): WorkbenchRoute {
   return {
     kind: "benchmark",
+  };
+}
+
+export function createWorkbenchNotFoundRoute(pathname: string): WorkbenchRoute {
+  return {
+    kind: "not-found",
+    pathname: normalizePathname(pathname),
   };
 }
 

@@ -7,6 +7,7 @@ import {
   buildEvaluationCandidateColorMap,
   buildEvaluationCandidatePresentations,
   formatEvaluationConfigurationLabel,
+  readEvaluationScore,
   resolveCandidateEvaluationRollupDisplay,
   resolveEvaluationCandidateDisplay,
 } from "../src/lib/candidate-evaluation-display";
@@ -71,6 +72,31 @@ describe("candidate evaluation display", () => {
       bestConfigurationText: "Best configuration Accurate",
       countText: "2 evaluations",
     });
+  });
+
+  test("uses selection score as the primary candidate score when present", () => {
+    const evaluation = evaluationSummary({
+      metrics: { score: metricStats(0.2) },
+      selectionMetric: "score",
+      selectionLabel: "score on split=validation",
+      selectionScore: metricStats(0.8),
+    });
+
+    const rollup = buildCandidateEvaluationRollup("candidate_test", [evaluation]);
+
+    expect(readEvaluationScore(evaluation)).toBe(0.8);
+    expect(rollup.bestScore).toBe(0.8);
+  });
+
+  test("does not label non-score selection metrics as score", () => {
+    const evaluation = evaluationSummary({
+      metrics: { score: metricStats(0.2) },
+      selectionMetric: "latency",
+      selectionLabel: "latency on split=validation",
+      selectionScore: metricStats(0.8),
+    });
+
+    expect(readEvaluationScore(evaluation)).toBe(0.2);
   });
 
   test("excludes incomplete evaluations from candidate score rollups", () => {

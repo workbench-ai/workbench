@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
 describe.runIf(process.env.WORKBENCH_PACKAGING_TEST === "1")("packaged Workbench", () => {
-  test("built binary exposes local-first help", () => {
+  test("built binary exposes repo-like help", () => {
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
     const result = spawnSync(
       process.execPath,
@@ -20,9 +20,10 @@ describe.runIf(process.env.WORKBENCH_PACKAGING_TEST === "1")("packaged Workbench
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("workbench init");
     expect(result.stdout).toContain("workbench push [SOURCE] [--dir DIR]");
-    expect(result.stdout).toContain("workbench improve [SOURCE] [--dir DIR]");
-    expect(result.stdout).toContain("workbench open [SOURCE] [--dir DIR]");
-    expect(result.stdout).toContain("workbench cloud benchmarks|runs|candidates <command> [options]");
+    expect(result.stdout).toContain("workbench pull [--dir DIR]");
+    expect(result.stdout).toContain("workbench improve [SOURCE] [--dir DIR] [--hosted]");
+    expect(result.stdout).toContain("workbench open [SOURCE|OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID]");
+    expect(result.stdout).not.toContain("workbench cloud");
   });
 
   test("built binary resolves built-in adapter commands without package-manager PATH", () => {

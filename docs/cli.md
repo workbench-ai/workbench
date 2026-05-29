@@ -1,16 +1,16 @@
 # CLI
 
-`workbench` is local-first. Normal commands run, inspect, improve, and serve the local project. Workbench Cloud is an optional remote layer for cloning, pushing, pulling, hosted execution, and stars.
+`workbench` treats a benchmark directory as one repo-like project. The authored source lives in the working tree, local run history lives under `.workbench/`, and Workbench Cloud is an optional remote that can store the same project source, runtime history, and hosted execution.
 
 The public project model is intentionally small:
 
 - engine: the benchmark runtime selected by `benchmark.yaml`; the built-in `workbench` engine owns native tasks, environment, scoring, and result normalization
 - candidate: `candidates/<name>/candidate.yaml` plus optional files at `candidates/<name>/files/`; the manifest owns prepare, runnable variants, the default run, and optional improve settings
-- remote: Workbench Cloud origin used by `clone`, `fetch`, `pull`, and `push`
+- remote: the Workbench Cloud project used by `clone`, `pull`, `push`, and hosted `--hosted` execution
 
 ## Public Demo Flow
 
-Use this path for the public three-statement demo. The public benchmark can be cloned and validated without a Workbench Cloud account. Sign in only when you are ready to push your local checkout and run hosted auto-improvement.
+Use this path for the public three-statement demo. The public benchmark can be cloned and validated without a Workbench Cloud account. Sign in only when you are ready to push your checkout and run hosted auto-improvement.
 
 ```bash
 workbench clone official/three-statement-demo
@@ -18,10 +18,10 @@ cd three-statement-demo
 workbench check
 workbench login
 workbench push
-workbench cloud improve candidates/current --budget 1 --samples 1 --watch
+workbench improve --hosted candidates/current --budget 1 --samples 1 --watch
 ```
 
-The cloned public demo uses `candidates/current` and `candidates/current/candidate.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. When a checkout came from a public benchmark, `workbench push` creates a writable hosted benchmark under the signed-in user and keeps the original benchmark as upstream metadata in `.workbench/origin.json`. If the signed-in user owns the public origin, `workbench push` updates that benchmark instead.
+The cloned public demo uses `candidates/current` and `candidates/current/candidate.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex.
 
 ## Provider Selection
 
@@ -33,7 +33,7 @@ When an agent creates a benchmark, first run `workbench whoami --json` and inspe
 
 Use the selected adapter consistently in `workbench init --skill NAME --agent ADAPTER`, the candidate path `candidates/ADAPTER`, and the candidate manifest's `runs` and `improve` blocks.
 
-## Local Development Flow
+## Development Flow
 
 ```bash
 workbench whoami --json
@@ -51,38 +51,45 @@ Skip `workbench auth connect ...` when `workbench whoami --json` already reports
 
 `workbench eval` ensures a candidate has an evaluation for the current benchmark. Omit `--runs` for the candidate's default run, pass a comma-separated list for specific runs, or pass `--runs all` to evaluate every run declared in the candidate manifest. Completed evaluations for the same candidate, run configuration, source, adapters, benchmark, and sample count are reused by default; pass `--rerun` only when you intentionally want another measurement.
 
-`workbench improve` ensures an improved candidate exists for the selected base candidate, run, budget, and sample count. It uses the current candidate by default, evaluates it first if needed, then asks the candidate's `improve` adapter to patch candidate files. Improvement is anchored to one selected run; use `--runs RUN` to override the default and `--from CANDIDATE_ID` only when improving a specific historical candidate snapshot. Completed improvements for the same base candidate, run configuration, source, adapters, benchmark, budget, and sample count are reused by default; pass `--rerun` only when you intentionally want another improvement attempt.
+`workbench improve` ensures an improved candidate exists for the selected base candidate, run, budget, and sample count. It uses the current candidate by default, evaluates it first if needed, then asks the candidate's `improve` adapter to patch candidate files. Improvement is anchored to one selected run; use `--runs RUN` to override the default and `--from CANDIDATE_ID` only when improving a specific local historical candidate snapshot. Completed improvements for the same base candidate, run configuration, source, adapters, benchmark, budget, and sample count are reused by default; pass `--rerun` only when you intentionally want another improvement attempt.
+
+Add `--hosted` to run the same lifecycle against the configured remote or an explicit `--benchmark OWNER/BENCHMARK`:
+
+```bash
+workbench login
+workbench push
+workbench eval --hosted candidates/codex --samples 1 --watch --json
+workbench improve --hosted candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch
+workbench open --hosted --json --no-open
+```
 
 Runtime candidates are versioned automatically. If the candidate manifest is named `Skill`, the initial snapshot is shown as `Skill v1`; each successful improvement produces the next version in that family. Candidate run configurations stay nested under the candidate version.
 
 Once an active candidate exists, eval records scores without moving that active pointer. Improve output distinguishes the candidate produced by that improve run from the active incumbent. `outputCandidateId` is the new version created by the run. `activeCandidateId` is the current best evaluated candidate after scoring, so it can remain on an older version when a new version scores lower.
 
-Use `workbench retry TARGET_ID` to retry a failed local run or evaluation. Retry requires an explicit id and replays the recorded candidate, candidate run configuration, sample count, and improve budget. Reissuing the same retry reuses completed repair work when it already exists.
+Use `workbench retry TARGET_ID` to retry a failed local run or evaluation. Use `workbench retry --hosted TARGET_ID` for hosted records. Retry requires an explicit id and replays the recorded candidate, candidate run configuration, sample count, and improve budget. Reissuing the same retry reuses completed repair work when it already exists.
 
-`workbench open` starts a local read-only web server. Keep the command running while the page is open. The browser UI is for inspection only: it supports navigating, filtering, selecting, expanding, and reviewing candidates, evaluations, cases, traces, scorecards, and files. Execution actions such as eval, improve, retry, cancel, push, and pull stay in the CLI.
+When a watched or reused hosted run reaches a terminal state from a checkout linked to the same remote project, Workbench imports the hosted project state back into local if local authored source still matches the remembered base. Explicit `--benchmark` runs against a different project leave the current checkout untouched.
 
-## Cloud Deployment Flow
+`workbench open` starts a local read-only web server. Keep the command running while the page is open. `workbench open --hosted` prints or opens the hosted project URL. The browser UI is for inspection only: it supports navigating, filtering, selecting, expanding, and reviewing candidates, evaluations, cases, traces, scorecards, and files. Execution actions such as eval, improve, retry, push, and pull stay in the CLI.
 
-```bash
-workbench login
-workbench whoami --json
-workbench push --tag v1
-workbench cloud eval candidates/codex --samples 1 --watch --json
-workbench cloud open --json --no-open
-```
-
-`workbench push` creates or updates a hosted benchmark version and writes `.workbench/origin.json`. Run it after `workbench check`; use a bounded local smoke eval first when local adapter auth and sandbox execution are already configured. Hosted commands return URLs in JSON output; open those URLs when an embedded browser is available.
-
-## Remote Sync And Collaboration
+## Remote Flow
 
 ```bash
 workbench clone official/three-statement-demo
-workbench fetch
 workbench pull
-workbench cloud star official/three-statement-demo
+workbench push
 ```
 
-`workbench fetch` downloads remote source into `.workbench/fetch` without changing project files. `workbench pull` updates managed project files from the origin. `workbench push` creates a writable hosted benchmark when the current origin is a read-only public clone, updates the read-only origin when the signed-in user owns it, and updates the hosted benchmark after that. `workbench remote remove origin --json` is idempotent and reports `removed: true` only when an origin file existed.
+`workbench clone` copies one hosted project state into a local working tree and remembers that remote. The state contains authored source, durable runtime history, and the last seen source/runtime fingerprints.
+
+`workbench pull` refuses to overwrite local authored source if it has changed since the last clone, pull, or push. When local source still matches the remembered base, pull replaces authored source with the hosted source, merges runtime history as immutable facts, and updates `.workbench/origin.json`.
+
+`workbench push` creates or updates the hosted benchmark from local project state. If the hosted source changed since the remembered base, push fails and asks you to pull first. Runtime history is merged idempotently; equal ids are kept, new ids are added, and same-id different-content conflicts fail instead of choosing a winner.
+
+`.workbench/origin.json` has one exact shape: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`. It is a remote pointer plus the last exchanged base, not a second project model.
+
+Hosted benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so remote references use only `OWNER/BENCHMARK`.
 
 ## Adapter Auth
 
@@ -104,25 +111,6 @@ ANTHROPIC_API_KEY=... workbench auth connect claude --method api-key --local-onl
 
 For other adapters, inspect supported methods with `workbench adapters inspect ADAPTER`, then run `workbench auth connect ADAPTER --method METHOD`. `workbench whoami` reports Workbench Cloud login state and required adapter-auth state for the current benchmark.
 
-## Hosted Execution
-
-```bash
-workbench cloud eval candidates/codex --benchmark alice/invoice-review@v1 --samples 1 --watch
-workbench cloud improve candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch
-workbench cloud open CANDIDATE_ID --no-open --json
-workbench cloud runs show run_123 --json
-workbench cloud runs cancel run_123
-workbench cloud candidates publish CANDIDATE_ID
-```
-
-Treat hosted resource ids as opaque candidate ids.
-
-Use `workbench cloud retry TARGET_ID` to retry a failed hosted run or evaluation. Retry starts a new hosted run from the recorded target; use `--watch` when you want the command to poll until completion.
-
-Hosted watch commands are client-side polling only. Stopping the client does not cancel the hosted run; use `workbench cloud runs cancel RUN_ID`.
-
-Hosted dry-runs are local planning operations. For example, `workbench cloud eval --dry-run` and `workbench cloud benchmarks delete --dry-run` print the request or deletion plan from the supplied benchmark ref or local origin without starting a run or deleting remote state.
-
 ## CLI Surface
 
 ```bash
@@ -133,10 +121,10 @@ workbench adapters create PATH [--dir DIR] [--json]
 workbench adapters list [--dir DIR] [--json]
 workbench adapters inspect ID [--dir DIR] [--json]
 workbench adapters test ID|SOURCE [--dir DIR] [--request PATH] [--output DIR] [--json]
-workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--json]
-workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]
-workbench retry TARGET_ID [--dir DIR] [--json]
-workbench open [SOURCE] [--dir DIR] [--run RUN_ID] [--host HOST] [--port N] [--no-open] [--json]
+workbench eval [SOURCE] [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--base CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
+workbench improve [SOURCE] [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--from CANDIDATE_ID] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
+workbench retry TARGET_ID [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
+workbench open [SOURCE|OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID] [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--run RUN_ID] [--host HOST] [--port N] [--no-open] [--json]
 workbench restore [--dir DIR] [--candidate CANDIDATE_ID] [--dry-run] [--yes] [--json]
 workbench runs list [--dir DIR] [--json]
 workbench runs show RUN_ID [--dir DIR] [--json]
@@ -150,23 +138,9 @@ workbench traces show TRACE_ID [--providers codex,claude] [--since 30d] [--works
 workbench login [--base-url URL] [--no-open] [--json]
 workbench logout [--json]
 workbench whoami [--dir DIR] [--json]
-workbench clone OWNER/BENCHMARK[@REF] [DIR] [--dry-run] [--json]
-workbench remote show [--dir DIR] [--json]
-workbench remote add origin OWNER/BENCHMARK[@REF] [--dir DIR] [--json]
-workbench remote set-url origin OWNER/BENCHMARK[@REF] [--dir DIR] [--json]
-workbench remote remove origin [--dir DIR] [--json]
-workbench fetch [--dir DIR] [--json]
+workbench clone OWNER/BENCHMARK [DIR] [--dry-run] [--json]
 workbench pull [--dir DIR] [--dry-run] [--json]
-workbench push [SOURCE] [--dir DIR] [--tag TAG] [--visibility public|private] [--dry-run] [--json]
-workbench cloud star OWNER/BENCHMARK [--json]
-workbench cloud unstar OWNER/BENCHMARK [--json]
-workbench cloud eval [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
-workbench cloud improve [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
-workbench cloud retry TARGET_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
-workbench cloud open [OWNER/BENCHMARK[@REF]|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--no-open] [--json]
-workbench cloud watch RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--interval-ms N] [--timeout-ms N] [--json]
-workbench cloud logs RUN_ID [--dir DIR] [--benchmark OWNER/BENCHMARK[@REF]] [--json]
-workbench cloud benchmarks|runs|candidates <command> [options]
+workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--json]
 workbench auth connect ADAPTER[/SLOT] [--dir DIR] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]
 workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--json]
 ```

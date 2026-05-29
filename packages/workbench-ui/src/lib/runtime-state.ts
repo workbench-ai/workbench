@@ -113,6 +113,18 @@ export function runStatusLabel(run: RunSummary): string {
   return run.workflow === "eval" ? `eval ${status}` : `improve ${status}`;
 }
 
+export function formatRunPolicyText(
+  run: Pick<RunSummary, "optimizeOn" | "selectBy"> | null | undefined,
+): string | null {
+  if (!run || (!run.optimizeOn && !run.selectBy)) {
+    return null;
+  }
+  return [
+    run.optimizeOn ? `Optimize on ${run.optimizeOn}` : null,
+    run.selectBy ? `Select winner by ${run.selectBy}` : null,
+  ].filter(Boolean).join(" · ");
+}
+
 export function activeRunSummaryLabel(activeRuns: readonly RunSummary[]): string {
   if (activeRuns.length === 0) {
     return "No active runs";

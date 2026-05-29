@@ -1,5 +1,5 @@
 interface:
   display_name: "Workbench"
-  short_description: "Create evals, configure, run, inspect, improve, sync, and export Workbench benchmarks and candidates with workbench"
+  short_description: "Create evals, configure, run, inspect, improve, clone, pull, and push Workbench benchmarks and candidates with workbench"
   default_prompt: >-
     Use the Workbench skill. Read SKILL.md first, then load only the relevant referenced docs. For the public demo, clone official/three-statement-demo, validate it with workbench check, log in, push the checkout, then run hosted auto-improvement. For new benchmarks, create, validate, eval, improve, and inspect locally before pushing to Workbench Cloud. Use workbench whoami --json only when adapter auth is missing, preferring connected Codex when available.

@@ -5,7 +5,7 @@
   "submission_schema_version": 1,
   "suite_latency_expectation": {
     "minimum_significant_improvement_ratio": 0.2,
-    "notes": "Eval cases measure whether an agent can drive the local-first CLI, Workbench Cloud client commands, and eval authoring without relying on private hosted implementation state."
+    "notes": "Eval cases measure whether an agent can drive the repo-like CLI, Workbench Cloud remotes, hosted --hosted execution, and eval authoring without relying on private hosted implementation state."
   },
   "evals": [
     {
@@ -66,8 +66,8 @@
       "id": "hosted-benchmark-and-spec",
       "title": "Create a hosted benchmark and apply a spec",
       "category": "hosted_spec",
-      "prompt": "Create a hosted Workbench benchmark named `invoice-parser`, push local source idempotently, and report the benchmark id plus the push result.",
-      "expected_output": "The response targets a hosted Workbench server, creates or selects a benchmark with the local-first CLI, pushes the local source, opens or returns the Workbench Cloud benchmark URL for an embedded browser, and reports hosted benchmark metadata.",
+      "prompt": "Create a hosted Workbench benchmark named `invoice-parser`, push local source and runtime history idempotently, and report the benchmark id plus the push result.",
+      "expected_output": "The response targets a hosted Workbench server, creates or selects a benchmark with the repo-like CLI, pushes local source plus runtime history, opens or returns the Workbench Cloud benchmark URL for an embedded browser, and reports hosted benchmark metadata.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -226,10 +226,10 @@
     },
     {
       "id": "hosted-upload-and-run",
-      "title": "Sync snapshots and start a hosted run",
+      "title": "Push source and start a hosted run",
       "category": "hosted_run",
-      "prompt": "Push `./candidates/codex/files` and `./tasks` to an existing hosted benchmark, start one hosted improve run from base candidate id `candidate_123`, budget 1, and samples 1, watch it to terminal status, and report the run id and candidate id.",
-      "expected_output": "The response treats local directories as Workbench project source, pushes benchmark source, starts a hosted improve run with `workbench cloud improve` and explicit `--base candidate_123`, watches the hosted run, uses the hosted command returned URLs or `workbench cloud open` when browser navigation is needed, and reports the resulting run and candidate id.",
+      "prompt": "From an existing Workbench project with `candidates/codex` and `tasks`, push source and runtime history to a hosted benchmark, start one hosted improve run from base candidate id `candidate_123`, budget 1, and samples 1, watch it to terminal status, and report the run id and candidate id.",
+      "expected_output": "The response treats local directories as Workbench project source, pushes benchmark source plus runtime history, starts a hosted improve run with `workbench improve --hosted` and explicit `--base candidate_123`, watches the hosted run, uses the returned URLs or `workbench open --hosted` when browser navigation is needed, and reports the resulting run and candidate id.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -247,7 +247,7 @@
           "value": "workbench"
         },
         {
-          "text": "pushes local source",
+          "text": "pushes local source and runtime history",
           "kind": "matches",
           "path": "tool_commands",
           "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+push\\b"
@@ -256,13 +256,13 @@
           "text": "starts a hosted run",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+improve\\b[^\\n]*--base\\s+candidate_123"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--hosted\\b[^\\n]*--base\\s+candidate_123|(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--base\\s+candidate_123[^\\n]*--hosted\\b"
         },
         {
           "text": "watches the hosted run",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+(?:watch\\b|improve\\b[^\\n]*--watch)"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--hosted\\b[^\\n]*--watch|(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--watch[^\\n]*--hosted\\b"
         },
         {
           "text": "reports the requested budget",
@@ -274,16 +274,16 @@
           "text": "opens or returns the resulting candidate URL after the run when needed",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:candidate_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*--hosted\\b[^\\n]*(?:candidate_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)|(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*(?:candidate_|<candidate>)[^\\n]*--hosted\\b[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
         }
       ]
     },
     {
-      "id": "hosted-candidate-inspection",
-      "title": "Inspect and export a hosted candidate snapshot",
+      "id": "local-candidate-inspection",
+      "title": "Inspect a local candidate snapshot",
       "category": "candidate_inspection",
-      "prompt": "List hosted candidate snapshots for a benchmark, list files for the selected hosted id, preview `workbench-run-summary.md`, and export it to `./best-candidate`.",
-      "expected_output": "The response uses hosted snapshot inspection commands, opens or returns the selected hosted id's Workbench Cloud URL for browser inspection, and pulls the selected snapshot without mutating hosted state.",
+      "prompt": "List local candidate snapshots for a benchmark, list files for the selected candidate id, preview `SKILL.md`, and open the local Workbench UI without starting any hosted mutation.",
+      "expected_output": "The response uses local `workbench candidates ...` inspection commands, opens or returns the read-only local Workbench URL with `workbench open --json --no-open`, and does not mutate hosted state.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -301,39 +301,33 @@
           "value": "workbench"
         },
         {
-          "text": "lists hosted candidate snapshots",
+          "text": "lists local candidate snapshots",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+list\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+candidates\\s+list\\b"
         },
         {
-          "text": "lists hosted snapshot files",
+          "text": "lists local candidate files",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+files\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+candidates\\s+files\\b"
         },
         {
-          "text": "previews a hosted snapshot file",
+          "text": "previews a local candidate file",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+preview\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+candidates\\s+preview\\b"
         },
         {
-          "text": "pulls the hosted snapshot",
+          "text": "opens or returns the local Workbench URL",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+candidates\\s+pull\\b"
+          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
         },
         {
-          "text": "opens or returns the selected hosted snapshot URL",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+cloud\\s+open\\s+(?:candidate_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
-        },
-        {
-          "text": "reports export as non-mutating",
+          "text": "reports inspection as non-mutating",
           "kind": "equals",
-          "path": "answer.export_mutates_hosted_state",
+          "path": "answer.inspection_mutates_hosted_state",
           "value": false
         }
       ]

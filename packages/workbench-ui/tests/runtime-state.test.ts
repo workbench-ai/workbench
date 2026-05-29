@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   activeRunSummaryLabel,
   buildWorkbenchRuntimeState,
+  formatRunPolicyText,
   runStatusLabel,
 } from "../src/lib/runtime-state";
 import type {
@@ -130,6 +131,14 @@ describe("runtime state", () => {
       .toBe("eval cancelled");
     expect(runStatusLabel(runSummary({ workflow: "improve", status: "finished", outcome: "ok" })))
       .toBe("improve completed");
+  });
+
+  test("formats split-aware improve policy text", () => {
+    expect(formatRunPolicyText(runSummary({
+      optimizeOn: "split=train",
+      selectBy: "score on split=validation",
+    }))).toBe("Optimize on split=train · Select winner by score on split=validation");
+    expect(formatRunPolicyText(runSummary())).toBeNull();
   });
 });
 

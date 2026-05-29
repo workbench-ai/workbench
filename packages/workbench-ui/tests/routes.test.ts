@@ -276,7 +276,7 @@ describe("workbench location routes", () => {
     ).toBe("/benchmarks/alice/demo/evaluations?evaluation=eval_123&case=case-001");
   });
 
-  test("evaluation detail paths fall back to the benchmark route", () => {
+  test("evaluation detail paths are explicit not-found routes", () => {
     expect(
       parseWorkbenchLocation(
         {
@@ -286,7 +286,36 @@ describe("workbench location routes", () => {
         "/benchmarks/alice/demo",
       ),
     ).toEqual({
-      kind: "benchmark",
+      kind: "not-found",
+      pathname: "/evaluations/eval_123",
+    });
+  });
+
+  test("unknown workspace paths are explicit not-found routes", () => {
+    expect(
+      parseWorkbenchLocation(
+        {
+          pathname: "/benchmarks/alice/demo/not-a-route",
+          search: "",
+        },
+        "/benchmarks/alice/demo",
+      ),
+    ).toEqual({
+      kind: "not-found",
+      pathname: "/not-a-route",
+    });
+
+    expect(
+      parseWorkbenchLocation(
+        {
+          pathname: "/benchmarks/alice/demo/candidates/candidate_123/unknown",
+          search: "",
+        },
+        "/benchmarks/alice/demo",
+      ),
+    ).toEqual({
+      kind: "not-found",
+      pathname: "/candidates/candidate_123/unknown",
     });
   });
 

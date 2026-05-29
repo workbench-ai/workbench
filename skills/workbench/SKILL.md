@@ -1,11 +1,11 @@
 ---
 name: workbench
-description: Use this skill for configuring, authoring, running, inspecting, improving, syncing, or exporting Workbench benchmarks and candidates with the `workbench` CLI.
+description: Use this skill for configuring, authoring, running, inspecting, improving, cloning, pulling, or pushing Workbench benchmarks and candidates with the `workbench` CLI.
 ---
 
 # Workbench
 
-Use `workbench` as a local-first benchmark CLI. Local commands create, validate, evaluate, improve, inspect, and serve a Workbench project. Workbench Cloud adds login, push, clone/fetch/pull, hosted runs, and stars.
+Use `workbench` as a repo-like benchmark CLI. Commands create, validate, evaluate, improve, inspect, and serve a Workbench project. Workbench Cloud is an optional remote reached through `login`, `clone`, `pull`, `push`, and hosted execution flags on the same lifecycle commands.
 
 ## Install
 
@@ -28,10 +28,10 @@ cd three-statement-demo
 workbench check
 workbench login
 workbench push
-workbench cloud improve candidates/current --budget 1 --samples 1 --watch
+workbench improve --hosted candidates/current --budget 1 --samples 1 --watch
 ```
 
-The public benchmark is readable without Workbench Cloud login. It starts with three cases and an empty skill frontmatter. Its cloned paths are `candidates/current` and `candidates/current/candidate.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. When a checkout came from a public benchmark, `workbench push` creates a writable hosted benchmark under the signed-in user and records the original benchmark as upstream metadata. If the signed-in user owns the public origin, `workbench push` updates that benchmark instead. Stop cleanly when login or OAuth requires user approval.
+The public benchmark is readable without Workbench Cloud login. It starts with three cases and an empty skill frontmatter. Its cloned paths are `candidates/current` and `candidates/current/candidate.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. `workbench clone`, `workbench pull`, and `workbench push` exchange one portable project state: authored source plus durable runtime history. Source updates are guarded by the last seen remote revision/fingerprint, while runtime history merges as immutable facts. Stop cleanly when login or OAuth requires user approval.
 
 ## Provider And Auth
 
@@ -53,7 +53,9 @@ Use split source files:
 
 - `benchmark.yaml` selects the engine and describes what is measured.
 - `candidates/<name>/candidate.yaml` owns prepare, run variants, default run, optional improve behavior, and candidate files with `files: { path: files }`.
-- `tasks/<case>/task.yaml` owns task text plus optional public `files`, hidden `tests`, and `solution` paths for the built-in Workbench engine.
+- `tasks/<case>/task.yaml` owns task text plus optional `split`, public `files`, hidden `tests`, and `solution` paths for the built-in Workbench engine.
+
+For train/validation-style improvement, use task `split` labels plus candidate `improve.optimizeOn` and `improve.selectBy`. `optimizeOn` controls optimizer evidence, `selectBy` controls active-candidate promotion, and omitted policy preserves all-case `score`. Do not create named case sets or separate optimizer files.
 
 Use `engine.with.environment.dockerfile` when the benchmark needs OS packages, CLIs, Python/R/Node dependencies, or shared runtime setup. Include `ca-certificates` when the environment installs packages or calls HTTPS services.
 
@@ -76,23 +78,25 @@ workbench open --json --no-open
 
 Skip `workbench auth connect ...` when `workbench whoami --json` already shows the selected adapter profile as connected. `workbench eval` uses the candidate's default run unless `--runs RUNS|all` is supplied, reuses completed evaluations only for the same candidate, run configuration, source, adapters, benchmark, and samples, and does not move the active pointer once an active candidate exists. `workbench improve` uses one selected run, defaulting to the candidate default, and reuses completed improvements only for the same base, run configuration, source, adapters, benchmark, budget, and samples. Use `--rerun` only when intentionally spending on another measurement or improvement attempt. Use `--runs RUN` to override the improve run and `--from CANDIDATE_ID` only when improving a specific historical candidate snapshot. Runtime candidate labels are automatic versions such as `Skill v1`, `Skill v2`, and `Skill v3`; do not put version labels in authored YAML. Improve JSON distinguishes `outputCandidateId` for the version produced by the run from `activeCandidateId` for the current best evaluated candidate. Use `workbench retry RUN_OR_EVAL_ID` only for failed local history; it leaves the failed record inspectable and reuses completed repair work when the same retry has already succeeded. Keep `workbench open --json --no-open` running while the local UI is in use. The browser UI is read-only inspection; run eval, improve, retry, cancel, push, and pull actions from the CLI.
 
-## Cloud Deployment Flow
+## Hosted Execution Flow
 
 After `workbench check`, push and run hosted smoke workflows. Run a bounded local eval first when local adapter auth and sandbox execution are already configured:
 
 ```bash
 workbench login
 workbench whoami --json
-workbench push --tag v1
-workbench cloud eval candidates/codex --benchmark owner/name@v1 --runs all --samples 1 --watch
-workbench cloud improve candidates/codex --base candidate_123 --budget 1 --samples 1 --watch
-workbench cloud retry RUN_OR_EVAL_ID --benchmark owner/name --watch --json
-workbench cloud open --json --no-open
+workbench push
+workbench eval --hosted candidates/codex --benchmark owner/name --runs all --samples 1 --watch
+workbench improve --hosted candidates/codex --base candidate_123 --budget 1 --samples 1 --watch
+workbench retry --hosted RUN_OR_EVAL_ID --benchmark owner/name --watch --json
+workbench open --hosted --json --no-open
 ```
 
-Use `workbench push` to sync benchmark source. Hosted eval and improve also reuse completed work only for the same candidate, run configuration, source, adapters, benchmark, and requested samples/budget; use `--rerun` only for an intentional duplicate run. Use `workbench cloud retry RUN_OR_EVAL_ID` only for failed hosted history; it replays the recorded candidate, configuration, sample count, and budget, and reuses completed repair work when the same retry has already succeeded. Use the `urls` object from JSON output when present. When an embedded browser is available, navigate it to the benchmark, evaluation, or candidate URL so the user can inspect candidates, cases, traces, scorecards, and files. Hosted ids such as `candidate_...` are opaque, and hosted browser pages are also read-only inspection.
+Use `workbench push` to push one project state to the remembered remote. Hosted eval and improve also reuse completed work only for the same candidate, run configuration, source, adapters, benchmark, and requested samples/budget; use `--rerun` only for an intentional duplicate run. Use `workbench retry --hosted RUN_OR_EVAL_ID` only for failed hosted history; it replays the recorded candidate, configuration, sample count, and budget, and reuses completed repair work when the same retry has already succeeded. Use the `urls` object from JSON output when present. When an embedded browser is available, navigate it to the benchmark, evaluation, or candidate URL so the user can inspect candidates, cases, traces, scorecards, and files. Hosted ids such as `candidate_...` are opaque, and hosted browser pages are also read-only inspection.
 
-For remote collaboration, use `workbench clone OWNER/BENCHMARK[@REF]`, `workbench fetch`, `workbench pull`, `workbench push`, `workbench cloud star`, and `workbench cloud unstar`.
+When a watched or reused hosted run reaches a terminal state from a checkout linked to the same remote project, Workbench imports the hosted project state back into local if local authored source still matches the remembered base. Explicit `--benchmark` runs against a different project leave the current checkout untouched.
+
+For remote collaboration, use `workbench clone OWNER/BENCHMARK`, `workbench pull`, and `workbench push`. If source changed on both sides since the last exchange, pull or push fails instead of choosing a winner; resolve by pushing or restoring local source before pulling, or pulling hosted source before pushing.
 
 ## Local Trace Inspection
 
@@ -116,7 +120,7 @@ workbench traces show TRACE_ID --workspace "$PWD" --json \
 
 When creating or editing Workbench evals, load only the relevant authored references:
 
-- `references/docs/cli.md` for provider selection, auth, command syntax, local runs, remote sync, and hosted commands.
+- `references/docs/cli.md` for provider selection, auth, command syntax, runs, clone/pull/push remotes, and hosted execution flags.
 - `references/docs/evals/README.md` for the overall eval-authoring flow.
 - `references/docs/evals/spec-syntax.md` for split `benchmark.yaml`, candidate manifests, native task packages, engine-owned scoring, and candidate-owned improve settings.
 - `references/docs/evals/runner-contract.md` for engine attempts, staged paths, same-environment scoring, and result records.
@@ -124,4 +128,4 @@ When creating or editing Workbench evals, load only the relevant authored refere
 - `references/docs/evals/tasks-and-fixtures.md` for task layout, public files, hidden verifier files, and Harbor imports.
 - `references/docs/evals/from-existing-workflow.md` when wrapping an existing benchmark, smoke test, script, or manual scoring workflow.
 - `references/docs/evals/from-file-outputs.md` when tasks or outputs involve `.docx`, `.xlsx`, `.pdf`, `.pptx`, or similar files.
-- `references/docs/evals/run-and-inspect.md` for local smoke runs, cloud deployment, hosted URLs, and run inspection.
+- `references/docs/evals/run-and-inspect.md` for local smoke runs, hosted execution, hosted URLs, and run inspection.

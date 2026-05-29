@@ -30,6 +30,14 @@ import type {
   MetricStats,
   SurfaceSnapshotFile,
   UsageSummary,
+  WorkbenchRuntimeBundle,
+  WorkbenchRuntimeBundleStats,
+  WorkbenchProjectSourceResources,
+  WorkbenchProjectState,
+  WorkbenchProjectStateBase,
+  WorkbenchProjectStateImportResult,
+  WorkbenchProjectStateRemote,
+  WorkbenchProjectStateSource,
   WorkbenchCandidatePatch,
   WorkbenchAdapterInvocation,
   WorkbenchExecutionCapability,
@@ -60,6 +68,7 @@ import {
 import {
   BENCHMARK_SPEC_FILE,
   CANDIDATE_SPEC_FILE,
+  DEFAULT_EXECUTION_RESOURCES,
   engineCasePrivateFiles,
   engineCaseFilesForRuntimeInput,
   engineCasePublicFiles,
@@ -69,6 +78,7 @@ import {
   isWorkbenchCandidateManifestPath,
   type GenericEngineCaseSpec,
   type GenericRunSpec,
+  type WorkbenchCaseSelector,
   type WorkbenchEngineCase,
 } from "./generic-spec.ts";
 import {
@@ -171,6 +181,8 @@ export {
   type WorkbenchCandidateImproveSpec,
   type WorkbenchCandidateManifestSpec,
   type WorkbenchCandidateRunSpec,
+  type WorkbenchCaseSelector,
+  type WorkbenchSelectionSpec,
   type GenericRunSpec,
   type GenericEngineCaseSpec,
   type WorkbenchEngineCase,
@@ -394,12 +406,218 @@ export type {
   RunSummary,
   RuntimeEvent,
   SurfaceSnapshotFile,
+  WorkbenchRuntimeBundle,
+  WorkbenchRuntimeBundleStats,
+  WorkbenchRuntimeRun,
+  WorkbenchRuntimeCandidateFiles,
+  WorkbenchRuntimeExecutionFiles,
+  WorkbenchRuntimeImportResult,
+  WorkbenchProjectSourceResources,
+  WorkbenchProjectState,
+  WorkbenchProjectStateBase,
+  WorkbenchProjectStateImportResult,
+  WorkbenchProjectStateRemote,
+  WorkbenchProjectStateSource,
   WorkbenchExecutionCapability,
   WorkbenchExecutionTrace,
   WorkbenchTraceSession,
   WorkbenchSandboxHandle,
   WorkbenchSandboxExecutionMetadata,
 } from "@workbench-ai/workbench-contract";
+
+export function sanitizeWorkbenchRuntimeJobForExchange(
+  job: HostedWorkbenchJob,
+): HostedWorkbenchJob {
+  const {
+    leaseUntil: _leaseUntil,
+    wakeupLeaseUntil: _wakeupLeaseUntil,
+    hostId: _hostId,
+    workerId: _workerId,
+    claimTokenHash: _claimTokenHash,
+    trace: _trace,
+    traceSessions: _traceSessions,
+    ...portable
+  } = job as HostedWorkbenchJob & {
+    trace?: unknown;
+    traceSessions?: unknown;
+  };
+  return { ...portable };
+}
+
+export function sanitizeWorkbenchRuntimeCandidateForExchange(
+  candidate: CandidateRecord,
+): CandidateRecord {
+  const {
+    ownerUserId: _ownerUserId,
+    ownerUsername: _ownerUsername,
+    visibility: _visibility,
+    metrics: _metrics,
+    candidateRunId: _candidateRunId,
+    candidateRunName: _candidateRunName,
+    ...portable
+  } = candidate as CandidateRecord & {
+    metrics?: unknown;
+    candidateRunId?: unknown;
+    candidateRunName?: unknown;
+  };
+  return { ...portable };
+}
+
+export function workbenchProjectSourceFingerprint(
+  input: Omit<WorkbenchProjectStateSource, "files" | "revisionId" | "fingerprint">,
+): string {
+  const canonical = {
+    sourceYaml: normalizeTextForProjectStateFingerprint(input.source),
+    candidateFiles: canonicalFilesForProjectStateFingerprint(input.candidateFiles),
+    engineResolveFiles: canonicalFilesForProjectStateFingerprint(input.engineResolveFiles),
+    engineResolveBinding: {
+      engine: input.engineResolveBinding.engine,
+      resolver: {
+        use: input.engineResolveBinding.resolver.use,
+        withFingerprint: input.engineResolveBinding.resolver.withFingerprint,
+      },
+    },
+    adapterFiles: canonicalFilesForProjectStateFingerprint(input.adapterFiles),
+    runtimeFiles: canonicalFilesForProjectStateFingerprint(input.runtimeFiles),
+    dockerfile: normalizeTextForProjectStateFingerprint(input.dockerfile),
+    runtimeDockerfile: normalizeTextForProjectStateFingerprint(input.runtimeDockerfile),
+    resources: normalizeProjectStateResources(input.resources),
+    network: input.network,
+  };
+  return createHash("sha256").update(JSON.stringify(canonicalizeProjectState(canonical))).digest("hex");
+}
+
+export function workbenchRuntimeBundleFingerprint(
+  bundle: WorkbenchRuntimeBundle,
+): string {
+  const canonical = {
+    schema: bundle.schema,
+    activeId: bundle.activeId,
+    candidates: sortByStableKey(
+      bundle.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange),
+      (candidate) => candidate.id,
+    ),
+    candidateFiles: sortByStableKey(
+      bundle.candidateFiles.map((group) => ({
+        candidateId: group.candidateId,
+        files: canonicalFilesForProjectStateFingerprint(group.files),
+      })),
+      (group) => group.candidateId,
+    ),
+    evaluations: sortByStableKey(bundle.evaluations, (evaluation) => evaluation.id),
+    runs: sortByStableKey(bundle.runs, (run) => run.id),
+    jobs: sortByStableKey(
+      bundle.jobs.map(runtimeJobForProjectStateFingerprint),
+      (job) => job.id,
+    ),
+    executionFiles: sortByStableKey(
+      bundle.executionFiles.map((group) => ({
+        jobId: group.jobId,
+        files: canonicalFilesForProjectStateFingerprint(group.files),
+      })),
+      (group) => group.jobId,
+    ),
+    events: sortByStableKey(bundle.events, (event) =>
+      [event.runId ?? "_", event.jobId ?? "_", event.at, event.id].join("#")
+    ),
+  };
+  return createHash("sha256").update(JSON.stringify(canonicalizeProjectState(canonical))).digest("hex");
+}
+
+export function workbenchSurfaceFilesEqualForExchange(
+  left: readonly SurfaceSnapshotFile[],
+  right: readonly SurfaceSnapshotFile[],
+): boolean {
+  return JSON.stringify(canonicalFilesForProjectStateFingerprint(left)) ===
+    JSON.stringify(canonicalFilesForProjectStateFingerprint(right));
+}
+
+export function workbenchRuntimeBundleStats(
+  bundle: WorkbenchRuntimeBundle,
+): WorkbenchRuntimeBundleStats {
+  return {
+    candidates: bundle.candidates.length,
+    candidateFiles: bundle.candidateFiles.reduce((sum, group) => sum + group.files.length, 0),
+    evaluations: bundle.evaluations.length,
+    runs: bundle.runs.length,
+    jobs: bundle.jobs.length,
+    executionFiles: bundle.executionFiles.reduce((sum, group) => sum + group.files.length, 0),
+    events: bundle.events.length,
+    activeId: bundle.activeId,
+  };
+}
+
+function runtimeJobForProjectStateFingerprint(
+  job: HostedWorkbenchJob,
+): HostedWorkbenchJob {
+  const portable = sanitizeWorkbenchRuntimeJobForExchange(job);
+  const output = portable.output;
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return portable;
+  }
+  const {
+    files: _files,
+    fileSet: _fileSet,
+    ...portableOutput
+  } = output as Record<string, Json>;
+  return {
+    ...portable,
+    output: portableOutput as Json,
+  };
+}
+
+function canonicalFilesForProjectStateFingerprint(
+  files: readonly SurfaceSnapshotFile[],
+): Array<{
+  path: string;
+  encoding: SurfaceSnapshotFile["encoding"];
+  executable: boolean;
+  content: string;
+}> {
+  return sortByStableKey(
+    files.map((file) => ({
+      path: file.path,
+      encoding: file.encoding,
+      executable: Boolean(file.executable),
+      content: file.content,
+    })),
+    (file) => file.path,
+  );
+}
+
+function normalizeTextForProjectStateFingerprint(value: string): string {
+  return value.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
+}
+
+function normalizeProjectStateResources(
+  resources: WorkbenchProjectSourceResources,
+): Required<WorkbenchProjectSourceResources> {
+  return {
+    cpu: resources.cpu ?? DEFAULT_EXECUTION_RESOURCES.cpu,
+    memoryGb: resources.memoryGb ?? DEFAULT_EXECUTION_RESOURCES.memoryGb,
+    diskGb: resources.diskGb ?? DEFAULT_EXECUTION_RESOURCES.diskGb,
+    timeoutMinutes: resources.timeoutMinutes ?? DEFAULT_EXECUTION_RESOURCES.timeoutMinutes,
+  };
+}
+
+function sortByStableKey<T>(items: readonly T[], keyFor: (item: T) => string): T[] {
+  return [...items].sort((left, right) => keyFor(left).localeCompare(keyFor(right)));
+}
+
+function canonicalizeProjectState(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeProjectState);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, canonicalizeProjectState(record[key])]),
+  );
+}
 
 interface RuntimeCommandSpec {
   use: "command";
@@ -879,6 +1097,11 @@ export function materializeWorkbenchRunResult(args: {
   jobs: readonly HostedWorkbenchJob[];
   previousCandidate?: CandidateRecord | null;
   existingCandidateCount: number;
+  selection?: {
+    metric: string;
+    caseIds?: readonly string[];
+    label?: string;
+  };
 }): WorkbenchRunMaterialization {
   const completed = args.jobs.filter((job) => job.status === "succeeded");
   const failedJobCount = args.jobs.filter(
@@ -919,10 +1142,7 @@ export function materializeWorkbenchRunResult(args: {
     const succeededEvaluationJobs = candidateJobs.filter(
       (job) => job.status === "succeeded",
     );
-    const outputs = normalizeEvaluationSampleOutputs({
-      jobs: succeededEvaluationJobs,
-      allJobs: completed,
-    })
+    const outputs = normalizeEvaluationSampleOutputs(succeededEvaluationJobs)
       .sort((left, right) => compareSampleOutputs(left.output, right.output));
     const outputJobIds = new Set(
       outputs.flatMap(({ jobs }) => jobs.map((job) => job.id)),
@@ -1020,6 +1240,15 @@ export function materializeWorkbenchRunResult(args: {
       candidateRunId: args.spec.candidate.selectedRunId,
       candidateRunName: args.spec.candidate.selectedRunName,
       evaluation: evalRecord,
+      ...(args.selection
+        ? {
+            selection: {
+              metric: args.selection.metric,
+              caseIds: args.selection.caseIds,
+              ...(args.selection.label ? { label: args.selection.label } : {}),
+            },
+          }
+        : {}),
     }));
     candidateFiles[candidateId] = materializedCandidateFiles({
       candidateRevisionFiles: candidateRevision.files,
@@ -1029,6 +1258,7 @@ export function materializeWorkbenchRunResult(args: {
   const selectedCandidate = selectCandidate({
     candidates,
     previousCandidate: args.previousCandidate ?? null,
+    selection: args.selection,
   });
   return {
     candidates,
@@ -1181,8 +1411,16 @@ function createEvaluationScorecard(args: {
   candidateRunId?: string;
   candidateRunName?: string;
   evaluation: EvaluationRecord;
+  selection?: {
+    metric: string;
+    caseIds?: readonly string[];
+    label?: string;
+  };
 }): EvaluationScorecard {
   const evaluation = args.evaluation;
+  const selectionScore = args.selection
+    ? readEvaluationSelectionStats(evaluation, args.selection.metric, args.selection.caseIds)
+    : null;
   return {
     id: evaluationScorecardId(args.runId, args.candidate.id),
     runId: args.runId,
@@ -1200,6 +1438,9 @@ function createEvaluationScorecard(args: {
     completedSampleCount: evaluation.completedSampleCount,
     errorSampleCount: evaluation.errorSampleCount,
     ...(evaluation.metrics ? { metrics: evaluation.metrics } : {}),
+    ...(args.selection ? { selectionMetric: args.selection.metric } : {}),
+    ...(args.selection ? { selectionLabel: args.selection.label ?? `${args.selection.metric} on selected cases` } : {}),
+    ...(selectionScore ? { selectionScore } : {}),
     ...(evaluation.durationMs ? { durationMs: evaluation.durationMs } : {}),
     ...(evaluation.usage ? { usage: evaluation.usage } : {}),
     ...(evaluation.error ? { error: evaluation.error } : {}),
@@ -1287,6 +1528,107 @@ export function createOptimizerTraceInputFiles(args: {
     }, null, 2)}\n`,
   ));
   return dedupeSurfaceFiles(files);
+}
+
+export interface WorkbenchSelectionPolicy {
+  metric: string;
+  selector: WorkbenchCaseSelector;
+}
+
+export function workbenchImproveOptimizeSelector(
+  spec: GenericRunSpec,
+): WorkbenchCaseSelector {
+  return cloneWorkbenchCaseSelector(spec.candidate.improve?.optimizeOn ?? { all: true });
+}
+
+export function workbenchImproveSelectionPolicy(
+  spec: GenericRunSpec,
+): WorkbenchSelectionPolicy {
+  const optimizeOn = workbenchImproveOptimizeSelector(spec);
+  const selectBy = spec.candidate.improve?.selectBy;
+  return {
+    metric: selectBy?.metric ?? "score",
+    selector: cloneWorkbenchCaseSelector(selectBy?.cases ?? optimizeOn),
+  };
+}
+
+export function workbenchEngineCaseIdsForSelector(
+  engineCases: readonly WorkbenchEngineCase[],
+  selector: WorkbenchCaseSelector,
+): string[] {
+  return engineCases
+    .filter((engineCase) => workbenchEngineCaseMatchesSelector(engineCase, selector))
+    .map((engineCase) => engineCase.id);
+}
+
+export function workbenchEngineCaseIdsForImproveEvaluation(args: {
+  spec: GenericRunSpec;
+  engineCases: readonly WorkbenchEngineCase[];
+}): string[] {
+  const optimizeIds = new Set(workbenchEngineCaseIdsForSelector(
+    args.engineCases,
+    workbenchImproveOptimizeSelector(args.spec),
+  ));
+  const selectionIds = new Set(workbenchEngineCaseIdsForSelector(
+    args.engineCases,
+    workbenchImproveSelectionPolicy(args.spec).selector,
+  ));
+  return args.engineCases
+    .map((engineCase) => engineCase.id)
+    .filter((caseId) => optimizeIds.has(caseId) || selectionIds.has(caseId));
+}
+
+export function filterOptimizerTraceJobsForCaseIds(
+  jobs: readonly HostedWorkbenchJob[],
+  caseIds: readonly string[],
+): HostedWorkbenchJob[] {
+  const allowed = new Set(caseIds);
+  if (allowed.size === 0) {
+    return [];
+  }
+  return jobs.filter((job) => {
+    if (workbenchExecutionPurpose(job) !== "attempt") {
+      return false;
+    }
+    const caseId = readJobString(job.input, "caseId");
+    return caseId !== null && allowed.has(caseId);
+  });
+}
+
+export function formatWorkbenchCaseSelector(
+  selector: WorkbenchCaseSelector,
+): string {
+  return workbenchCaseSelectorUsesAllCases(selector)
+    ? "all cases"
+    : `split=${selector.split}`;
+}
+
+export function formatWorkbenchSelectionPolicy(
+  policy: WorkbenchSelectionPolicy,
+): string {
+  return `${policy.metric} on ${formatWorkbenchCaseSelector(policy.selector)}`;
+}
+
+export function workbenchCaseSelectorUsesAllCases(
+  selector: WorkbenchCaseSelector,
+): boolean {
+  return !selector.split;
+}
+
+function workbenchEngineCaseMatchesSelector(
+  engineCase: WorkbenchEngineCase,
+  selector: WorkbenchCaseSelector,
+): boolean {
+  if (workbenchCaseSelectorUsesAllCases(selector)) {
+    return true;
+  }
+  return engineCase.case.split === selector.split;
+}
+
+function cloneWorkbenchCaseSelector(
+  selector: WorkbenchCaseSelector,
+): WorkbenchCaseSelector {
+  return selector.split ? { split: selector.split } : { all: true };
 }
 
 export function evaluationMeanMetrics(
@@ -1825,6 +2167,12 @@ function parseAuthoredWorkbenchSourceSpec(source: string): AuthoredWorkbenchSour
         ? {
             improve: {
               edits: [...resolved.candidate.improve.edits],
+              ...(resolved.candidate.improve.optimizeOn
+                ? { optimizeOn: resolved.candidate.improve.optimizeOn }
+                : {}),
+              ...(resolved.candidate.improve.selectBy
+                ? { selectBy: resolved.candidate.improve.selectBy }
+                : {}),
               ...improveSpecFromInvocation(resolved.improve as NonNullable<GenericRunSpec["improve"]>),
             },
           }
@@ -2825,6 +3173,7 @@ async function executeAttemptExecutionInCurrentRuntime(
     attemptIndex: workload.attemptIndex,
     sampleIndex: workload.sampleIndex,
     caseId: workload.caseId,
+    split: workload.engineCaseSpec?.split,
     startedAt,
     finishedAt,
     durationMs: workloadResult.durationMs,
@@ -4026,6 +4375,7 @@ async function writeWorkbenchAdapterRequest(
   const requestPath = path.join(root, ".workbench", "request.json");
   await fs.mkdir(path.dirname(requestPath), { recursive: true });
   const casePrompt = workload.engineCaseSpec?.prompt;
+  const caseSplit = workload.engineCaseSpec?.split;
   const adapter = step.adapter ?? execution.adapter;
   const candidateCommand = adapterProtocolCommandSpec(workload.spec.run, "candidate.run", manifests).command;
   const payload = {
@@ -4064,6 +4414,7 @@ async function writeWorkbenchAdapterRequest(
       case: {
         id: workload.caseId,
         ...(casePrompt ? { prompt: casePrompt } : {}),
+        ...(caseSplit ? { split: caseSplit } : {}),
       },
     },
     paths: {
@@ -4561,6 +4912,7 @@ function evaluateSample(args: {
   attemptIndex: number;
   sampleIndex: number;
   caseId: string;
+  split?: string;
   startedAt: string;
   finishedAt: string;
   durationMs?: number;
@@ -4581,6 +4933,7 @@ function evaluateSample(args: {
   }
   const cases = runtimeTimedCaseResults({
     caseId: args.caseId,
+    split: args.split,
     status: "completed",
     durationMs,
     metrics,
@@ -4655,11 +5008,10 @@ function normalizeSampleJobOutput(
   };
 }
 
-function normalizeEvaluationSampleOutputs(args: {
-  jobs: readonly HostedWorkbenchJob[];
-  allJobs: readonly HostedWorkbenchJob[];
-}): HostedMaterializedSampleOutput[] {
-  return args.jobs.flatMap((job): HostedMaterializedSampleOutput[] => {
+function normalizeEvaluationSampleOutputs(
+  jobs: readonly HostedWorkbenchJob[],
+): HostedMaterializedSampleOutput[] {
+  return jobs.flatMap((job): HostedMaterializedSampleOutput[] => {
     const output = normalizeSampleJobOutput(job.output);
     if (!output) {
       return [];
@@ -4671,6 +5023,7 @@ function normalizeEvaluationSampleOutputs(args: {
           ...output.sample,
           cases: runtimeTimedCaseResults({
             caseId,
+            split: readJobEngineCaseSplit(job),
             status: output.sample.status === "error" ? "error" : "completed",
             durationMs,
             metrics: output.sample.metrics ?? {},
@@ -4690,6 +5043,7 @@ function normalizeEvaluationSampleOutputs(args: {
 
 function runtimeTimedCaseResults(args: {
   caseId: string;
+  split?: string;
   status: EvalCaseStatus;
   durationMs: number;
   metrics: Record<string, number>;
@@ -4704,10 +5058,22 @@ function runtimeTimedCaseResults(args: {
       }];
   return cases.map((entry) => ({
     ...entry,
+    ...(!entry.split && args.split && entry.id === args.caseId ? { split: args.split } : {}),
     status: entry.status ?? args.status,
     metrics: entry.metrics ?? args.metrics,
     durationMs: args.durationMs,
   }));
+}
+
+function readJobEngineCaseSplit(job: HostedWorkbenchJob): string | undefined {
+  const input = jsonRecord(job.input);
+  const execution = jsonRecord(input.execution);
+  const metadata = jsonRecord(execution.metadata);
+  const engineCase = jsonRecord(metadata.engineCase);
+  const split = engineCase.split;
+  return typeof split === "string" && split.trim().length > 0
+    ? split.trim()
+    : undefined;
 }
 
 function runtimeJobDurationMs(job: HostedWorkbenchJob): number | undefined {
@@ -4834,6 +5200,7 @@ function errorEvaluationSampleFromJobGroup(
   }
   const sampleIndex = readOptionalJobNumber(job.input, "sampleIndex");
   const caseId = readJobString(job.input, "caseId");
+  const split = readJobEngineCaseSplit(job);
   if (sampleIndex === null || !caseId) {
     return null;
   }
@@ -4858,6 +5225,7 @@ function errorEvaluationSampleFromJobGroup(
     ...(error ? { error } : {}),
     cases: [{
       id: caseId,
+      ...(split ? { split } : {}),
       status: "error",
       ...(durationMs !== undefined ? { durationMs } : {}),
       metrics: {},
@@ -5179,22 +5547,32 @@ function aggregateCaseStatus(
 function selectCandidate(args: {
   candidates: readonly CandidateRecord[];
   previousCandidate: CandidateRecord | null;
+  selection?: {
+    metric: string;
+    caseIds?: readonly string[];
+  };
 }): CandidateRecord | null {
   let selected = args.previousCandidate;
   for (const candidate of args.candidates) {
-    if (!selected || hasHigherScore(candidate, selected)) {
+    if (!selected || hasHigherEvaluationMetric(candidate, selected, args.selection)) {
       selected = candidate;
     }
   }
   return selected;
 }
 
-function hasHigherScore(
+function hasHigherEvaluationMetric(
   candidate: CandidateRecord,
   incumbent: CandidateRecord,
+  selection?: {
+    metric: string;
+    caseIds?: readonly string[];
+    label?: string;
+  },
 ): boolean {
-  const candidateValue = readEvaluationMean(candidate.eval, "score");
-  const incumbentValue = readEvaluationMean(incumbent.eval, "score");
+  const metric = selection?.metric ?? "score";
+  const candidateValue = readEvaluationSelectionMean(candidate.eval, metric, selection?.caseIds);
+  const incumbentValue = readEvaluationSelectionMean(incumbent.eval, metric, selection?.caseIds);
   if (candidateValue == null) {
     return false;
   }
@@ -5204,12 +5582,38 @@ function hasHigherScore(
   return candidateValue > incumbentValue;
 }
 
-function readEvaluationMean(
+function readEvaluationSelectionMean(
   evaluation: EvaluationRecord | undefined,
   metric: string,
+  caseIds?: readonly string[],
 ): number | null {
-  const direct = evaluation?.metrics?.[metric]?.mean;
-  return typeof direct === "number" && Number.isFinite(direct) ? direct : null;
+  const stats = readEvaluationSelectionStats(evaluation, metric, caseIds);
+  return stats ? stats.mean : null;
+}
+
+function readEvaluationSelectionStats(
+  evaluation: EvaluationRecord | undefined,
+  metric: string,
+  caseIds?: readonly string[],
+): MetricStats | null {
+  if (!caseIds) {
+    const direct = evaluation?.metrics?.[metric];
+    return direct && Number.isFinite(direct.mean) ? direct : null;
+  }
+  if (caseIds.length === 0) {
+    return null;
+  }
+  const allowed = new Set(caseIds);
+  const values =
+    (evaluation?.samples ?? [])
+      .flatMap((sample) => sample.cases ?? [])
+      .flatMap((caseResult) => {
+        const metricValue = caseResult.metrics[metric];
+        return allowed.has(caseResult.id) && typeof metricValue === "number" && Number.isFinite(metricValue)
+          ? [metricValue]
+      : [];
+      });
+  return values.length > 0 ? metricStats(values) : null;
 }
 
 function metricStats(values: number[]): MetricStats {

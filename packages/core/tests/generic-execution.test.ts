@@ -103,6 +103,54 @@ describe("generic sandbox execution contract", () => {
     expect(spec.candidate.improve?.edits).toEqual(["prompt.md", "scripts/evaluate.py"]);
   });
 
+  test("parses explicit improve optimize and selection policy without case-set magic", () => {
+    const source = genericSpec().replace(
+      "    with:\n      model: gpt-5.4-mini",
+      [
+        "    with:",
+        "      model: gpt-5.4-mini",
+        "    optimizeOn:",
+        "      split: train",
+        "    selectBy:",
+        "      metric: score",
+        "      cases:",
+        "        split: validation",
+      ].join("\n"),
+    );
+
+    const spec = resolveWorkbenchResolvedSourceYaml(source);
+    const validation = validateWorkbenchResolvedSourceYaml(source);
+    const invalid = validateWorkbenchResolvedSourceYaml(source.replace(
+      "    optimizeOn:\n      split: train",
+      "    optimizeOn:\n      all: true\n      split: train",
+    ));
+    const staleSurface = validateWorkbenchResolvedSourceYaml(source.replace(
+      "    optimizeOn:\n      split: train",
+      "    caseSets:\n      train:\n        split: train",
+    ));
+    const missingMetric = validateWorkbenchResolvedSourceYaml(source.replace(
+      "      metric: score\n",
+      "",
+    ));
+
+    expect(validation.ok).toBe(true);
+    expect(spec.candidate.improve?.optimizeOn).toEqual({ split: "train" });
+    expect(spec.candidate.improve?.selectBy).toEqual({
+      metric: "score",
+      cases: { split: "validation" },
+    });
+    expect(spec.improve).toEqual({
+      use: "codex",
+      with: { model: "gpt-5.4-mini" },
+    });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.errors.join("\n")).toContain("resolved Workbench source.candidate.improve.optimizeOn must specify either all or split, not both.");
+    expect(staleSurface.ok).toBe(false);
+    expect(staleSurface.errors.join("\n")).toContain("resolved Workbench source.candidate.improve includes unsupported field: caseSets.");
+    expect(missingMetric.ok).toBe(false);
+    expect(missingMetric.errors.join("\n")).toContain("resolved Workbench source.candidate.improve.selectBy.metric must be a non-empty string.");
+  });
+
   test("rejects unsupported adapter envelope fields", () => {
     const yaml = genericSpec().replace(
       "    use: workbench",

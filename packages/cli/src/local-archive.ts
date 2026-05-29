@@ -4,7 +4,11 @@ import path from "node:path";
 import {
   buildWorkbenchTraceSessionsFromFiles,
   candidateRecordWithoutDerivedFields,
+  sanitizeWorkbenchRuntimeCandidateForExchange,
+  sanitizeWorkbenchRuntimeJobForExchange,
   selectExecutionOutputFilesForInspection,
+  workbenchRuntimeBundleStats,
+  workbenchSurfaceFilesEqualForExchange,
   type CandidateRecord,
   type EvaluationScorecard,
   type HostedWorkbenchJob,
@@ -12,6 +16,9 @@ import {
   type RuntimeEvent,
   type Json,
   type SurfaceSnapshotFile,
+  type WorkbenchRuntimeBundle,
+  type WorkbenchRuntimeBundleStats,
+  type WorkbenchRuntimeImportResult,
   type WorkbenchExecutionTrace,
   type WorkbenchTraceSession,
 } from "@workbench-ai/workbench-core";
@@ -128,6 +135,182 @@ export async function saveLocalJobs(
   if (jobs.length === 0) {
     return;
   }
+  await writeArchivedLocalJobs(workspace, jobs, new Map());
+}
+
+export async function exportLocalRuntimeBundle(
+  workspace: string,
+): Promise<WorkbenchRuntimeBundle> {
+  const snapshot = await loadLocalArchive(workspace);
+  const jobs = (await readLocalJobs(workspace)).map(sanitizeRuntimeJobForExchange);
+  const executionFiles = await Promise.all(
+    jobs.map(async (job) => ({
+      jobId: job.id,
+      files: await readLocalExecutionFiles(workspace, job.id),
+    })),
+  );
+  return {
+    schema: "workbench.runtime.bundle.v1",
+    activeId: snapshot.activeId,
+    candidates: snapshot.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange),
+    candidateFiles: Object.entries(snapshot.candidateFiles).map(([candidateId, files]) => ({
+      candidateId,
+      files: copySurfaceFiles(files),
+    })),
+    evaluations: snapshot.evaluations.map((evaluation) => ({ ...evaluation })),
+    runs: snapshot.runs.map((run) => ({ ...run })),
+    jobs,
+    executionFiles,
+    events: snapshot.events.map((event) => ({ ...event })),
+  };
+}
+
+export async function importLocalRuntimeBundle(
+  workspace: string,
+  bundle: WorkbenchRuntimeBundle,
+): Promise<WorkbenchRuntimeImportResult> {
+  validateRuntimeBundleSchema(bundle);
+  const snapshot = await loadLocalArchive(workspace);
+  const existingJobs = (await readLocalJobs(workspace)).map(sanitizeRuntimeJobForExchange);
+  let changed = false;
+
+  const existingCandidates = snapshot.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange);
+  if (JSON.stringify(existingCandidates) !== JSON.stringify(snapshot.candidates)) {
+    changed = true;
+  }
+  const incomingCandidates = bundle.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange);
+  const candidates = mergeRecordsById(existingCandidates, incomingCandidates, (candidate) => candidate.id, (didChange) => {
+    changed ||= didChange;
+  }).sort(compareLocalCandidateRecords);
+  const candidateFiles = { ...snapshot.candidateFiles };
+  for (const group of bundle.candidateFiles) {
+    const candidateId = localRecordName(group.candidateId);
+    const files = copySurfaceFiles(group.files);
+    const existing = candidateFiles[candidateId];
+    if (existing) {
+      if (!workbenchSurfaceFilesEqualForExchange(existing, files)) {
+        throw new Error(`Runtime history conflict for candidate files ${candidateId}.`);
+      }
+    } else {
+      changed = true;
+    }
+    candidateFiles[candidateId] = files;
+  }
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const activeId = bundle.activeId && candidateIds.has(bundle.activeId)
+    ? bundle.activeId
+    : snapshot.activeId && candidateIds.has(snapshot.activeId)
+      ? snapshot.activeId
+      : null;
+  if (activeId !== snapshot.activeId) {
+    changed = true;
+  }
+  const evaluations = mergeRecordsById(snapshot.evaluations, bundle.evaluations, (evaluation) => evaluation.id, (didChange) => {
+    changed ||= didChange;
+  }).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  const runs = mergeRecordsById(snapshot.runs, bundle.runs, (run) => run.id, (didChange) => {
+    changed ||= didChange;
+  }).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+  const events = mergeRecordsById(snapshot.events, bundle.events, runtimeEventKey, (didChange) => {
+    changed ||= didChange;
+  }).sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id));
+
+  const executionFilesByJobId = new Map<string, SurfaceSnapshotFile[]>();
+  await Promise.all(existingJobs.map(async (job) => {
+    executionFilesByJobId.set(job.id, await readLocalExecutionFiles(workspace, job.id));
+  }));
+  for (const group of bundle.executionFiles) {
+    const jobId = localRecordName(group.jobId);
+    const files = copySurfaceFiles(group.files);
+    const existing = executionFilesByJobId.get(jobId);
+    if (existing) {
+      if (!workbenchSurfaceFilesEqualForExchange(existing, files)) {
+        throw new Error(`Runtime history conflict for execution files ${jobId}.`);
+      }
+    } else {
+      changed = true;
+    }
+    executionFilesByJobId.set(jobId, files);
+  }
+  const jobs = mergeRecordsById(
+    existingJobs,
+    bundle.jobs.map(sanitizeRuntimeJobForExchange),
+    (job) => job.id,
+    (didChange) => {
+      changed ||= didChange;
+    },
+    runtimeJobsEqualForExchange,
+  ).sort((left, right) =>
+    (left.startedAt ?? left.createdAt).localeCompare(right.startedAt ?? right.createdAt) ||
+    left.id.localeCompare(right.id)
+  );
+
+  await saveLocalArchive(workspace, {
+    activeId,
+    candidates,
+    candidateFiles,
+    evaluations,
+    runs,
+    events,
+  });
+  await writeArchivedLocalJobs(workspace, jobs, executionFilesByJobId);
+
+  return {
+    changed,
+    stats: runtimeBundleStats({
+      schema: "workbench.runtime.bundle.v1",
+      activeId,
+      candidates,
+      candidateFiles: Object.entries(candidateFiles).map(([candidateId, files]) => ({
+        candidateId,
+        files,
+      })),
+      evaluations,
+      runs,
+      jobs,
+      executionFiles: [...executionFilesByJobId.entries()].map(([jobId, files]) => ({
+        jobId,
+        files,
+      })),
+      events,
+    }),
+  };
+}
+
+export function runtimeBundleStats(
+  bundle: WorkbenchRuntimeBundle,
+): WorkbenchRuntimeBundleStats {
+  return workbenchRuntimeBundleStats(bundle);
+}
+
+export function sanitizeRuntimeJobForExchange(
+  job: HostedWorkbenchJob,
+): HostedWorkbenchJob {
+  return sanitizeWorkbenchRuntimeJobForExchange(job);
+}
+
+function sanitizeRuntimeJobForArchive(
+  job: HostedWorkbenchJob,
+): HostedWorkbenchJob {
+  const {
+    leaseUntil: _leaseUntil,
+    wakeupLeaseUntil: _wakeupLeaseUntil,
+    hostId: _hostId,
+    workerId: _workerId,
+    claimTokenHash: _claimTokenHash,
+    ...portable
+  } = job;
+  return { ...portable };
+}
+
+async function writeArchivedLocalJobs(
+  workspace: string,
+  jobs: readonly HostedWorkbenchJob[],
+  executionFilesByJobId: ReadonlyMap<string, readonly SurfaceSnapshotFile[]>,
+): Promise<void> {
+  if (jobs.length === 0) {
+    return;
+  }
   const root = localRuntimeDir(workspace);
   const jobsDir = path.join(root, "jobs");
   const executionFilesDir = path.join(root, "execution-files");
@@ -136,16 +319,24 @@ export async function saveLocalJobs(
     fs.mkdir(executionFilesDir, { recursive: true }),
   ]);
   for (const job of jobs) {
+    const sanitizedJob = sanitizeRuntimeJobForArchive(job);
     const safeJobId = localRecordName(job.id);
-    const traceSourceFiles = filterArchivedExecutionFiles(completedJobOutputFiles(job));
-    const outputFiles = selectExecutionOutputFilesForInspection({
-      purpose: readExecutionPurpose(job),
-      files: traceSourceFiles,
-      output: jsonRecord(job.output),
-    });
+    const explicitOutputFiles = executionFilesByJobId.get(job.id);
+    const traceSourceFiles = filterArchivedExecutionFiles(completedJobOutputFiles(sanitizedJob));
+    const outputFiles = explicitOutputFiles
+      ? copySurfaceFiles(explicitOutputFiles)
+      : selectExecutionOutputFilesForInspection({
+          purpose: readExecutionPurpose(sanitizedJob),
+          files: traceSourceFiles,
+          output: jsonRecord(sanitizedJob.output),
+        });
     await writeJson(
       path.join(jobsDir, `${safeJobId}.json`),
-      archivedLocalJob(job, outputFiles, traceSourceFiles),
+      archivedLocalJob(
+        sanitizedJob,
+        outputFiles,
+        traceSourceFiles.length > 0 ? traceSourceFiles : outputFiles,
+      ),
     );
     const filesRoot = path.join(executionFilesDir, safeJobId);
     await fs.rm(filesRoot, { force: true, recursive: true });
@@ -315,6 +506,96 @@ function validateLocalArchiveSnapshot(snapshot: LocalArchiveSnapshot): void {
   validateLocalArchiveIndex(snapshot);
 }
 
+function validateRuntimeBundleSchema(bundle: WorkbenchRuntimeBundle): void {
+  if (!bundle || bundle.schema !== "workbench.runtime.bundle.v1") {
+    throw new Error("Unsupported Workbench runtime bundle.");
+  }
+}
+
+function mergeRecordsById<T>(
+  existing: readonly T[],
+  incoming: readonly T[],
+  idFor: (record: T) => string,
+  markChanged: (changed: boolean) => void,
+  equal: (left: T, right: T) => boolean = runtimeRecordsEqual,
+): T[] {
+  const records = new Map<string, T>();
+  for (const record of existing) {
+    records.set(localRecordName(idFor(record)), record);
+  }
+  for (const record of incoming) {
+    const id = localRecordName(idFor(record));
+    const previous = records.get(id);
+    if (!previous || !equal(previous, record)) {
+      if (previous) {
+        throw new Error(`Runtime history conflict for id ${id}.`);
+      }
+      markChanged(true);
+    }
+    records.set(id, record);
+  }
+  return [...records.values()];
+}
+
+function runtimeRecordsEqual<T>(left: T, right: T): boolean {
+  return JSON.stringify(canonicalRuntimeJson(left)) ===
+    JSON.stringify(canonicalRuntimeJson(right));
+}
+
+function runtimeJobsEqualForExchange(
+  left: HostedWorkbenchJob,
+  right: HostedWorkbenchJob,
+): boolean {
+  return runtimeRecordsEqual(
+    runtimeComparableJob(left),
+    runtimeComparableJob(right),
+  );
+}
+
+function runtimeComparableJob(job: HostedWorkbenchJob): HostedWorkbenchJob {
+  const comparable = sanitizeRuntimeJobForExchange(job);
+  const output = comparable.output;
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return comparable;
+  }
+  const {
+    files: _files,
+    fileSet: _fileSet,
+    ...portableOutput
+  } = output as Record<string, Json>;
+  return {
+    ...comparable,
+    output: portableOutput as Json,
+  };
+}
+
+function canonicalRuntimeJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalRuntimeJson);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .map((key) => [key, canonicalRuntimeJson((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
+}
+
+function runtimeEventKey(event: RuntimeEvent): string {
+  return [
+    event.runId ?? "_",
+    event.jobId ?? "_",
+    event.at,
+    event.id,
+  ].join("#");
+}
+
+function copySurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
+  return files.map((file) => ({ ...file }));
+}
+
 function validateLocalArchiveIndex(snapshot: LocalArchiveIndex): void {
   const candidateIds = new Set(snapshot.candidates.map((candidate) => candidate.id));
   if (snapshot.activeId && !candidateIds.has(snapshot.activeId)) {
@@ -402,15 +683,42 @@ function archivedLocalJob(
   traceSourceFiles: readonly SurfaceSnapshotFile[],
 ): HostedWorkbenchJob & { trace: WorkbenchExecutionTrace; traceSessions: WorkbenchTraceSession[] } {
   const output = jsonRecord(job.output);
-  const traceSessions = buildLocalJobTraceSessions(job, traceSourceFiles);
+  const existingTrace = readExistingTrace(job);
+  const existingTraceSessions = readExistingTraceSessions(job);
+  const traceSessions = existingTraceSessions.length > 0
+    ? existingTraceSessions
+    : buildLocalJobTraceSessions(job, traceSourceFiles);
   return {
     ...job,
     ...(Object.keys(output).length > 0
       ? { output: { ...output, files: traceSourceFiles } as unknown as Json }
       : {}),
-    trace: buildLocalJobTrace(job),
+    trace: existingTrace ?? buildLocalJobTrace(job),
     traceSessions,
   };
+}
+
+function readExistingTrace(job: HostedWorkbenchJob): WorkbenchExecutionTrace | null {
+  const trace = (job as LocalArchivedJob).trace;
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
+    return null;
+  }
+  return {
+    trace_id: typeof trace.trace_id === "string" && trace.trace_id.length > 0
+      ? trace.trace_id
+      : job.id,
+    spans: Array.isArray(trace.spans) ? trace.spans : [],
+    events: Array.isArray(trace.events) ? trace.events : [],
+    summaries: Array.isArray(trace.summaries) ? trace.summaries : [],
+  };
+}
+
+function readExistingTraceSessions(job: HostedWorkbenchJob): WorkbenchTraceSession[] {
+  const sessions = (job as LocalArchivedJob).traceSessions;
+  if (!Array.isArray(sessions)) {
+    return [];
+  }
+  return sessions.map((session) => ({ ...session }));
 }
 
 function filterArchivedExecutionFiles(

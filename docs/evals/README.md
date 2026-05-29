@@ -15,7 +15,7 @@ Before writing a spec, read:
 - [runner-contract.md](runner-contract.md) for engine staging, evidence visibility, same-environment scoring, and result outputs.
 - [adapters.md](adapters.md) for custom adapter manifests, sources, overrides, auth, slots, engine-owned helpers, and local replay.
 - [tasks-and-fixtures.md](tasks-and-fixtures.md) for task directory layout, public files, verifier tests, and Harbor imports.
-- [run-and-inspect.md](run-and-inspect.md) for local smoke runs, cloud deployment, hosted URLs, and inspection.
+- [run-and-inspect.md](run-and-inspect.md) for local smoke runs, hosted execution, hosted URLs, and inspection.
 
 File-specific guidance lives under [file-recipes/](file-recipes/):
 

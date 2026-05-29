@@ -50,8 +50,20 @@ export interface WorkbenchCandidateRunSpec extends WorkbenchAdapterInvocation {
   name: string;
 }
 
+export interface WorkbenchCaseSelector {
+  all?: true;
+  split?: string;
+}
+
+export interface WorkbenchSelectionSpec {
+  metric: string;
+  cases?: WorkbenchCaseSelector;
+}
+
 export interface WorkbenchCandidateImproveSpec extends WorkbenchAdapterInvocation {
   edits: string[];
+  optimizeOn?: WorkbenchCaseSelector;
+  selectBy?: WorkbenchSelectionSpec;
 }
 
 export interface WorkbenchCandidateManifestSpec {
@@ -96,6 +108,8 @@ export interface GenericRunSpec {
     runs: Record<string, WorkbenchCandidateRunSpec>;
     improve?: {
       edits: string[];
+      optimizeOn?: WorkbenchCaseSelector;
+      selectBy?: WorkbenchSelectionSpec;
     };
   };
   environment: WorkbenchRuntimeSpec;
@@ -358,6 +372,8 @@ function genericSpecFromAuthoredBundle(
         ? {
             improve: {
               edits: [...candidate.improve.edits],
+              ...(candidate.improve.optimizeOn ? { optimizeOn: cloneJson(candidate.improve.optimizeOn) } : {}),
+              ...(candidate.improve.selectBy ? { selectBy: cloneJson(candidate.improve.selectBy) } : {}),
             },
           }
         : {}),
@@ -543,15 +559,76 @@ function normalizeCandidateImprove(
   if (!record) {
     return undefined;
   }
-  rejectUnknownKeys(record, label, ["edits", "use", "with", "auth"], errors);
+  rejectUnknownKeys(record, label, ["edits", "use", "with", "auth", "optimizeOn", "selectBy"], errors);
   const edits = normalizeRelativePathList(record.edits, `${label}.edits`, errors);
   const invocation = normalizePhaseAdapter(adapterRecordFrom(record), label, errors);
+  const optimizeOn = normalizeCaseSelector(record.optimizeOn, `${label}.optimizeOn`, errors);
+  const selectBy = normalizeSelectionSpec(record.selectBy, `${label}.selectBy`, errors);
   return edits.length > 0 && invocation
     ? {
         ...invocation,
         edits,
+        ...(optimizeOn ? { optimizeOn } : {}),
+        ...(selectBy ? { selectBy } : {}),
       }
     : undefined;
+}
+
+function normalizeSelectionSpec(
+  value: unknown,
+  label: string,
+  errors: string[],
+): WorkbenchSelectionSpec | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = readRequiredRecord(value, label, errors);
+  if (!record) {
+    return undefined;
+  }
+  rejectUnknownKeys(record, label, ["metric", "cases"], errors);
+  const metric = readRequiredString(record.metric, `${label}.metric`, errors);
+  const cases = normalizeCaseSelector(record.cases, `${label}.cases`, errors);
+  return metric
+    ? {
+        metric,
+        ...(cases ? { cases } : {}),
+      }
+    : undefined;
+}
+
+function normalizeCaseSelector(
+  value: unknown,
+  label: string,
+  errors: string[],
+): WorkbenchCaseSelector | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const record = readRequiredRecord(value, label, errors);
+  if (!record) {
+    return undefined;
+  }
+  rejectUnknownKeys(record, label, ["all", "split"], errors);
+  const hasAll = Object.prototype.hasOwnProperty.call(record, "all");
+  const hasSplit = Object.prototype.hasOwnProperty.call(record, "split");
+  if (hasAll && hasSplit) {
+    errors.push(`${label} must specify either all or split, not both.`);
+    return undefined;
+  }
+  if (!hasAll && !hasSplit) {
+    errors.push(`${label} must specify all: true or split.`);
+    return undefined;
+  }
+  if (hasAll) {
+    if (record.all !== true) {
+      errors.push(`${label}.all must be true when provided.`);
+      return undefined;
+    }
+    return { all: true };
+  }
+  const split = readRequiredString(record.split, `${label}.split`, errors);
+  return split ? { split } : undefined;
 }
 
 function adapterRecordFrom(record: Record<string, unknown>): Record<string, unknown> {

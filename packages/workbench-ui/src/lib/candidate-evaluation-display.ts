@@ -183,7 +183,9 @@ export function resolveCandidateEvaluationRollupDisplay(
 }
 
 export function readEvaluationScore(evaluation: EvaluationSummary): number | null {
-  const score = evaluation.metrics?.score?.mean;
+  const score = evaluation.selectionMetric === "score"
+    ? evaluation.selectionScore?.mean ?? evaluation.metrics?.score?.mean
+    : evaluation.metrics?.score?.mean;
   return typeof score === "number" && Number.isFinite(score) ? score : null;
 }
 

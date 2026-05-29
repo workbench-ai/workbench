@@ -3,6 +3,7 @@
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   ActivityIcon,
+  AlertTriangleIcon,
   ChartColumnIcon,
   FileCode2Icon,
   FolderOpenIcon,
@@ -18,6 +19,7 @@ import {
   DesktopWorkspaceSplit,
 } from "@workbench-ai/cli-web-ui/components/shared/desktop-workspace-split";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
+import { ProblemState } from "@workbench-ai/cli-web-ui/components/shared/problem-state";
 import {
   FilesBrowser,
 } from "@workbench-ai/cli-web-ui/components/shared/files-browser";
@@ -1076,7 +1078,23 @@ export function WorkbenchWorkspace({
     });
   }
 
+  const routeHref = (next: WorkbenchRoute) => buildWorkbenchLocationHref(next, routeBasePath, persistentSearchParams);
+  const benchmarkHref = routeHref(createBenchmarkRoute());
+
   const objectSurface = (() => {
+    if (route.kind === "not-found") {
+      return (
+        <ScrollableObjectSurface>
+          <ProblemState
+            message="The page you requested could not be found."
+            scope="workspace"
+            statusCode={404}
+            title="Page not found"
+          />
+        </ScrollableObjectSurface>
+      );
+    }
+
     if (route.kind === "candidate" && route.view === "manifest") {
       return (
         <CandidateYamlSurface
@@ -1197,8 +1215,6 @@ export function WorkbenchWorkspace({
 
   const desktopObjectPaneOpen =
     route.kind !== "benchmark" && !prefersCompactWorkspaceLayout;
-  const routeHref = (next: WorkbenchRoute) => buildWorkbenchLocationHref(next, routeBasePath, persistentSearchParams);
-  const benchmarkHref = routeHref(createBenchmarkRoute());
   const workbenchBrandHref = brandHref ?? benchmarkHref;
   const benchmarkNavigation = (
     <WorkbenchBenchmarkNavigation
@@ -1593,6 +1609,9 @@ function objectPaneTitle(args: {
   if (args.route.kind === "evaluations") {
     return "Evaluations";
   }
+  if (args.route.kind === "not-found") {
+    return "Not found";
+  }
   if (args.route.kind !== "candidate") {
     return "Benchmark";
   }
@@ -1631,7 +1650,9 @@ function WorkbenchBreadcrumbs({
       : "Candidate"
     : route.kind === "evaluations"
       ? "Evaluations"
-      : "Candidates";
+      : route.kind === "not-found"
+        ? "Not found"
+        : "Candidates";
   const parentRoute =
     route.kind === "candidate" ? createCandidatesRoute() :
     null;
@@ -1779,6 +1800,10 @@ function ObjectPaneBadges({
     return snapshot ? <Badge variant="outline">{formatCount(candidateCount, "candidate")}</Badge> : null;
   }
 
+  if (route.kind === "not-found") {
+    return null;
+  }
+
   if (route.kind !== "candidate") {
     return snapshot ? (
       <Badge variant="outline">
@@ -1804,6 +1829,24 @@ function ObjectPaneBadges({
         <CandidateRuntimeBadge state={selectedCandidateRuntimeState} />
       ) : null}
     </>
+  );
+}
+
+function PaneErrorState({
+  message,
+  title = "Couldn't load Workbench data",
+}: {
+  message: string;
+  title?: string;
+}) {
+  return (
+    <ProblemState
+      align="start"
+      icon={AlertTriangleIcon}
+      message={message}
+      scope="pane"
+      title={title}
+    />
   );
 }
 
@@ -1893,9 +1936,10 @@ function BenchmarkSurface({
   if (specError) {
     return (
       <div className="grid gap-4">
-        <Card>
-          <CardContent className="py-6 text-sm text-destructive">{specError}</CardContent>
-        </Card>
+        <PaneErrorState
+          message={specError}
+          title="Couldn't load benchmark source"
+        />
       </div>
     );
   }
@@ -2142,9 +2186,10 @@ function SourceYamlSection({
       {loading ? (
         <SourceYamlSkeleton />
       ) : error ? (
-        <Card>
-          <CardContent className="py-4 text-sm text-destructive">{error}</CardContent>
-        </Card>
+        <PaneErrorState
+          message={error}
+          title="Couldn't load manifest source"
+        />
       ) : source ? (
         <div className="grid min-w-0 gap-2">
           <div className="flex min-w-0 flex-wrap gap-2">
@@ -2599,9 +2644,7 @@ function CandidatesArchiveSurface({
 }) {
   if (snapshotError) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{snapshotError}</CardContent>
-      </Card>
+      <PaneErrorState message={snapshotError} />
     );
   }
 
@@ -2638,9 +2681,7 @@ function CandidatesLineageSurface({
 }) {
   if (snapshotError) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{snapshotError}</CardContent>
-      </Card>
+      <PaneErrorState message={snapshotError} />
     );
   }
 
@@ -2693,9 +2734,7 @@ function CandidateYamlSurface({
 }) {
   if (snapshotError) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{snapshotError}</CardContent>
-      </Card>
+      <PaneErrorState message={snapshotError} />
     );
   }
 
@@ -2756,9 +2795,7 @@ function CandidateFilesSurface({
 
   if (snapshotError) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{snapshotError}</CardContent>
-      </Card>
+      <PaneErrorState message={snapshotError} />
     );
   }
 
@@ -2994,9 +3031,7 @@ function CandidateOverviewSurface({
 }) {
   if (snapshotError) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{snapshotError}</CardContent>
-      </Card>
+      <PaneErrorState message={snapshotError} />
     );
   }
 
@@ -3028,7 +3063,7 @@ function CandidateOverviewSurface({
   return (
     <div className="grid gap-6">
       <section className="grid min-w-0 gap-3">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,11rem),1fr))]">
           <FactItem title="Created" value={formatTimestamp(selectedCandidateSummary.createdAt)} />
           <FactItem
             title="Version"
@@ -3037,6 +3072,14 @@ function CandidateOverviewSurface({
           <FactItem
             title="Run state"
             value={selectedCandidateRuntimeState?.label ?? "No runs"}
+          />
+          <FactItem
+            title="Optimize on"
+            value={selectedCandidateRuntimeState?.latestRun?.optimizeOn ?? "—"}
+          />
+          <FactItem
+            title="Select winner by"
+            value={selectedCandidateRuntimeState?.latestRun?.selectBy ?? "—"}
           />
           <FactItem title="Best score" value={rollup.bestScore === null ? "—" : formatMetricValue(rollup.bestScore)} />
           <FactItem
@@ -3216,7 +3259,12 @@ function AttemptTraceContent({
   }
 
   if (traceState.error) {
-    return <p className="text-sm text-destructive">{traceState.error}</p>;
+    return (
+      <PaneErrorState
+        message={traceState.error}
+        title="Couldn't load execution trace"
+      />
+    );
   }
 
   if (!traceExecution) {
@@ -3427,9 +3475,10 @@ function EvaluationDetailSurface({
 
   if (state.error) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{state.error}</CardContent>
-      </Card>
+      <PaneErrorState
+        message={state.error}
+        title="Couldn't load evaluation"
+      />
     );
   }
 
@@ -3586,9 +3635,10 @@ function EvaluationCaseDetailSurface({
 
   if (state.error) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{state.error}</CardContent>
-      </Card>
+      <PaneErrorState
+        message={state.error}
+        title="Couldn't load case review"
+      />
     );
   }
 
@@ -3727,9 +3777,7 @@ function EvaluationsSurface({
 }) {
   if (snapshotError) {
     return (
-      <Card>
-        <CardContent className="py-6 text-sm text-destructive">{snapshotError}</CardContent>
-      </Card>
+      <PaneErrorState message={snapshotError} />
     );
   }
 

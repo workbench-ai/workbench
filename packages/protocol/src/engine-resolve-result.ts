@@ -17,6 +17,7 @@ export interface WorkbenchEngineCaseEnvironmentSpec {
 export interface WorkbenchEngineCaseSpec {
   version: 3;
   prompt: string;
+  split?: string;
   environment?: WorkbenchEngineCaseEnvironmentSpec;
 }
 
@@ -106,9 +107,13 @@ export function normalizeWorkbenchEngineCaseSpec(
   if (typeof record.prompt !== "string" || record.prompt.trim().length === 0) {
     throw new Error(`${label}.prompt must be a non-empty string.`);
   }
+  if (record.split !== undefined && (typeof record.split !== "string" || record.split.trim().length === 0)) {
+    throw new Error(`${label}.split must be a non-empty string when provided.`);
+  }
   return {
     version: 3,
     prompt: record.prompt,
+    ...(typeof record.split === "string" ? { split: record.split.trim() } : {}),
     ...(record.environment !== undefined
       ? { environment: normalizeCaseEnvironment(record.environment, `${label}.environment`) }
       : {}),

@@ -187,7 +187,39 @@ async function handleLocalWorkbenchRequest(args: {
     await sendFontFile(args.response, args.context.assetsRoot, url, args.request.method);
     return;
   }
-  await sendHtml(args.response, args.request.method);
+  if (url.pathname.startsWith("/assets/")) {
+    throw new LocalApiError("Workbench local asset not found.", 404);
+  }
+  await sendHtml(
+    args.response,
+    args.request.method,
+    isKnownWorkbenchDocumentPath(url.pathname) ? 200 : 404,
+  );
+}
+
+function isKnownWorkbenchDocumentPath(pathname: string): boolean {
+  const segments = pathname.split("/").filter(Boolean).map(decodeDocumentPathSegment);
+  if (segments.length === 0) {
+    return true;
+  }
+  if (segments[0] === "evaluations") {
+    return segments.length === 1;
+  }
+  if (segments[0] !== "candidates") {
+    return false;
+  }
+  if (segments.length === 1 || segments.length === 2) {
+    return true;
+  }
+  return segments.length === 3 && (segments[2] === "files" || segments[2] === "manifest");
+}
+
+function decodeDocumentPathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 async function handleApiRequest(
@@ -724,7 +756,15 @@ async function sendFile(
   contentType: string,
   method = "GET",
 ): Promise<void> {
-  const body = await fs.readFile(filePath);
+  let body: Buffer;
+  try {
+    body = await fs.readFile(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new LocalApiError("Workbench local asset not found.", 404);
+    }
+    throw error;
+  }
   response.writeHead(200, {
     "content-type": contentType,
     "content-length": body.byteLength,
@@ -751,7 +791,11 @@ async function sendFontFile(
   await sendFile(response, path.join(assetsRoot, "fonts", fileName), "font/woff2", method);
 }
 
-async function sendHtml(response: ServerResponse, method = "GET"): Promise<void> {
+async function sendHtml(
+  response: ServerResponse,
+  method = "GET",
+  status = 200,
+): Promise<void> {
   const body = `<!doctype html>
 <html lang="en">
   <head>
@@ -765,7 +809,7 @@ async function sendHtml(response: ServerResponse, method = "GET"): Promise<void>
     <script type="module" src="/assets/client.js"></script>
   </body>
 </html>`;
-  response.writeHead(200, {
+  response.writeHead(status, {
     "content-type": "text/html; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "cache-control": "no-store",

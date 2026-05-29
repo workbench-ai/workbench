@@ -17,7 +17,10 @@ import {
   readEvaluationScore,
   resolveCandidateEvaluationRollupDisplay,
 } from "../lib/candidate-evaluation-display";
-import type { CandidateRuntimeState } from "../lib/runtime-state";
+import {
+  formatRunPolicyText,
+  type CandidateRuntimeState,
+} from "../lib/runtime-state";
 import type { EvaluationSummary, CandidateSummary } from "../types";
 import {
   CandidateRuntimeBadge,
@@ -67,6 +70,7 @@ export function CandidateList({
         const baseSummary = summary.baseId ? summaryById.get(summary.baseId) ?? null : null;
         const candidateContext = formatCandidateSecondaryLabel(summary, baseSummary);
         const runtimeState = candidateStateById?.get(summary.id) ?? null;
+        const policyText = formatRunPolicyText(runtimeState?.latestRun ?? null);
         const rollupDisplay = resolveCandidateEvaluationRollupDisplay(
           rollupByCandidate.get(summary.id),
         );
@@ -113,6 +117,9 @@ export function CandidateList({
                 <span className="font-medium text-foreground">{rollupDisplay.scoreText}</span>
                 <span className="text-muted-foreground">{rollupDisplay.meanText}</span>
                 <span className="text-muted-foreground">{rollupDisplay.countText}</span>
+                {policyText ? (
+                  <span className="text-muted-foreground">{policyText}</span>
+                ) : null}
                 {isActive ? (
                   <span className="inline-flex items-center gap-1 text-primary">
                     <GitBranchIcon className="size-3.5" />

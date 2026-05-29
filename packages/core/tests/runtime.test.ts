@@ -18,20 +18,25 @@ import {
   extractExecutionUsageFromTrace,
   findEnvironmentVersionForImage,
   executionResultFromCompletedSandboxJob,
+  filterOptimizerTraceJobsForCaseIds,
   materializeWorkbenchRunResult,
   normalizeDockerImageRef,
   normalizeSurfaceFiles,
   planWorkbenchExecutionJobsForPurpose,
   resolveWorkbenchResolvedSourceYaml,
   selectExecutionOutputFilesForInspection,
+  sanitizeWorkbenchRuntimeCandidateForExchange,
+  sanitizeWorkbenchRuntimeJobForExchange,
   stageWorkbenchRunWorkload,
   attemptJobCountForRunSpec,
   validateWorkbenchResolvedSourceYaml,
+  workbenchRuntimeBundleFingerprint,
   workbenchRunExecutionFingerprint,
   workbenchTraceExecutionDirectory,
   workbenchTraceRunDirectory,
   workbenchTraceRunDirectoryName,
   workloadTimeoutMs,
+  type CandidateRecord,
   type WorkbenchRunWorkload,
   type WorkbenchEngineCase,
   type HostedWorkbenchJob,
@@ -49,6 +54,95 @@ import {
 } from "../src/sandbox-inputs.ts";
 
 describe("Workbench runtime generic execution", () => {
+  test("runtime candidate exchange ignores local and cloud derived fields", () => {
+    const candidate = {
+      id: "candidate_1",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "benchmark",
+      candidateFingerprint: "candidate",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "evaluated",
+      fileChanges: [],
+      ownerUserId: "user_1",
+      ownerUsername: "official",
+      visibility: "private",
+      metrics: { score: 1 },
+      candidateRunId: "run",
+      candidateRunName: "Default",
+    } as CandidateRecord & {
+      ownerUserId: string;
+      ownerUsername: string;
+      visibility: string;
+      metrics: Record<string, number>;
+      candidateRunId: string;
+      candidateRunName: string;
+    };
+
+    expect(sanitizeWorkbenchRuntimeCandidateForExchange(candidate)).toEqual({
+      id: "candidate_1",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "benchmark",
+      candidateFingerprint: "candidate",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "evaluated",
+      fileChanges: [],
+    });
+
+    const baseBundle = {
+      schema: "workbench.runtime.bundle.v1" as const,
+      activeId: "candidate_1",
+      candidates: [candidate],
+      candidateFiles: [],
+      evaluations: [],
+      runs: [],
+      jobs: [],
+      executionFiles: [],
+      events: [],
+    };
+    const strippedBundle = {
+      ...baseBundle,
+      candidates: [sanitizeWorkbenchRuntimeCandidateForExchange(candidate)],
+    };
+    expect(workbenchRuntimeBundleFingerprint(baseBundle)).toBe(
+      workbenchRuntimeBundleFingerprint(strippedBundle),
+    );
+
+    const job = {
+      id: "job_1",
+      runId: "run_1",
+      candidateId: "candidate_1",
+      projectId: "wb_123456789abc",
+      kind: "execution",
+      status: "finished",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+      output: {
+        ok: true,
+        files: [{ path: "trace.json", content: "{}", encoding: "utf8" }],
+        fileSet: { files: [] },
+      },
+      trace: { trace_id: "job_1", spans: [], events: [], summaries: [] },
+      traceSessions: [],
+    } as HostedWorkbenchJob & { trace: unknown; traceSessions: unknown };
+    expect(sanitizeWorkbenchRuntimeJobForExchange(job)).toEqual({
+      id: "job_1",
+      runId: "run_1",
+      candidateId: "candidate_1",
+      projectId: "wb_123456789abc",
+      kind: "execution",
+      status: "finished",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:01.000Z",
+      output: {
+        ok: true,
+        files: [{ path: "trace.json", content: "{}", encoding: "utf8" }],
+        fileSet: { files: [] },
+      },
+    });
+  });
+
   test("run execution fingerprints include source and adapter files", () => {
     const base = workbenchRunExecutionFingerprint({
       sourceYaml: "version: 4\ncandidate:\n  selectedRunId: main\n",
@@ -1199,6 +1293,238 @@ describe("Workbench runtime generic execution", () => {
     expect(materialized.evaluations[0]?.sampleCount).toBe(1);
   });
 
+  test("selects improved candidates by configured split score", () => {
+    const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
+    const now = "2026-04-27T00:00:00.000Z";
+    const runId = "run_split_selection";
+    const candidateId = "candidate_split_selection_001";
+    const previousCandidate = {
+      id: "candidate_previous",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
+      candidateFingerprint: "candidate_previous",
+      createdAt: now,
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+      eval: {
+        candidate: { id: "candidate_previous", kind: "candidate" as const },
+        status: "completed" as const,
+        sampleCount: 1,
+        completedSampleCount: 1,
+        errorSampleCount: 0,
+        metrics: { score: metricStats([0.6]) },
+        cases: [
+          { id: "case-train", split: "train", status: "completed" as const, sampleCount: 1, metrics: { score: metricStats([1]) } },
+          { id: "case-validation", split: "validation", status: "completed" as const, sampleCount: 1, metrics: { score: metricStats([0.2]) } },
+        ],
+        samples: [{
+          id: "sample_001",
+          index: 0,
+          candidate: { id: "candidate_previous", kind: "candidate" as const },
+          status: "completed" as const,
+          metrics: { score: 0.6 },
+          cases: [
+            { id: "case-train", split: "train", status: "completed" as const, metrics: { score: 1 } },
+            { id: "case-validation", split: "validation", status: "completed" as const, metrics: { score: 0.2 } },
+          ],
+        }],
+      },
+    };
+    const candidateRevision = createBaselineCandidateJob({
+      ownerUserId: "user_runtime",
+      projectId: "project_runtime",
+      runId,
+      candidateId,
+      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "candidate" }]),
+      now,
+      baseId: previousCandidate.id,
+      attemptIndex: 0,
+    });
+    const engineCases = [
+      engineCase("case-train", "Train", [], [], "train"),
+      engineCase("case-validation", "Validation", [], [], "validation"),
+    ];
+    const attemptJobs = planWorkbenchExecutionJobsForPurpose({
+      ownerUserId: "user_runtime",
+      projectId: "project_runtime",
+      runId,
+      candidateId,
+      attemptIndex: 0,
+      samples: 1,
+      spec,
+      workflow: "improve",
+      purpose: "attempt",
+      caseIds: engineCases.map((bundle) => bundle.id),
+      engineCases,
+      now,
+    });
+    const completedAttempts = attemptJobs.map((job): HostedWorkbenchJob => {
+      const caseId = job.input && typeof job.input === "object" && !Array.isArray(job.input)
+        ? String((job.input as { caseId?: unknown }).caseId)
+        : "";
+      const score = caseId === "case-validation" ? 0.4 : 0;
+      return {
+        ...runningJob(job, now),
+        status: "succeeded",
+        attempt: 1,
+        finishedAt: now,
+        updatedAt: now,
+        output: {
+          ok: true,
+          candidateId,
+          attemptIndex: 0,
+          fileChanges: [],
+          files: [],
+          traces: [],
+          sample: {
+            id: `${caseId}__sample_001`,
+            index: 0,
+            candidate: { id: candidateId, kind: "candidate" },
+            status: "completed",
+            startedAt: now,
+            finishedAt: now,
+            metrics: { score },
+            cases: [{
+              id: caseId,
+              status: "completed",
+              metrics: { score },
+            }],
+          },
+        },
+      };
+    });
+
+    const materialized = materializeWorkbenchRunResult({
+      runId,
+      benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
+      startedAt: now,
+      spec,
+      jobs: [candidateRevision, ...completedAttempts],
+      previousCandidate: previousCandidate as Parameters<typeof materializeWorkbenchRunResult>[0]["previousCandidate"],
+      existingCandidateCount: 1,
+      selection: {
+        metric: "score",
+        caseIds: ["case-validation"],
+        label: "score on split=validation",
+      },
+    });
+    const traceIndex = JSON.parse(
+      createOptimizerTraceInputFiles({
+        jobs: filterOptimizerTraceJobsForCaseIds(completedAttempts, ["case-train"]),
+      }).find((file) => file.path === "index.json")?.content ?? "{}",
+    ) as { executions?: Array<{ caseId?: string | null }> };
+
+    expect(materialized.activeCandidateId).toBe(candidateId);
+    expect(materialized.evaluations[0]?.selectionScore?.mean).toBe(0.4);
+    expect(materialized.evaluations[0]?.selectionLabel).toBe("score on split=validation");
+    expect(materialized.candidates[0]?.eval?.metrics?.score.mean).toBe(0.2);
+    expect(materialized.candidates[0]?.eval?.cases?.map((entry) => [entry.id, entry.split])).toEqual([
+      ["case-train", "train"],
+      ["case-validation", "validation"],
+    ]);
+    expect(traceIndex.executions?.map((entry) => entry.caseId)).toEqual(["case-train"]);
+  });
+
+  test("selects improved candidates by aggregate score when selection uses all cases", () => {
+    const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
+    const now = "2026-04-27T00:00:00.000Z";
+    const runId = "run_all_case_selection";
+    const candidateId = "candidate_all_case_selection_001";
+    const previousCandidate = {
+      id: "candidate_previous_all_cases",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
+      candidateFingerprint: "candidate_previous_all_cases",
+      createdAt: now,
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+      eval: {
+        candidate: { id: "candidate_previous_all_cases", kind: "candidate" as const },
+        status: "completed" as const,
+        sampleCount: 1,
+        completedSampleCount: 1,
+        errorSampleCount: 0,
+        metrics: { score: metricStats([0.6]) },
+        samples: [{
+          id: "sample_001",
+          index: 0,
+          candidate: { id: "candidate_previous_all_cases", kind: "candidate" as const },
+          status: "completed" as const,
+          metrics: { score: 0.6 },
+        }],
+      },
+    };
+    const candidateRevision = createBaselineCandidateJob({
+      ownerUserId: "user_runtime",
+      projectId: "project_runtime",
+      runId,
+      candidateId,
+      files: normalizeSurfaceFiles([{ path: "prompt.md", content: "candidate" }]),
+      now,
+      baseId: previousCandidate.id,
+      attemptIndex: 0,
+    });
+    const [attemptJob] = planWorkbenchExecutionJobsForPurpose({
+      ownerUserId: "user_runtime",
+      projectId: "project_runtime",
+      runId,
+      candidateId,
+      attemptIndex: 0,
+      samples: 1,
+      spec,
+      workflow: "improve",
+      purpose: "attempt",
+      caseIds: ["case-a"],
+      engineCases: [engineCase("case-a", "Case A")],
+      now,
+    });
+    const completedAttempt: HostedWorkbenchJob = {
+      ...runningJob(attemptJob!, now),
+      status: "succeeded",
+      attempt: 1,
+      finishedAt: now,
+      updatedAt: now,
+      output: {
+        ok: true,
+        candidateId,
+        attemptIndex: 0,
+        fileChanges: [],
+        files: [],
+        traces: [],
+        sample: {
+          id: "sample_001",
+          index: 0,
+          candidate: { id: candidateId, kind: "candidate" },
+          status: "completed",
+          startedAt: now,
+          finishedAt: now,
+          metrics: { score: 0.7 },
+        },
+      },
+    };
+
+    const materialized = materializeWorkbenchRunResult({
+      runId,
+      benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
+      startedAt: now,
+      spec,
+      jobs: [candidateRevision, completedAttempt],
+      previousCandidate: previousCandidate as Parameters<typeof materializeWorkbenchRunResult>[0]["previousCandidate"],
+      existingCandidateCount: 1,
+      selection: {
+        metric: "score",
+        label: "score on all cases",
+      },
+    });
+
+    expect(materialized.activeCandidateId).toBe(candidateId);
+    expect(materialized.evaluations[0]?.selectionScore?.mean).toBe(0.7);
+  });
+
   test("case reviews expose scoring and executions without file or log side channels", () => {
     const candidate = {
       id: "candidate_execution_review",
@@ -2162,17 +2488,30 @@ function completedScore(job: HostedWorkbenchJob): number | undefined {
   return typeof result.score === "number" ? result.score : undefined;
 }
 
+function metricStats(values: readonly number[]) {
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  return {
+    count: values.length,
+    mean,
+    variance: 0,
+    stddev: 0,
+    min: Math.min(...values),
+    max: Math.max(...values),
+  };
+}
+
 function engineCase(
   id: string,
   task: string,
   publicFiles: readonly { path: string; content: string }[] = [],
   privateFiles: readonly { path: string; content: string }[] = [],
+  split?: string,
 ): WorkbenchEngineCase {
   const publicCaseFiles = normalizeSurfaceFiles(publicFiles);
   const privateCaseFiles = normalizeSurfaceFiles(privateFiles);
   return {
     id,
-    case: { version: 3, prompt: task },
+    case: { version: 3, prompt: task, ...(split ? { split } : {}) },
     files: {
       public: publicCaseFiles,
       private: privateCaseFiles,

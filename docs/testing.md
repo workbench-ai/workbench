@@ -34,7 +34,7 @@ Useful manual spot checks:
 - `pnpm cli push --help`
 - `pnpm cli clone --help`
 - `pnpm cli pull --help`
-- `pnpm cli cloud eval --help`
+- `pnpm cli eval --help`
 - `pnpm cli --version`
 
 ## External Harbor Engine Smoke
@@ -59,14 +59,14 @@ pnpm cli eval "$tmpdir/candidates/command" --samples 1 --json
 
 The score should come from Harbor's normalized result through the adapter. Harbor-specific reward conventions, artifact copying rules, verifier sandboxing, and health-check semantics stay in Harbor `task.toml` and the Harbor runtime. If no Harbor engine adapter source is declared, this smoke is expected to fail adapter resolution rather than fall back to a hidden built-in.
 
-## Workbench Cloud Client Checks
+## Workbench Cloud Remote Checks
 
-The open CLI includes Cloud client commands, but hosted implementation is owned by `products/workbench-cloud`. With a local Workbench Cloud server running, source and state commands can be checked with:
+The open CLI includes Cloud remote commands, but hosted implementation is owned by `products/workbench-cloud`. With a local Workbench Cloud server running, source and state commands can be checked with:
 
 ```bash
 WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli push --json
-WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli fetch --json
 WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli pull --json
+WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli eval --hosted --samples 1 --dry-run --json
 ```
 
 Hosted execution checks should use the Workbench Cloud smoke command:

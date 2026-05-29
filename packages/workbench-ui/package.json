@@ -8,6 +8,10 @@
       "types": "./src/index.tsx",
       "default": "./src/index.tsx"
     },
+    "./routes": {
+      "types": "./src/lib/routes.ts",
+      "default": "./src/lib/routes.ts"
+    },
     "./styles.css": "./src/styles.css"
   },
   "scripts": {

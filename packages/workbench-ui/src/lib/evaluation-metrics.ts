@@ -51,16 +51,10 @@ export function buildEvaluationMetricDescriptors(
   const descriptors = new Map<string, EvaluationMetricDescriptor>();
   for (const evaluation of evaluations.filter(isCompleteEvaluationSummary)) {
     for (const metricId of Object.keys(evaluation.evaluation?.metrics ?? evaluation.metrics ?? {})) {
-      const isScoreMetric = metricId === "score";
-      descriptors.set(metricId, {
-        id: metricId,
-        label: formatMetricLabel(metricId),
-        direction: "higher",
-        kind: "number",
-        group: "metric",
-        primary: isScoreMetric,
-        ...(isScoreMetric ? { semanticRole: "performance" as const } : {}),
-      });
+      descriptors.set(metricId, metricDescriptor(metricId));
+    }
+    if (evaluation.selectionMetric && evaluation.selectionScore) {
+      descriptors.set(evaluation.selectionMetric, metricDescriptor(evaluation.selectionMetric));
     }
     if (evaluation.evaluation?.durationMs ?? evaluation.durationMs) {
       descriptors.set("durationMs", {
@@ -86,6 +80,19 @@ export function buildEvaluationMetricDescriptors(
     }
   }
   return [...descriptors.values()].sort(compareMetricDescriptors);
+}
+
+function metricDescriptor(metricId: string): EvaluationMetricDescriptor {
+  const isScoreMetric = metricId === "score";
+  return {
+    id: metricId,
+    label: formatMetricLabel(metricId),
+    direction: "higher",
+    kind: "number",
+    group: "metric",
+    primary: isScoreMetric,
+    ...(isScoreMetric ? { semanticRole: "performance" as const } : {}),
+  };
 }
 
 const costAxisFormatter = new Intl.NumberFormat("en-US", {
@@ -250,6 +257,9 @@ export function getEvaluationMetricStats(
   }
   if (descriptor.id === "usage.total.costUsd") {
     return evaluation.evaluation?.usage?.total?.costUsd ?? evaluation.usage?.total?.costUsd;
+  }
+  if (evaluation.selectionMetric === descriptor.id && evaluation.selectionScore) {
+    return evaluation.selectionScore;
   }
   return evaluation.evaluation?.metrics?.[descriptor.id] ?? evaluation.metrics?.[descriptor.id];
 }

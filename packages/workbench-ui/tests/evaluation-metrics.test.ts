@@ -9,6 +9,7 @@ import {
   buildEvaluationTradeoffData,
   buildEvaluationTradeoffPairs,
   formatEvaluationMetricStats,
+  getEvaluationMetricValue,
   selectPrimaryEvaluationMetrics,
 } from "../src/lib/evaluation-metrics";
 import type {
@@ -163,6 +164,43 @@ describe("evaluation metric helpers", () => {
       group: "metric",
       label: "Case Completion",
       primary: false,
+    });
+  });
+
+  test("uses selection score for the selected metric", () => {
+    const evaluation = {
+      ...evaluationRecord("split_selection", "Skill", 0.5, 12_000),
+      selectionMetric: "score",
+      selectionScore: stats(0.9),
+    };
+    const scoreDescriptor: EvaluationMetricDescriptor = {
+      id: "score",
+      label: "Score",
+      direction: "higher",
+      kind: "number",
+      group: "metric",
+      primary: true,
+    };
+
+    expect(getEvaluationMetricValue(evaluation, scoreDescriptor)).toBe(0.9);
+  });
+
+  test("includes selected metrics even when only selection stats are present", () => {
+    const base = evaluationRecord("custom_selection", "Skill", 0.5, 12_000);
+    const descriptors = buildEvaluationMetricDescriptors([{
+      ...base,
+      metrics: { score: base.metrics.score },
+      evaluation: {
+        ...base.evaluation,
+        metrics: { score: base.evaluation.metrics.score },
+      },
+      selectionMetric: "validation_accuracy",
+      selectionScore: stats(0.9),
+    }]);
+
+    expect(descriptors.find((descriptor) => descriptor.id === "validation_accuracy")).toMatchObject({
+      label: "Validation Accuracy",
+      group: "metric",
     });
   });
 

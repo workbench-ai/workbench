@@ -17,7 +17,10 @@ import {
   resolveEvaluationCandidateDisplay,
 } from "../lib/candidate-evaluation-display";
 import { buildEvaluationMetricDescriptors } from "../lib/evaluation-metrics";
-import type { EvaluationRuntimeRow } from "../lib/runtime-state";
+import {
+  formatRunPolicyText,
+  type EvaluationRuntimeRow,
+} from "../lib/runtime-state";
 import { shortId, statusLabel } from "../lib/format";
 import type {
   LabeledEvaluationSummary,
@@ -222,6 +225,7 @@ function toEvaluationDataTableRow(
       configurationLabel: formatEvaluationConfigurationLabel(row.evaluation),
       statusLabel: statusLabel(row.evaluation.status),
       sampleText: formatEvaluationSampleText(row.evaluation),
+      policyText: formatRunPolicyText(row.run),
       evaluation,
       evaluationId: row.evaluation.id,
     };
@@ -233,6 +237,7 @@ function toEvaluationDataTableRow(
     configurationLabel: formatRunConfigurationLabel(row),
     statusLabel: row.statusLabel,
     sampleText: formatRunSampleText(row),
+    policyText: formatRunPolicyText(row.run),
     evaluation: null,
     evaluationId: null,
   };

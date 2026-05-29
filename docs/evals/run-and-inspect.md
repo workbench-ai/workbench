@@ -21,19 +21,21 @@ Runtime candidates are versioned automatically. A manifest named `Skill` appears
 
 Once an active candidate exists, eval records scores without moving that active pointer. Improve JSON uses explicit candidate ids: `outputCandidateId` is the version produced by the improve run, while `activeCandidateId` is the current best evaluated candidate after scoring. These can differ when a newly produced version underperforms the incumbent.
 
-## Cloud Deployment
+## Hosted Execution
 
 ```bash
 workbench login
 workbench whoami --json
-workbench push --tag v1
-workbench cloud eval candidates/codex --samples 1 --watch --json
-workbench cloud improve candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch --json
-workbench cloud retry TARGET_ID --watch --json
-workbench cloud open --json --no-open
+workbench push
+workbench eval --hosted candidates/codex --samples 1 --watch --json
+workbench improve --hosted candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch --json
+workbench retry --hosted TARGET_ID --watch --json
+workbench open --hosted --json --no-open
 ```
 
-If the hosted benchmark already exists, run from the directory containing `.workbench/origin.json` or pass `--benchmark OWNER/BENCHMARK[@REF]` to `workbench cloud` eval, runs, and hosted inspection commands. Internal `wb_...` ids are accepted for owner-only commands when needed. If the runtime is custom, keep `engine.with.environment.dockerfile` pointed at the local Dockerfile; `workbench push` builds or reuses the benchmark environment version from that Dockerfile.
+If the hosted benchmark already exists, run from the directory containing `.workbench/origin.json` or pass `--benchmark OWNER/BENCHMARK` to hosted lifecycle commands. Internal `wb_...` ids are accepted for owner-only commands when needed. If the runtime is custom, keep `engine.with.environment.dockerfile` pointed at the local Dockerfile; `workbench push` builds or reuses the benchmark environment version from that Dockerfile.
+
+Watched or reused terminal hosted runs import the hosted project state back into the linked local checkout when local source still matches the remembered base. Hosted commands that explicitly target a different `--benchmark` do not mutate the current checkout.
 
 Additional note for agents: if a hosted command returns `urls` and an embedded browser is available, navigate the browser to the returned benchmark URL. For custom Dockerfile runtimes, verify the hosted environment is ready before starting a run.
 
@@ -41,7 +43,7 @@ Additional note for agents: if a hosted command returns `urls` and an embedded b
 
 Cost metrics are sample-based in evaluations. Evaluation cost is engine attempt cost per sample. Candidate totals also include improve execution cost. If a provider reports cost directly, Workbench uses that value; otherwise it estimates from the checked-in LiteLLM model price snapshot when the adapter reports enough token detail.
 
-For hosted validation, use `workbench cloud eval ... --watch --json` first. Use the returned candidate id as `--base` for a hosted improve run when you want to test the improvement loop. Use `workbench cloud retry <run-id-or-evaluation-id> --watch --json` for failed hosted history. Use the returned id fields, `runId`, and `urls` from watched JSON output. Open the evaluation URL for scorecard detail, candidate files, case evidence, attempts, traces, and files. If a run is still pending and no candidate id exists yet, use `workbench cloud runs show <run-id> --json` for operational status and `workbench cloud open --json --no-open` for the benchmark route.
+For hosted validation, use `workbench eval --hosted ... --watch --json` first. Use the returned candidate id as `--base` for a hosted improve run when you want to test the improvement loop. Use `workbench retry --hosted <run-id-or-evaluation-id> --watch --json` for failed hosted history. Use the returned id fields, `runId`, and `urls` from watched JSON output. Open the evaluation URL for scorecard detail, candidate files, case evidence, attempts, traces, and files. If a run is still pending and no candidate id exists yet, use `workbench open --hosted --json --no-open` for the benchmark route.
 
 If the sample errors, inspect the improve execution, candidate runner, scoring helper, runtime environment, and output-writing logic. Most first-pass errors are one of:
 
@@ -61,4 +63,4 @@ workbench candidates preview --candidate <candidate> --path SKILL.md --output -
 workbench open --json --no-open
 ```
 
-Use the first run to verify that verifier files, durable artifacts, traces, and candidate file changes are all understandable before increasing budget or samples. The web view is read-only inspection; execution, retry, cancellation, and sync remain CLI actions.
+Use the first run to verify that verifier files, durable artifacts, traces, and candidate file changes are all understandable before increasing budget or samples. The web view is read-only inspection; execution, retry, push, and pull remain CLI actions.

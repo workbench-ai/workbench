@@ -317,6 +317,9 @@ export interface EvaluationSummary {
   completedSampleCount: number;
   errorSampleCount: number;
   metrics?: Record<string, MetricStats>;
+  selectionMetric?: string;
+  selectionLabel?: string;
+  selectionScore?: MetricStats;
   durationMs?: MetricStats;
   usage?: EvaluationUsageStats;
   error?: string;
@@ -464,6 +467,8 @@ export interface RunSummary {
   improver: string;
   engineRun: string;
   strategy: string;
+  optimizeOn?: string;
+  selectBy?: string;
   budget: number;
   repairBudget: number;
   attemptsRequested: number;
@@ -475,6 +480,12 @@ export interface RunSummary {
   error?: string;
   activeCandidateId?: string | null;
   outputCandidateId?: string | null;
+}
+
+export interface WorkbenchRuntimeRun extends RunSummary {
+  jobCount?: number;
+  completedJobCount?: number;
+  failedJobCount?: number;
 }
 
 export interface RuntimeEvent {
@@ -510,12 +521,118 @@ export interface RuntimeSnapshot {
   runs: RunSummary[];
 }
 
+export interface WorkbenchRuntimeCandidateFiles {
+  candidateId: string;
+  files: SurfaceSnapshotFile[];
+}
+
+export interface WorkbenchRuntimeExecutionFiles {
+  jobId: string;
+  files: SurfaceSnapshotFile[];
+}
+
+export interface WorkbenchRuntimeBundle {
+  schema: "workbench.runtime.bundle.v1";
+  activeId: string | null;
+  candidates: CandidateRecord[];
+  candidateFiles: WorkbenchRuntimeCandidateFiles[];
+  evaluations: EvaluationScorecard[];
+  runs: WorkbenchRuntimeRun[];
+  jobs: HostedWorkbenchJob[];
+  executionFiles: WorkbenchRuntimeExecutionFiles[];
+  events: RuntimeEvent[];
+}
+
+export interface WorkbenchRuntimeBundleStats {
+  candidates: number;
+  candidateFiles: number;
+  evaluations: number;
+  runs: number;
+  jobs: number;
+  executionFiles: number;
+  events: number;
+  activeId: string | null;
+}
+
+export interface WorkbenchRuntimeImportResult {
+  changed: boolean;
+  stats: WorkbenchRuntimeBundleStats;
+}
+
+export interface WorkbenchProjectSourceResources {
+  cpu?: number;
+  memoryGb?: number;
+  diskGb?: number;
+  timeoutMinutes?: number;
+}
+
+export interface WorkbenchProjectStateSource {
+  source: string;
+  files: SurfaceSnapshotFile[];
+  candidateFiles: SurfaceSnapshotFile[];
+  engineResolveFiles: SurfaceSnapshotFile[];
+  engineResolveBinding: EngineResolveBinding;
+  adapterFiles: SurfaceSnapshotFile[];
+  dockerfile: string;
+  runtimeDockerfile: string;
+  runtimeFiles: SurfaceSnapshotFile[];
+  network: "off" | "on";
+  resources: WorkbenchProjectSourceResources;
+  revisionId?: string;
+  fingerprint?: string;
+}
+
+export interface WorkbenchProjectStateBase {
+  sourceRevisionId?: string;
+  sourceFingerprint?: string;
+  runtimeFingerprint?: string;
+}
+
+export interface WorkbenchProjectStateRemote {
+  id: string;
+  remote: string;
+  ownerUsername: string;
+  name: string;
+  visibility: "private" | "public";
+}
+
+export interface WorkbenchProjectState {
+  schema: "workbench.project.state.v1";
+  project: WorkbenchProjectStateRemote;
+  base: WorkbenchProjectStateBase;
+  source: WorkbenchProjectStateSource;
+  runtime: WorkbenchRuntimeBundle;
+}
+
+export interface WorkbenchProjectStateImportResult {
+  changed: boolean;
+  source: {
+    changed: boolean;
+    revisionId?: string;
+    fingerprint?: string;
+  };
+  runtime: WorkbenchRuntimeImportResult;
+  state: WorkbenchProjectState;
+}
+
 export interface AuthoredWorkbenchCandidateRunSpec extends WorkbenchAuthoredAdapterSpec {
   name: string;
 }
 
+export interface WorkbenchCaseSelector {
+  all?: true;
+  split?: string;
+}
+
+export interface WorkbenchSelectionSpec {
+  metric: string;
+  cases?: WorkbenchCaseSelector;
+}
+
 export interface AuthoredWorkbenchCandidateImproveSpec extends WorkbenchAuthoredAdapterSpec {
   edits: string[];
+  optimizeOn?: WorkbenchCaseSelector;
+  selectBy?: WorkbenchSelectionSpec;
 }
 
 export interface AuthoredWorkbenchCandidateSpec {
@@ -932,7 +1049,7 @@ export interface HostedWorkbenchJob {
   error?: string;
 }
 
-export interface HostedWorkbenchRun extends RunSummary {
+export interface HostedWorkbenchRun extends WorkbenchRuntimeRun {
   projectId: string;
   environmentVersionId?: string;
   specVersionId: string;
@@ -943,6 +1060,7 @@ export interface HostedWorkbenchRun extends RunSummary {
     benchmarkFingerprint: string;
     candidateFingerprint: string;
     baseCandidateId: string | null;
+    payerUserId?: string;
     candidateOwnerUserId?: string;
     candidateOwnerUsername?: string;
     preserveActiveCandidateId?: string | null;

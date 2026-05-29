@@ -395,7 +395,7 @@ describe("built-in Workbench adapters", () => {
     await fs.mkdir(path.join(tasksRoot, "task-001", "tests"), { recursive: true });
     await fs.writeFile(
       path.join(tasksRoot, "task-001", "task.yaml"),
-      "version: 3\ntask: Write ok.\ntests:\n  path: tests\n",
+      "version: 3\ntask: Write ok.\nsplit: train\ntests:\n  path: tests\n",
     );
     await fs.writeFile(path.join(tasksRoot, "task-001", "tests", "test.sh"), "echo 1\n");
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
@@ -434,6 +434,7 @@ describe("built-in Workbench adapters", () => {
       case: {
         version: 3,
         prompt: "Write ok.",
+        split: "train",
       },
       files: {
         private: [{

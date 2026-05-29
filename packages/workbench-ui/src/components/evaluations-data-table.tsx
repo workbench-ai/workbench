@@ -140,6 +140,11 @@ export function EvaluationsDataTable({
                     <Badge variant="outline" className="w-fit">
                       {row.statusLabel}
                     </Badge>
+                    {row.policyText ? (
+                      <span className="text-xs text-muted-foreground">
+                        {row.policyText}
+                      </span>
+                    ) : null}
                   </div>
                 </TableCell>
                 {columns.map((descriptor) => (
@@ -182,6 +187,7 @@ export interface EvaluationDataTableRow {
   configurationLabel: string;
   statusLabel: string;
   sampleText: string;
+  policyText?: string | null;
   evaluation: LabeledEvaluationSummary | null;
   evaluationId: string | null;
 }
