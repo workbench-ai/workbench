@@ -168,6 +168,7 @@ export async function exportLocalRuntimeBundle(
 export async function importLocalRuntimeBundle(
   workspace: string,
   bundle: WorkbenchRuntimeBundle,
+  currentBenchmarkFingerprint: string,
 ): Promise<WorkbenchRuntimeImportResult> {
   validateRuntimeBundleSchema(bundle);
   const snapshot = await loadLocalArchive(workspace);
@@ -181,7 +182,7 @@ export async function importLocalRuntimeBundle(
   const incomingCandidates = bundle.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange);
   const candidates = mergeRecordsById(existingCandidates, incomingCandidates, (candidate) => candidate.id, (didChange) => {
     changed ||= didChange;
-  }).sort(compareLocalCandidateRecords);
+  }, runtimeCandidatesCompatibleForExchange, mergeRuntimeCandidateForExchange).sort(compareLocalCandidateRecords);
   const candidateFiles = { ...snapshot.candidateFiles };
   for (const group of bundle.candidateFiles) {
     const candidateId = localRecordName(group.candidateId);
@@ -196,21 +197,19 @@ export async function importLocalRuntimeBundle(
     }
     candidateFiles[candidateId] = files;
   }
-  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
-  const activeId = bundle.activeId && candidateIds.has(bundle.activeId)
-    ? bundle.activeId
-    : snapshot.activeId && candidateIds.has(snapshot.activeId)
-      ? snapshot.activeId
-      : null;
+  const activeId =
+    compatibleRuntimeActiveCandidateId(candidates, bundle.activeId ?? null, currentBenchmarkFingerprint) ??
+    compatibleRuntimeActiveCandidateId(candidates, snapshot.activeId, currentBenchmarkFingerprint) ??
+    latestCompatibleRuntimeCandidateId(candidates, currentBenchmarkFingerprint);
   if (activeId !== snapshot.activeId) {
     changed = true;
   }
   const evaluations = mergeRecordsById(snapshot.evaluations, bundle.evaluations, (evaluation) => evaluation.id, (didChange) => {
     changed ||= didChange;
-  }).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }, runtimeEvaluationsCompatibleForExchange).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   const runs = mergeRecordsById(snapshot.runs, bundle.runs, (run) => run.id, (didChange) => {
     changed ||= didChange;
-  }).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+  }, runtimeRunsCompatibleForExchange).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
   const events = mergeRecordsById(snapshot.events, bundle.events, runtimeEventKey, (didChange) => {
     changed ||= didChange;
   }).sort((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id));
@@ -219,13 +218,22 @@ export async function importLocalRuntimeBundle(
   await Promise.all(existingJobs.map(async (job) => {
     executionFilesByJobId.set(job.id, await readLocalExecutionFiles(workspace, job.id));
   }));
+  const existingJobById = new Map(existingJobs.map((job) => [job.id, job]));
+  const incomingJobById = new Map(
+    bundle.jobs.map(sanitizeRuntimeJobForExchange).map((job) => [job.id, job]),
+  );
   for (const group of bundle.executionFiles) {
     const jobId = localRecordName(group.jobId);
     const files = copySurfaceFiles(group.files);
     const existing = executionFilesByJobId.get(jobId);
     if (existing) {
       if (!workbenchSurfaceFilesEqualForExchange(existing, files)) {
-        throw new Error(`Runtime history conflict for execution files ${jobId}.`);
+        const existingJob = existingJobById.get(jobId) ?? null;
+        const incomingJob = incomingJobById.get(jobId) ?? null;
+        if (!existingJob || !incomingJob || !runtimeJobsEqualForExchange(existingJob, incomingJob)) {
+          throw new Error(`Runtime history conflict for execution files ${jobId}.`);
+        }
+        changed = true;
       }
     } else {
       changed = true;
@@ -518,6 +526,7 @@ function mergeRecordsById<T>(
   idFor: (record: T) => string,
   markChanged: (changed: boolean) => void,
   equal: (left: T, right: T) => boolean = runtimeRecordsEqual,
+  merge: (left: T, right: T) => T = (_left, right) => right,
 ): T[] {
   const records = new Map<string, T>();
   for (const record of existing) {
@@ -526,13 +535,19 @@ function mergeRecordsById<T>(
   for (const record of incoming) {
     const id = localRecordName(idFor(record));
     const previous = records.get(id);
-    if (!previous || !equal(previous, record)) {
-      if (previous) {
-        throw new Error(`Runtime history conflict for id ${id}.`);
-      }
+    if (!previous) {
+      markChanged(true);
+      records.set(id, record);
+      continue;
+    }
+    if (!equal(previous, record)) {
+      throw new Error(`Runtime history conflict for id ${id}.`);
+    }
+    const merged = merge(previous, record);
+    if (!runtimeRecordsEqual(previous, merged)) {
       markChanged(true);
     }
-    records.set(id, record);
+    records.set(id, merged);
   }
   return [...records.values()];
 }
@@ -546,9 +561,12 @@ function runtimeJobsEqualForExchange(
   left: HostedWorkbenchJob,
   right: HostedWorkbenchJob,
 ): boolean {
+  if (runtimeRecordsEqual(runtimeComparableJob(left), runtimeComparableJob(right))) {
+    return true;
+  }
   return runtimeRecordsEqual(
-    runtimeComparableJob(left),
-    runtimeComparableJob(right),
+    runtimeJobIdentityForExchange(left),
+    runtimeJobIdentityForExchange(right),
   );
 }
 
@@ -567,6 +585,140 @@ function runtimeComparableJob(job: HostedWorkbenchJob): HostedWorkbenchJob {
     ...comparable,
     output: portableOutput as Json,
   };
+}
+
+function runtimeCandidatesCompatibleForExchange(
+  left: CandidateRecord,
+  right: CandidateRecord,
+): boolean {
+  return runtimeRecordsEqual(
+    runtimeCandidateIdentityForExchange(left),
+    runtimeCandidateIdentityForExchange(right),
+  );
+}
+
+function runtimeCandidateIdentityForExchange(candidate: CandidateRecord): unknown {
+  const {
+    eval: _eval,
+    prompt: _prompt,
+    meta: _meta,
+    status: _status,
+    usage: _usage,
+    visibility: _visibility,
+    ownerUserId: _ownerUserId,
+    ownerUsername: _ownerUsername,
+    metrics: _metrics,
+    candidateRunId: _candidateRunId,
+    candidateRunName: _candidateRunName,
+    ...identity
+  } = candidate as CandidateRecord & {
+    metrics?: unknown;
+    candidateRunId?: unknown;
+    candidateRunName?: unknown;
+  };
+  return identity;
+}
+
+function mergeRuntimeCandidateForExchange(
+  left: CandidateRecord,
+  right: CandidateRecord,
+): CandidateRecord {
+  return {
+    ...left,
+    ...right,
+    ...(right.eval ? { eval: right.eval } : left.eval ? { eval: left.eval } : {}),
+    ...(right.prompt ? { prompt: right.prompt } : left.prompt ? { prompt: left.prompt } : {}),
+    ...(right.meta !== undefined ? { meta: right.meta } : left.meta !== undefined ? { meta: left.meta } : {}),
+    ...(right.usage ? { usage: right.usage } : left.usage ? { usage: left.usage } : {}),
+    visibility: right.visibility ?? left.visibility,
+  };
+}
+
+function runtimeEvaluationsCompatibleForExchange(
+  left: EvaluationScorecard,
+  right: EvaluationScorecard,
+): boolean {
+  if (runtimeRecordsEqual(left, right)) {
+    return true;
+  }
+  return runtimeRecordsEqual(
+    runtimeEvaluationIdentityForExchange(left),
+    runtimeEvaluationIdentityForExchange(right),
+  );
+}
+
+function runtimeEvaluationIdentityForExchange(evaluation: EvaluationScorecard): unknown {
+  return {
+    id: evaluation.id,
+    runId: evaluation.runId,
+    candidateId: evaluation.candidateId,
+    candidateVersion: evaluation.candidateVersion,
+    benchmarkFingerprint: evaluation.benchmarkFingerprint,
+    candidateFingerprint: evaluation.candidateFingerprint,
+  };
+}
+
+function runtimeRunsCompatibleForExchange(
+  left: RunSummary,
+  right: RunSummary,
+): boolean {
+  if (runtimeRecordsEqual(left, right)) {
+    return true;
+  }
+  return runtimeRecordsEqual(
+    runtimeRunIdentityForExchange(left),
+    runtimeRunIdentityForExchange(right),
+  );
+}
+
+function runtimeRunIdentityForExchange(run: RunSummary): unknown {
+  return {
+    id: run.id,
+    workflow: run.workflow,
+    benchmarkFingerprint: run.benchmarkFingerprint,
+    candidateId: run.candidateId ?? null,
+    outputCandidateId: run.outputCandidateId ?? null,
+    engineRun: run.engineRun,
+    improver: run.improver,
+    strategy: run.strategy,
+    budget: run.budget,
+    samples: run.samples,
+    attemptsRequested: run.attemptsRequested,
+  };
+}
+
+function runtimeJobIdentityForExchange(job: HostedWorkbenchJob): unknown {
+  return {
+    id: job.id,
+    runId: job.runId,
+    candidateId: job.candidateId,
+    kind: job.kind,
+    attempt: job.attempt,
+  };
+}
+
+function compatibleRuntimeActiveCandidateId(
+  candidates: readonly CandidateRecord[],
+  candidateId: string | null,
+  benchmarkFingerprint: string,
+): string | null {
+  if (!candidateId) {
+    return null;
+  }
+  const candidate = candidates.find((entry) => entry.id === candidateId) ?? null;
+  return candidate?.benchmarkFingerprint === benchmarkFingerprint ? candidate.id : null;
+}
+
+function latestCompatibleRuntimeCandidateId(
+  candidates: readonly CandidateRecord[],
+  benchmarkFingerprint: string,
+): string | null {
+  return candidates
+    .filter((candidate) =>
+      candidate.benchmarkFingerprint === benchmarkFingerprint &&
+      candidate.status === "evaluated"
+    )
+    .at(-1)?.id ?? null;
 }
 
 function canonicalRuntimeJson(value: unknown): unknown {
@@ -637,6 +789,9 @@ function validateCandidateRecord(candidate: CandidateRecord): void {
   requireArchivePositiveInteger(candidate.ordinal, `candidate ${candidate.id}.ordinal`);
   requireArchiveString(candidate.benchmarkFingerprint, `candidate ${candidate.id}.benchmarkFingerprint`);
   requireArchiveString(candidate.candidateFingerprint, `candidate ${candidate.id}.candidateFingerprint`);
+  if (candidate.visibility !== "private" && candidate.visibility !== "public") {
+    throw new Error(`candidate ${candidate.id}.visibility must be private or public.`);
+  }
   requireArchiveString(candidate.createdAt, `candidate ${candidate.id}.createdAt`);
 }
 

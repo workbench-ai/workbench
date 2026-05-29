@@ -223,8 +223,37 @@ export function createWorkbenchProgressStdoutParser(
 
 export async function publishWorkbenchProgressStdoutEnvelope(
   envelope: WorkbenchProgressStdoutEnvelope,
+  expectedTarget?: WorkbenchExecutionProgressTarget,
 ): Promise<void> {
-  await postProgressBody(envelope);
+  const target = validProgressTarget(expectedTarget);
+  if (!target) {
+    await postProgressBody(envelope);
+    return;
+  }
+  if (!progressEnvelopeMatchesTarget(envelope, target)) {
+    return;
+  }
+  await postProgressBody({
+    url: target.url,
+    body: {
+      ...envelope.body,
+      ...(target.ownerUserId ? { ownerUserId: target.ownerUserId } : {}),
+      progressToken: target.token,
+    },
+  });
+}
+
+function progressEnvelopeMatchesTarget(
+  envelope: WorkbenchProgressStdoutEnvelope,
+  target: WorkbenchExecutionProgressTarget,
+): boolean {
+  return envelope.url === target.url &&
+    envelope.body.progressToken === target.token &&
+    (
+      !target.ownerUserId ||
+      envelope.body.ownerUserId === undefined ||
+      envelope.body.ownerUserId === target.ownerUserId
+    );
 }
 
 function firstExistingIndex(indexes: number[]): number {

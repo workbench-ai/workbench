@@ -6,6 +6,51 @@ export type Json =
   | Json[]
   | { [key: string]: Json };
 
+const RESERVED_ADAPTER_AUTH_ENV_NAMES = new Set([
+  "BASH_ENV",
+  "ENV",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_NOSYSTEM",
+  "GIT_CONFIG_SYSTEM",
+  "HOME",
+  "IFS",
+  "LD_AUDIT",
+  "LD_LIBRARY_PATH",
+  "LD_PRELOAD",
+  "LOGNAME",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PATH",
+  "PWD",
+  "PYTHONHOME",
+  "PYTHONPATH",
+  "SHELL",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USER",
+]);
+
+const RESERVED_ADAPTER_AUTH_ENV_PREFIXES = [
+  "DYLD_",
+  "LD_",
+  "npm_",
+  "npm_config_",
+  "WORKBENCH_",
+];
+
+export function isReservedWorkbenchAdapterAuthEnvName(name: string): boolean {
+  const normalized = name.trim();
+  return RESERVED_ADAPTER_AUTH_ENV_NAMES.has(normalized) ||
+    RESERVED_ADAPTER_AUTH_ENV_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
+export function assertWorkbenchAdapterAuthEnvNameAllowed(name: string): void {
+  if (isReservedWorkbenchAdapterAuthEnvName(name)) {
+    throw new Error(`Adapter auth env var is reserved: ${name}`);
+  }
+}
+
 export interface HostedWorkbenchProject {
   id: string;
   ownerUserId: string;
@@ -35,7 +80,6 @@ export interface HostedWorkbenchProjectSummary {
   runCount: number;
   starCount: number;
   viewerHasStarred?: boolean;
-  latestRun: HostedWorkbenchRun | null;
 }
 
 export interface WorkbenchSpecValidation {

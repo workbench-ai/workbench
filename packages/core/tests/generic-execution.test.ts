@@ -15,6 +15,8 @@ import {
   collectWorkbenchAdapterInvocations,
   collectWorkbenchExecutionIsolationIssues,
   createWorkbenchSandboxAllocation,
+  createDockerSandboxBackendDescriptor,
+  createWorkbenchAdapterAuthBundle,
   createWorkbenchExecutionCapability,
   createWorkbenchExecutionJob,
   expectedWorkbenchRunJobCount,
@@ -85,6 +87,11 @@ describe("generic sandbox execution contract", () => {
     expect(spec.engineRun.use).toBe("workbench");
     expect(spec.engineRun.with).toMatchObject({ score: { use: "rubric" } });
     expect(engineResolveInvocationForSpec(spec).use).toBe("workbench");
+  });
+
+  test("docker sandbox keeps the binary network policy contract for local execution", () => {
+    expect(createDockerSandboxBackendDescriptor().capabilities.networkPolicy)
+      .toEqual(["none", "open"]);
   });
 
   test("source spec validation is the split benchmark/candidate contract", () => {
@@ -1031,6 +1038,35 @@ describe("generic sandbox execution contract", () => {
     )).toEqual([{ adapterId: "codex", profile: "default" }]);
   });
 
+  test("rejects adapter auth env vars that can alter the runtime process", () => {
+    const target = {
+      adapterId: "codex",
+      profile: "default",
+    };
+
+    expect(() =>
+      createWorkbenchAdapterAuthBundle({
+        target,
+        method: "api-key",
+        env: {
+          OPENAI_API_KEY: "sk-test",
+        },
+      }),
+    ).not.toThrow();
+
+    for (const name of ["NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_AUDIT", "WORKBENCH_OUTPUT"]) {
+      expect(() =>
+        createWorkbenchAdapterAuthBundle({
+          target,
+          method: "api-key",
+          env: {
+            [name]: "malicious",
+          },
+        }),
+      ).toThrow(/reserved/u);
+    }
+  });
+
   test("built-in adapter defaults use generic adapter auth bundles", async () => {
     const binRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-codex-adapter-"));
     const adapterPath = path.join(binRoot, "codex-adapter.mjs");
@@ -1039,7 +1075,7 @@ import path from "node:path";
 const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, "utf8"));
 const entry = request.auth?.self?.default;
 if (entry?.method !== "oauth" || entry?.profile !== "default" || !entry?.filesRoot) process.exit(11);
-if (request.auth?.adapters?.codex?.default?.filesRoot !== entry.filesRoot) process.exit(12);
+if (request.auth?.adapters?.codex) process.exit(12);
 const output = process.env.WORKBENCH_OUTPUT;
 fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
@@ -1775,7 +1811,7 @@ const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST
 if (process.env.MY_AGENT_API_KEY !== "secret") process.exit(11);
 const root = request.auth?.self?.default?.filesRoot;
 if (!root) process.exit(12);
-if (request.auth?.adapters?.["my-agent"]?.default?.filesRoot !== root) process.exit(14);
+if (request.auth?.adapters?.["my-agent"]) process.exit(14);
 if (fs.readFileSync(path.join(root, ".my-agent/config.json"), "utf8") !== "{\\"token\\":\\"file\\"}") process.exit(13);
 fs.mkdirSync(process.env.WORKBENCH_OUTPUT, { recursive: true });
 if (request.operation !== "candidate.run") {
@@ -1873,6 +1909,7 @@ const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST
 if (process.env.SECRET_AGENT_KEY !== "nested-secret") process.exit(11);
 if (request.auth?.default) process.exit(12);
 if (request.auth?.adapters?.["secret-agent"]?.default?.env?.SECRET_AGENT_KEY !== "materialized") process.exit(13);
+if (request.auth?.self?.default?.env?.SECRET_AGENT_KEY) process.exit(14);
 fs.mkdirSync(process.env.WORKBENCH_OUTPUT, { recursive: true });
 if (request.operation !== "candidate.run") {
   fs.writeFileSync(path.join(process.env.WORKBENCH_OUTPUT, "runner-output.txt"), "nested auth\\n");

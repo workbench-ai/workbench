@@ -19,6 +19,7 @@ import type {
   CandidateSummary,
   EvalCaseStatus,
   EvalCaseResult,
+  EngineResolveBinding,
   EvaluationRecord,
   EvaluationScorecard,
   EvaluationSampleRecord,
@@ -50,6 +51,7 @@ import {
   adapterCommandName,
   assertWorkbenchAdapterOperationResultOk,
   collectWorkbenchAdapterAuthRequirements,
+  collectWorkbenchAdapterInvocations,
   parseWorkbenchAdapterManifest,
   readWorkbenchAdapterOperationResult,
   WORKBENCH_RUNTIME_CONTROL_TOKEN_ENV,
@@ -450,7 +452,6 @@ export function sanitizeWorkbenchRuntimeCandidateForExchange(
   const {
     ownerUserId: _ownerUserId,
     ownerUsername: _ownerUsername,
-    visibility: _visibility,
     metrics: _metrics,
     candidateRunId: _candidateRunId,
     candidateRunName: _candidateRunName,
@@ -461,6 +462,80 @@ export function sanitizeWorkbenchRuntimeCandidateForExchange(
     candidateRunName?: unknown;
   };
   return { ...portable };
+}
+
+export interface WorkbenchBenchmarkContentFingerprintInput {
+  sourceYaml: string;
+  engineResolveFiles: readonly SurfaceSnapshotFile[];
+  engineResolveBinding: EngineResolveBinding;
+  adapterFiles?: readonly SurfaceSnapshotFile[];
+  adapterManifests?: readonly WorkbenchAdapterManifest[];
+  runtimeFiles?: readonly SurfaceSnapshotFile[];
+  resources?: WorkbenchProjectSourceResources | null;
+  network?: WorkbenchProjectStateSource["network"] | null;
+}
+
+export interface WorkbenchCandidateContentFingerprintInput {
+  sourceYaml: string;
+  candidateFiles: readonly SurfaceSnapshotFile[];
+  adapterFiles?: readonly SurfaceSnapshotFile[];
+  adapterManifests?: readonly WorkbenchAdapterManifest[];
+}
+
+export function workbenchBenchmarkContentFingerprint(
+  input: WorkbenchBenchmarkContentFingerprintInput,
+): string {
+  const benchmarkSource = workbenchBenchmarkSourceYamlForFingerprint(input.sourceYaml);
+  const resolvedSpec = resolveWorkbenchResolvedSourceYamlInternal(input.sourceYaml);
+  const adapterManifests = input.adapterManifests ??
+    adapterManifestsForContentFingerprint(input.adapterFiles ?? []);
+  const benchmarkAdapterIds = new Set(
+    collectWorkbenchAdapterInvocations([resolvedSpec.engineRun], adapterManifests)
+      .map((invocation: { use: string }) => invocation.use),
+  );
+  const canonical = {
+    sourceYaml: normalizeTextForProjectStateFingerprint(benchmarkSource.sourceYaml),
+    engineResolveFiles: canonicalFilesForProjectStateFingerprint(input.engineResolveFiles),
+    engineResolveBinding: canonicalEngineResolveBindingForFingerprint(input.engineResolveBinding),
+    adapterFiles: canonicalFilesForProjectStateFingerprint(
+      adapterFilesForContentFingerprint(
+        input.adapterFiles ?? [],
+        benchmarkSource.adapterSources,
+        benchmarkAdapterIds,
+      ),
+    ),
+    runtimeFiles: canonicalFilesForProjectStateFingerprint(input.runtimeFiles ?? []),
+    resources: input.resources
+      ? normalizeProjectStateResources(input.resources)
+      : null,
+    network: input.network ?? null,
+  };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+export function workbenchCandidateContentFingerprint(
+  input: WorkbenchCandidateContentFingerprintInput,
+): string {
+  const candidateSource = workbenchCandidateSourceYamlForFingerprint(input.sourceYaml);
+  const resolvedSpec = resolveWorkbenchResolvedSourceYamlInternal(input.sourceYaml);
+  const adapterManifests = input.adapterManifests ??
+    adapterManifestsForContentFingerprint(input.adapterFiles ?? []);
+  const candidateAdapterIds = new Set(
+    collectWorkbenchAdapterInvocations([resolvedSpec.run], adapterManifests)
+      .map((invocation: { use: string }) => invocation.use),
+  );
+  const canonical = {
+    sourceYaml: normalizeTextForProjectStateFingerprint(candidateSource.sourceYaml),
+    candidateFiles: canonicalFilesForProjectStateFingerprint(input.candidateFiles),
+    adapterFiles: canonicalFilesForProjectStateFingerprint(
+      adapterFilesForContentFingerprint(
+        input.adapterFiles ?? [],
+        candidateSource.adapterSources,
+        candidateAdapterIds,
+      ),
+    ),
+  };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 export function workbenchProjectSourceFingerprint(
@@ -545,6 +620,138 @@ export function workbenchRuntimeBundleStats(
     events: bundle.events.length,
     activeId: bundle.activeId,
   };
+}
+
+function workbenchCandidateSourceYamlForFingerprint(sourceYaml: string): {
+  sourceYaml: string;
+  adapterSources: string[];
+} {
+  const parsed = YAML.parse(sourceYaml) as Record<string, unknown> | null;
+  const candidate = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed.candidate
+    : null;
+  const candidateRecord = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : null;
+  const adapters = Array.isArray(candidateRecord?.adapters)
+    ? candidateRecord.adapters.flatMap((entry) => typeof entry === "string" ? [entry] : [])
+    : [];
+  const sourceRecord = splitCandidateSourceRecord(candidateRecord);
+  return {
+    sourceYaml: `${YAML.stringify(sourceRecord ?? {}).trimEnd()}\n`,
+    adapterSources: adapters,
+  };
+}
+
+function workbenchBenchmarkSourceYamlForFingerprint(sourceYaml: string): {
+  sourceYaml: string;
+  adapterSources: string[];
+} {
+  const parsed = YAML.parse(sourceYaml) as Record<string, unknown> | null;
+  const benchmark = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed.benchmark
+    : null;
+  const benchmarkRecord = benchmark && typeof benchmark === "object" && !Array.isArray(benchmark)
+    ? benchmark as Record<string, unknown>
+    : null;
+  const adapters = Array.isArray(benchmarkRecord?.adapters)
+    ? benchmarkRecord.adapters.flatMap((entry) => typeof entry === "string" ? [entry] : [])
+    : [];
+  return {
+    sourceYaml: `${YAML.stringify(benchmarkRecord ?? {}).trimEnd()}\n`,
+    adapterSources: adapters,
+  };
+}
+
+function canonicalEngineResolveBindingForFingerprint(
+  binding: EngineResolveBinding,
+): EngineResolveBinding {
+  return {
+    engine: binding.engine,
+    resolver: {
+      use: binding.resolver.use,
+      withFingerprint: binding.resolver.withFingerprint,
+    },
+  };
+}
+
+function adapterFilesForContentFingerprint(
+  adapterFiles: readonly SurfaceSnapshotFile[],
+  adapterSources: readonly string[],
+  adapterIds: ReadonlySet<string>,
+): SurfaceSnapshotFile[] {
+  const roots = [
+    ...adapterSources.map(normalizeSourcePathForContentFingerprint).filter(Boolean),
+    ...adapterRootsForContentFingerprint(adapterFiles, adapterIds),
+  ];
+  if (roots.length === 0) {
+    return [];
+  }
+  return adapterFiles.filter((file) =>
+    roots.some((root) => isWithinSourcePathForContentFingerprint(file.path, root)),
+  );
+}
+
+function adapterRootsForContentFingerprint(
+  adapterFiles: readonly SurfaceSnapshotFile[],
+  adapterIds: ReadonlySet<string>,
+): string[] {
+  const roots: string[] = [];
+  for (const file of adapterFiles) {
+    const normalizedPath = normalizeSourcePathForContentFingerprint(file.path);
+    if (
+      (
+        normalizedPath !== "workbench.adapter.yaml" &&
+        !normalizedPath.endsWith("/workbench.adapter.yaml")
+      ) ||
+      file.encoding !== "utf8"
+    ) {
+      continue;
+    }
+    const manifest = parseWorkbenchAdapterManifest(file.content, normalizedPath);
+    if (adapterIds.has(manifest.id)) {
+      roots.push(normalizedPath === "workbench.adapter.yaml"
+        ? ""
+        : normalizedPath.slice(0, -"/workbench.adapter.yaml".length));
+    }
+  }
+  return roots;
+}
+
+function adapterManifestsForContentFingerprint(
+  adapterFiles: readonly SurfaceSnapshotFile[],
+): WorkbenchAdapterManifest[] {
+  return adapterFiles.flatMap((file) => {
+    const normalizedPath = normalizeSourcePathForContentFingerprint(file.path);
+    if (
+      (
+        normalizedPath !== "workbench.adapter.yaml" &&
+        !normalizedPath.endsWith("/workbench.adapter.yaml")
+      ) ||
+      file.encoding !== "utf8"
+    ) {
+      return [];
+    }
+    return [parseWorkbenchAdapterManifest(file.content, normalizedPath)];
+  });
+}
+
+function isWithinSourcePathForContentFingerprint(filePath: string, rootPath: string): boolean {
+  const normalizedFile = normalizeSourcePathForContentFingerprint(filePath);
+  const normalizedRoot = normalizeSourcePathForContentFingerprint(rootPath);
+  if (!normalizedRoot) {
+    return true;
+  }
+  return normalizedFile === normalizedRoot ||
+    normalizedFile.startsWith(`${normalizedRoot}/`);
+}
+
+function normalizeSourcePathForContentFingerprint(value: string): string {
+  return value
+    .replace(/\\/gu, "/")
+    .replace(/^\/+/u, "")
+    .replace(/\/+/gu, "/")
+    .replace(/^(?:\.\/)+/u, "");
 }
 
 function runtimeJobForProjectStateFingerprint(
@@ -2791,9 +2998,6 @@ export async function executeAdapterInCurrentRuntime(
   const runtimeInput = {
     ...args,
     ...(adapterAuth.root ? { adapterAuthRoot: adapterAuth.root } : {}),
-    ...(Object.keys(adapterAuth.env).length > 0
-      ? { adapterAuthEnv: adapterAuth.env }
-      : {}),
   };
   try {
     if (execution.purpose === "improve") {
@@ -2900,31 +3104,17 @@ function adapterAuthRequest(
   const self: Record<string, Json> = {};
   const adapters: Record<string, Record<string, Json>> = {};
   for (const bundle of bundles) {
-    const key = bundle.slot ?? "default";
-    const fileAuth = bundle.files.length > 0
-      ? {
-          ...(root ? { filesRoot: `${root}/${bundle.adapterId}/${bundle.slot ?? "_"}/${bundle.profile}` } : {}),
-          files: bundle.files.map((file) => ({
-            path: file.path,
-            encoding: file.encoding,
-          })),
-        }
-      : undefined;
-    const entry: Json = {
-      method: bundle.method,
-      profile: bundle.profile,
-      ...(bundle.env && bundle.env.length > 0
-        ? { env: Object.fromEntries(bundle.env.map((entry) => [entry.name, "materialized"])) }
-        : {}),
-      ...(fileAuth ? fileAuth : {}),
-    };
-    adapters[bundle.adapterId] = {
-      ...(adapters[bundle.adapterId] ?? {}),
-      [key]: entry,
-    };
-    if (!currentAdapterId || bundle.adapterId === currentAdapterId) {
-      self[key] = entry;
+    const entry = adapterAuthRequestEntry(bundle, root);
+    if (currentAdapterId && bundle.adapterId === currentAdapterId) {
+      self[bundle.slot ?? "default"] = entry;
+      continue;
     }
+    if (!currentAdapterId) {
+      self[bundle.slot ?? "default"] = entry;
+      continue;
+    }
+    adapters[bundle.adapterId] ??= {};
+    adapters[bundle.adapterId]![bundle.slot ?? "default"] = entry;
   }
   const entries: Record<string, Json> = {};
   if (Object.keys(self).length > 0) {
@@ -2934,6 +3124,29 @@ function adapterAuthRequest(
     entries.adapters = adapters as unknown as Json;
   }
   return entries;
+}
+
+function adapterAuthRequestEntry(
+  bundle: WorkbenchAdapterAuthBundle,
+  root?: string,
+): Json {
+  const fileAuth = bundle.files.length > 0
+    ? {
+        ...(root ? { filesRoot: `${root}/${bundle.adapterId}/${bundle.slot ?? "_"}/${bundle.profile}` } : {}),
+        files: bundle.files.map((file) => ({
+          path: file.path,
+          encoding: file.encoding,
+        })),
+      }
+    : undefined;
+  return {
+    method: bundle.method,
+    profile: bundle.profile,
+    ...(bundle.env && bundle.env.length > 0
+      ? { env: Object.fromEntries(bundle.env.map((entry) => [entry.name, "materialized"])) }
+      : {}),
+    ...(fileAuth ? fileAuth : {}),
+  } as unknown as Json;
 }
 
 function adapterAuthRequestForStep(
@@ -2946,6 +3159,32 @@ function adapterAuthRequestForStep(
     return args.adapterAuthRequest;
   }
   return adapterAuthRequest(profiles, args.adapterAuthRoot, adapterId);
+}
+
+function adapterAuthEnvForStep(
+  args: Pick<WorkbenchExecutionRuntimeInput, "adapterAuthProfiles" | "adapterAuthEnv">,
+  adapterId: string,
+): Record<string, string> {
+  void adapterId;
+  const profiles = (args.adapterAuthProfiles ?? [])
+    .map((bundle) => sanitizeWorkbenchAdapterAuthBundle(bundle));
+  if (profiles.length === 0) {
+    return args.adapterAuthEnv ?? {};
+  }
+  const env: Record<string, string> = {};
+  for (const bundle of profiles) {
+    Object.assign(env, adapterAuthEnv(bundle));
+  }
+  return env;
+}
+
+function adapterAuthProfilesForAdapter(
+  args: Pick<WorkbenchExecutionRuntimeInput, "adapterAuthProfiles">,
+  adapterId: string,
+): WorkbenchAdapterAuthBundle[] {
+  return (args.adapterAuthProfiles ?? [])
+    .map((bundle) => sanitizeWorkbenchAdapterAuthBundle(bundle))
+    .filter((bundle) => bundle.adapterId === adapterId);
 }
 
 function adapterAuthProfilesForExecution(
@@ -3241,9 +3480,6 @@ export async function executeRuntimeControlOperationSequenceInCurrentRuntime(
       {
         ...runtimeArgs,
         ...(adapterAuth.root ? { adapterAuthRoot: adapterAuth.root } : {}),
-        ...(Object.keys(adapterAuth.env).length > 0
-          ? { adapterAuthEnv: adapterAuth.env }
-          : {}),
       },
       workload,
       args.runtimeControlOperation.operations.map((operation, index) =>
@@ -3452,16 +3688,16 @@ function runtimeControlStepForOperation(
   index: number,
   manifests: readonly WorkbenchAdapterManifest[] = [],
 ): WorkbenchWorkloadStepCommand {
-  const command = operation.invocation.command?.trim()
-    || adapterProtocolCommandSpec(
-      {
-        use: operation.invocation.use,
-        with: operation.invocation.with ?? {},
-        ...(operation.invocation.auth !== undefined ? { auth: operation.invocation.auth } : {}),
-      },
-      operation.operation,
-      manifests,
-    ).command;
+  const commandSpec = adapterProtocolCommandSpec(
+    {
+      use: operation.invocation.use,
+      with: operation.invocation.with ?? {},
+      ...(operation.invocation.auth !== undefined ? { auth: operation.invocation.auth } : {}),
+    },
+    operation.operation,
+    manifests,
+  );
+  const command = operation.invocation.command?.trim() || commandSpec.command;
   return {
     kind: operation.operation === "candidate.run"
       ? "candidate"
@@ -3470,7 +3706,7 @@ function runtimeControlStepForOperation(
         : "engine",
     label: operation.label ?? `${operation.operation.replace(".", "_")}_${index + 1}`,
     operation: operation.operation,
-    executor: "sandbox",
+    executor: commandSpec.executor,
     adapter: {
       use: operation.invocation.use,
       with: operation.invocation.with ?? {},
@@ -3701,12 +3937,13 @@ async function runHostedCommandExecutionSteps(
           enginePrivateStaged = true;
         }
         await resetHostedWorkloadStepOutput(workspace.root);
+        const stepAdapterId = step.adapter?.use ?? execution.adapter.use;
         const adapterRequestPath = await writeWorkbenchAdapterRequest(
           workspace.root,
           workload,
           execution,
           step,
-          adapterAuthRequestForStep(args, step.adapter?.use ?? execution.adapter.use),
+          adapterAuthRequestForStep(args, stepAdapterId),
           args.adapterManifests,
         );
         const stepRole = stepEventRole(step);
@@ -3720,7 +3957,7 @@ async function runHostedCommandExecutionSteps(
             throw new Error(`Adapter step ${step.label} is missing a command.`);
           }
           const adapterRoot = step.executor === "host"
-            ? hostAdapterRoots.get(step.adapter?.use ?? execution.adapter.use)
+            ? hostAdapterRoots.get(stepAdapterId)
             : undefined;
           const command = createHostedWorkloadShellCommand(
             workspace.root,
@@ -3733,7 +3970,7 @@ async function runHostedCommandExecutionSteps(
             env: createHostedWorkloadAdapterEnv(
               workspace.root,
               adapterRequestPath,
-              args.adapterAuthEnv,
+              adapterAuthEnvForStep(args, stepAdapterId),
               adapterRoot ? { adapterRoot } : undefined,
               args.adapterRuntimeEnv,
             ),
@@ -3743,7 +3980,7 @@ async function runHostedCommandExecutionSteps(
           const operationResult = await readWorkbenchAdapterOperationResult(outputDir(workspace.root), step.operation);
           assertWorkbenchAdapterOperationResultOk(
             operationResult,
-            `Adapter ${step.adapter?.use ?? execution.adapter.use} ${step.operation}`,
+            `Adapter ${stepAdapterId} ${step.operation}`,
           );
           await writeSurfaceFiles(outputDir(workspace.root), [
             textSurfaceFile(
@@ -3935,10 +4172,10 @@ function attemptUsageSummary(
   resultUsage: UsageSummary | undefined,
 ): UsageSummary | undefined {
   const normalizedWorkloadUsage = completeUsageSummary(workloadUsage);
-  const legacyEngineUsage = normalizedWorkloadUsage?.engine
+  const resultEngineUsage = normalizedWorkloadUsage?.engine
     ? undefined
     : assignUsageRole("engine", resultUsage);
-  return mergeUsageSummaries([normalizedWorkloadUsage, legacyEngineUsage]);
+  return mergeUsageSummaries([normalizedWorkloadUsage, resultEngineUsage]);
 }
 
 function hasExplicitUsageRole(usage: UsageSummary | undefined): boolean {

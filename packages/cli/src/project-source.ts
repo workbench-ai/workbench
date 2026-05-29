@@ -21,6 +21,8 @@ import {
   assertWorkbenchAdapterOperationResultOk,
   collectWorkbenchAdapterInvocations,
   readWorkbenchAdapterOperationResult,
+  WORKBENCH_ADAPTER_RESULT_FILE,
+  WORKBENCH_ADAPTER_RESULT_PROTOCOL,
   workbenchAdapterOperationCommand,
   workbenchAdapterOperationResultPath,
   type WorkbenchAdapterManifest,
@@ -262,6 +264,29 @@ export async function readLocalAuthoredProjectSource(
       textSourceFile(toRootRelativePath(dir, candidateSpecPath), candidateSource),
     ],
   };
+}
+
+export function hostedEngineResolveFiles(source: LocalProjectSource): HostedFile[] {
+  return [
+    ...source.engineResolveFiles,
+    {
+      path: WORKBENCH_ADAPTER_RESULT_FILE,
+      content: `${JSON.stringify({
+        protocol: WORKBENCH_ADAPTER_RESULT_PROTOCOL,
+        operation: "engine.resolve",
+        ok: true,
+        value: {
+          cases: source.engineCases,
+          ...(source.engineResolveEnvironment
+            ? { environment: source.engineResolveEnvironment }
+            : {}),
+        },
+        feedback: {
+          path: source.engineResolveFingerprintPath,
+        },
+      }, null, 2)}\n`,
+    },
+  ];
 }
 
 async function resolveLocalProjectSourcePaths(

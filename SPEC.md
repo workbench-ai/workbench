@@ -136,7 +136,7 @@ Verifier files are not present during candidate prepare or in the candidate adap
 workbench init [DIR] --command NAME
 workbench check [SOURCE] [--dir DIR] [--json]
 workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--json]
-workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
+workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
 workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]
 workbench improve --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
 workbench retry TARGET_ID [--dir DIR] [--json]

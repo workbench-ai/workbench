@@ -198,7 +198,7 @@ async function executeWorkbenchEngineResolveRequest(
 async function executeWorkbenchEngineRunRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
-  const outcome = workbenchEngineGradingIsolation(request) === "separate"
+  const outcome = await workbenchEngineGradingIsolation(request) === "separate"
     ? await runWorkbenchEngineSeparateGrading(request)
     : await runWorkbenchEngineSharedGrading(request);
   if (!outcome.result) {
@@ -294,18 +294,32 @@ function workbenchEngineCandidateInvocation(request: WorkbenchAdapterOperationRe
 
 type WorkbenchEngineGradingIsolation = "shared" | "separate";
 
-function workbenchEngineGradingIsolation(
+async function workbenchEngineGradingIsolation(
   request: WorkbenchAdapterOperationRequest,
-): WorkbenchEngineGradingIsolation {
+): Promise<WorkbenchEngineGradingIsolation> {
   const grading = jsonRecord(adapterCommandConfigRecord(request).grading);
   const isolation = grading?.isolation;
-  if (isolation === undefined) {
-    return "shared";
+  if (
+    isolation !== undefined &&
+    isolation !== "shared" &&
+    isolation !== "separate"
+  ) {
+    throw new Error("Workbench engine grading.isolation must be shared or separate.");
   }
-  if (isolation === "shared" || isolation === "separate") {
-    return isolation;
+  if (await workbenchEnginePrivateFilesPresent(request)) {
+    return "separate";
   }
-  throw new Error("Workbench engine grading.isolation must be shared or separate.");
+  return isolation ?? "shared";
+}
+
+async function workbenchEnginePrivateFilesPresent(
+  request: WorkbenchAdapterOperationRequest,
+): Promise<boolean> {
+  if (!request.paths.enginePrivate) {
+    return false;
+  }
+  const files = await readOptionalSurfaceFiles(request.paths.enginePrivate);
+  return files.length > 0;
 }
 
 async function runWorkbenchEngineSharedGrading(

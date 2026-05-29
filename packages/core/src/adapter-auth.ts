@@ -2,6 +2,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { assertWorkbenchAdapterAuthEnvNameAllowed } from "@workbench-ai/workbench-contract";
+
 export type WorkbenchAdapterAuthStatus =
   | "connected"
   | "reauth_required"
@@ -347,6 +349,7 @@ function sanitizeWorkbenchAdapterAuthEnvVar(value: unknown): WorkbenchAdapterAut
   if (!/^[A-Z_][A-Z0-9_]*$/u.test(name)) {
     throw new Error(`Adapter auth env var is invalid: ${name}`);
   }
+  assertWorkbenchAdapterAuthEnvNameAllowed(name);
   if (!envValue.trim()) {
     throw new Error(`Adapter auth env var ${name} is empty.`);
   }

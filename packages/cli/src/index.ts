@@ -64,8 +64,6 @@ import {
 import {
   assertWorkbenchAdapterOperationResultOk,
   collectWorkbenchAdapterAuthRequirements,
-  WORKBENCH_ADAPTER_RESULT_FILE,
-  WORKBENCH_ADAPTER_RESULT_PROTOCOL,
   normalizeWorkbenchAdapterOperationRequest,
   readWorkbenchAdapterOperationResult,
   workbenchAdapterOperationCommand,
@@ -128,6 +126,7 @@ import {
   type WorkspaceSnapshotFile,
 } from "./workspace-snapshot.js";
 import {
+  hostedEngineResolveFiles,
   readLocalProjectSource,
   WORKBENCH_BENCHMARK_FILE,
   type LocalProjectSource,
@@ -204,8 +203,6 @@ interface HostedProjectSummary {
   ownerUsername?: string;
   name?: string;
   visibility?: "private" | "public";
-  currentSpecVersionId?: string;
-  sourceFingerprint?: string;
   activeCandidateId?: string | null;
   starCount?: number;
   runs?: unknown[];
@@ -294,6 +291,7 @@ type HostedFile = WorkspaceSnapshotFile;
 
 interface HostedRunRecord {
   id: string;
+  projectId?: string;
   status: string;
   workflow?: HostedRunWorkflow;
   candidateId: string | null;
@@ -314,6 +312,12 @@ interface HostedRunRecord {
   error?: string;
   input?: Json;
   urls?: WorkbenchResourceUrls;
+}
+
+interface HostedRunStartResponse {
+  run: HostedRunRecord;
+  reused?: boolean;
+  benchmark?: HostedProjectSummary & { id: string };
 }
 
 interface HostedRunJobRecord {
@@ -1361,19 +1365,20 @@ async function localRun(
       },
     });
     for (const candidate of materialized.candidates) {
-      outputCandidateId = candidate.id;
+      const localCandidate = localCandidateRecord(candidate);
+      outputCandidateId = localCandidate.id;
       snapshot = upsertLocalCandidate(
         snapshot,
-        candidate,
-        materialized.candidateFiles[candidate.id] ?? [],
+        localCandidate,
+        materialized.candidateFiles[localCandidate.id] ?? [],
       );
       events.push(
-        createLocalEvent("candidate_created", candidate.createdAt, {
+        createLocalEvent("candidate_created", localCandidate.createdAt, {
           runId,
-          candidateId: candidate.id,
-          baseId: candidate.baseId,
-          status: candidate.status,
-          metrics: evaluationMeanMetrics(candidate.eval),
+          candidateId: localCandidate.id,
+          baseId: localCandidate.baseId,
+          status: localCandidate.status,
+          metrics: evaluationMeanMetrics(localCandidate.eval),
         }),
       );
     }
@@ -1847,7 +1852,7 @@ async function localEvaluateCandidate(
     previousCandidate: existingCandidate ?? null,
     existingCandidateCount: snapshot.candidates.length,
   });
-  for (const candidateRecord of materialized.candidates) {
+  for (const candidateRecord of materialized.candidates.map(localCandidateRecord)) {
     snapshot = upsertLocalCandidate(
       snapshot,
       candidateRecord,
@@ -4288,8 +4293,6 @@ async function pushBenchmark(
   const nextOrigin = await writeWorkbenchOriginFromState(dir, {
     baseUrl,
     state: response.state,
-    project: publishedProject,
-    sourceFingerprint: state.source.fingerprint,
   });
   writeOutput(
     {
@@ -4341,8 +4344,6 @@ async function createHostedBenchmarkFromState(args: {
   const origin = await writeWorkbenchOriginFromState(args.dir, {
     baseUrl: args.baseUrl,
     state: result.state,
-    project,
-    sourceFingerprint: args.state.source.fingerprint,
   });
   return { project, origin, result };
 }
@@ -4350,17 +4351,9 @@ async function createHostedBenchmarkFromState(args: {
 async function applyRequestedProjectVisibility(args: {
   baseUrl: string;
   projectId: string;
-  responseProject: HostedProjectSummary & {
-    ownerUsername?: string;
-    sourceFingerprint?: string;
-    currentSpecVersionId?: string;
-  };
+  responseProject: HostedProjectSummary & { ownerUsername?: string };
   visibility?: "private" | "public";
-}): Promise<HostedProjectSummary & {
-  ownerUsername?: string;
-  sourceFingerprint?: string;
-  currentSpecVersionId?: string;
-}> {
+}): Promise<HostedProjectSummary & { ownerUsername?: string }> {
   if (args.visibility === "public") {
     return (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
       projectApiPath(args.projectId, "/publish"),
@@ -4517,11 +4510,15 @@ async function applyProjectStateToLocal(args: {
     await assertLocalSourceMatchesOrigin(args.dir, args.origin);
   }
   await syncSourceFiles(args.dir, args.state.source.files);
-  const runtimeImport = await importLocalRuntimeBundle(args.dir, args.state.runtime);
+  const benchmarkFingerprint = localBenchmarkFingerprint(await readLocalProjectSource(args.dir));
+  const runtimeImport = await importLocalRuntimeBundle(
+    args.dir,
+    args.state.runtime,
+    benchmarkFingerprint,
+  );
   const origin = await writeWorkbenchOriginFromState(args.dir, {
     baseUrl: args.baseUrl,
     state: args.state,
-    sourceFingerprint: await localSourceFingerprint(args.dir),
   });
   return {
     origin,
@@ -4584,7 +4581,7 @@ async function retryHostedWorkflow(
     parsed.flags.watch === true
       ? parseOptionalPositiveInt(parsed.flags["timeout-ms"], "timeout-ms")
       : undefined;
-  const response = await apiRequest<{ run: HostedRunRecord }>(
+  const response = await apiRequest<HostedRunStartResponse>(
     projectApiPath(target.projectId, "/runs"),
     {
       method: "POST",
@@ -4592,7 +4589,8 @@ async function retryHostedWorkflow(
     },
     target.baseUrl,
   );
-  const startedRun = withRunUrls(target, response.run);
+  const runTarget = hostedTargetForRunStartResponse(target, response);
+  const startedRun = withRunUrls(runTarget, response.run);
   if (parsed.flags.watch === true) {
     if (parsed.flags.json !== true) {
       io.stdout.write(
@@ -4601,13 +4599,13 @@ async function retryHostedWorkflow(
     }
     const watched = await watchHostedRun({
       parsed,
-      target,
+      target: runTarget,
       runId: response.run.id,
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
     });
-    const outputRun = withRunUrls(target, await withHostedRunFailureSummary(target, watched));
-    await tryImportTerminalHostedProjectState({ target, io });
+    const outputRun = withRunUrls(runTarget, await withHostedRunFailureSummary(runTarget, watched));
+    await tryImportTerminalHostedProjectState({ target: runTarget, io });
     const result: RetryCommandResult = {
       ok: hostedRunSucceeded(watched),
       retried: {
@@ -4833,12 +4831,10 @@ async function startHostedWorkflow(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set([
+  const allowedFlags = new Set([
     "dir",
     "benchmark",
-    "base",
     "runs",
-    "budget",
     "samples",
     "rerun",
     "watch",
@@ -4846,7 +4842,14 @@ async function startHostedWorkflow(
     "interval-ms",
     "timeout-ms",
     "json",
-  ]));
+  ]);
+  if (workflow === "eval") {
+    allowedFlags.add("candidate");
+  } else {
+    allowedFlags.add("base");
+    allowedFlags.add("budget");
+  }
+  rejectUnknownFlags(parsed, allowedFlags);
   if (parsed.positionals.length > 1) {
     throw new UsageError(`workbench ${workflow} --hosted accepts at most one source file or directory argument.`);
   }
@@ -4898,7 +4901,9 @@ async function startHostedWorkflow(
     );
     return failed === 0 ? 0 : 1;
   }
-  const baseCandidateId = asOptionalString(parsed.flags.base);
+  const selectedCandidateId = workflow === "eval"
+    ? asOptionalString(parsed.flags.candidate)
+    : asOptionalString(parsed.flags.base);
   const request: {
     workflow: HostedRunWorkflow;
     budget?: number;
@@ -4914,19 +4919,19 @@ async function startHostedWorkflow(
           workflow,
           budget,
           samples,
-          ...(baseCandidateId ? { candidateId: baseCandidateId } : {}),
+          ...(selectedCandidateId ? { candidateId: selectedCandidateId } : {}),
         }
       : {
           workflow,
           samples,
-          ...(baseCandidateId ? { candidateId: baseCandidateId } : {}),
+          ...(selectedCandidateId ? { candidateId: selectedCandidateId } : {}),
         };
   const projectSource = selectedRunIds[0] === defaultProjectSource.candidateRunId
     ? defaultProjectSource
     : await readLocalProjectSource(path.resolve(sourceArg), { runId: selectedRunIds[0] });
   request.sourceYaml = projectSource.specSource;
   request.adapterFiles = projectSource.adapterFiles;
-  if (workflow === "eval" && !baseCandidateId) {
+  if (workflow === "eval" && !selectedCandidateId) {
     request.candidateFiles = projectSource.candidateFiles;
   }
   if (parsed.flags.rerun === true) {
@@ -4968,7 +4973,7 @@ async function startHostedWorkflow(
       parsed,
       target,
       samples: request.samples,
-      candidateId: baseCandidateId,
+      candidateId: selectedCandidateId,
       sourceYaml: projectSource.specSource,
       adapterFiles: projectSource.adapterFiles,
       intervalMs: watchIntervalMs ?? 1000,
@@ -4976,7 +4981,7 @@ async function startHostedWorkflow(
       io,
     });
   }
-  const response = await apiRequest<{ run: HostedRunRecord; reused?: boolean }>(
+  const response = await apiRequest<HostedRunStartResponse>(
     projectApiPath(target.projectId, "/runs"),
     {
       method: "POST",
@@ -4984,12 +4989,13 @@ async function startHostedWorkflow(
     },
     target.baseUrl,
   );
-  const startedRun = withRunUrls(target, response.run);
+  const runTarget = hostedTargetForRunStartResponse(target, response);
+  const startedRun = withRunUrls(runTarget, response.run);
   const startedRunOutput = response.reused === true
     ? { ...startedRun, reused: true }
     : startedRun;
   if (response.reused === true && response.run.status === "finished") {
-    await tryImportTerminalHostedProjectState({ target, io });
+    await tryImportTerminalHostedProjectState({ target: runTarget, io });
     writeOutput(
       {
         ok: hostedRunSucceeded(response.run),
@@ -5012,15 +5018,15 @@ async function startHostedWorkflow(
     }
     const watched = await watchHostedRun({
       parsed,
-      target,
+      target: runTarget,
       runId: response.run.id,
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
     });
-    const outputRun = await withHostedRunFailureSummary(target, watched);
-    await tryImportTerminalHostedProjectState({ target, io });
+    const outputRun = await withHostedRunFailureSummary(runTarget, watched);
+    await tryImportTerminalHostedProjectState({ target: runTarget, io });
     writeOutput(
-      withRunUrls(target, outputRun),
+      withRunUrls(runTarget, outputRun),
       parsed,
       io,
       formatHostedRunResult,
@@ -5060,7 +5066,7 @@ async function ensureHostedImproveBaseCandidate(args: {
       return activeCandidate.id;
     }
   }
-  const response = await apiRequest<{ run: HostedRunRecord }>(
+  const response = await apiRequest<HostedRunStartResponse>(
     projectApiPath(args.target.projectId, "/runs"),
     {
       method: "POST",
@@ -5074,9 +5080,10 @@ async function ensureHostedImproveBaseCandidate(args: {
     },
     args.target.baseUrl,
   );
+  const runTarget = hostedTargetForRunStartResponse(args.target, response);
   const watched = await watchHostedRun({
     parsed: args.parsed,
-    target: args.target,
+    target: runTarget,
     runId: response.run.id,
     intervalMs: args.intervalMs,
     timeoutMs: args.timeoutMs,
@@ -5087,7 +5094,7 @@ async function ensureHostedImproveBaseCandidate(args: {
   if (!watched.candidateId) {
     throw new UsageError(`Parent candidate eval ${watched.id} did not produce a candidate.`);
   }
-  await tryImportTerminalHostedProjectState({ target: args.target, io: args.io });
+  await tryImportTerminalHostedProjectState({ target: runTarget, io: args.io });
   return watched.candidateId;
 }
 
@@ -5098,9 +5105,8 @@ function hostedWorkflowArgsForRun(args: {
 }): string[] {
   const next = ["--dir", args.sourceDir, "--runs", args.runId, "--json"];
   appendStringFlag(next, "benchmark", asOptionalString(args.parsed.flags.benchmark));
-  appendStringFlag(next, "base", asOptionalString(args.parsed.flags.base));
+  appendStringFlag(next, "candidate", asOptionalString(args.parsed.flags.candidate));
   appendStringFlag(next, "samples", asOptionalString(args.parsed.flags.samples));
-  appendStringFlag(next, "budget", asOptionalString(args.parsed.flags.budget));
   appendStringFlag(next, "interval-ms", asOptionalString(args.parsed.flags["interval-ms"]));
   appendStringFlag(next, "timeout-ms", asOptionalString(args.parsed.flags["timeout-ms"]));
   if (args.parsed.flags.watch === true) {
@@ -5410,8 +5416,6 @@ async function resolveRemoteProject(
   id: string;
   name?: string;
   ownerUsername?: string;
-  currentSpecVersionId?: string;
-  sourceFingerprint?: string;
 }> {
   if (projectRef.includes("/")) {
     const ref = parseBenchmarkRef(projectRef);
@@ -5420,8 +5424,6 @@ async function resolveRemoteProject(
         id: string;
         name?: string;
         ownerUsername?: string;
-        currentSpecVersionId?: string;
-        sourceFingerprint?: string;
       };
     }>(publicProjectApiPath(ref), {}, baseUrl);
     return response.benchmark;
@@ -5431,8 +5433,6 @@ async function resolveRemoteProject(
       id: string;
       name?: string;
       ownerUsername?: string;
-      currentSpecVersionId?: string;
-      sourceFingerprint?: string;
     };
   }>(projectApiPath(projectRef), {}, baseUrl);
   return response.benchmark;
@@ -5442,6 +5442,9 @@ function withRunUrls(
   target: HostedTarget,
   run: HostedRunRecord,
 ): HostedRunRecord {
+  if (!target.owner || !target.projectName) {
+    return { ...run };
+  }
   return {
     ...run,
     urls: buildWorkbenchResourceUrls(target, {
@@ -5449,6 +5452,33 @@ function withRunUrls(
       candidateId: run.outputCandidateId ?? run.candidateId,
     }),
   };
+}
+
+function hostedTargetForRunStartResponse(
+  target: HostedTarget,
+  response: HostedRunStartResponse,
+): HostedTarget {
+  const projectId = response.benchmark?.id ?? response.run.projectId ?? target.projectId;
+  if (projectId === target.projectId && !response.benchmark) {
+    return target;
+  }
+  const origin = target.origin?.projectId === projectId ? target.origin : null;
+  const next: HostedTarget = {
+    ...target,
+    projectId,
+    origin,
+  };
+  if (response.benchmark?.ownerUsername) {
+    next.owner = response.benchmark.ownerUsername;
+  } else {
+    delete next.owner;
+  }
+  if (response.benchmark?.name) {
+    next.projectName = response.benchmark.name;
+  } else {
+    delete next.projectName;
+  }
+  return next;
 }
 
 function hostedRunEvaluationCandidateId(
@@ -5472,7 +5502,8 @@ function localProjectState(args: {
   visibility: "private" | "public";
 }): WorkbenchProjectState {
   const stateSource = localProjectStateSource(args.source);
-  const runtimeFingerprint = workbenchRuntimeBundleFingerprint(args.runtime);
+  const runtime = runtimeBundleForProjectVisibility(args.runtime, args.visibility);
+  const runtimeFingerprint = workbenchRuntimeBundleFingerprint(runtime);
   return {
     schema: "workbench.project.state.v1",
     project: {
@@ -5488,7 +5519,27 @@ function localProjectState(args: {
       runtimeFingerprint: args.origin?.runtimeFingerprint ?? runtimeFingerprint,
     },
     source: stateSource,
-    runtime: args.runtime,
+    runtime,
+  };
+}
+
+function localCandidateRecord(candidate: CandidateRecord): CandidateRecord {
+  return {
+    ...candidate,
+    visibility: "private",
+  };
+}
+
+function runtimeBundleForProjectVisibility(
+  runtime: WorkbenchRuntimeBundle,
+  visibility: "private" | "public",
+): WorkbenchRuntimeBundle {
+  return {
+    ...runtime,
+    candidates: runtime.candidates.map((candidate) => ({
+      ...candidate,
+      visibility,
+    })),
   };
 }
 
@@ -5529,16 +5580,12 @@ function hostedProjectSummaryFromState(
   id: string;
   name: string;
   ownerUsername?: string;
-  sourceFingerprint?: string;
-  currentSpecVersionId?: string;
 } {
   return {
     id: state.project.id,
     ownerUsername: state.project.ownerUsername,
     name: state.project.name,
     visibility: state.project.visibility,
-    currentSpecVersionId: state.source.revisionId ?? state.base.sourceRevisionId,
-    sourceFingerprint: state.source.fingerprint ?? state.base.sourceFingerprint,
   };
 }
 
@@ -5576,29 +5623,6 @@ function hostedProjectSourceRequest(source: LocalProjectSource): {
     network,
     resources,
   };
-}
-
-function hostedEngineResolveFiles(source: LocalProjectSource): HostedFile[] {
-  return [
-    ...source.engineResolveFiles,
-    {
-      path: WORKBENCH_ADAPTER_RESULT_FILE,
-      content: `${JSON.stringify({
-        protocol: WORKBENCH_ADAPTER_RESULT_PROTOCOL,
-        operation: "engine.resolve",
-        ok: true,
-        value: {
-          cases: source.engineCases,
-          ...(source.engineResolveEnvironment
-            ? { environment: source.engineResolveEnvironment }
-            : {}),
-        },
-        feedback: {
-          path: source.engineResolveFingerprintPath,
-        },
-      }, null, 2)}\n`,
-    },
-  ];
 }
 
 function isRemoteProjectId(value: string): boolean {
@@ -5889,19 +5913,14 @@ async function writeWorkbenchOriginFromState(
   args: {
     baseUrl: string;
     state: WorkbenchProjectState;
-    project?: HostedProjectSummary;
-    sourceFingerprint?: string;
   },
 ): Promise<WorkbenchOrigin> {
-  const owner = args.project?.ownerUsername ?? args.state.project.ownerUsername;
-  const name = args.project?.name ?? args.state.project.name;
+  const owner = args.state.project.ownerUsername;
+  const name = args.state.project.name;
   const sourceRevisionId =
-    args.project?.currentSpecVersionId ??
     args.state.source.revisionId ??
     args.state.base.sourceRevisionId;
   const sourceFingerprint =
-    args.sourceFingerprint ??
-    args.project?.sourceFingerprint ??
     args.state.source.fingerprint ??
     args.state.base.sourceFingerprint;
   const runtimeFingerprint =
@@ -5913,16 +5932,11 @@ async function writeWorkbenchOriginFromState(
   return await writeWorkbenchOrigin(dir, {
     baseUrl: args.baseUrl,
     remote: `${owner}/${name}`,
-    projectId: args.project?.id ?? args.state.project.id,
+    projectId: args.state.project.id,
     sourceRevisionId,
     sourceFingerprint,
     runtimeFingerprint,
   });
-}
-
-async function localSourceFingerprint(dir: string): Promise<string> {
-  const source = localProjectStateSource(await readLocalProjectSource(dir));
-  return source.fingerprint ?? workbenchProjectSourceFingerprint(source);
 }
 
 function parseOriginRemote(origin: WorkbenchOrigin): { owner: string; project: string } {

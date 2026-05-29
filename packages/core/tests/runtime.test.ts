@@ -30,6 +30,8 @@ import {
   stageWorkbenchRunWorkload,
   attemptJobCountForRunSpec,
   validateWorkbenchResolvedSourceYaml,
+  workbenchBenchmarkContentFingerprint,
+  workbenchCandidateContentFingerprint,
   workbenchRuntimeBundleFingerprint,
   workbenchRunExecutionFingerprint,
   workbenchTraceExecutionDirectory,
@@ -46,6 +48,7 @@ import {
 } from "../src/index.ts";
 import {
   createWorkbenchProgressStdoutParser,
+  publishWorkbenchProgressStdoutEnvelope,
   WORKBENCH_PROGRESS_STDOUT_PREFIX,
   type WorkbenchProgressStdoutEnvelope,
 } from "../src/execution-events.ts";
@@ -54,6 +57,73 @@ import {
 } from "../src/sandbox-inputs.ts";
 
 describe("Workbench runtime generic execution", () => {
+  test("content fingerprints use one canonical source shape", () => {
+    const sourceYaml = [
+      "version: 4",
+      "benchmark:",
+      "  version: 4",
+      "  name: Demo",
+      "  description: Demo benchmark.",
+      "  engine:",
+      "    use: workbench",
+      "    with:",
+      "      environment:",
+      "        dockerfile: environment/Dockerfile",
+      "      score:",
+      "        use: command",
+      "        with:",
+      "          command: 'true'",
+      "candidate:",
+      "  version: 4",
+      "  name: Skill",
+      "  files:",
+      "    path: files",
+      "  defaultRun: command",
+      "  runs:",
+      "    command:",
+      "      name: Command",
+      "      use: command",
+      "      with:",
+      "        command: node run.js",
+      "",
+    ].join("\n");
+    const engineResolveBinding = {
+      engine: "workbench",
+      resolver: {
+        use: "workbench",
+        withFingerprint: "resolver-fp",
+      },
+    };
+    const engineResolveFiles = [textSurfaceFile("workbench-result.json", "{\"cases\":[]}\n")];
+    const runtimeFiles = [textSurfaceFile("environment/Dockerfile", "FROM node:22-alpine\n")];
+    const candidateFiles = [textSurfaceFile("run.js", "console.log('ok')\n")];
+
+    const benchmarkFingerprint = workbenchBenchmarkContentFingerprint({
+      sourceYaml: sourceYaml.replace(/\n/gu, "\r\n"),
+      engineResolveFiles,
+      engineResolveBinding,
+      runtimeFiles,
+      resources: {},
+      network: "off",
+    });
+    expect(benchmarkFingerprint).toBe(workbenchBenchmarkContentFingerprint({
+      sourceYaml,
+      engineResolveFiles,
+      engineResolveBinding,
+      runtimeFiles,
+      resources: { cpu: 2, memoryGb: 4, diskGb: 10, timeoutMinutes: 20 },
+      network: "off",
+    }));
+
+    expect(workbenchCandidateContentFingerprint({
+      sourceYaml,
+      candidateFiles,
+    })).not.toBe(workbenchCandidateContentFingerprint({
+      sourceYaml,
+      candidateFiles: [textSurfaceFile("run.js", "console.log('changed')\n")],
+    }));
+  });
+
   test("runtime candidate exchange ignores local and cloud derived fields", () => {
     const candidate = {
       id: "candidate_1",
@@ -61,12 +131,12 @@ describe("Workbench runtime generic execution", () => {
       ordinal: 1,
       benchmarkFingerprint: "benchmark",
       candidateFingerprint: "candidate",
+      visibility: "private",
       createdAt: "2026-01-01T00:00:00.000Z",
       status: "evaluated",
       fileChanges: [],
       ownerUserId: "user_1",
       ownerUsername: "official",
-      visibility: "private",
       metrics: { score: 1 },
       candidateRunId: "run",
       candidateRunName: "Default",
@@ -85,6 +155,7 @@ describe("Workbench runtime generic execution", () => {
       ordinal: 1,
       benchmarkFingerprint: "benchmark",
       candidateFingerprint: "candidate",
+      visibility: "private",
       createdAt: "2026-01-01T00:00:00.000Z",
       status: "evaluated",
       fileChanges: [],
@@ -141,6 +212,80 @@ describe("Workbench runtime generic execution", () => {
         fileSet: { files: [] },
       },
     });
+  });
+
+  test("progress stdout publishing is bound to the expected target", async () => {
+    const expected = await tryCreateProgressCaptureServer();
+    const unexpected = await tryCreateProgressCaptureServer();
+    if (!expected || !unexpected) {
+      await expected?.close();
+      await unexpected?.close();
+      return;
+    }
+    const batch = {
+      projectId: "project_runtime",
+      runId: "run_runtime",
+      jobId: "job_runtime",
+      executionId: "exec_runtime",
+      attempt: 1,
+      seqStart: 1,
+      seqEnd: 1,
+      emittedAt: "2026-04-27T00:00:00.000Z",
+      events: [],
+    };
+    try {
+      await publishWorkbenchProgressStdoutEnvelope({
+        url: unexpected.url,
+        body: {
+          type: "workbench.job.progress",
+          ownerUserId: "user_runtime",
+          progressToken: "progress-token",
+          batch,
+        },
+      }, {
+        url: expected.url,
+        token: "progress-token",
+        ownerUserId: "user_runtime",
+      });
+      await publishWorkbenchProgressStdoutEnvelope({
+        url: expected.url,
+        body: {
+          type: "workbench.job.progress",
+          ownerUserId: "other_user",
+          progressToken: "progress-token",
+          batch,
+        },
+      }, {
+        url: expected.url,
+        token: "progress-token",
+        ownerUserId: "user_runtime",
+      });
+      expect(expected.requests).toHaveLength(0);
+      expect(unexpected.requests).toHaveLength(0);
+
+      await publishWorkbenchProgressStdoutEnvelope({
+        url: expected.url,
+        body: {
+          type: "workbench.job.progress",
+          progressToken: "progress-token",
+          batch,
+        },
+      }, {
+        url: expected.url,
+        token: "progress-token",
+        ownerUserId: "user_runtime",
+      });
+      expect(expected.requests).toEqual([
+        expect.objectContaining({
+          ownerUserId: "user_runtime",
+          progressToken: "progress-token",
+        }),
+      ]);
+      expect(unexpected.requests).toHaveLength(0);
+    } finally {
+      await expected.close();
+      await unexpected.close();
+    }
   });
 
   test("run execution fingerprints include source and adapter files", () => {
@@ -865,6 +1010,125 @@ describe("Workbench runtime generic execution", () => {
     expect(materialized.evaluations[0]?.evaluation.candidate.id).toBe(candidateId);
     expect(materialized.evaluations[0]?.candidateName).toBe("runtime-generic-execution");
     expect(materialized.evaluations[0]?.evaluation.candidate.label).toBe("runtime-generic-execution");
+  });
+
+  test("runtime-control uses adapter executor metadata for nested operations", async () => {
+    const spec = resolveWorkbenchResolvedSourceYaml([
+      "version: 4",
+      "benchmark:",
+      "  version: 4",
+      "  name: runtime-host-nested-adapter",
+      "  description: Exercise a host nested candidate adapter.",
+      "  engine:",
+      "    use: workbench",
+      "    with:",
+      "      environment:",
+      "        dockerfile: environment/Dockerfile",
+      "      score:",
+      "        use: rubric",
+      "        with:",
+      "          judge:",
+      "            use: codex",
+      "            with:",
+      "              model: gpt-5.4-mini",
+      "          criteria:",
+      "            - id: useful",
+      "              description: Output is useful.",
+      "candidate:",
+      "  version: 4",
+      "  name: runtime-host-nested-adapter",
+      "  description: Candidate runner for host nested adapter.",
+      "  files:",
+      "    path: candidates/host/files",
+      "  defaultRun: host",
+      "  runs:",
+      "    host:",
+      "      name: Host",
+      "      use: host-runner",
+      "      with: {}",
+      "  improve:",
+      "    edits:",
+      "      - SKILL.md",
+      "    use: host-runner",
+      "    with: {}",
+      "",
+    ].join("\n"));
+    const now = "2026-04-27T00:00:00.000Z";
+    const engineCases = [engineCase("case-001", "Run the host nested adapter.")];
+    const engineResolveFiles = engineCases[0]!.files.public ?? [];
+    const attemptJobs = planWorkbenchExecutionJobsForPurpose({
+      ownerUserId: "user_runtime",
+      projectId: "project_runtime",
+      runId: "run_host_nested",
+      candidateId: "candidate_host_001",
+      attemptIndex: 0,
+      samples: 1,
+      spec,
+      workflow: "eval",
+      purpose: "attempt",
+      caseIds: engineCases.map((bundle) => bundle.id),
+      engineCases,
+      now,
+    });
+    const hostRunnerManifest = {
+      id: "host-runner",
+      protocol: "workbench.adapter.v3" as const,
+      setup: [],
+      operations: {
+        "candidate.run": { command: "node runner.mjs", executor: "host" as const },
+        "candidate.improve": { command: "node runner.mjs", executor: "host" as const },
+      },
+    };
+    const hostRunnerFiles = normalizeSurfaceFiles([
+      {
+        path: "adapters/host-runner/workbench.adapter.yaml",
+        content: [
+          "id: host-runner",
+          "protocol: workbench.adapter.v3",
+          "setup: []",
+          "operations:",
+          "  candidate.run:",
+          "    command: node runner.mjs",
+          "    executor: host",
+          "  candidate.improve:",
+          "    command: node runner.mjs",
+          "    executor: host",
+          "",
+        ].join("\n"),
+      },
+      {
+        path: "adapters/host-runner/runner.mjs",
+        content: [
+          "import fs from 'node:fs';",
+          "import path from 'node:path';",
+          "const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, 'utf8'));",
+          "const output = process.env.WORKBENCH_OUTPUT;",
+          "fs.mkdirSync(output, { recursive: true });",
+          "fs.writeFileSync(path.join(output, 'host-runner.txt'), 'host runner output\\n');",
+          "fs.writeFileSync(path.join(output, 'workbench-result.json'), JSON.stringify({",
+          "  protocol: 'workbench.adapter-result.v1',",
+          "  operation: request.operation,",
+          "  ok: true",
+          "}, null, 2));",
+          "",
+        ].join("\n"),
+      },
+    ]);
+    const rubricAdapter = await scriptedRubricAdapter({ score: 0.91 });
+    const completedAttempt = await executeWorkbenchAttemptWithRuntimeControl({
+      job: runningJob(attemptJobs[0]!, now),
+      spec,
+      adapterManifests: [workbenchEngineManifest(), hostRunnerManifest, rubricAdapter],
+      adapterFiles: hostRunnerFiles,
+      baseFiles: normalizeSurfaceFiles([{ path: "SKILL.md", content: "Use the host runner.\n" }]),
+      engineResolveFiles,
+      engineCases,
+    });
+
+    expect(completedAttempt.error).toBeUndefined();
+    expect(completedAttempt.status).toBe("succeeded");
+    expect(completedScore(completedAttempt)).toBe(0.91);
+    expect(completedOutputFiles(completedAttempt).map((file) => file.path)).toContain("host-runner.txt");
   });
 
   test("materializes only candidate source files into candidate snapshots", () => {

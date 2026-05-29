@@ -12,11 +12,12 @@ import { composeRuntimeDockerfileWithAdapters } from "../src/adapter-project";
 import { localBenchmarkFingerprint } from "../src/benchmark-fingerprint";
 import { startLocalWorkbenchDevServer } from "../src/dev-open-server";
 import { runCli } from "../src/index";
-import { loadLocalArchive, readLocalJobs, saveLocalArchive, saveLocalJobs, upsertLocalRun } from "../src/local-archive";
+import { importLocalRuntimeBundle, loadLocalArchive, readLocalJobs, saveLocalArchive, saveLocalJobs, upsertLocalRun } from "../src/local-archive";
 import { readLocalProjectSource } from "../src/project-source";
 import { packageRoot, productRoot } from "./test-paths";
 import type {
   CandidateRecord,
+  EvaluationScorecard,
   HostedWorkbenchJob,
   RunSummary,
   WorkbenchRuntimeBundle,
@@ -200,6 +201,7 @@ function hostedRuntimeBundleFixture(input: {
       ordinal: 1,
       benchmarkFingerprint: "benchmark-fp",
       candidateFingerprint: "candidate-fp",
+      visibility: "public",
       createdAt,
       referenceIds: [],
       status: "evaluated",
@@ -538,7 +540,9 @@ describe("workbench CLI", () => {
     expect(io.stdoutText()).toContain("workbench pull [--dir DIR]");
     expect(io.stdoutText()).toContain("workbench init");
     expect(io.stdoutText()).toContain("workbench check [SOURCE] [--dir DIR]");
-    expect(io.stdoutText()).toContain("workbench improve [SOURCE] [--dir DIR] [--hosted]");
+    expect(io.stdoutText()).toContain("workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID]");
+    expect(io.stdoutText()).toContain("workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID]");
+    expect(io.stdoutText()).toContain("workbench improve --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID]");
     expect(io.stdoutText()).toContain("workbench retry TARGET_ID [--dir DIR]");
     expect(io.stdoutText()).toContain("workbench adapters test ID|SOURCE");
     expect(io.stdoutText()).toContain("workbench open [SOURCE|OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID]");
@@ -1050,12 +1054,11 @@ describe("workbench CLI", () => {
     const spec = await readFile(path.join(productRoot, "SPEC.md"), "utf8");
 
     for (const command of commandLines) {
-      const documentedCommand = command
-        .replace("--base SUBJECT_ID", "--base SUBJECT_ID")
-        .replace("OWNER/BENCHMARK|RUN_ID|SUBJECT_ID", "OWNER/BENCHMARK|RUN_ID|SUBJECT_ID");
-      expect(cliDocs).toContain(documentedCommand);
+      expect(cliDocs).toContain(command);
     }
     expect(spec).toContain("workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID]");
+    expect(spec).toContain("workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID]");
+    expect(spec).not.toContain("workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID]");
     expect(spec).toContain("workbench candidates list|show|files|preview");
     expect(spec).toContain("candidates/<name>/candidate.yaml");
   });
@@ -1109,6 +1112,7 @@ describe("workbench CLI", () => {
     expect(cliDocs).not.toContain("workbench eval candidates/current --samples 1");
     expect(cliDocs).toContain("workbench improve --budget 1 --samples 1");
     expect(cliDocs).toContain("workbench improve --hosted candidates/current --budget 1 --samples 1 --watch");
+    expect(cliDocs).toContain("For hosted eval, use `--candidate CANDIDATE_ID`");
     expect(cliDocs).toContain("workbench improve --hosted candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch");
     expect(cliDocs).toContain("workbench push");
     expect(cliDocs).not.toContain("--tag");
@@ -1121,6 +1125,7 @@ describe("workbench CLI", () => {
     expect(skill).not.toContain("workbench eval candidates/current --samples 1");
     expect(skill).toContain("workbench improve --budget 1 --samples 1");
     expect(skill).toContain("workbench improve --hosted candidates/current --budget 1 --samples 1 --watch");
+    expect(skill).toContain("For hosted eval, pass `--candidate CANDIDATE_ID`");
     expect(skill).toContain("workbench improve --hosted candidates/codex --base candidate_123 --budget 1 --samples 1 --watch");
     expect(skill).not.toContain("@v1");
     expect(skill).not.toContain("workbench cloud");
@@ -1287,6 +1292,7 @@ describe("workbench CLI", () => {
           ordinal: snapshotWithCandidate.candidates.length + 1,
           benchmarkFingerprint: await localSeedBenchmarkFingerprint(workspace),
           candidateFingerprint: "local-draft-fingerprint",
+          visibility: "private",
           createdAt: "2026-04-28T00:01:00.000Z",
           referenceIds: [],
           status: "agent_error",
@@ -3589,7 +3595,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       remote: "alice/demo",
       baseUrl: "http://workbench.test",
       sourceRevisionId: "spec_0001",
-      sourceFingerprint: expect.any(String),
+      sourceFingerprint: "fp_0001",
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe("http://workbench.test/api/workbench/benchmarks/state");
@@ -3707,6 +3713,7 @@ await fs.writeFile(resultPath, JSON.stringify({
         ordinal: 1,
         benchmarkFingerprint: "benchmark",
         candidateFingerprint: "candidate",
+        visibility: "public",
         createdAt: "2026-01-01T00:00:00.000Z",
         status: "evaluated",
         referenceIds: [],
@@ -3750,20 +3757,27 @@ await fs.writeFile(resultPath, JSON.stringify({
       executionFiles: [],
       events: [],
     };
+    const sourceFiles = [
+      { path: "benchmark.yaml", content: "version: 4\nname: demo\ndescription: Demo benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n" },
+      { path: "candidates/command/candidate.yaml", content: "version: 4\nname: demo\nfiles:\n  path: files\ndefaultRun: command\nruns:\n  command:\n    name: Command\n    use: command\n    with:\n      command: node run.js\n" },
+      { path: "candidates/command/files/run.js", content: "console.log('ok')\n" },
+      { path: "environment/Dockerfile", content: "FROM node:22-alpine\n" },
+      { path: "tasks/case-a/task.yaml", content: "version: 3\ntask: test\n" },
+    ];
+    const sourceRoot = path.join(root, "source");
+    for (const file of sourceFiles) {
+      await mkdir(path.dirname(path.join(sourceRoot, file.path)), { recursive: true });
+      await writeFile(path.join(sourceRoot, file.path), file.content);
+    }
+    const sourceFingerprint = await currentSourceFingerprint(sourceRoot);
     const state = projectStateFixture({
       id: "wb_123456789abc",
       owner: "alice",
       name: "demo",
       revisionId: "spec_0001",
-      sourceFingerprint: "fp_0001",
+      sourceFingerprint,
       runtime,
-      files: [
-        { path: "benchmark.yaml", content: "version: 4\nname: demo\ndescription: Demo benchmark.\nengine:\n  use: workbench\n  with:\n    environment:\n      dockerfile: environment/Dockerfile\n    score:\n      use: command\n      with:\n        command: 'true'\n" },
-        { path: "candidates/command/candidate.yaml", content: "version: 4\nname: demo\nfiles:\n  path: files\ndefaultRun: command\nruns:\n  command:\n    name: Command\n    use: command\n    with:\n      command: node run.js\n" },
-        { path: "candidates/command/files/run.js", content: "console.log('ok')\n" },
-        { path: "environment/Dockerfile", content: "FROM node:22-alpine\n" },
-        { path: "tasks/case-a/task.yaml", content: "version: 3\ntask: test\n" },
-      ],
+      files: sourceFiles,
     });
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -3789,6 +3803,201 @@ await fs.writeFile(resultPath, JSON.stringify({
       "GET http://workbench.test/api/workbench/public/benchmarks/alice/demo/state",
       "GET http://workbench.test/api/workbench/public/benchmarks/alice/demo/state",
     ]);
+  });
+
+  test("runtime import is idempotent for hosted-enriched copies of the same facts", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-runtime-idempotent-"));
+    const candidateId = "candidate_same";
+    const runId = "run_same";
+    const evaluationId = "eval_same";
+    const jobId = "job_same";
+    const candidate: CandidateRecord = {
+      id: candidateId,
+      name: "Skill",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "benchmark-fp",
+      candidateFingerprint: "candidate-fp",
+      visibility: "private",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      referenceIds: [],
+      status: "created",
+      fileChanges: ["prompt.md"],
+      eval: {
+        metrics: { score: 0.5 },
+        samples: [],
+      } as unknown as CandidateRecord["eval"],
+    };
+    const evaluation = {
+      id: evaluationId,
+      runId,
+      benchmarkFingerprint: candidate.benchmarkFingerprint,
+      candidateFingerprint: candidate.candidateFingerprint,
+      candidateId,
+      candidateName: "Skill",
+      candidateVersion: 1,
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:00:01.000Z",
+      status: "running",
+      sampleCount: 1,
+      completedSampleCount: 0,
+      errorSampleCount: 0,
+      evaluation: {
+        id: evaluationId,
+        runId,
+        benchmarkFingerprint: candidate.benchmarkFingerprint,
+        candidateFingerprint: candidate.candidateFingerprint,
+        candidateId,
+        candidateVersion: 1,
+        samples: [],
+      },
+    } as unknown as EvaluationScorecard;
+    const run = localRunSummary({
+      id: runId,
+      benchmarkFingerprint: candidate.benchmarkFingerprint,
+      candidateId,
+      outputCandidateId: candidateId,
+      activeCandidateId: candidateId,
+      status: "running",
+    });
+    const job = {
+      id: jobId,
+      projectId: "local",
+      runId,
+      candidateId,
+      kind: "execute",
+      status: "running",
+      attempt: 1,
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:00:01.000Z",
+      startedAt: "2026-05-28T00:00:00.000Z",
+      input: { execution: { purpose: "attempt" } },
+      output: { ok: true, files: [textFile("transient.txt", "local\n")] },
+    } as unknown as HostedWorkbenchJob;
+    await saveLocalArchive(workspace, {
+      activeId: candidateId,
+      candidates: [candidate],
+      candidateFiles: {
+        [candidateId]: [textFile("prompt.md", "candidate\n")],
+      },
+      evaluations: [evaluation],
+      runs: [run],
+      events: [],
+    });
+    await saveLocalJobs(workspace, [job]);
+
+    const hostedBundle: WorkbenchRuntimeBundle = {
+      schema: "workbench.runtime.bundle.v1",
+      activeId: candidateId,
+      candidates: [{
+        ...candidate,
+        visibility: "public",
+        status: "evaluated",
+      }],
+      candidateFiles: [{
+        candidateId,
+        files: [textFile("prompt.md", "candidate\n")],
+      }],
+      evaluations: [{
+        ...evaluation,
+        updatedAt: "2026-05-28T00:00:03.000Z",
+        status: "completed",
+        completedSampleCount: 1,
+        metrics: { score: { mean: 1, count: 1 } },
+      } as unknown as EvaluationScorecard],
+      runs: [{
+        ...run,
+        status: "finished",
+        outcome: "ok",
+        attemptsExecuted: 1,
+        completedJobCount: 1,
+        failedJobCount: 0,
+        finishedAt: "2026-05-28T00:00:03.000Z",
+      }],
+      jobs: [{
+        ...job,
+        projectId: "wb_123456789abc",
+        status: "succeeded",
+        updatedAt: "2026-05-28T00:00:03.000Z",
+        finishedAt: "2026-05-28T00:00:03.000Z",
+        output: { ok: true },
+      }],
+      executionFiles: [{
+        jobId,
+        files: [textFile("workbench-result.json", "{\"score\":1}\n")],
+      }],
+      events: [],
+    };
+
+    await expect(importLocalRuntimeBundle(workspace, hostedBundle, "benchmark-fp")).resolves.toMatchObject({
+      stats: { activeId: candidateId, candidates: 1, evaluations: 1, runs: 1, jobs: 1 },
+    });
+    await expect(importLocalRuntimeBundle(workspace, hostedBundle, "benchmark-fp")).resolves.toMatchObject({
+      stats: { activeId: candidateId, candidates: 1, evaluations: 1, runs: 1, jobs: 1 },
+    });
+    const archive = await loadLocalArchive(workspace);
+    expect(archive.activeId).toBe(candidateId);
+    expect(archive.candidates[0]?.status).toBe("evaluated");
+    expect(archive.evaluations[0]?.status).toBe("completed");
+    expect(archive.runs[0]?.status).toBe("finished");
+  });
+
+  test("runtime import keeps the active candidate compatible with the current benchmark", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-runtime-active-fingerprint-"));
+    const oldCandidate: CandidateRecord = {
+      id: "candidate_old",
+      name: "Skill",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "old-benchmark",
+      candidateFingerprint: "old-candidate",
+      visibility: "private",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+    };
+    const currentCandidate: CandidateRecord = {
+      ...oldCandidate,
+      id: "candidate_current",
+      version: 2,
+      ordinal: 2,
+      benchmarkFingerprint: "current-benchmark",
+      candidateFingerprint: "current-candidate",
+      createdAt: "2026-05-28T00:01:00.000Z",
+    };
+
+    await saveLocalArchive(workspace, {
+      activeId: oldCandidate.id,
+      candidates: [oldCandidate],
+      candidateFiles: {
+        [oldCandidate.id]: [textFile("prompt.md", "old\n")],
+      },
+      evaluations: [],
+      runs: [],
+      events: [],
+    });
+
+    const bundle: WorkbenchRuntimeBundle = {
+      schema: "workbench.runtime.bundle.v1",
+      activeId: oldCandidate.id,
+      candidates: [oldCandidate, currentCandidate],
+      candidateFiles: [
+        { candidateId: oldCandidate.id, files: [textFile("prompt.md", "old\n")] },
+        { candidateId: currentCandidate.id, files: [textFile("prompt.md", "current\n")] },
+      ],
+      evaluations: [],
+      runs: [],
+      jobs: [],
+      executionFiles: [],
+      events: [],
+    };
+
+    await expect(importLocalRuntimeBundle(workspace, bundle, "current-benchmark")).resolves.toMatchObject({
+      stats: { activeId: currentCandidate.id },
+    });
+    const archive = await loadLocalArchive(workspace);
+    expect(archive.activeId).toBe(currentCandidate.id);
   });
 
   test("cloned origins do not track local writable mode when the signed-in user owns the benchmark", async () => {
@@ -3943,7 +4152,7 @@ await fs.writeFile(resultPath, JSON.stringify({
         projectId: "wb_officialdemo",
         remote: "official/demo",
         sourceRevisionId: "spec_0002",
-        sourceFingerprint: expect.any(String),
+        sourceFingerprint: "fp_official",
       },
       urls: {
         benchmark: "http://workbench.test/benchmarks/official/demo",
@@ -4158,7 +4367,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       remote: "alice/demo",
       baseUrl: "http://workbench.test",
       sourceRevisionId: "spec_0002",
-      sourceFingerprint: expect.any(String),
+      sourceFingerprint: "fp_0002",
     });
   });
 
@@ -4332,7 +4541,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       commandCandidateSpecPath(workspace),
       "--benchmark",
       "wb_123456789abc",
-      "--base",
+      "--candidate",
       "candidate_123",
       "--samples",
       "2",
@@ -4363,6 +4572,67 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
     expect(requests[4]?.body).not.toHaveProperty("candidateSource");
     expect(requests[4]?.body).not.toHaveProperty("candidateFiles");
+  });
+
+  test("rejects hosted eval --base and accepts --candidate for existing candidates", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-hosted-eval-candidate-"));
+    expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
+
+    vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc" && (init?.method ?? "GET") === "GET") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+          },
+        });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc/runs" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        return Response.json({
+          run: {
+            id: "run_existing_candidate",
+            workflow: "eval",
+            status: "queued",
+            candidateId: body.candidateId,
+            jobCount: 1,
+          },
+        }, { status: 201 });
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const rejected = createIo();
+    expect(await runCli([
+      "eval",
+      "--hosted",
+      "--dir",
+      workspace,
+      "--benchmark",
+      "wb_123456789abc",
+      "--base",
+      "candidate_v3",
+      "--json",
+    ], rejected)).toBe(2);
+    expect(rejected.stdoutText()).toContain("Unsupported flag: --base.");
+
+    const accepted = createIo();
+    expect(await runCli([
+      "eval",
+      "--hosted",
+      "--dir",
+      workspace,
+      "--benchmark",
+      "wb_123456789abc",
+      "--candidate",
+      "candidate_v3",
+      "--json",
+    ], accepted)).toBe(0);
+    expect(JSON.parse(accepted.stdoutText())).toMatchObject({
+      candidateId: "candidate_v3",
+    });
   });
 
   test("treats hosted eval positional YAML as source, not candidate id", async () => {
@@ -4452,7 +4722,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       workspace,
       "--benchmark",
       "wb_123456789abc",
-      "--base",
+      "--candidate",
       "candidate_v3",
       "--json",
     ], io);
@@ -5633,6 +5903,7 @@ async function seedLocalCandidate(
       ordinal: 1,
       benchmarkFingerprint,
       candidateFingerprint: "seeded-candidate-fingerprint",
+      visibility: "private",
       createdAt: "2026-04-28T00:00:00.000Z",
       referenceIds: [],
       status: "evaluated",

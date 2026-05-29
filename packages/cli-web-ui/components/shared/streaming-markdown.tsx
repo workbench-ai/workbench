@@ -29,7 +29,7 @@ export function StreamingMarkdown({
         className="text-sm leading-7"
         controls={false}
         isAnimating={streaming}
-        linkSafety={{ enabled: false }}
+        linkSafety={{ enabled: true }}
         mode={streaming ? "streaming" : "static"}
         plugins={{ code }}
       >

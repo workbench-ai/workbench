@@ -87,10 +87,10 @@ That smoke command starts the cloud-owned builder, host supervisor, and sandbox 
 Use the real benchmark package as a local regression target for version-4 benchmark/candidate source:
 
 ```bash
-pnpm cli check --dir ../three-statement-bench --json
-pnpm cli runs list --dir ../three-statement-bench --json
-pnpm cli candidates list --dir ../three-statement-bench --json
-pnpm cli open --dir ../three-statement-bench --no-open --json
+pnpm cli check --dir ../benchmarks/test/three-statement-bench --json
+pnpm cli runs list --dir ../benchmarks/test/three-statement-bench --json
+pnpm cli candidates list --dir ../benchmarks/test/three-statement-bench --json
+pnpm cli open --dir ../benchmarks/test/three-statement-bench --no-open --json
 ```
 
 When validating in a browser, open the URL returned by `workbench open`. The candidate-centric flow should move from `/candidates` to a candidate, open an evaluation in place, select a case, and inspect the attempt traces directly under that case. Also verify the benchmark master pane, the one-way details-pane collapse button in the benchmark master pane on object routes, version selector, Manifest and Files tabs, route-backed `/candidates`, `/candidates?view=lineage`, and `/evaluations` index pages, candidate detail Manifest and Files tabs, and breadcrumbs that navigate to the matching index route. Run ids remain operational CLI/API resources, but they are not a browser navigation surface.

@@ -94,6 +94,8 @@ workbench open --hosted --json --no-open
 
 Use `workbench push` to push one project state to the remembered remote. Hosted eval and improve also reuse completed work only for the same candidate, run configuration, source, adapters, benchmark, and requested samples/budget; use `--rerun` only for an intentional duplicate run. Use `workbench retry --hosted RUN_OR_EVAL_ID` only for failed hosted history; it replays the recorded candidate, configuration, sample count, and budget, and reuses completed repair work when the same retry has already succeeded. Use the `urls` object from JSON output when present. When an embedded browser is available, navigate it to the benchmark, evaluation, or candidate URL so the user can inspect candidates, cases, traces, scorecards, and files. Hosted ids such as `candidate_...` are opaque, and hosted browser pages are also read-only inspection.
 
+For hosted eval, pass `--candidate CANDIDATE_ID` when evaluating an existing hosted candidate. For hosted improve, pass `--base CANDIDATE_ID` when choosing the candidate to improve.
+
 When a watched or reused hosted run reaches a terminal state from a checkout linked to the same remote project, Workbench imports the hosted project state back into local if local authored source still matches the remembered base. Explicit `--benchmark` runs against a different project leave the current checkout untouched.
 
 For remote collaboration, use `workbench clone OWNER/BENCHMARK`, `workbench pull`, and `workbench push`. If source changed on both sides since the last exchange, pull or push fails instead of choosing a winner; resolve by pushing or restoring local source before pulling, or pulling hosted source before pushing.

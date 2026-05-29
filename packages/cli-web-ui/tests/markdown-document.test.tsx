@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
@@ -36,6 +38,22 @@ complex:
 });
 
 describe("markdown document view", () => {
+  test("keeps Streamdown link safety enabled for static and streaming markdown", () => {
+    const markdownDocumentView = readFileSync(
+      new URL("../components/shared/markdown-document-view.tsx", import.meta.url),
+      "utf8",
+    );
+    const streamingMarkdown = readFileSync(
+      new URL("../components/shared/streaming-markdown.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(markdownDocumentView).toContain("linkSafety={{ enabled: true }}");
+    expect(streamingMarkdown).toContain("linkSafety={{ enabled: true }}");
+    expect(markdownDocumentView).not.toContain("linkSafety={{ enabled: false }}");
+    expect(streamingMarkdown).not.toContain("linkSafety={{ enabled: false }}");
+  });
+
   test("renders frontmatter as metadata and keeps the body separate", () => {
     const html = renderToStaticMarkup(
       createElement(MarkdownDocumentView, {

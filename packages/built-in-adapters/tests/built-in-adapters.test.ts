@@ -492,12 +492,10 @@ describe("built-in Workbench adapters", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-shared-"));
     await fs.mkdir(path.join(root, "input", "candidate"), { recursive: true });
     await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
-    await fs.mkdir(path.join(root, "private", "engine"), { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
     await fs.writeFile(path.join(root, "input", "candidate", "SKILL.md"), "Do the shared work.\n");
     await fs.writeFile(path.join(root, "input", "case", "prompt.md"), "Public shared task.\n");
-    await fs.writeFile(path.join(root, "private", "engine", "secret.txt"), "shared hidden\n");
     const calls: unknown[] = [];
     const token = "runtime-token";
     const server = createServer(async (request, response) => {
@@ -529,9 +527,7 @@ describe("built-in Workbench adapters", () => {
       expect(inputs.case).toEqual([
         expect.objectContaining({ path: "prompt.md", content: "Public shared task.\n" }),
       ]);
-      expect(inputs.enginePrivate).toEqual([
-        expect.objectContaining({ path: "secret.txt", content: "shared hidden\n" }),
-      ]);
+      expect(inputs.enginePrivate).toEqual([]);
       expect(inputs.output).toBeUndefined();
       expect(inputs.workspace).toBeUndefined();
       response.setHeader("content-type", "application/json");
@@ -750,9 +746,6 @@ describe("built-in Workbench adapters", () => {
       invocation: {
         use: "workbench",
         with: {
-          grading: {
-            isolation: "separate",
-          },
           score: {
             use: "inline-score",
             command: "score-command",

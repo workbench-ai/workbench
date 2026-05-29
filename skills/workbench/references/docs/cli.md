@@ -63,6 +63,8 @@ workbench improve --hosted candidates/codex --base CANDIDATE_ID --budget 1 --sam
 workbench open --hosted --json --no-open
 ```
 
+For hosted eval, use `--candidate CANDIDATE_ID` when evaluating an existing hosted candidate. For hosted improve, use `--base CANDIDATE_ID` when choosing the candidate to improve.
+
 Runtime candidates are versioned automatically. If the candidate manifest is named `Skill`, the initial snapshot is shown as `Skill v1`; each successful improvement produces the next version in that family. Candidate run configurations stay nested under the candidate version.
 
 Once an active candidate exists, eval records scores without moving that active pointer. Improve output distinguishes the candidate produced by that improve run from the active incumbent. `outputCandidateId` is the new version created by the run. `activeCandidateId` is the current best evaluated candidate after scoring, so it can remain on an older version when a new version scores lower.
@@ -121,8 +123,10 @@ workbench adapters create PATH [--dir DIR] [--json]
 workbench adapters list [--dir DIR] [--json]
 workbench adapters inspect ID [--dir DIR] [--json]
 workbench adapters test ID|SOURCE [--dir DIR] [--request PATH] [--output DIR] [--json]
-workbench eval [SOURCE] [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--base CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
-workbench improve [SOURCE] [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--from CANDIDATE_ID] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
+workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--json]
+workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
+workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]
+workbench improve --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
 workbench retry TARGET_ID [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
 workbench open [SOURCE|OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID] [--dir DIR] [--hosted] [--benchmark OWNER/BENCHMARK] [--run RUN_ID] [--host HOST] [--port N] [--no-open] [--json]
 workbench restore [--dir DIR] [--candidate CANDIDATE_ID] [--dry-run] [--yes] [--json]

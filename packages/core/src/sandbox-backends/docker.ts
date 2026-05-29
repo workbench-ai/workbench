@@ -38,6 +38,7 @@ import {
 import {
   createWorkbenchProgressStdoutParser,
   publishWorkbenchProgressStdoutEnvelope,
+  type WorkbenchExecutionProgressTarget,
 } from "../execution-events.ts";
 import {
   resolveSandboxTemplateImage,
@@ -57,10 +58,15 @@ const DOCKER_RUNTIME_MOUNT = "/workbench-runtime";
 const DOCKER_DEFAULT_WORKSPACE = "/workspace";
 
 type DockerRuntimePayload = {
-  mountRoot: string;
+  mounts: readonly DockerRuntimeMount[];
   runnerPath: string;
   runtimeImport: string;
   builtInDockerfileRoot: string;
+};
+
+type DockerRuntimeMount = {
+  source: string;
+  target: string;
 };
 
 interface DockerSandboxUser {
@@ -214,12 +220,13 @@ async function prepareDockerSandboxWorkspace(
     stderr: stderrPath,
     templateImage: image,
     containerName: dockerContainerName(request.allocation.sandboxId),
-    runtimeRoot: runtimePayload.mountRoot,
+    runtimeMounts: runtimePayload.mounts as unknown as Json,
     runnerPath: runtimePayload.runnerPath,
     runtimeImport: runtimePayload.runtimeImport,
     sandboxUid: sandboxUser.uid,
     sandboxGid: sandboxUser.gid,
     network: network as unknown as Json,
+    ...(args.progress ? { progressTarget: args.progress as unknown as Json } : {}),
   };
 }
 
@@ -234,11 +241,12 @@ async function runDockerSandboxExecution(
   const stderrPath = readRequiredMetadataString(metadata, "stderr", DOCKER_SANDBOX_BACKEND);
   const image = readRequiredMetadataString(metadata, "templateImage", DOCKER_SANDBOX_BACKEND);
   const containerName = readRequiredMetadataString(metadata, "containerName", DOCKER_SANDBOX_BACKEND);
-  const runtimeRoot = readRequiredMetadataString(metadata, "runtimeRoot", DOCKER_SANDBOX_BACKEND);
+  const runtimeMounts = readDockerRuntimeMounts(metadata.runtimeMounts);
   const runnerPath = readRequiredMetadataString(metadata, "runnerPath", DOCKER_SANDBOX_BACKEND);
   const runtimeImport = readRequiredMetadataString(metadata, "runtimeImport", DOCKER_SANDBOX_BACKEND);
   const sandboxUid = readRequiredMetadataNumber(metadata, "sandboxUid", DOCKER_SANDBOX_BACKEND);
   const sandboxGid = readRequiredMetadataNumber(metadata, "sandboxGid", DOCKER_SANDBOX_BACKEND);
+  const progressTarget = readOptionalProgressTarget(metadata.progressTarget);
   const network = asRuntimeRecord(metadata.network);
   const resources = execution.policy.resources;
   const tmpfsSize = dockerSize(resources.diskGb);
@@ -277,8 +285,7 @@ async function runDockerSandboxExecution(
     DOCKER_RUNTIME_MOUNT,
     "-v",
     `${root}:/workbench-execution`,
-    "-v",
-    `${runtimeRoot}:${DOCKER_RUNTIME_MOUNT}:ro`,
+    ...dockerRuntimeMountArgs(runtimeMounts),
     "--env",
     "HOME=/tmp",
     "--env",
@@ -300,6 +307,7 @@ async function runDockerSandboxExecution(
       stdoutPath,
       stderrPath,
       timeoutMs,
+      progressTarget,
     });
   } catch (error) {
     dockerError = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -325,6 +333,24 @@ async function runDockerSandboxExecution(
     throw new Error("Sandbox adapter runner response omitted job.");
   }
   return response.job as HostedWorkbenchJob;
+}
+
+function dockerRuntimeMountArgs(mounts: readonly DockerRuntimeMount[]): string[] {
+  return [
+    "--tmpfs",
+    `${DOCKER_RUNTIME_MOUNT}:rw,nosuid,nodev,size=16m,mode=755`,
+    ...mounts.flatMap((mount) => [
+      "--mount",
+      `type=bind,source=${mount.source},target=${dockerRuntimeMountTarget(mount.target)},readonly`,
+    ]),
+  ];
+}
+
+function dockerRuntimeMountTarget(target: string): string {
+  const relativeTarget = target.replace(/^\/+|\/+$/gu, "");
+  return relativeTarget
+    ? `${DOCKER_RUNTIME_MOUNT}/${relativeTarget}`
+    : DOCKER_RUNTIME_MOUNT;
 }
 
 function tmpfsDockerArg(pathname: string, uid: number, gid: number, size: string): string {
@@ -378,6 +404,7 @@ function runDockerSandboxProcess(
     stdoutPath: string;
     stderrPath: string;
     timeoutMs: number;
+    progressTarget?: WorkbenchExecutionProgressTarget;
   },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -385,7 +412,10 @@ function runDockerSandboxProcess(
     let timedOut = false;
     const progressPublishes: Promise<void>[] = [];
     const progressParser = createWorkbenchProgressStdoutParser((envelope) => {
-      progressPublishes.push(publishWorkbenchProgressStdoutEnvelope(envelope).catch(() => undefined));
+      progressPublishes.push(
+        publishWorkbenchProgressStdoutEnvelope(envelope, options.progressTarget)
+          .catch(() => undefined),
+      );
     });
     const stdout = createWriteStream(options.stdoutPath);
     const stderr = createWriteStream(options.stderrPath);
@@ -582,11 +612,27 @@ function resolveLocalDockerRuntimePayload(): DockerRuntimePayload {
 
 function monorepoDockerPayload(root: string): DockerRuntimePayload {
   return {
-    mountRoot: root,
+    mounts: monorepoDockerRuntimeMounts(root),
     runnerPath: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/worker/sandbox-adapter-runner.cjs`,
     runtimeImport: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/src/index.ts`,
     builtInDockerfileRoot: path.join(root, "products/workbench/environments"),
   };
+}
+
+function monorepoDockerRuntimeMounts(root: string): DockerRuntimeMount[] {
+  return [
+    ...requiredDockerRuntimeMounts(root, [
+      ["products/workbench/packages/core", "products/workbench/packages/core"],
+      ["products/workbench/packages/contract", "products/workbench/packages/contract"],
+      ["products/workbench/packages/protocol", "products/workbench/packages/protocol"],
+      ["products/workbench/packages/built-in-adapters", "products/workbench/packages/built-in-adapters"],
+      ["products/agent-drivers", "products/agent-drivers"],
+      ["products/workbench/environments", "products/workbench/environments"],
+    ]),
+    ...optionalDockerRuntimeMounts(root, [
+      ["node_modules", "node_modules"],
+    ]),
+  ];
 }
 
 function findInstalledPackageDockerPayload(): DockerRuntimePayload | null {
@@ -602,13 +648,36 @@ function findInstalledPackageDockerPayload(): DockerRuntimePayload | null {
     existsSync(path.join(packageRoot, "environments/node-22/Dockerfile"))
   ) {
     return {
-      mountRoot: path.dirname(nodeModulesRoot),
+      mounts: [{ source: nodeModulesRoot, target: "node_modules" }],
       runnerPath: `${DOCKER_RUNTIME_MOUNT}/node_modules/@workbench-ai/workbench-core/worker/sandbox-adapter-runner.cjs`,
       runtimeImport: `${DOCKER_RUNTIME_MOUNT}/node_modules/@workbench-ai/workbench-core/dist/index.js`,
       builtInDockerfileRoot: path.join(packageRoot, "environments"),
     };
   }
   return null;
+}
+
+function requiredDockerRuntimeMounts(
+  root: string,
+  entries: readonly (readonly [string, string])[],
+): DockerRuntimeMount[] {
+  return entries.map(([source, target]) => {
+    const absoluteSource = path.join(root, source);
+    if (!existsSync(absoluteSource)) {
+      throw new Error(`Docker sandbox runtime is missing ${source}.`);
+    }
+    return { source: absoluteSource, target };
+  });
+}
+
+function optionalDockerRuntimeMounts(
+  root: string,
+  entries: readonly (readonly [string, string])[],
+): DockerRuntimeMount[] {
+  return entries.flatMap(([source, target]) => {
+    const absoluteSource = path.join(root, source);
+    return existsSync(absoluteSource) ? [{ source: absoluteSource, target }] : [];
+  });
 }
 
 function findAncestorNamed(start: string, name: string): string | null {
@@ -664,6 +733,61 @@ function readRequiredMetadataNumber(metadata: Record<string, unknown>, key: stri
     throw new Error(`${backend} sandbox metadata is missing ${key}.`);
   }
   return value;
+}
+
+function readDockerRuntimeMounts(
+  value: unknown,
+): DockerRuntimeMount[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${DOCKER_SANDBOX_BACKEND} sandbox metadata is missing runtime mounts.`);
+  }
+  const mounts = value.flatMap((entry): DockerRuntimeMount[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.source !== "string" || typeof record.target !== "string") {
+      return [];
+    }
+    if (!isSafeDockerRuntimeMountTarget(record.target)) {
+      return [];
+    }
+    return [{ source: record.source, target: record.target }];
+  });
+  if (mounts.length === 0) {
+    throw new Error(`${DOCKER_SANDBOX_BACKEND} sandbox metadata is missing runtime mounts.`);
+  }
+  return mounts;
+}
+
+function isSafeDockerRuntimeMountTarget(target: string): boolean {
+  if (target === "") {
+    return true;
+  }
+  return !target.startsWith("/") &&
+    !target.split("/").includes("..") &&
+    !/[\0\r\n:,]/u.test(target);
+}
+
+function readOptionalProgressTarget(
+  value: unknown,
+): WorkbenchExecutionProgressTarget | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.url !== "string" || typeof record.token !== "string") {
+    return undefined;
+  }
+  return {
+    url: record.url,
+    token: record.token,
+    ...(typeof record.ownerUserId === "string" ? { ownerUserId: record.ownerUserId } : {}),
+    ...(typeof record.flushWindowMs === "number" ? { flushWindowMs: record.flushWindowMs } : {}),
+    ...(record.transport === "stdout" || record.transport === "both" || record.transport === "http"
+      ? { transport: record.transport }
+      : {}),
+  };
 }
 
 function dockerSandboxUser(): DockerSandboxUser {

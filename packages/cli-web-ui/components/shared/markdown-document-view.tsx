@@ -43,7 +43,7 @@ export function MarkdownDocumentView({
             className="text-sm leading-7"
             controls={false}
             isAnimating={false}
-            linkSafety={{ enabled: false }}
+            linkSafety={{ enabled: true }}
             mode="static"
           >
             {trimmedBody}
