@@ -7,6 +7,7 @@ import {
   sanitizeWorkbenchRuntimeCandidateForExchange,
   sanitizeWorkbenchRuntimeJobForExchange,
   selectExecutionOutputFilesForInspection,
+  workbenchRuntimeExplicitActiveId,
   workbenchRuntimeBundleStats,
   workbenchSurfaceFilesEqualForExchange,
   type CandidateRecord,
@@ -140,6 +141,7 @@ export async function saveLocalJobs(
 
 export async function exportLocalRuntimeBundle(
   workspace: string,
+  options: { currentBenchmarkFingerprint?: string } = {},
 ): Promise<WorkbenchRuntimeBundle> {
   const snapshot = await loadLocalArchive(workspace);
   const jobs = (await readLocalJobs(workspace)).map(sanitizeRuntimeJobForExchange);
@@ -149,9 +151,17 @@ export async function exportLocalRuntimeBundle(
       files: await readLocalExecutionFiles(workspace, job.id),
     })),
   );
+  const activeId = options.currentBenchmarkFingerprint
+    ? workbenchRuntimeExplicitActiveId({
+        candidates: snapshot.candidates,
+        runs: snapshot.runs,
+        preferredActiveId: snapshot.activeId,
+        benchmarkFingerprint: options.currentBenchmarkFingerprint,
+      })
+    : snapshot.activeId;
   return {
     schema: "workbench.runtime.bundle.v1",
-    activeId: snapshot.activeId,
+    activeId,
     candidates: snapshot.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange),
     candidateFiles: Object.entries(snapshot.candidateFiles).map(([candidateId, files]) => ({
       candidateId,
@@ -196,13 +206,6 @@ export async function importLocalRuntimeBundle(
       changed = true;
     }
     candidateFiles[candidateId] = files;
-  }
-  const activeId =
-    compatibleRuntimeActiveCandidateId(candidates, bundle.activeId ?? null, currentBenchmarkFingerprint) ??
-    compatibleRuntimeActiveCandidateId(candidates, snapshot.activeId, currentBenchmarkFingerprint) ??
-    latestCompatibleRuntimeCandidateId(candidates, currentBenchmarkFingerprint);
-  if (activeId !== snapshot.activeId) {
-    changed = true;
   }
   const evaluations = mergeRecordsById(snapshot.evaluations, bundle.evaluations, (evaluation) => evaluation.id, (didChange) => {
     changed ||= didChange;
@@ -252,6 +255,15 @@ export async function importLocalRuntimeBundle(
     (left.startedAt ?? left.createdAt).localeCompare(right.startedAt ?? right.createdAt) ||
     left.id.localeCompare(right.id)
   );
+  const activeId = workbenchRuntimeExplicitActiveId({
+    candidates,
+    runs,
+    preferredActiveId: bundle.activeId ?? null,
+    benchmarkFingerprint: currentBenchmarkFingerprint,
+  });
+  if (activeId !== snapshot.activeId) {
+    changed = true;
+  }
 
   await saveLocalArchive(workspace, {
     activeId,
@@ -695,30 +707,6 @@ function runtimeJobIdentityForExchange(job: HostedWorkbenchJob): unknown {
     kind: job.kind,
     attempt: job.attempt,
   };
-}
-
-function compatibleRuntimeActiveCandidateId(
-  candidates: readonly CandidateRecord[],
-  candidateId: string | null,
-  benchmarkFingerprint: string,
-): string | null {
-  if (!candidateId) {
-    return null;
-  }
-  const candidate = candidates.find((entry) => entry.id === candidateId) ?? null;
-  return candidate?.benchmarkFingerprint === benchmarkFingerprint ? candidate.id : null;
-}
-
-function latestCompatibleRuntimeCandidateId(
-  candidates: readonly CandidateRecord[],
-  benchmarkFingerprint: string,
-): string | null {
-  return candidates
-    .filter((candidate) =>
-      candidate.benchmarkFingerprint === benchmarkFingerprint &&
-      candidate.status === "evaluated"
-    )
-    .at(-1)?.id ?? null;
 }
 
 function canonicalRuntimeJson(value: unknown): unknown {

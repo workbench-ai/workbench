@@ -29,6 +29,7 @@ import type {
   HostedWorkbenchJob,
   Json,
   MetricStats,
+  RunSummary,
   SurfaceSnapshotFile,
   UsageSummary,
   WorkbenchRuntimeBundle,
@@ -620,6 +621,50 @@ export function workbenchRuntimeBundleStats(
     events: bundle.events.length,
     activeId: bundle.activeId,
   };
+}
+
+export function workbenchRuntimeExplicitActiveId(args: {
+  candidates: readonly CandidateRecord[];
+  runs: readonly RunSummary[];
+  preferredActiveId?: string | null;
+  benchmarkFingerprint: string;
+}): string | null {
+  const candidateById = new Map(args.candidates.map((candidate) => [
+    candidate.id,
+    candidate,
+  ]));
+  const compatible = (candidateId: string | null | undefined): string | null => {
+    if (!candidateId) {
+      return null;
+    }
+    const candidate = candidateById.get(candidateId) ?? null;
+    return candidate?.benchmarkFingerprint === args.benchmarkFingerprint
+      ? candidate.id
+      : null;
+  };
+  return compatible(args.preferredActiveId) ??
+    latestExplicitRunActiveIdForBenchmark(args.runs, compatible, args.benchmarkFingerprint);
+}
+
+function latestExplicitRunActiveIdForBenchmark(
+  runs: readonly RunSummary[],
+  compatible: (candidateId: string | null | undefined) => string | null,
+  benchmarkFingerprint: string,
+): string | null {
+  return runs
+    .slice()
+    .sort((left, right) => {
+      const leftAt = left.finishedAt ?? left.startedAt;
+      const rightAt = right.finishedAt ?? right.startedAt;
+      return leftAt.localeCompare(rightAt) || left.id.localeCompare(right.id);
+    })
+    .reverse()
+    .map((run) =>
+      run.benchmarkFingerprint === benchmarkFingerprint
+        ? compatible(run.activeCandidateId)
+        : null
+    )
+    .find((candidateId): candidateId is string => candidateId !== null) ?? null;
 }
 
 function workbenchCandidateSourceYamlForFingerprint(sourceYaml: string): {

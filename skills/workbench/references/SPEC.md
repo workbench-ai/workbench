@@ -151,7 +151,7 @@ workbench pull [--dir DIR] [--dry-run] [--json]
 workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--json]
 ```
 
-`clone`, `pull`, and `push` exchange one project-state envelope. Source files are the authored benchmark and candidate tree. Runtime history is the durable set of candidates, evaluations, runs, jobs, events, candidate files, execution files, and the active candidate pointer. Source changes are guarded by the last exchanged revision/fingerprint; local pull refuses to overwrite changed local source, hosted push refuses to overwrite changed hosted source, and runtime history merges idempotently as immutable facts.
+`clone`, `pull`, and `push` exchange one project-state envelope. Source files are the authored benchmark and candidate tree. Runtime history is the durable set of candidates, evaluations, runs, jobs, events, candidate files, execution files, and the explicit active candidate pointer. Source changes are guarded by the last exchanged revision/fingerprint; local pull refuses to overwrite changed local source, hosted push refuses to overwrite changed hosted source, and runtime history merges idempotently as immutable facts. Workbench does not infer active state from the latest or best candidate during sync. If the explicit active candidate does not match the current benchmark fingerprint, active state is `null`; if source later returns to a fingerprint with explicit run active facts, that explicit active candidate is restored.
 
 `.workbench/origin.json` is an exact remote pointer and base record: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`.
 
@@ -159,7 +159,7 @@ Hosted benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so `OWNER/BENC
 
 `workbench eval` and `workbench improve` reuse completed work only when the candidate, run configuration, source, adapters, benchmark, and requested samples/budget match; `--rerun` is the explicit duplicate-spend escape hatch. Runtime candidates are automatically versioned display snapshots such as `Skill v1`, `Skill v2`, and `Skill v3`; authored YAML owns the candidate family and run configurations, not version labels.
 
-When watched or reused hosted lifecycle work reaches a terminal state from a checkout linked to the same remote project, the CLI imports the hosted project-state envelope back into local under the same local-source guard used by `pull`. Explicit `--benchmark` targets for a different project do not mutate the current checkout.
+When watched or reused hosted lifecycle work reaches a terminal state from a checkout linked to the same remote project, the CLI imports the hosted project-state envelope back into local under the same local-source guard used by `pull`. Successful `push` also imports the accepted runtime state so local and hosted active pointers stay aligned. Explicit `--benchmark` targets for a different project do not mutate the current checkout.
 
 Once an active candidate exists, eval records scores without moving that active pointer. Improve output uses `outputCandidateId` for the produced version and `activeCandidateId` for the current best evaluated candidate after scoring. They can differ when a newer version scores below the incumbent.
 

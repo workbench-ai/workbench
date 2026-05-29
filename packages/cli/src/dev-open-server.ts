@@ -387,7 +387,7 @@ export async function localBenchmarkSnapshot(context: LocalWorkbenchRequestConte
   const summaries = candidates.map(candidateSummary);
   const activeId = snapshot.activeId && candidates.some((candidate) => candidate.id === snapshot.activeId)
     ? snapshot.activeId
-    : candidates.at(-1)?.id ?? null;
+    : null;
   const currentBenchmarkFingerprint = await readCurrentBenchmarkFingerprint(context);
   return {
     workspaceRoot: path.resolve(workspace),

@@ -4186,7 +4186,9 @@ async function pushBenchmark(
   const visibility = readOptionalBenchmarkVisibility(parsed.flags.visibility);
   const createVisibility = visibility ?? "public";
   const dryRun = parsed.flags["dry-run"] === true;
-  const runtime = await exportLocalRuntimeBundle(dir);
+  const runtime = await exportLocalRuntimeBundle(dir, {
+    currentBenchmarkFingerprint: localBenchmarkFingerprint(source),
+  });
   const state = localProjectState({
     source,
     runtime,
@@ -4290,7 +4292,8 @@ async function pushBenchmark(
     responseProject,
     visibility,
   });
-  const nextOrigin = await writeWorkbenchOriginFromState(dir, {
+  const applied = await acceptPushedProjectStateToLocal({
+    dir,
     baseUrl,
     state: response.state,
   });
@@ -4301,13 +4304,13 @@ async function pushBenchmark(
       changed: response.changed === true,
       benchmark: publishedProject,
       visibility: visibility ?? "unchanged",
-      origin: nextOrigin,
+      origin: applied.origin,
       source: response.source,
       runtime: response.runtime.stats,
       urls: buildWorkbenchResourceUrls({
         baseUrl,
         projectId: publishedProject.id ?? responseProject.id,
-        ...originRemoteUrlParts(nextOrigin),
+        ...originRemoteUrlParts(applied.origin),
       }),
     },
     parsed,
@@ -4341,11 +4344,12 @@ async function createHostedBenchmarkFromState(args: {
     args.baseUrl,
   );
   const project = hostedProjectSummaryFromState(result.state);
-  const origin = await writeWorkbenchOriginFromState(args.dir, {
+  const applied = await acceptPushedProjectStateToLocal({
+    dir: args.dir,
     baseUrl: args.baseUrl,
     state: result.state,
   });
-  return { project, origin, result };
+  return { project, origin: applied.origin, result };
 }
 
 async function applyRequestedProjectVisibility(args: {
@@ -4525,6 +4529,24 @@ async function applyProjectStateToLocal(args: {
     files: args.state.source.files.length,
     runtime: runtimeImport.stats,
   };
+}
+
+async function acceptPushedProjectStateToLocal(args: {
+  dir: string;
+  baseUrl: string;
+  state: WorkbenchProjectState;
+}): Promise<{ origin: WorkbenchOrigin; runtime: WorkbenchRuntimeBundleStats }> {
+  const benchmarkFingerprint = localBenchmarkFingerprint(await readLocalProjectSource(args.dir));
+  const runtime = await importLocalRuntimeBundle(
+    args.dir,
+    args.state.runtime,
+    benchmarkFingerprint,
+  );
+  const origin = await writeWorkbenchOriginFromState(args.dir, {
+    baseUrl: args.baseUrl,
+    state: args.state,
+  });
+  return { origin, runtime: runtime.stats };
 }
 
 interface HostedRetryTarget {

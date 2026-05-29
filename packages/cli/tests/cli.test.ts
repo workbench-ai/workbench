@@ -1320,7 +1320,7 @@ describe("workbench CLI", () => {
         evaluations: unknown[];
       }>(`${server.url}api/snapshot`);
       expect(snapshot.workspaceRoot).toBe(path.resolve(workspace));
-      expect(snapshot.activeId).toBe(candidateId);
+      expect(snapshot.activeId).toBeNull();
       expect(snapshot.summaries.map((summary) => summary.id)).toEqual([candidateId]);
       expect(snapshot.summaries[0]).not.toHaveProperty("metrics");
       expect(snapshot.evaluations).toEqual([]);
@@ -3942,7 +3942,7 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(archive.runs[0]?.status).toBe("finished");
   });
 
-  test("runtime import keeps the active candidate compatible with the current benchmark", async () => {
+  test("runtime import clears incompatible active instead of selecting the latest compatible candidate", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-runtime-active-fingerprint-"));
     const oldCandidate: CandidateRecord = {
       id: "candidate_old",
@@ -3994,10 +3994,76 @@ await fs.writeFile(resultPath, JSON.stringify({
     };
 
     await expect(importLocalRuntimeBundle(workspace, bundle, "current-benchmark")).resolves.toMatchObject({
-      stats: { activeId: currentCandidate.id },
+      stats: { activeId: null },
     });
     const archive = await loadLocalArchive(workspace);
-    expect(archive.activeId).toBe(currentCandidate.id);
+    expect(archive.activeId).toBeNull();
+  });
+
+  test("runtime import restores active from explicit run state instead of latest candidate order", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-runtime-active-run-fact-"));
+    const incumbent: CandidateRecord = {
+      id: "candidate_incumbent",
+      name: "Skill",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "benchmark",
+      candidateFingerprint: "candidate-incumbent",
+      visibility: "private",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+    };
+    const newerCandidate: CandidateRecord = {
+      ...incumbent,
+      id: "candidate_newer",
+      version: 2,
+      ordinal: 2,
+      candidateFingerprint: "candidate-newer",
+      createdAt: "2026-05-28T00:02:00.000Z",
+    };
+
+    const bundle: WorkbenchRuntimeBundle = {
+      schema: "workbench.runtime.bundle.v1",
+      activeId: null,
+      candidates: [incumbent, newerCandidate],
+      candidateFiles: [
+        { candidateId: incumbent.id, files: [textFile("prompt.md", "incumbent\n")] },
+        { candidateId: newerCandidate.id, files: [textFile("prompt.md", "newer\n")] },
+      ],
+      evaluations: [],
+      runs: [
+        localRunSummary({
+          id: "run_incumbent_eval",
+          benchmarkFingerprint: "benchmark",
+          candidateId: incumbent.id,
+          outputCandidateId: incumbent.id,
+          activeCandidateId: incumbent.id,
+          finishedAt: "2026-05-28T00:01:00.000Z",
+          outcome: "ok",
+        }),
+        localRunSummary({
+          id: "run_newer_improve",
+          workflow: "improve",
+          benchmarkFingerprint: "benchmark",
+          candidateId: newerCandidate.id,
+          outputCandidateId: newerCandidate.id,
+          activeCandidateId: incumbent.id,
+          finishedAt: "2026-05-28T00:03:00.000Z",
+          outcome: "ok",
+        }),
+      ],
+      jobs: [],
+      executionFiles: [],
+      events: [],
+    };
+
+    await expect(importLocalRuntimeBundle(workspace, bundle, "benchmark")).resolves.toMatchObject({
+      stats: { activeId: incumbent.id },
+    });
+    const archive = await loadLocalArchive(workspace);
+    expect(archive.activeId).toBe(incumbent.id);
   });
 
   test("cloned origins do not track local writable mode when the signed-in user owns the benchmark", async () => {

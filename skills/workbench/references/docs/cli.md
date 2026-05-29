@@ -87,7 +87,9 @@ workbench push
 
 `workbench pull` refuses to overwrite local authored source if it has changed since the last clone, pull, or push. When local source still matches the remembered base, pull replaces authored source with the hosted source, merges runtime history as immutable facts, and updates `.workbench/origin.json`.
 
-`workbench push` creates or updates the hosted benchmark from local project state. If the hosted source changed since the remembered base, push fails and asks you to pull first. Runtime history is merged idempotently; equal ids are kept, new ids are added, and same-id different-content conflicts fail instead of choosing a winner.
+`workbench push` creates or updates the hosted benchmark from local project state. If the hosted source changed since the remembered base, push fails and asks you to pull first. Runtime history is merged idempotently; equal ids are kept, new ids are added, and same-id different-content conflicts fail instead of choosing a winner. A successful push imports the accepted runtime state back into local, including the active candidate pointer.
+
+The active candidate is explicit runtime state. Sync never chooses a replacement from the latest or best evaluated candidate. If the explicit active candidate belongs to a different benchmark fingerprint than the current source, active is `null`; when source returns to a fingerprint with explicit run active facts, that active candidate is restored.
 
 `.workbench/origin.json` has one exact shape: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`. It is a remote pointer plus the last exchanged base, not a second project model.
 

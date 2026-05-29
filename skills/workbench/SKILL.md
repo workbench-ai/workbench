@@ -31,7 +31,7 @@ workbench push
 workbench improve --hosted candidates/current --budget 1 --samples 1 --watch
 ```
 
-The public benchmark is readable without Workbench Cloud login. It starts with three cases and an empty skill frontmatter. Its cloned paths are `candidates/current` and `candidates/current/candidate.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. `workbench clone`, `workbench pull`, and `workbench push` exchange one portable project state: authored source plus durable runtime history. Source updates are guarded by the last seen remote revision/fingerprint, while runtime history merges as immutable facts. Stop cleanly when login or OAuth requires user approval.
+The public benchmark is readable without Workbench Cloud login. It starts with three cases and an empty skill frontmatter. Its cloned paths are `candidates/current` and `candidates/current/candidate.yaml`. If a local or hosted run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex. `workbench clone`, `workbench pull`, and `workbench push` exchange one portable project state: authored source plus durable runtime history. Source updates are guarded by the last seen remote revision/fingerprint, while runtime history merges as immutable facts. The active candidate is explicit runtime state; sync does not infer a replacement from the latest evaluated candidate, and active is `null` when the explicit pointer is incompatible with current source. Stop cleanly when login or OAuth requires user approval.
 
 ## Provider And Auth
 
