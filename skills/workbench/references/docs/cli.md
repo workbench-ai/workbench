@@ -106,6 +106,8 @@ workbench auth connect codex --method oauth
 workbench auth connect claude --method oauth
 ```
 
+File-based OAuth profiles are mutable runtime auth. Local runs serialize jobs that share the same OAuth profile, and hosted runs hold a per-profile lease while forwarding refreshed auth files back to Workbench Cloud before the next job can claim that profile.
+
 Use API-key auth when you want provider API-key billing instead:
 
 ```bash

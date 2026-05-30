@@ -260,6 +260,9 @@ export {
   publishWorkbenchProgressStdoutEnvelope,
 } from "./execution-events.ts";
 export {
+  persistWorkbenchAdapterAuthUpdates,
+} from "./adapter-auth-updates.ts";
+export {
   resolveSandboxTemplateImage,
 } from "./sandbox-backends/template-images.ts";
 export {
@@ -2786,6 +2789,7 @@ function createInitialCandidateFiles(args: {
 export interface WorkbenchExecutionJobOptions {
   sandboxProvider: string;
   loadLocalAdapterAuthProfiles?: boolean;
+  adapterAuthUpdateSink?: (profiles: readonly WorkbenchAdapterAuthBundle[]) => Promise<void>;
   createSandboxPlaneForProvider?: (
     provider: string,
     args: WorkbenchExecutionRuntimeInput,
@@ -2806,57 +2810,76 @@ export async function executeWorkbenchExecutionJob(
       args,
       Boolean(options.loadLocalAdapterAuthProfiles),
     );
+    const adapterAuthUpdateSink =
+      options.adapterAuthUpdateSink ??
+      (options.loadLocalAdapterAuthProfiles
+        ? persistLocalAdapterAuthProfileUpdates
+        : undefined);
     const runtimeArgs =
       adapterAuthProfiles.length > 0
-        ? { ...args, adapterAuthProfiles }
+        ? { ...args, adapterAuthProfiles, ...(adapterAuthUpdateSink ? { adapterAuthUpdateSink } : {}) }
         : args;
-    const executionForRuntime = readWorkbenchExecutionSpec(runtimeArgs.job);
-    const executor = workbenchExecutionExecutorForRuntimeInput(runtimeArgs);
-    if (executor === "host") {
-      return await withWorkbenchRuntimeControlServer(
+    return await withMutableAdapterAuthExecutionLocks(adapterAuthProfiles, async () =>
+      await executeWorkbenchExecutionJobWithResolvedAuth(
         runtimeArgs,
         options,
         startedAt,
-        async (adapterRuntimeEnv) => executeAdapterInCurrentRuntime(
-          {
-            ...runtimeArgs,
-            adapterRuntimeEnv,
-          },
-          executionForRuntime,
-          startedAt,
-          createWorkbenchExecutionCapability(executionForRuntime, { now: startedAt }),
-        ),
-      );
-    }
-    const fileStore = createWorkbenchSandboxFileStore(runtimeArgs);
-    const planeFactory = options.createSandboxPlaneForProvider ?? createSandboxBackendPlaneForProvider;
-    const plane = planeFactory(
-      options.sandboxProvider,
-      runtimeArgs,
-      startedAt,
-      fileStore,
-    );
-    const validated = await executeValidatedSandboxExecution(plane, executionForRuntime, {
-      now: startedAt,
-      runnerId: resolveWorkbenchWorkerId(
-        [
-          process.env.WORKBENCH_WORKER_ID,
-          process.env.EC2_INSTANCE_ID,
-          os.hostname(),
-          process.env.HOSTNAME,
-        ],
-        "local-runner",
-      ),
-      fileStore,
-    });
-    return completedJobFromSandboxResult(
-      runtimeArgs.job,
-      startedAt,
-      validated.result,
+      )
     );
   } catch (error) {
     return failWorkbenchRunJob(args.job, startedAt, error);
   }
+}
+
+async function executeWorkbenchExecutionJobWithResolvedAuth(
+  runtimeArgs: WorkbenchExecutionRuntimeInput,
+  options: WorkbenchExecutionJobOptions,
+  startedAt: string,
+): Promise<HostedWorkbenchJob> {
+  const executionForRuntime = readWorkbenchExecutionSpec(runtimeArgs.job);
+  const executor = workbenchExecutionExecutorForRuntimeInput(runtimeArgs);
+  if (executor === "host") {
+    return await withWorkbenchRuntimeControlServer(
+      runtimeArgs,
+      options,
+      startedAt,
+      async (adapterRuntimeEnv) => executeAdapterInCurrentRuntime(
+        {
+          ...runtimeArgs,
+          adapterRuntimeEnv,
+        },
+        executionForRuntime,
+        startedAt,
+        createWorkbenchExecutionCapability(executionForRuntime, { now: startedAt }),
+      ),
+    );
+  }
+  const fileStore = createWorkbenchSandboxFileStore(runtimeArgs);
+  const planeFactory = options.createSandboxPlaneForProvider ?? createSandboxBackendPlaneForProvider;
+  const plane = planeFactory(
+    options.sandboxProvider,
+    runtimeArgs,
+    startedAt,
+    fileStore,
+  );
+  const validated = await executeValidatedSandboxExecution(plane, executionForRuntime, {
+    now: startedAt,
+    runnerId: resolveWorkbenchWorkerId(
+      [
+        process.env.WORKBENCH_WORKER_ID,
+        process.env.EC2_INSTANCE_ID,
+        os.hostname(),
+        process.env.HOSTNAME,
+      ],
+      "local-runner",
+    ),
+    fileStore,
+  });
+  return completedJobFromSandboxResult(
+    runtimeArgs.job,
+    startedAt,
+    validated.result,
+  );
 }
 
 export function workbenchExecutionExecutorForRuntimeInput(
@@ -3215,6 +3238,9 @@ export async function executeAdapterInCurrentRuntime(
   } catch (error) {
     return failWorkbenchRunJob(args.job, startedAt, error);
   } finally {
+    if (adapterAuth.captureUpdates) {
+      await persistMaterializedAdapterAuthUpdates(args, adapterAuth.captureUpdates);
+    }
     if (adapterAuth.cleanup) {
       await adapterAuth.cleanup().catch(() => undefined);
     }
@@ -3229,6 +3255,7 @@ async function materializeSandboxAdapterAuth(
   root?: string;
   env: Record<string, string>;
   cleanup?: () => Promise<void>;
+  captureUpdates?: () => Promise<WorkbenchAdapterAuthBundle[]>;
 }> {
   const adapterProfiles = adapterAuthProfilesForExecution(execution, args);
   if (adapterProfiles.length === 0) {
@@ -3254,6 +3281,13 @@ async function materializeSandboxAdapterAuth(
   return {
     ...(root ? { root } : {}),
     env,
+    captureUpdates: async () =>
+      await collectMaterializedAdapterAuthProfileUpdates(
+        adapterFileBundles,
+        root,
+        fs,
+        path,
+      ),
     cleanup: async () => {
       if (root) {
         await fs.rm(root, { recursive: true, force: true });
@@ -3285,6 +3319,114 @@ async function materializeAdapterAuthProfiles(
           : file.content,
         { mode: file.mode ?? 0o600 },
       );
+    }
+  }
+}
+
+async function collectMaterializedAdapterAuthProfileUpdates(
+  bundles: readonly WorkbenchAdapterAuthBundle[],
+  root: string,
+  fs: typeof import("node:fs/promises"),
+  path: typeof import("node:path"),
+): Promise<WorkbenchAdapterAuthBundle[]> {
+  const updates: WorkbenchAdapterAuthBundle[] = [];
+  for (const bundle of bundles) {
+    const targetRoot = path.join(
+      root,
+      bundle.adapterId,
+      bundle.slot ?? "_",
+      bundle.profile,
+    );
+    const files: WorkbenchAdapterAuthBundle["files"] = [];
+    let changed = false;
+    for (const file of bundle.files) {
+      const filePath = path.join(targetRoot, file.path);
+      const content = file.encoding === "base64"
+        ? (await fs.readFile(filePath)).toString("base64")
+        : await fs.readFile(filePath, "utf8");
+      files.push({
+        ...file,
+        content,
+      });
+      if (content !== file.content) {
+        changed = true;
+      }
+    }
+    if (!changed) {
+      continue;
+    }
+    updates.push(sanitizeWorkbenchAdapterAuthBundle({
+      ...bundle,
+      files,
+      updatedAt: new Date().toISOString(),
+    }));
+  }
+  return updates;
+}
+
+async function persistMaterializedAdapterAuthUpdates(
+  args: Pick<WorkbenchExecutionRuntimeInput, "adapterAuthUpdateSink">,
+  captureUpdates: () => Promise<WorkbenchAdapterAuthBundle[]>,
+): Promise<void> {
+  if (!args.adapterAuthUpdateSink) {
+    return;
+  }
+  const updates = await captureUpdates();
+  if (updates.length === 0) {
+    return;
+  }
+  await args.adapterAuthUpdateSink(updates);
+}
+
+async function persistLocalAdapterAuthProfileUpdates(
+  profiles: readonly WorkbenchAdapterAuthBundle[],
+): Promise<void> {
+  const store = localWorkbenchAdapterAuthStore();
+  for (const profile of profiles) {
+    await store.put(profile);
+  }
+}
+
+const mutableAdapterAuthExecutionLocks = new Map<string, Promise<void>>();
+
+async function withMutableAdapterAuthExecutionLocks<T>(
+  profiles: readonly WorkbenchAdapterAuthBundle[],
+  callback: () => Promise<T>,
+): Promise<T> {
+  const keys = [...new Set(profiles
+    .filter((profile) => profile.method === "oauth" && profile.files.length > 0)
+    .map((profile) => [
+      profile.adapterId,
+      profile.slot ?? "_",
+      profile.profile,
+    ].join("/")))]
+    .sort();
+  let run = callback;
+  for (const key of [...keys].reverse()) {
+    const next = run;
+    run = async () => await withMutableAdapterAuthExecutionLock(key, next);
+  }
+  return await run();
+}
+
+async function withMutableAdapterAuthExecutionLock<T>(
+  key: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  const previous = mutableAdapterAuthExecutionLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.catch(() => undefined).then(() => current);
+  mutableAdapterAuthExecutionLocks.set(key, queued);
+  await previous.catch(() => undefined);
+  try {
+    return await callback();
+  } finally {
+    release();
+    if (mutableAdapterAuthExecutionLocks.get(key) === queued) {
+      mutableAdapterAuthExecutionLocks.delete(key);
     }
   }
 }
@@ -3687,6 +3829,9 @@ export async function executeRuntimeControlOperationSequenceInCurrentRuntime(
       },
     );
   } finally {
+    if (adapterAuth.captureUpdates) {
+      await persistMaterializedAdapterAuthUpdates(runtimeArgs, adapterAuth.captureUpdates);
+    }
     if (adapterAuth.cleanup) {
       await adapterAuth.cleanup().catch(() => undefined);
     }

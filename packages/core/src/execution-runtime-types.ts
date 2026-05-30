@@ -35,6 +35,7 @@ export interface WorkbenchExecutionRuntimeInput {
   traceFiles?: readonly SurfaceSnapshotFile[];
   now?: string;
   adapterAuthProfiles?: readonly WorkbenchAdapterAuthBundle[];
+  adapterAuthUpdateSink?: (profiles: readonly WorkbenchAdapterAuthBundle[]) => Promise<void>;
   adapterManifests?: readonly WorkbenchAdapterManifest[];
   adapterAuthRoot?: string;
   adapterAuthRequest?: Json;

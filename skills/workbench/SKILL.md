@@ -37,7 +37,7 @@ The public benchmark is readable without Workbench Cloud login. It starts with t
 
 Before scaffolding a benchmark, run `workbench whoami --json`. Inspect `adapterStatuses` and `hostedAuth.adapters`. Prefer a connected `codex` profile. If Codex is not connected, use another connected provider that fits the requested workflow. If no provider is connected, default to `codex`.
 
-Workbench Cloud auth and adapter auth are separate. Use `workbench login` before Cloud operations. Connect adapter auth before local or hosted runs when `whoami` reports the selected adapter as disconnected. Use `workbench auth connect codex --method oauth` or `workbench auth connect claude --method oauth` to reuse subscription sign-in. Use `--method api-key` with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` only when the user wants provider API-key billing. For other adapters, inspect methods with `workbench adapters inspect ADAPTER`.
+Workbench Cloud auth and adapter auth are separate. Use `workbench login` before Cloud operations. Connect adapter auth before local or hosted runs when `whoami` reports the selected adapter as disconnected. Use `workbench auth connect codex --method oauth` or `workbench auth connect claude --method oauth` to reuse subscription sign-in. OAuth file profiles are mutable runtime auth: Workbench serializes jobs sharing a profile and saves refreshed auth before the next job claims it. Use `--method api-key` with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` only when the user wants provider API-key billing. For other adapters, inspect methods with `workbench adapters inspect ADAPTER`.
 
 ## Create And Push A Benchmark
 

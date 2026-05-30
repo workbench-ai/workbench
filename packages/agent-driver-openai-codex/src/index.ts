@@ -299,6 +299,8 @@ interface CodexSessionState {
   attemptWorkspacePath: string;
   sessionWorkspacePath: string | null;
   childEnv: NodeJS.ProcessEnv;
+  managedCodexHomeDir: string;
+  profileSourceRoot: string | null;
   process: ChildProcessWithoutNullStreams;
   reader: readline.Interface;
   nextId: number;
@@ -320,6 +322,8 @@ interface CodexNotificationNormalization {
 
 interface PreparedManagedCodexHome {
   managedHomeDir: string;
+  managedCodexHomeDir: string;
+  profileSourceRoot: string | null;
   trustedProjectPaths: string[];
   childEnv: NodeJS.ProcessEnv;
 }
@@ -901,7 +905,7 @@ export class CodexHarnessAdapter
     repoRoot: string,
     trustedProjectPaths: string[] = [],
     runtimeHome?: string,
-  ): Promise<void> {
+  ): Promise<{ profileSourceRoot: string | null }> {
     const { auth, provider } =
       CodexHarnessAdapter.resolveProviderSelection(plan);
     if (auth.strategy === "profile_path") {
@@ -919,7 +923,7 @@ export class CodexHarnessAdapter
         codexHomeDir,
         trustedProjectPaths,
       });
-      return;
+      return { profileSourceRoot: sourceRoot };
     }
 
     const apiKeyAuth = CodexHarnessAdapter.resolveApiKeyAuth(
@@ -939,7 +943,7 @@ export class CodexHarnessAdapter
     });
 
     if (provider.id === "azure") {
-      return;
+      return { profileSourceRoot: null };
     }
 
     if (
@@ -948,7 +952,7 @@ export class CodexHarnessAdapter
         codexHomeDir,
       )
     ) {
-      return;
+      return { profileSourceRoot: null };
     }
 
     const loginCommand = CodexHarnessAdapter.getLoginCommand(command);
@@ -996,6 +1000,7 @@ export class CodexHarnessAdapter
       codexHomeDir,
       trustedProjectPaths,
     });
+    return { profileSourceRoot: null };
   }
 
   static async prepareManagedCodexHome(args: {
@@ -1020,7 +1025,7 @@ export class CodexHarnessAdapter
     );
     const trustedProjectPaths =
       await CodexHarnessAdapter.resolveTrustedProjectPaths(args.workspacePath);
-    await CodexHarnessAdapter.ensureManagedHomeAuth(
+    const auth = await CodexHarnessAdapter.ensureManagedHomeAuth(
       args.plan,
       managedCodexHomeDir,
       childEnv,
@@ -1047,6 +1052,8 @@ export class CodexHarnessAdapter
     }
     return {
       managedHomeDir,
+      managedCodexHomeDir,
+      profileSourceRoot: auth.profileSourceRoot,
       trustedProjectPaths,
       childEnv,
     };
@@ -1071,7 +1078,7 @@ export class CodexHarnessAdapter
     });
     const { workspacePath, attemptWorkspacePath, sessionWorkspacePath } =
       preparedWorkspace;
-    const { managedHomeDir, childEnv } =
+    const { managedHomeDir, managedCodexHomeDir, profileSourceRoot, childEnv } =
       await CodexHarnessAdapter.prepareManagedCodexHome({
         plan: args.plan,
         workspacePath,
@@ -1136,6 +1143,8 @@ export class CodexHarnessAdapter
           attemptWorkspacePath,
           sessionWorkspacePath,
           childEnv,
+          managedCodexHomeDir,
+          profileSourceRoot,
           process: child,
           reader,
           nextId: 1,
@@ -1338,11 +1347,30 @@ export class CodexHarnessAdapter
       hardKillTimeoutMs,
     );
     context.state.reader.close();
+    await CodexHarnessAdapter.persistProfileAuthFromManagedHome({
+      managedCodexHomeDir: context.state.managedCodexHomeDir,
+      profileSourceRoot: context.state.profileSourceRoot,
+    });
     await persistStageSessionWorkspace({
       sessionWorkspacePath: context.state.sessionWorkspacePath,
       attemptWorkspacePath: context.state.attemptWorkspacePath,
       excludedTopLevelEntries: [".agents", ".codex"],
     });
+  }
+
+  static async persistProfileAuthFromManagedHome(args: {
+    managedCodexHomeDir: string;
+    profileSourceRoot: string | null;
+  }): Promise<void> {
+    if (!args.profileSourceRoot) {
+      return;
+    }
+    const targetAuthPath = path.join(args.profileSourceRoot, ".codex", "auth.json");
+    await ensureDir(path.dirname(targetAuthPath));
+    await fs.copyFile(
+      CodexHarnessAdapter.getAuthPath(args.managedCodexHomeDir),
+      targetAuthPath,
+    );
   }
 
   static getHarness(

@@ -1076,6 +1076,7 @@ const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST
 const entry = request.auth?.self?.default;
 if (entry?.method !== "oauth" || entry?.profile !== "default" || !entry?.filesRoot) process.exit(11);
 if (request.auth?.adapters?.codex) process.exit(12);
+fs.writeFileSync(path.join(entry.filesRoot, ".codex", "auth.json"), "{\\"refreshed\\":true}\\n");
 const output = process.env.WORKBENCH_OUTPUT;
 fs.mkdirSync(output, { recursive: true });
 fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
@@ -1117,6 +1118,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       now: "2026-04-27T00:00:00.000Z",
     });
 
+    const adapterAuthUpdates: WorkbenchAdapterAuthBundle[] = [];
     const completed = await executeAdapterInCurrentRuntime({
       job,
       spec,
@@ -1140,6 +1142,9 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
         }],
         updatedAt: "2026-05-07T00:00:00.000Z",
       }],
+      adapterAuthUpdateSink: async (updates) => {
+        adapterAuthUpdates.push(...updates);
+      },
       baseFiles: [{
         path: "prompt.md",
         kind: "text",
@@ -1161,6 +1166,8 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
 
     expect(execution.adapter.auth).toBe("default");
     expect(completed.status).toBe("succeeded");
+    expect(adapterAuthUpdates).toHaveLength(1);
+    expect(adapterAuthUpdates[0]!.files[0]!.content).toBe("{\"refreshed\":true}\n");
   });
 
   test("sandbox execution dispatches command improve adapters by operation result output", async () => {

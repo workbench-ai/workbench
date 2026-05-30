@@ -20,6 +20,9 @@ import {
   createSandboxAdapterRequest,
   executionResultFromCompletedSandboxJob,
 } from "../sandbox-inputs.ts";
+import {
+  persistWorkbenchAdapterAuthUpdates,
+} from "../adapter-auth-updates.ts";
 import type {
   WorkbenchExecutionRuntimeInput,
 } from "../execution-runtime-types.ts";
@@ -128,7 +131,7 @@ export function createDockerSandboxPlane(
       };
     },
     async exec(request) {
-      const completedJob = await runDockerSandboxExecution(request.sandbox, request.execution);
+      const completedJob = await runDockerSandboxExecution(args, request.sandbox, request.execution);
       return await executionResultFromCompletedSandboxJob({
         completedJob,
         execution: request.execution,
@@ -231,6 +234,7 @@ async function prepareDockerSandboxWorkspace(
 }
 
 async function runDockerSandboxExecution(
+  args: WorkbenchExecutionRuntimeInput,
   sandbox: SandboxHandle,
   execution: WorkbenchExecutionSpec,
 ): Promise<HostedWorkbenchJob> {
@@ -332,6 +336,7 @@ async function runDockerSandboxExecution(
   if (!response.job || typeof response.job !== "object") {
     throw new Error("Sandbox adapter runner response omitted job.");
   }
+  await persistWorkbenchAdapterAuthUpdates(args, response.adapterAuthProfiles);
   return response.job as HostedWorkbenchJob;
 }
 

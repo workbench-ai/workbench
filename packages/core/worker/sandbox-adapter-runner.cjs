@@ -28,12 +28,18 @@ async function main() {
     } = await import(runtimeImport);
     markStage("runtime-imported");
     const startedAt = typeof request.startedAt === "string" ? request.startedAt : new Date().toISOString();
+    const adapterAuthProfiles = [];
     const runtimeInput = {
       ...validated.jobInput,
       now: startedAt,
       workspaceRoot: workspaceRootFromEnvironment(),
       pullImages: false,
       runtimeRegistry: "",
+      adapterAuthUpdateSink: async (updates) => {
+        if (Array.isArray(updates)) {
+          adapterAuthProfiles.push(...updates);
+        }
+      },
     };
     const completedJob = validated.jobInput.runtimeControlOperation
       ? await executeRuntimeControlOperationSequenceInCurrentRuntime(
@@ -49,7 +55,11 @@ async function main() {
           validated.capability,
         );
     markStage("adapter-completed");
-    fs.writeFileSync(responsePath, `${JSON.stringify({ ok: true, job: completedJob }, null, 2)}\n`);
+    fs.writeFileSync(responsePath, `${JSON.stringify({
+      ok: true,
+      job: completedJob,
+      ...(adapterAuthProfiles.length > 0 ? { adapterAuthProfiles } : {}),
+    }, null, 2)}\n`);
   } catch (error) {
     markStage("failed");
     fs.writeFileSync(responsePath, `${JSON.stringify({
