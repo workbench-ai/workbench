@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   buildWorkbenchTraceSessionsFromFiles,
   candidateRecordWithoutDerivedFields,
+  compactWorkbenchRuntimeJobForExchange,
   mergeWorkbenchRuntimeCandidateForExchange,
   sanitizeWorkbenchRuntimeCandidateForExchange,
   sanitizeWorkbenchRuntimeJobForExchange,
@@ -146,13 +147,7 @@ export async function exportLocalRuntimeBundle(
   options: { currentBenchmarkFingerprint?: string } = {},
 ): Promise<WorkbenchRuntimeBundle> {
   const snapshot = await loadLocalArchive(workspace);
-  const jobs = (await readLocalJobs(workspace)).map(sanitizeRuntimeJobForExchange);
-  const executionFiles = await Promise.all(
-    jobs.map(async (job) => ({
-      jobId: job.id,
-      files: await readLocalExecutionFiles(workspace, job.id),
-    })),
-  );
+  const jobs = (await readLocalJobs(workspace)).map(compactWorkbenchRuntimeJobForExchange);
   const activeId = options.currentBenchmarkFingerprint
     ? workbenchRuntimeExplicitActiveId({
         candidates: snapshot.candidates,
@@ -172,7 +167,7 @@ export async function exportLocalRuntimeBundle(
     evaluations: snapshot.evaluations.map((evaluation) => ({ ...evaluation })),
     runs: snapshot.runs.map((run) => ({ ...run })),
     jobs,
-    executionFiles,
+    executionFiles: [],
     events: snapshot.events.map((event) => ({ ...event })),
   };
 }

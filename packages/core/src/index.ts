@@ -451,6 +451,38 @@ export function sanitizeWorkbenchRuntimeJobForExchange(
   return { ...portable };
 }
 
+export function compactWorkbenchRuntimeJobForExchange(
+  job: HostedWorkbenchJob,
+): HostedWorkbenchJob {
+  const portable = sanitizeWorkbenchRuntimeJobForExchange(job);
+  return {
+    ...portable,
+    input: compactRuntimeJobJson(portable.input),
+    ...(portable.output !== undefined
+      ? { output: compactRuntimeJobJson(portable.output) }
+      : {}),
+  };
+}
+
+function compactRuntimeJobJson(value: Json): Json {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const next: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  delete next.baseFiles;
+  delete next.engineResolveFiles;
+  delete next.fileSet;
+  delete next.files;
+  delete next.traceFiles;
+  const candidatePatch = next.candidatePatch;
+  if (candidatePatch && typeof candidatePatch === "object" && !Array.isArray(candidatePatch)) {
+    const compactPatch: Record<string, unknown> = { ...(candidatePatch as Record<string, unknown>) };
+    delete compactPatch.files;
+    next.candidatePatch = compactPatch;
+  }
+  return next as Json;
+}
+
 export function sanitizeWorkbenchRuntimeCandidateForExchange(
   candidate: CandidateRecord,
 ): CandidateRecord {
