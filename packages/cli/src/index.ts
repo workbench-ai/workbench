@@ -31,6 +31,7 @@ import {
   runWorkbenchExecutionDag,
   resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml,
+  runtimeResources,
   summarizeCandidateFiles,
   validateWorkbenchRunEnvelope,
   validateWorkbenchResolvedSourceYaml,
@@ -4294,6 +4295,11 @@ async function pushBenchmark(
     throw new UsageError("Missing hosted benchmark. Run workbench push from a source directory.");
   }
   if (dryRun) {
+    const remoteProject = await verifyLinkedPushDryRunTarget({
+      baseUrl,
+      origin,
+      projectId,
+    });
     writeOutput(
       {
         ok: true,
@@ -4303,6 +4309,7 @@ async function pushBenchmark(
         baseUrl,
         benchmarkId: projectId,
         remote: origin.remote,
+        benchmark: remoteProject,
         benchmarkName: source.spec.name,
         visibility: visibility ?? "unchanged",
         sourceFileCount: sourceFileCount(source),
@@ -4363,6 +4370,28 @@ async function pushBenchmark(
     },
   );
   return 0;
+}
+
+async function verifyLinkedPushDryRunTarget(args: {
+  baseUrl: string;
+  origin: WorkbenchOrigin;
+  projectId: string;
+}): Promise<HostedProjectSummary & { id: string; ownerUsername?: string; name?: string }> {
+  const response = await apiRequest<{
+    benchmark: HostedProjectSummary & { id: string; ownerUsername?: string; name?: string };
+  }>(projectApiPath(args.projectId), {}, args.baseUrl);
+  const expected = parseOriginRemote(args.origin);
+  const actualOwner = response.benchmark.ownerUsername;
+  const actualProject = response.benchmark.name;
+  if (actualOwner !== expected.owner || actualProject !== expected.project) {
+    const actualRemote = actualOwner && actualProject
+      ? `${actualOwner}/${actualProject}`
+      : "unknown";
+    throw new UsageError(
+      `Workbench origin points to ${args.origin.remote}, but ${args.projectId} resolved to ${actualRemote}.`,
+    );
+  }
+  return response.benchmark;
 }
 
 async function createHostedBenchmarkFromState(args: {
@@ -5705,32 +5734,19 @@ function isRemoteProjectId(value: string): boolean {
 
 function hostedEnvironmentOptions(source: LocalProjectSource): {
   network: "off" | "on";
-  resources: Partial<{
+  resources: {
     cpu: number;
     memoryGb: number;
     diskGb: number;
     timeoutMinutes: number;
-  }>;
+  };
 } {
-  const rawResources = source.spec.environment.resources ?? {};
   return {
     network:
       source.spec.environment.network?.egress === "open"
         ? "on"
         : "off",
-    resources: {
-      cpu: typeof rawResources.cpu === "number" ? rawResources.cpu : undefined,
-      memoryGb:
-        typeof rawResources.memoryGb === "number"
-          ? rawResources.memoryGb
-          : undefined,
-      diskGb:
-        typeof rawResources.diskGb === "number" ? rawResources.diskGb : undefined,
-      timeoutMinutes:
-        typeof rawResources.timeoutMinutes === "number"
-          ? rawResources.timeoutMinutes
-          : undefined,
-    },
+    resources: runtimeResources(source.spec.environment),
   };
 }
 

@@ -4,11 +4,13 @@ import path from "node:path";
 import {
   buildWorkbenchTraceSessionsFromFiles,
   candidateRecordWithoutDerivedFields,
+  mergeWorkbenchRuntimeCandidateForExchange,
   sanitizeWorkbenchRuntimeCandidateForExchange,
   sanitizeWorkbenchRuntimeJobForExchange,
   selectExecutionOutputFilesForInspection,
   workbenchRuntimeExplicitActiveId,
   workbenchRuntimeBundleStats,
+  workbenchRuntimeCandidateIdentityForExchange,
   workbenchSurfaceFilesEqualForExchange,
   type CandidateRecord,
   type EvaluationScorecard,
@@ -192,7 +194,7 @@ export async function importLocalRuntimeBundle(
   const incomingCandidates = bundle.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange);
   const candidates = mergeRecordsById(existingCandidates, incomingCandidates, (candidate) => candidate.id, (didChange) => {
     changed ||= didChange;
-  }, runtimeCandidatesCompatibleForExchange, mergeRuntimeCandidateForExchange).sort(compareLocalCandidateRecords);
+  }, runtimeCandidatesCompatibleForExchange, mergeWorkbenchRuntimeCandidateForExchange).sort(compareLocalCandidateRecords);
   const candidateFiles = { ...snapshot.candidateFiles };
   for (const group of bundle.candidateFiles) {
     const candidateId = localRecordName(group.candidateId);
@@ -368,9 +370,12 @@ export async function readLocalExecutionFiles(
   workspace: string,
   jobId: string,
 ): Promise<SurfaceSnapshotFile[]> {
-  return await readSurfaceFiles(
-    path.join(localRuntimeDir(workspace), "execution-files", localRecordName(jobId)),
-  );
+  return selectExecutionOutputFilesForInspection({
+    purpose: null,
+    files: await readSurfaceFiles(
+      path.join(localRuntimeDir(workspace), "execution-files", localRecordName(jobId)),
+    ),
+  });
 }
 
 export async function readLocalCandidateRecord(
@@ -604,46 +609,9 @@ function runtimeCandidatesCompatibleForExchange(
   right: CandidateRecord,
 ): boolean {
   return runtimeRecordsEqual(
-    runtimeCandidateIdentityForExchange(left),
-    runtimeCandidateIdentityForExchange(right),
+    workbenchRuntimeCandidateIdentityForExchange(left),
+    workbenchRuntimeCandidateIdentityForExchange(right),
   );
-}
-
-function runtimeCandidateIdentityForExchange(candidate: CandidateRecord): unknown {
-  const {
-    eval: _eval,
-    prompt: _prompt,
-    meta: _meta,
-    status: _status,
-    usage: _usage,
-    visibility: _visibility,
-    ownerUserId: _ownerUserId,
-    ownerUsername: _ownerUsername,
-    metrics: _metrics,
-    candidateRunId: _candidateRunId,
-    candidateRunName: _candidateRunName,
-    ...identity
-  } = candidate as CandidateRecord & {
-    metrics?: unknown;
-    candidateRunId?: unknown;
-    candidateRunName?: unknown;
-  };
-  return identity;
-}
-
-function mergeRuntimeCandidateForExchange(
-  left: CandidateRecord,
-  right: CandidateRecord,
-): CandidateRecord {
-  return {
-    ...left,
-    ...right,
-    ...(right.eval ? { eval: right.eval } : left.eval ? { eval: left.eval } : {}),
-    ...(right.prompt ? { prompt: right.prompt } : left.prompt ? { prompt: left.prompt } : {}),
-    ...(right.meta !== undefined ? { meta: right.meta } : left.meta !== undefined ? { meta: left.meta } : {}),
-    ...(right.usage ? { usage: right.usage } : left.usage ? { usage: left.usage } : {}),
-    visibility: right.visibility ?? left.visibility,
-  };
 }
 
 function runtimeEvaluationsCompatibleForExchange(
@@ -758,9 +726,6 @@ function validateLocalArchiveIndex(snapshot: LocalArchiveIndex): void {
     const candidate = snapshot.candidates.find((entry) => entry.id === evaluation.candidateId);
     if (!candidate) {
       throw new Error(`evaluation ${evaluation.id}.candidateId not found: ${evaluation.candidateId}`);
-    }
-    if (candidate.benchmarkFingerprint !== evaluation.benchmarkFingerprint) {
-      throw new Error(`evaluation ${evaluation.id}.benchmarkFingerprint does not match candidate ${candidate.id}.`);
     }
     if (candidate.candidateFingerprint !== evaluation.candidateFingerprint) {
       throw new Error(`evaluation ${evaluation.id}.candidateFingerprint does not match candidate ${candidate.id}.`);

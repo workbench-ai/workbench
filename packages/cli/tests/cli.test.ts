@@ -3896,7 +3896,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       visibility: "private",
       createdAt: "2026-05-28T00:00:00.000Z",
       referenceIds: [],
-      status: "created",
+      status: "running",
       fileChanges: ["prompt.md"],
       eval: {
         metrics: { score: 0.5 },
@@ -3966,8 +3966,12 @@ await fs.writeFile(resultPath, JSON.stringify({
       activeId: candidateId,
       candidates: [{
         ...candidate,
+        version: 3,
+        ordinal: 3,
         visibility: "public",
+        createdAt: "2026-05-28T00:02:00.000Z",
         status: "evaluated",
+        fileChanges: ["hosted-rollup.md"],
       }],
       candidateFiles: [{
         candidateId,
@@ -4073,6 +4077,52 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
     const archive = await loadLocalArchive(workspace);
     expect(archive.activeId).toBeNull();
+  });
+
+  test("local runtime archive permits historical evaluation benchmark fingerprints", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-runtime-historical-eval-"));
+    const candidate: CandidateRecord = {
+      id: "candidate_same",
+      name: "Skill",
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint: "current-benchmark",
+      candidateFingerprint: "candidate-fp",
+      visibility: "private",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: [],
+    };
+    const evaluation = {
+      id: "eval_historical",
+      runId: "run_historical",
+      benchmarkFingerprint: "historical-benchmark",
+      candidateFingerprint: candidate.candidateFingerprint,
+      candidateId: candidate.id,
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:00:01.000Z",
+      status: "completed",
+      sampleCount: 1,
+      completedSampleCount: 1,
+      errorSampleCount: 0,
+    } as EvaluationScorecard;
+
+    await saveLocalArchive(workspace, {
+      activeId: null,
+      candidates: [candidate],
+      candidateFiles: {
+        [candidate.id]: [textFile("prompt.md", "candidate\n")],
+      },
+      evaluations: [evaluation],
+      runs: [],
+      events: [],
+    });
+
+    await expect(loadLocalArchive(workspace)).resolves.toMatchObject({
+      candidates: [{ benchmarkFingerprint: "current-benchmark" }],
+      evaluations: [{ benchmarkFingerprint: "historical-benchmark" }],
+    });
   });
 
   test("runtime import restores active from explicit run state instead of latest candidate order", async () => {
@@ -5704,6 +5754,22 @@ await fs.writeFile(resultPath, JSON.stringify({
     const expectedRuntimeFingerprint = workbenchRuntimeBundleFingerprint(runtime);
     expect(expectedRuntimeFingerprint).not.toBe("rt_remote_base");
 
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      requests.push(`${init?.method ?? "GET"} ${url}`);
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+            visibility: "public",
+          },
+        });
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
     const io = createIo();
     expect(await runCli(["push", "--dir", root, "--dry-run", "--json"], io)).toBe(0);
     expect(JSON.parse(io.stdoutText())).toMatchObject({
@@ -5715,6 +5781,37 @@ await fs.writeFile(resultPath, JSON.stringify({
       },
       runtimeFingerprint: expectedRuntimeFingerprint,
     });
+    expect(requests).toEqual([
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
+    ]);
+  });
+
+  test("push dry-run validates access to the linked remote before reporting an update", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "workbench-push-dry-run-auth-"));
+    expect(await runCli(["init", root, "--command", "push-command-eval", "--json"], createIo())).toBe(0);
+    const sourceFingerprint = await currentSourceFingerprint(root);
+    await mkdir(path.join(root, ".workbench"), { recursive: true });
+    await writeFile(
+      path.join(root, ".workbench", "origin.json"),
+      JSON.stringify(originFixture({
+        remote: "test/demo",
+        sourceFingerprint,
+      }), null, 2),
+      "utf8",
+    );
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc") {
+        return Response.json(
+          { error: "Workbench benchmark not found: wb_123456789abc" },
+          { status: 404 },
+        );
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    expect(await runCli(["push", "--dir", root, "--dry-run"], io)).toBe(1);
+    expect(io.stderrText()).toContain("Workbench benchmark not found: wb_123456789abc");
   });
 
   test("push uploads binary snapshots without utf8 corruption", async () => {

@@ -98,7 +98,7 @@ For hosted eval, pass `--candidate CANDIDATE_ID` when evaluating an existing hos
 
 When a watched or reused hosted run reaches a terminal state from a checkout linked to the same remote project, Workbench imports the hosted project state back into local if local authored source still matches the remembered base. Explicit `--benchmark` runs against a different project leave the current checkout untouched.
 
-For remote collaboration, use `workbench clone OWNER/BENCHMARK`, `workbench pull`, and `workbench push`. If source changed on both sides since the last exchange, pull or push fails instead of choosing a winner; resolve by pushing or restoring local source before pulling, or pulling hosted source before pushing.
+For remote collaboration, use `workbench clone OWNER/BENCHMARK`, `workbench pull`, and `workbench push`. If source changed on both sides since the last exchange, pull or push fails instead of choosing a winner; resolve by pushing or restoring local source before pulling, or pulling hosted source before pushing. Linked `workbench push --dry-run` verifies that the active Workbench account can read the remembered remote before reporting an update plan. Runtime sync treats candidate timestamps, versions, status, usage, owner, visibility, and generated tool profile/cache directories as read-model details; candidate files, inspectable execution outputs, and immutable fingerprints remain the conflict guards.
 
 ## Local Trace Inspection
 

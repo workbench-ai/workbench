@@ -32,7 +32,9 @@ import {
   validateWorkbenchResolvedSourceYaml,
   workbenchBenchmarkContentFingerprint,
   workbenchCandidateContentFingerprint,
+  workbenchProjectSourceFingerprint,
   workbenchRuntimeBundleFingerprint,
+  workbenchRuntimeCandidateIdentityForExchange,
   workbenchRunExecutionFingerprint,
   workbenchTraceExecutionDirectory,
   workbenchTraceRunDirectory,
@@ -115,6 +117,87 @@ describe("Workbench runtime generic execution", () => {
       network: "off",
     }));
 
+    const promptFile = {
+      path: "prompt.txt",
+      kind: "text" as const,
+      encoding: "utf8" as const,
+      executable: false,
+      content: "Say ok.\n",
+    };
+    const actualsFile = {
+      path: "actuals.json",
+      kind: "text" as const,
+      encoding: "utf8" as const,
+      executable: false,
+      content: "{}\n",
+    };
+    const caseA = {
+      id: "case-a",
+      case: { version: 3, prompt: "A" },
+      files: {
+        public: [promptFile],
+        private: [actualsFile],
+        source: [actualsFile, promptFile],
+      },
+    };
+    const caseB = {
+      id: "case-b",
+      case: { version: 3, prompt: "B" },
+      files: {
+        public: [promptFile],
+        private: [],
+        source: [promptFile],
+      },
+    };
+    const engineResolveResult = (cases: unknown[]) =>
+      [textSurfaceFile("workbench-result.json", `${JSON.stringify({
+        protocol: "workbench.adapter-result.v1",
+        operation: "engine.resolve",
+        ok: true,
+        value: { cases },
+        feedback: { path: "tasks" },
+      }, null, 2)}\n`)];
+    const orderedEngineResolveFiles = engineResolveResult([caseA, caseB]);
+    const unorderedEngineResolveFiles = engineResolveResult([caseB, caseA]);
+    expect(workbenchBenchmarkContentFingerprint({
+      sourceYaml,
+      engineResolveFiles: unorderedEngineResolveFiles,
+      engineResolveBinding,
+      runtimeFiles,
+      resources: {},
+      network: "off",
+    })).toBe(workbenchBenchmarkContentFingerprint({
+      sourceYaml,
+      engineResolveFiles: orderedEngineResolveFiles,
+      engineResolveBinding,
+      runtimeFiles,
+      resources: {},
+      network: "off",
+    }));
+    expect(workbenchProjectSourceFingerprint({
+      source: sourceYaml,
+      candidateFiles,
+      engineResolveFiles: unorderedEngineResolveFiles,
+      engineResolveBinding,
+      adapterFiles: [],
+      dockerfile: runtimeFiles[0]!.content,
+      runtimeDockerfile: runtimeFiles[0]!.content,
+      runtimeFiles,
+      resources: {},
+      network: "off",
+    })).toBe(workbenchProjectSourceFingerprint({
+      source: sourceYaml,
+      candidateFiles,
+      engineResolveFiles: orderedEngineResolveFiles,
+      engineResolveBinding,
+      adapterFiles: [],
+      dockerfile: runtimeFiles[0]!.content,
+      runtimeDockerfile: runtimeFiles[0]!.content,
+      runtimeFiles,
+      resources: {},
+      network: "off",
+    }));
+
     expect(workbenchCandidateContentFingerprint({
       sourceYaml,
       candidateFiles,
@@ -133,6 +216,7 @@ describe("Workbench runtime generic execution", () => {
       candidateFingerprint: "candidate",
       visibility: "private",
       createdAt: "2026-01-01T00:00:00.000Z",
+      referenceIds: [],
       status: "evaluated",
       fileChanges: [],
       ownerUserId: "user_1",
@@ -157,6 +241,7 @@ describe("Workbench runtime generic execution", () => {
       candidateFingerprint: "candidate",
       visibility: "private",
       createdAt: "2026-01-01T00:00:00.000Z",
+      referenceIds: [],
       status: "evaluated",
       fileChanges: [],
     });
@@ -178,6 +263,45 @@ describe("Workbench runtime generic execution", () => {
     };
     expect(workbenchRuntimeBundleFingerprint(baseBundle)).toBe(
       workbenchRuntimeBundleFingerprint(strippedBundle),
+    );
+    expect(workbenchRuntimeCandidateIdentityForExchange({
+      ...candidate,
+      name: "Display Name",
+      version: 99,
+      ordinal: 99,
+      visibility: "public",
+      createdAt: "2026-01-02T00:00:00.000Z",
+      status: "running",
+      fileChanges: ["derived-summary.md"],
+      usage: { total: { totalTokens: 1 } },
+      eval: { samples: [] } as unknown as CandidateRecord["eval"],
+      prompt: "derived prompt",
+      meta: { derived: true },
+    })).toEqual({
+      id: "candidate_1",
+      candidateFingerprint: "candidate",
+      baseId: null,
+      referenceIds: [],
+    });
+    expect(workbenchRuntimeBundleFingerprint(baseBundle)).toBe(
+      workbenchRuntimeBundleFingerprint({
+        ...baseBundle,
+        candidates: [{
+          ...candidate,
+          benchmarkFingerprint: "new-benchmark",
+          name: "Display Name",
+          version: 99,
+          ordinal: 99,
+          visibility: "public",
+          createdAt: "2026-01-02T00:00:00.000Z",
+          status: "running",
+          fileChanges: ["derived-summary.md"],
+          usage: { total: { totalTokens: 1 } },
+          eval: { samples: [] } as unknown as CandidateRecord["eval"],
+          prompt: "derived prompt",
+          meta: { derived: true },
+        }],
+      }),
     );
 
     const job = {
@@ -560,6 +684,9 @@ describe("Workbench runtime generic execution", () => {
       { path: "outputs/result.json", content: "{}" },
       { path: "workbench-result.json", content: "{}" },
       { path: ".workbench/traces/job/output.xlsx", encoding: "base64", content: "AA==" },
+      { path: "lo_profile/user/registrymodifications.xcu", content: "cache" },
+      { path: "soffice_profile/user/basic/script.xlc", content: "cache" },
+      { path: "__pycache__/build_model.cpython-312.pyc", content: "cache" },
     ]);
 
     expect(selectExecutionOutputFilesForInspection({

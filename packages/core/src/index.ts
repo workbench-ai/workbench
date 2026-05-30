@@ -55,6 +55,7 @@ import {
   collectWorkbenchAdapterInvocations,
   parseWorkbenchAdapterManifest,
   readWorkbenchAdapterOperationResult,
+  WORKBENCH_ADAPTER_RESULT_FILE,
   WORKBENCH_RUNTIME_CONTROL_TOKEN_ENV,
   WORKBENCH_RUNTIME_CONTROL_URL_ENV,
   workbenchAdapterOperationCommand,
@@ -465,6 +466,37 @@ export function sanitizeWorkbenchRuntimeCandidateForExchange(
   return { ...portable };
 }
 
+export function workbenchRuntimeCandidateIdentityForExchange(
+  candidate: CandidateRecord,
+): {
+  id: string;
+  candidateFingerprint: string;
+  baseId: string | null;
+  referenceIds: string[];
+} {
+  return {
+    id: candidate.id,
+    candidateFingerprint: candidate.candidateFingerprint,
+    baseId: candidate.baseId ?? null,
+    referenceIds: [...candidate.referenceIds].sort(),
+  };
+}
+
+export function mergeWorkbenchRuntimeCandidateForExchange(
+  left: CandidateRecord,
+  right: CandidateRecord,
+): CandidateRecord {
+  return {
+    ...left,
+    ...right,
+    ...(right.eval ? { eval: right.eval } : left.eval ? { eval: left.eval } : {}),
+    ...(right.prompt ? { prompt: right.prompt } : left.prompt ? { prompt: left.prompt } : {}),
+    ...(right.meta !== undefined ? { meta: right.meta } : left.meta !== undefined ? { meta: left.meta } : {}),
+    ...(right.usage ? { usage: right.usage } : left.usage ? { usage: left.usage } : {}),
+    visibility: right.visibility ?? left.visibility,
+  };
+}
+
 export interface WorkbenchBenchmarkContentFingerprintInput {
   sourceYaml: string;
   engineResolveFiles: readonly SurfaceSnapshotFile[];
@@ -570,7 +602,7 @@ export function workbenchRuntimeBundleFingerprint(
     schema: bundle.schema,
     activeId: bundle.activeId,
     candidates: sortByStableKey(
-      bundle.candidates.map(sanitizeWorkbenchRuntimeCandidateForExchange),
+      bundle.candidates.map(workbenchRuntimeCandidateIdentityForExchange),
       (candidate) => candidate.id,
     ),
     candidateFiles: sortByStableKey(
@@ -831,9 +863,92 @@ function canonicalFilesForProjectStateFingerprint(
       path: file.path,
       encoding: file.encoding,
       executable: Boolean(file.executable),
-      content: file.content,
+      content: canonicalFileContentForProjectStateFingerprint(file),
     })),
     (file) => file.path,
+  );
+}
+
+function canonicalFileContentForProjectStateFingerprint(
+  file: SurfaceSnapshotFile,
+): string {
+  if (
+    file.encoding !== "utf8" ||
+    normalizeSourcePathForContentFingerprint(file.path) !== WORKBENCH_ADAPTER_RESULT_FILE
+  ) {
+    return file.content;
+  }
+  return canonicalEngineResolveResultContentForFingerprint(file.content);
+}
+
+function canonicalEngineResolveResultContentForFingerprint(content: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return content;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return content;
+  }
+  const record = parsed as Record<string, unknown>;
+  const value = record.value && typeof record.value === "object" && !Array.isArray(record.value)
+    ? record.value as Record<string, unknown>
+    : null;
+  if (!Array.isArray(value?.cases)) {
+    return JSON.stringify(canonicalizeProjectState(record));
+  }
+  return JSON.stringify(canonicalizeProjectState({
+    ...record,
+    value: {
+      ...value,
+      cases: sortByStableKey(
+        value.cases.map(canonicalEngineResolveCaseForFingerprint),
+        (engineCase) => engineCase.id,
+      ),
+    },
+  }));
+}
+
+function canonicalEngineResolveCaseForFingerprint(value: unknown): Record<string, unknown> & { id: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { id: JSON.stringify(value), value };
+  }
+  const record = value as Record<string, unknown>;
+  const files = record.files && typeof record.files === "object" && !Array.isArray(record.files)
+    ? record.files as Record<string, unknown>
+    : null;
+  return {
+    ...record,
+    id: typeof record.id === "string" ? record.id : JSON.stringify(record.id ?? record),
+    ...(files
+      ? {
+          files: {
+            ...files,
+            public: canonicalEngineResolveCaseFilesForFingerprint(files.public),
+            private: canonicalEngineResolveCaseFilesForFingerprint(files.private),
+            source: canonicalEngineResolveCaseFilesForFingerprint(files.source),
+          },
+        }
+      : {}),
+  };
+}
+
+function canonicalEngineResolveCaseFilesForFingerprint(value: unknown): unknown {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  if (!value.every((entry) =>
+    entry &&
+    typeof entry === "object" &&
+    !Array.isArray(entry) &&
+    typeof (entry as Record<string, unknown>).path === "string"
+  )) {
+    return value;
+  }
+  return sortByStableKey(
+    value.map((entry) => ({ ...(entry as Record<string, unknown>) })),
+    (entry) => String(entry.path),
   );
 }
 
@@ -1711,7 +1826,10 @@ export function selectExecutionOutputFilesForInspection(args: {
   files: readonly SurfaceSnapshotFile[];
   output?: Record<string, unknown> | null | undefined;
 }): SurfaceSnapshotFile[] {
-  return args.files.filter((file) => !isWorkbenchInternalOutputPath(file.path));
+  return args.files.filter((file) =>
+    !isWorkbenchInternalOutputPath(file.path) &&
+    !isGeneratedExecutionOutputPath(file.path)
+  );
 }
 
 export function isWorkbenchInternalOutputPath(filePath: string): boolean {
@@ -1724,6 +1842,36 @@ export function isWorkbenchInternalOutputPath(filePath: string): boolean {
     normalized === "sandbox_error.log" ||
     normalized === "exit_code" ||
     /^[a-z_-]+_(stdout\.log|stderr\.log|exit_code)$/u.test(normalized)
+  );
+}
+
+export function isGeneratedExecutionOutputPath(filePath: string): boolean {
+  const normalized = normalizeRelativePath(filePath);
+  if (normalized.endsWith(".pyc")) {
+    return true;
+  }
+  return normalized.split("/").some(isGeneratedExecutionOutputSegment);
+}
+
+function isGeneratedExecutionOutputSegment(segment: string): boolean {
+  if (
+    segment === "__pycache__" ||
+    segment === ".cache" ||
+    segment === ".mypy_cache" ||
+    segment === ".pytest_cache" ||
+    segment === ".ruff_cache" ||
+    segment === ".venv" ||
+    segment === "node_modules" ||
+    segment === "venv"
+  ) {
+    return true;
+  }
+  if (segment === "lohome" || segment === "lo_tmp") {
+    return true;
+  }
+  return (
+    /^lo[-_]?.*profile\d*$/u.test(segment) ||
+    /^(soffice|recalc|usability).*profile\d*$/u.test(segment)
   );
 }
 
