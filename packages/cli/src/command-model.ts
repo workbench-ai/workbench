@@ -155,7 +155,7 @@ const commandHelp: Record<string, string> = Object.fromEntries(Object.entries({
     "  workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]",
     "  workbench improve --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]",
     "",
-    "Ensure a candidate improvement exists for the selected base, run, budget, and samples. Without --hosted, execution writes local records. With --hosted, Workbench starts or reuses hosted work against the configured remote or --benchmark target. Completed work is reused only when base, run configuration, source, adapters, benchmark, budget, and samples match; use --rerun to intentionally spend again.",
+    "Ensure a candidate improvement exists for the selected base, run, budget, and samples. Improve defaults to the evaluated active candidate when it belongs to the current benchmark fingerprint; otherwise it evaluates and uses the authored current candidate. Without --hosted, execution writes local records. With --hosted, Workbench starts or reuses hosted work against the configured remote or --benchmark target. Completed work is reused only when base, run configuration, source, adapters, benchmark, budget, and samples match; use --rerun to intentionally spend again.",
     "",
     "Examples:",
     "  workbench improve --budget 1 --samples 1",

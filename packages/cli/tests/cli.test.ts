@@ -9,14 +9,17 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { rootUsage } from "../src/command-model";
 import { composeRuntimeDockerfileWithAdapters } from "../src/adapter-project";
-import { localBenchmarkFingerprint, projectStateBenchmarkFingerprint } from "../src/benchmark-fingerprint";
+import { localBenchmarkFingerprint, localCandidateFingerprint, projectStateBenchmarkFingerprint } from "../src/benchmark-fingerprint";
 import { startLocalWorkbenchDevServer } from "../src/dev-open-server";
 import { runCli } from "../src/index";
-import { importLocalRuntimeBundle, loadLocalArchive, readLocalJobs, saveLocalArchive, saveLocalJobs, upsertLocalRun } from "../src/local-archive";
+import { exportLocalRuntimeBundle, importLocalRuntimeBundle, loadLocalArchive, readLocalJobs, saveLocalArchive, saveLocalJobs, upsertLocalRun } from "../src/local-archive";
 import { readLocalProjectSource } from "../src/project-source";
 import { packageRoot, productRoot } from "./test-paths";
 import {
   engineResolveBindingForSpec,
+  normalizeSurfaceFiles,
+  workbenchRunExecutionFingerprint,
+  workbenchRuntimeBundleFingerprint,
   type CandidateRecord,
   type EvaluationScorecard,
   type HostedWorkbenchJob,
@@ -1238,6 +1241,77 @@ describe("workbench CLI", () => {
       expect(run.localView?.note).toContain("Keep this command running while using the local web view");
     }
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("local improve defaults to the evaluated active candidate", async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-local-improve-active-"));
+    expect(await runCli(["init", workspace, "--command", "local-command-eval", "--json"], createIo())).toBe(0);
+    await writeDockerNodeWorkbenchSpec(workspace);
+    const projectSource = await readLocalProjectSource(workspace);
+    const benchmarkFingerprint = localBenchmarkFingerprint(projectSource);
+    const executionFingerprint = workbenchRunExecutionFingerprint({
+      sourceYaml: projectSource.specSource,
+      adapterFiles: normalizeSurfaceFiles(projectSource.adapterFiles),
+    });
+    const activeId = "candidate_active_001";
+    const authoredId = "candidate_authored_001";
+    const activeCandidate: CandidateRecord = {
+      id: activeId,
+      version: 1,
+      ordinal: 1,
+      benchmarkFingerprint,
+      candidateFingerprint: "active-candidate-fingerprint",
+      visibility: "private",
+      createdAt: "2026-05-29T00:00:00.000Z",
+      referenceIds: [],
+      status: "evaluated",
+      fileChanges: ["run.js"],
+    };
+    const authoredCandidate: CandidateRecord = {
+      ...activeCandidate,
+      id: authoredId,
+      version: 2,
+      ordinal: 2,
+      candidateFingerprint: localCandidateFingerprint(projectSource),
+      createdAt: "2026-05-29T00:01:00.000Z",
+    };
+    await saveLocalArchive(workspace, {
+      activeId,
+      candidates: [activeCandidate, authoredCandidate],
+      candidateFiles: {
+        [activeId]: [textFile("run.js", "console.log('active')\n")],
+        [authoredId]: [textFile("run.js", "console.log('authored')\n")],
+      },
+      evaluations: [],
+      runs: [localRunSummary({
+        id: "run_active_reuse",
+        workflow: "improve",
+        benchmarkFingerprint,
+        candidateId: activeId,
+        candidateRunId: projectSource.spec.candidate.selectedRunId,
+        candidateRunName: projectSource.spec.candidate.selectedRunName,
+        executionFingerprint,
+        budget: 1,
+        samples: 1,
+        status: "finished",
+        outcome: "ok",
+        outputCandidateId: activeId,
+        activeCandidateId: activeId,
+        finishedAt: "2026-05-29T00:02:00.000Z",
+      })],
+      events: [],
+    });
+
+    const io = createIo();
+    expect(await runCli(["improve", "--dir", workspace, "--budget", "1", "--samples", "1", "--json"], io)).toBe(0);
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      reused: true,
+      runId: "run_active_reuse",
+      outputCandidateId: activeId,
+      activeCandidateId: activeId,
+    });
+    expect((await loadLocalArchive(workspace)).activeId).toBe(activeId);
   });
 
   test("check reports binary environment egress and rejects legacy allowlist", async () => {
@@ -5607,6 +5681,40 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(exitCode).toBe(2);
     expect(io.stderrText()).toContain("Dockerfile not found:");
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("push dry-run reports the local runtime fingerprint for linked updates", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "workbench-push-dry-run-runtime-fp-"));
+    expect(await runCli(["init", root, "--command", "push-command-eval", "--json"], createIo())).toBe(0);
+    const sourceFingerprint = await currentSourceFingerprint(root);
+    await mkdir(path.join(root, ".workbench"), { recursive: true });
+    await writeFile(
+      path.join(root, ".workbench", "origin.json"),
+      JSON.stringify(originFixture({
+        sourceFingerprint,
+        runtimeFingerprint: "rt_remote_base",
+      }), null, 2),
+      "utf8",
+    );
+    const candidateId = await seedLocalCandidate(root);
+    const source = await readLocalProjectSource(root);
+    const runtime = await exportLocalRuntimeBundle(root, {
+      currentBenchmarkFingerprint: localBenchmarkFingerprint(source),
+    });
+    const expectedRuntimeFingerprint = workbenchRuntimeBundleFingerprint(runtime);
+    expect(expectedRuntimeFingerprint).not.toBe("rt_remote_base");
+
+    const io = createIo();
+    expect(await runCli(["push", "--dir", root, "--dry-run", "--json"], io)).toBe(0);
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      dryRun: true,
+      action: "update",
+      runtime: {
+        activeId: candidateId,
+      },
+      runtimeFingerprint: expectedRuntimeFingerprint,
+    });
   });
 
   test("push uploads binary snapshots without utf8 corruption", async () => {

@@ -157,7 +157,7 @@ workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [-
 
 Hosted benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so `OWNER/BENCHMARK` is the only public benchmark reference shape.
 
-`workbench eval` and `workbench improve` reuse completed work only when the candidate, run configuration, source, adapters, benchmark, and requested samples/budget match; `--rerun` is the explicit duplicate-spend escape hatch. Runtime candidates are automatically versioned display snapshots such as `Skill v1`, `Skill v2`, and `Skill v3`; authored YAML owns the candidate family and run configurations, not version labels.
+`workbench eval` and `workbench improve` reuse completed work only when the candidate, run configuration, source, adapters, benchmark, and requested samples/budget match; `--rerun` is the explicit duplicate-spend escape hatch. Local and hosted improve default to the evaluated active candidate when that candidate belongs to the current benchmark fingerprint; otherwise they evaluate and use the authored current candidate. Runtime candidates are automatically versioned display snapshots such as `Skill v1`, `Skill v2`, and `Skill v3`; authored YAML owns the candidate family and run configurations, not version labels.
 
 When watched or reused hosted lifecycle work reaches a terminal state from a checkout linked to the same remote project, the CLI imports the hosted project-state envelope back into local under the same local-source guard used by `pull`. Successful `push` also imports the accepted runtime state so local and hosted active pointers stay aligned. Explicit `--benchmark` targets for a different project do not mutate the current checkout.
 

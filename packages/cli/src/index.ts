@@ -1511,41 +1511,31 @@ async function ensureLocalImproveBaseCandidate(args: {
 }): Promise<CandidateRecord> {
   let snapshot = await loadLocalArchive(args.workspace);
   const explicitBase = asOptionalString(args.parsed.flags.from);
-  const benchmarkFingerprint = await readLocalBenchmarkFingerprint(args.workspace);
+  const benchmarkFingerprint = localBenchmarkFingerprint(args.projectSource);
+  const baseCandidateArgs = {
+    workspace: args.workspace,
+    benchmarkFingerprint,
+    projectSource: args.projectSource,
+    samples: args.samples,
+    rerun: args.parsed.flags.rerun === true,
+    io: args.io,
+    runtimeOptions: args.runtimeOptions,
+  };
   if (explicitBase) {
-    let candidate = readLocalCandidate(snapshot, explicitBase);
-    if (candidate.benchmarkFingerprint !== benchmarkFingerprint) {
-      throw new UsageError(
-        `Base candidate ${explicitBase} belongs to benchmark ${candidate.benchmarkFingerprint}, not ${benchmarkFingerprint}.`,
-      );
+    return await ensureEvaluatedLocalImproveBaseCandidate({
+      ...baseCandidateArgs,
+      candidateId: explicitBase,
+    });
+  }
+
+  if (snapshot.activeId) {
+    const activeCandidate = readLocalCandidate(snapshot, snapshot.activeId);
+    if (activeCandidate.benchmarkFingerprint === benchmarkFingerprint) {
+      return await ensureEvaluatedLocalImproveBaseCandidate({
+        ...baseCandidateArgs,
+        candidateId: activeCandidate.id,
+      });
     }
-    if (!candidate.candidateFingerprint) {
-      throw new UsageError(`Base candidate ${explicitBase} is missing a candidate fingerprint.`);
-    }
-    if (candidate.status !== "evaluated" && !candidate.eval) {
-      const code = await localEvaluateCandidate(
-        [
-          "--dir",
-          args.workspace,
-          "--candidate",
-          explicitBase,
-          "--runs",
-          args.projectSource.spec.candidate.selectedRunId,
-          "--samples",
-          String(args.samples),
-          ...(args.parsed.flags.rerun === true ? ["--rerun"] : []),
-          "--json",
-        ],
-        createSilentIo(args.io),
-        args.runtimeOptions,
-      );
-      if (code !== 0) {
-        throw new UsageError(`Base candidate ${explicitBase} eval failed; improve was not started.`);
-      }
-      snapshot = await loadLocalArchive(args.workspace);
-      candidate = readLocalCandidate(snapshot, explicitBase);
-    }
-    return candidate;
   }
 
   const candidateFingerprint = localCandidateFingerprint(args.projectSource);
@@ -1592,6 +1582,52 @@ async function ensureLocalImproveBaseCandidate(args: {
     throw new UsageError("Parent candidate eval did not produce an evaluated candidate.");
   }
   return evaluated;
+}
+
+async function ensureEvaluatedLocalImproveBaseCandidate(args: {
+  workspace: string;
+  candidateId: string;
+  benchmarkFingerprint: string;
+  projectSource: LocalProjectSource;
+  samples: number;
+  rerun: boolean;
+  io: CliIo;
+  runtimeOptions: CliRuntimeOptions;
+}): Promise<CandidateRecord> {
+  let snapshot = await loadLocalArchive(args.workspace);
+  let candidate = readLocalCandidate(snapshot, args.candidateId);
+  if (candidate.benchmarkFingerprint !== args.benchmarkFingerprint) {
+    throw new UsageError(
+      `Base candidate ${args.candidateId} belongs to benchmark ${candidate.benchmarkFingerprint}, not ${args.benchmarkFingerprint}.`,
+    );
+  }
+  if (!candidate.candidateFingerprint) {
+    throw new UsageError(`Base candidate ${args.candidateId} is missing a candidate fingerprint.`);
+  }
+  if (candidate.status === "evaluated" || candidate.eval) {
+    return candidate;
+  }
+  const code = await localEvaluateCandidate(
+    [
+      "--dir",
+      args.workspace,
+      "--candidate",
+      args.candidateId,
+      "--runs",
+      args.projectSource.spec.candidate.selectedRunId,
+      "--samples",
+      String(args.samples),
+      ...(args.rerun ? ["--rerun"] : []),
+      "--json",
+    ],
+    createSilentIo(args.io),
+    args.runtimeOptions,
+  );
+  if (code !== 0) {
+    throw new UsageError(`Base candidate ${args.candidateId} eval failed; improve was not started.`);
+  }
+  snapshot = await loadLocalArchive(args.workspace);
+  return readLocalCandidate(snapshot, args.candidateId);
 }
 
 function createSilentIo(io: CliIo): CliIo {
@@ -4191,6 +4227,7 @@ async function pushBenchmark(
   const runtime = await exportLocalRuntimeBundle(dir, {
     currentBenchmarkFingerprint: localBenchmarkFingerprint(source),
   });
+  const localRuntimeFingerprint = workbenchRuntimeBundleFingerprint(runtime);
   const state = localProjectState({
     source,
     runtime,
@@ -4211,7 +4248,7 @@ async function pushBenchmark(
           sourceFileCount: sourceFileCount(source),
           runtime: runtimeBundleStats(runtime),
           sourceFingerprint: state.source.fingerprint,
-          runtimeFingerprint: state.base.runtimeFingerprint,
+          runtimeFingerprint: localRuntimeFingerprint,
         },
         parsed,
         io,
@@ -4271,7 +4308,7 @@ async function pushBenchmark(
         sourceFileCount: sourceFileCount(source),
         runtime: runtimeBundleStats(runtime),
         sourceFingerprint: state.source.fingerprint,
-        runtimeFingerprint: state.base.runtimeFingerprint,
+        runtimeFingerprint: localRuntimeFingerprint,
       },
       parsed,
       io,
