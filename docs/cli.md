@@ -89,6 +89,8 @@ workbench push
 
 `workbench push` creates or updates the hosted benchmark from local project state. If the hosted source changed since the remembered base, push fails and asks you to pull first. `workbench push --dry-run` for a linked checkout first verifies that the signed-in account can read the remembered remote. Runtime history is merged idempotently; equal candidate facts are kept even when local and hosted read-model fields such as timestamps, versions, status, usage, owner, or visibility differ. New ids are added, and same-id different candidate files or immutable fingerprints fail instead of choosing a winner. Execution-file sync keeps inspectable outputs and drops generated tool profile/cache directories. A successful push imports the accepted runtime state back into local, including the active candidate pointer.
 
+Hosted project reads used by clone, pull, push dry-runs, and post-watch sync retry transient read failures. Mutating requests are not retried automatically.
+
 The active candidate is explicit runtime state. Sync never chooses a replacement from the latest or best evaluated candidate. If the explicit active candidate belongs to a different benchmark fingerprint than the current source, active is `null`; when source returns to a fingerprint with explicit run active facts, that active candidate is restored.
 
 `.workbench/origin.json` has one exact shape: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`. It is a remote pointer plus the last exchanged base, not a second project model.
@@ -107,6 +109,8 @@ workbench auth connect claude --method oauth
 ```
 
 File-based OAuth profiles are mutable runtime auth. Local runs serialize jobs that share the same OAuth profile, and hosted runs hold a per-profile lease while forwarding refreshed auth files back to Workbench Cloud before the next job can claim that profile.
+
+If a provider reports that an OAuth refresh token can no longer be refreshed, hosted execution marks that adapter connection `reauth_required` and finishes the run instead of reusing stale credentials for the remaining jobs. Reconnect the adapter with `workbench auth connect ADAPTER --method oauth` before retrying hosted work.
 
 Use API-key auth when you want provider API-key billing instead:
 

@@ -273,6 +273,8 @@ class WorkbenchApiRequestError extends Error {
   }
 }
 
+const API_REQUEST_MAX_ATTEMPTS = 3;
+
 interface WorkbenchAdapterSummary {
   use: string;
   model?: string;
@@ -4309,7 +4311,7 @@ async function pushBenchmark(
         baseUrl,
         benchmarkId: projectId,
         remote: origin.remote,
-        benchmark: remoteProject,
+        benchmark: hostedProjectSummaryForOutput(remoteProject),
         benchmarkName: source.spec.name,
         visibility: visibility ?? "unchanged",
         sourceFileCount: sourceFileCount(source),
@@ -4392,6 +4394,19 @@ async function verifyLinkedPushDryRunTarget(args: {
     );
   }
   return response.benchmark;
+}
+
+function hostedProjectSummaryForOutput(
+  project: HostedProjectSummary & { id?: string; ownerUsername?: string; name?: string },
+): HostedProjectSummary {
+  return {
+    ...(project.id ? { id: project.id } : {}),
+    ...(project.ownerUsername ? { ownerUsername: project.ownerUsername } : {}),
+    ...(project.name ? { name: project.name } : {}),
+    ...(project.visibility ? { visibility: project.visibility } : {}),
+    ...(project.activeCandidateId !== undefined ? { activeCandidateId: project.activeCandidateId } : {}),
+    ...(typeof project.starCount === "number" ? { starCount: project.starCount } : {}),
+  };
 }
 
 async function createHostedBenchmarkFromState(args: {
@@ -6118,26 +6133,57 @@ async function apiRequest<T>(
       config.baseUrl ??
       DEFAULT_BASE_URL,
   );
-  const response = await fetch(`${baseUrl}${apiPath}`, {
-    method: options.method ?? "GET",
-    headers: {
-      "content-type": "application/json",
-      ...(config.accessToken
-        ? { authorization: `Bearer ${config.accessToken}` }
-        : {}),
-    },
-    body: options.body == null ? undefined : JSON.stringify(options.body),
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new WorkbenchApiRequestError(
-      response.status,
-      readResponseError(text) ||
-        `Request failed with status ${response.status}${response.statusText ? ` ${response.statusText}` : ""}.`,
-      text,
-    );
+  const method = options.method ?? "GET";
+  const canRetry = method === "GET";
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= API_REQUEST_MAX_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}${apiPath}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          ...(config.accessToken
+            ? { authorization: `Bearer ${config.accessToken}` }
+            : {}),
+        },
+        body: options.body == null ? undefined : JSON.stringify(options.body),
+      });
+    } catch (error) {
+      lastError = error;
+      if (canRetry && attempt < API_REQUEST_MAX_ATTEMPTS && isTransientFetchError(error)) {
+        await sleep(apiRequestRetryDelayMs(attempt));
+        continue;
+      }
+      throw error;
+    }
+    if (!response.ok) {
+      const text = await response.text();
+      const requestError = new WorkbenchApiRequestError(
+        response.status,
+        readResponseError(text) ||
+          `Request failed with status ${response.status}${response.statusText ? ` ${response.statusText}` : ""}.`,
+        text,
+      );
+      lastError = requestError;
+      if (canRetry && attempt < API_REQUEST_MAX_ATTEMPTS && isTransientApiRequestError(requestError)) {
+        await sleep(apiRequestRetryDelayMs(attempt));
+        continue;
+      }
+      throw requestError;
+    }
+    return (await response.json()) as T;
   }
-  return (await response.json()) as T;
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Workbench API request failed."));
+}
+
+function apiRequestRetryDelayMs(attempt: number): number {
+  return 250 * attempt;
+}
+
+function isTransientFetchError(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /(?:fetch failed|socket hang up|ECONNRESET|EPIPE|UND_ERR_SOCKET|terminated)/iu.test(message);
 }
 
 async function uploadAdapterConnection(

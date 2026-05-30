@@ -37,7 +37,7 @@ The public benchmark is readable without Workbench Cloud login. It starts with t
 
 Before scaffolding a benchmark, run `workbench whoami --json`. Inspect `adapterStatuses` and `hostedAuth.adapters`. Prefer a connected `codex` profile. If Codex is not connected, use another connected provider that fits the requested workflow. If no provider is connected, default to `codex`.
 
-Workbench Cloud auth and adapter auth are separate. Use `workbench login` before Cloud operations. Connect adapter auth before local or hosted runs when `whoami` reports the selected adapter as disconnected. Use `workbench auth connect codex --method oauth` or `workbench auth connect claude --method oauth` to reuse subscription sign-in. OAuth file profiles are mutable runtime auth: Workbench serializes jobs sharing a profile and saves refreshed auth before the next job claims it. Use `--method api-key` with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` only when the user wants provider API-key billing. For other adapters, inspect methods with `workbench adapters inspect ADAPTER`.
+Workbench Cloud auth and adapter auth are separate. Use `workbench login` before Cloud operations. Connect adapter auth before local or hosted runs when `whoami` reports the selected adapter as disconnected or `reauth_required`. Use `workbench auth connect codex --method oauth` or `workbench auth connect claude --method oauth` to reuse subscription sign-in. OAuth file profiles are mutable runtime auth: Workbench serializes jobs sharing a profile and saves refreshed auth before the next job claims it. If hosted execution marks an OAuth adapter `reauth_required`, reconnect it before retrying hosted work. Use `--method api-key` with `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` only when the user wants provider API-key billing. For other adapters, inspect methods with `workbench adapters inspect ADAPTER`.
 
 ## Create And Push A Benchmark
 
@@ -99,6 +99,8 @@ For hosted eval, pass `--candidate CANDIDATE_ID` when evaluating an existing hos
 When a watched or reused hosted run reaches a terminal state from a checkout linked to the same remote project, Workbench imports the hosted project state back into local if local authored source still matches the remembered base. Explicit `--benchmark` runs against a different project leave the current checkout untouched.
 
 For remote collaboration, use `workbench clone OWNER/BENCHMARK`, `workbench pull`, and `workbench push`. If source changed on both sides since the last exchange, pull or push fails instead of choosing a winner; resolve by pushing or restoring local source before pulling, or pulling hosted source before pushing. Linked `workbench push --dry-run` verifies that the active Workbench account can read the remembered remote before reporting an update plan. Runtime sync treats candidate timestamps, versions, status, usage, owner, visibility, and generated tool profile/cache directories as read-model details; candidate files, inspectable execution outputs, and immutable fingerprints remain the conflict guards.
+
+Hosted project reads used by clone, pull, push dry-runs, and post-watch sync retry transient read failures. Mutating requests are not retried automatically.
 
 ## Local Trace Inspection
 

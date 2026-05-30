@@ -5755,8 +5755,13 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(expectedRuntimeFingerprint).not.toBe("rt_remote_base");
 
     const requests: string[] = [];
+    let fetchAttempts = 0;
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       requests.push(`${init?.method ?? "GET"} ${url}`);
+      fetchAttempts += 1;
+      if (fetchAttempts === 1) {
+        throw new TypeError("fetch failed: socket hang up");
+      }
       if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc") {
         return Response.json({
           benchmark: {
@@ -5764,6 +5769,9 @@ await fs.writeFile(resultPath, JSON.stringify({
             ownerUsername: "alice",
             name: "demo",
             visibility: "public",
+            snapshots: {
+              candidate: { files: [{ path: "large.txt", contentRedacted: true }] },
+            },
           },
         });
       }
@@ -5772,16 +5780,25 @@ await fs.writeFile(resultPath, JSON.stringify({
 
     const io = createIo();
     expect(await runCli(["push", "--dir", root, "--dry-run", "--json"], io)).toBe(0);
-    expect(JSON.parse(io.stdoutText())).toMatchObject({
+    const output = JSON.parse(io.stdoutText());
+    expect(output).toMatchObject({
       ok: true,
       dryRun: true,
       action: "update",
+      benchmark: {
+        id: "wb_123456789abc",
+        ownerUsername: "alice",
+        name: "demo",
+        visibility: "public",
+      },
       runtime: {
         activeId: candidateId,
       },
       runtimeFingerprint: expectedRuntimeFingerprint,
     });
+    expect(output.benchmark).not.toHaveProperty("snapshots");
     expect(requests).toEqual([
+      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
       "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
     ]);
   });
