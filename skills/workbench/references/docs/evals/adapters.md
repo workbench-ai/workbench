@@ -33,7 +33,7 @@ adapters:
   - git:https://github.com/acme/workbench-adapter.git#4f2c1a9
 ```
 
-Path sources must stay inside the benchmark source tree. `npm:` and `git:` sources are resolved during local source reading and hosted publication. Exact npm versions and git commits are pinned; npm tags, git branches, and default branches float.
+Path sources must stay inside the benchmark source tree. `npm:` and `git:` sources are resolved during local source reading and remote publication. Exact npm versions and git commits are pinned; npm tags, git branches, and default branches float.
 
 The CLI default adapter catalog includes `workbench` for the native engine and `codex`, `claude`, and `command` for candidate, improve, or command-backed engine behavior. The built-in Workbench engine owns native task loading plus the `tests` and `rubric` scoring helpers selected only inside `engine.with.score`; they are not additional public adapter categories or top-level authoring primitives.
 
@@ -134,7 +134,7 @@ engine:
     path: terminal-bench-subset
 ```
 
-The Harbor engine adapter should stay a thin bridge to Harbor. Harbor itself owns `instruction.md`, `task.toml`, `environment/`, `tests/`, health-check, MCP-server, and `solution/` interpretation, candidate invocation, artifact handoff, verifier/reward behavior, and same-sandbox versus separate-sandbox verifier topology. Core runtime remains generic and records the engine's normalized job result, trace sessions, trace files, and artifacts. Host engine adapters use runtime-control when they want Workbench to allocate child sandboxes; TypeScript adapters can call `runWorkbenchRuntimeOperationSequence` from `@workbench-ai/workbench-protocol`, and raw adapters can call the bearer-protected HTTP endpoint directly. A Harbor adapter should call Harbor inspect/export and run APIs, expose Workbench runtime-control as a sandbox provider when Harbor asks for sandboxes, and normalize the final Harbor result instead of reimplementing Harbor `task.toml` semantics in Workbench code. Use benchmark-contained paths for portable Cloud runs; if an engine reads outside the benchmark tree, its `engine.resolve` operation must emit inspectable resolved files. Hosted pushes upload resolved cases plus an `engineResolveBinding` so Cloud can verify the snapshot belongs to the selected resolver without re-running engine-specific logic.
+The Harbor engine adapter should stay a thin bridge to Harbor. Harbor itself owns `instruction.md`, `task.toml`, `environment/`, `tests/`, health-check, MCP-server, and `solution/` interpretation, candidate invocation, artifact handoff, verifier/reward behavior, and same-sandbox versus separate-sandbox verifier topology. Core runtime remains generic and records the engine's normalized job result, trace sessions, trace files, and artifacts. Host engine adapters use runtime-control when they want Workbench to allocate child sandboxes; TypeScript adapters can call `runWorkbenchRuntimeOperationSequence` from `@workbench-ai/workbench-protocol`, and raw adapters can call the bearer-protected HTTP endpoint directly. A Harbor adapter should call Harbor inspect/export and run APIs, expose Workbench runtime-control as a sandbox backend when Harbor asks for sandboxes, and normalize the final Harbor result instead of reimplementing Harbor `task.toml` semantics in Workbench code. Use benchmark-contained paths for portable Cloud runs; if an engine reads outside the benchmark tree, its `engine.resolve` operation must emit inspectable resolved files. Remote pushes upload resolved cases plus an `engineResolveBinding` so Cloud can verify the snapshot belongs to the selected resolver without re-running engine-specific logic.
 
 ## Auth
 
@@ -147,7 +147,7 @@ workbench auth connect my-agent --method api-key
 workbench auth connect deployer/github --method token-file
 ```
 
-Workbench injects only the auth required by the adapter invocation being executed. Hosted workers receive scoped adapter auth material, not user home directories or service credentials.
+Workbench injects only the auth required by the adapter invocation being executed. Remote workers receive scoped adapter auth material, not user home directories or service credentials.
 
 ## Adapter Slots
 
@@ -190,7 +190,7 @@ Replay a request fixture locally:
 workbench adapters test adapters/my-agent --request adapter-request.json --output out/adapter-test
 ```
 
-When `--request` is provided, Workbench parses the request, checks that `invocation.use` matches the manifest id, runs the requested operation command with `WORKBENCH_ADAPTER_REQUEST` and `WORKBENCH_OUTPUT`, and verifies `workbench-result.json`. Use `--output` when you want a stable local output directory; otherwise Workbench creates a temporary output directory and reports it in command output. This is a local command replay; it does not start Docker or a hosted run.
+When `--request` is provided, Workbench parses the request, checks that `invocation.use` matches the manifest id, runs the requested operation command with `WORKBENCH_ADAPTER_REQUEST` and `WORKBENCH_OUTPUT`, and verifies `workbench-result.json`. Use `--output` when you want a stable local output directory; otherwise Workbench creates a temporary output directory and reports it in command output. This is a local command replay; it does not start Docker or a remote run.
 
 ## Protocol Versioning
 

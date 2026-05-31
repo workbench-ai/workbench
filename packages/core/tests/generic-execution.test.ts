@@ -131,9 +131,9 @@ describe("generic sandbox execution contract", () => {
       "    optimizeOn:\n      split: train",
       "    optimizeOn:\n      all: true\n      split: train",
     ));
-    const staleSurface = validateWorkbenchResolvedSourceYaml(source.replace(
+    const unsupportedImproveField = validateWorkbenchResolvedSourceYaml(source.replace(
       "    optimizeOn:\n      split: train",
-      "    caseSets:\n      train:\n        split: train",
+      "    selection:\n      split: train",
     ));
     const missingMetric = validateWorkbenchResolvedSourceYaml(source.replace(
       "      metric: score\n",
@@ -152,8 +152,8 @@ describe("generic sandbox execution contract", () => {
     });
     expect(invalid.ok).toBe(false);
     expect(invalid.errors.join("\n")).toContain("resolved Workbench source.candidate.improve.optimizeOn must specify either all or split, not both.");
-    expect(staleSurface.ok).toBe(false);
-    expect(staleSurface.errors.join("\n")).toContain("resolved Workbench source.candidate.improve includes unsupported field: caseSets.");
+    expect(unsupportedImproveField.ok).toBe(false);
+    expect(unsupportedImproveField.errors.join("\n")).toContain("resolved Workbench source.candidate.improve includes unsupported field: selection.");
     expect(missingMetric.ok).toBe(false);
     expect(missingMetric.errors.join("\n")).toContain("resolved Workbench source.candidate.improve.selectBy.metric must be a non-empty string.");
   });
@@ -1443,8 +1443,8 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
 
     expect(workbenchExecutionExecutorForRuntimeInput(jobInput)).toBe("host");
     const completed = await executeWorkbenchExecutionJob(jobInput, {
-      sandboxProvider: DOCKER_SANDBOX_BACKEND,
-      createSandboxPlaneForProvider() {
+      sandboxBackend: DOCKER_SANDBOX_BACKEND,
+      createSandboxPlaneForBackend() {
         sandboxPlaneRequested = true;
         throw new Error("sandbox plane should not be created for host executor");
       },
@@ -1534,8 +1534,8 @@ fs.writeFileSync(request.paths.result, JSON.stringify({
         engineResolveFiles: [],
         engineCases,
       }, {
-        sandboxProvider: DOCKER_SANDBOX_BACKEND,
-        createSandboxPlaneForProvider() {
+        sandboxBackend: DOCKER_SANDBOX_BACKEND,
+        createSandboxPlaneForBackend() {
           throw new Error("sandbox plane should not be created for host executor");
         },
       });
@@ -1671,8 +1671,8 @@ fs.writeFileSync(path.join(request.paths.output, "workbench-result.json"), JSON.
       engineResolveFiles: [publicFile],
       engineCases,
     }, {
-      sandboxProvider: DOCKER_SANDBOX_BACKEND,
-      createSandboxPlaneForProvider(_provider, runtimeArgs, startedAt) {
+      sandboxBackend: DOCKER_SANDBOX_BACKEND,
+      createSandboxPlaneForBackend(_backend, runtimeArgs, startedAt) {
         childPrivateFiles = runtimeArgs.engineCases[0]?.files.private ?? [];
         return {
           backend: {
@@ -2095,7 +2095,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     expect(output.files?.map((file) => file.path).sort()).toEqual(["prompt.md", "scripts/evaluate.py"]);
   });
 
-  test("run envelope budget limits are shared across local and hosted planning", () => {
+  test("run envelope budget limits are shared across local and remote planning", () => {
     expect(expectedWorkbenchRunJobCount({
       workflow: "improve",
       budget: 2,
@@ -2199,17 +2199,17 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
   });
 
   test("rejects non-binary authored network policies", () => {
-    const allowlist = validateWorkbenchResolvedSourceYaml(genericSpecWithoutEnvironmentNetwork().replace(
+    const unsupportedEgress = validateWorkbenchResolvedSourceYaml(genericSpecWithoutEnvironmentNetwork().replace(
       "environment:\n        dockerfile: environment/Dockerfile",
-      "environment:\n        dockerfile: environment/Dockerfile\n        network:\n          egress: allowlist",
+      "environment:\n        dockerfile: environment/Dockerfile\n        network:\n          egress: private",
     ));
     const allowField = validateWorkbenchResolvedSourceYaml(genericSpecWithoutEnvironmentNetwork().replace(
       "environment:\n        dockerfile: environment/Dockerfile",
       "environment:\n        dockerfile: environment/Dockerfile\n        network:\n          egress: open\n          allow:\n            - api.example.com",
     ));
 
-    expect(allowlist.ok).toBe(false);
-    expect(allowlist.errors).toContain("benchmark.yaml.engine.with.environment.network.egress must be none or open.");
+    expect(unsupportedEgress.ok).toBe(false);
+    expect(unsupportedEgress.errors).toContain("benchmark.yaml.engine.with.environment.network.egress must be none or open.");
     expect(allowField.ok).toBe(false);
     expect(allowField.errors).toContain("benchmark.yaml.engine.with.environment.network includes unsupported field: allow.");
   });

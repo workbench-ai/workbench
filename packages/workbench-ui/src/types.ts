@@ -4,6 +4,7 @@ import type {
   EvaluationSummary,
   MetricStats,
   RuntimeSnapshot,
+  WorkbenchEvaluationMetricDescriptor,
 } from "@workbench-ai/workbench-contract";
 
 export type {
@@ -23,27 +24,18 @@ export type {
   CandidateFilePreview as CandidateWorkspaceFilePreview,
   AuthoredWorkbenchSourceSpec,
   AuthoredWorkbenchSourceDocument,
-  HostedWorkbenchJob,
-  HostedWorkbenchRun,
+  RemoteWorkbenchJob,
+  RemoteWorkbenchRun,
   RunSummary,
   WorkbenchExecutionEvidence,
   WorkbenchExecutionTraceDetail,
 } from "@workbench-ai/workbench-contract";
 
-export type EvaluationMetricDirection = "higher" | "lower";
-export type EvaluationMetricKind = "number" | "duration_ms" | "currency_usd";
-export type EvaluationMetricGroup = "metric" | "execution" | "usage" | "other";
-export type EvaluationMetricSemanticRole = "performance" | "speed" | "cost";
-
-export interface EvaluationMetricDescriptor {
-  id: string;
-  label: string;
-  direction: EvaluationMetricDirection;
-  kind: EvaluationMetricKind;
-  group: EvaluationMetricGroup;
-  primary: boolean;
-  semanticRole?: EvaluationMetricSemanticRole;
-}
+export type EvaluationMetricDescriptor = WorkbenchEvaluationMetricDescriptor;
+export type EvaluationMetricDirection = WorkbenchEvaluationMetricDescriptor["direction"];
+export type EvaluationMetricKind = WorkbenchEvaluationMetricDescriptor["kind"];
+export type EvaluationMetricGroup = WorkbenchEvaluationMetricDescriptor["group"];
+export type EvaluationMetricSemanticRole = NonNullable<WorkbenchEvaluationMetricDescriptor["semanticRole"]>;
 
 export type EvaluationMetricStats = MetricStats;
 

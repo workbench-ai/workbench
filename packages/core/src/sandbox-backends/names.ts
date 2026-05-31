@@ -2,21 +2,19 @@ export const DOCKER_SANDBOX_BACKEND = "docker";
 
 export type WorkbenchSandboxBackendName = typeof DOCKER_SANDBOX_BACKEND;
 
-export type WorkbenchSandboxProviderName = WorkbenchSandboxBackendName;
-
-export function isWorkbenchSandboxProviderName(value: string): value is WorkbenchSandboxProviderName {
+export function isWorkbenchSandboxBackendName(value: string): value is WorkbenchSandboxBackendName {
   return value === DOCKER_SANDBOX_BACKEND;
 }
 
-export function resolveWorkbenchSandboxProviderName(
+export function resolveWorkbenchSandboxBackendName(
   value: string | null | undefined,
-): WorkbenchSandboxProviderName {
+): WorkbenchSandboxBackendName {
   const normalized = value?.trim();
   if (!normalized) {
-    throw new Error("Sandbox provider is required.");
+    throw new Error("Sandbox backend is required.");
   }
-  if (isWorkbenchSandboxProviderName(normalized)) {
+  if (isWorkbenchSandboxBackendName(normalized)) {
     return normalized;
   }
-  throw new Error(`Unsupported local sandbox provider ${normalized}. Supported providers: docker.`);
+  throw new Error(`Unsupported local sandbox backend ${normalized}. Supported backends: docker.`);
 }

@@ -21,7 +21,7 @@ describe.runIf(process.env.WORKBENCH_PACKAGING_TEST === "1")("packaged Workbench
     expect(result.stdout).toContain("workbench init");
     expect(result.stdout).toContain("workbench push [SOURCE] [--dir DIR]");
     expect(result.stdout).toContain("workbench pull [--dir DIR]");
-    expect(result.stdout).toContain("workbench improve [SOURCE] [--dir DIR] [--hosted]");
+    expect(result.stdout).toContain("workbench improve --remote [SOURCE] [--dir DIR]");
     expect(result.stdout).toContain("workbench open [SOURCE|OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID]");
     expect(result.stdout).not.toContain("workbench cloud");
   });

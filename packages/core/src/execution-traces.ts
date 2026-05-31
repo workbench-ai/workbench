@@ -1,5 +1,5 @@
 import type {
-  HostedWorkbenchJob,
+  RemoteWorkbenchJob,
   Json,
   SurfaceSnapshotFile,
   WorkbenchExecutionTrace,
@@ -13,7 +13,7 @@ export interface WorkbenchTraceMergeJob {
 }
 
 export function finalizeWorkbenchExecutionTraceForJob(args: {
-  job: HostedWorkbenchJob;
+  job: RemoteWorkbenchJob;
   stageId: string;
   trace: WorkbenchExecutionTrace;
 }): WorkbenchExecutionTrace {
@@ -116,7 +116,7 @@ export function mergeWorkbenchExecutionTracesByJob(args: {
 }
 
 export function buildWorkbenchTraceSessionsFromFiles(args: {
-  job: HostedWorkbenchJob;
+  job: RemoteWorkbenchJob;
   files: readonly SurfaceSnapshotFile[];
   purpose?: string | null;
   fallbackRole: WorkbenchTraceSession["role"];
@@ -517,7 +517,7 @@ function sanitizeTraceComponent(value: string): string {
 
 function finalizeTraceSummary(args: {
   summary: WorkbenchExecutionTrace["summaries"][number] | null;
-  job: HostedWorkbenchJob;
+  job: RemoteWorkbenchJob;
   status: WorkbenchExecutionTrace["summaries"][number]["status"];
   terminal: boolean;
   attempt: number;
@@ -561,7 +561,7 @@ function sameSummaryStage(
 }
 
 function traceStatusForJob(
-  status: HostedWorkbenchJob["status"],
+  status: RemoteWorkbenchJob["status"],
 ): WorkbenchExecutionTrace["summaries"][number]["status"] {
   if (status === "succeeded") {
     return "completed";

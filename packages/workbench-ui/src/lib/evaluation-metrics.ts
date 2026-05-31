@@ -1,4 +1,5 @@
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
+import { buildWorkbenchEvaluationMetricDescriptors } from "@workbench-ai/workbench-contract";
 
 import {
   formatDurationMs,
@@ -48,51 +49,7 @@ export interface EvaluationTradeoffDatum {
 export function buildEvaluationMetricDescriptors(
   evaluations: readonly LabeledEvaluationSummary[],
 ): EvaluationMetricDescriptor[] {
-  const descriptors = new Map<string, EvaluationMetricDescriptor>();
-  for (const evaluation of evaluations.filter(isCompleteEvaluationSummary)) {
-    for (const metricId of Object.keys(evaluation.evaluation?.metrics ?? evaluation.metrics ?? {})) {
-      descriptors.set(metricId, metricDescriptor(metricId));
-    }
-    if (evaluation.selectionMetric && evaluation.selectionScore) {
-      descriptors.set(evaluation.selectionMetric, metricDescriptor(evaluation.selectionMetric));
-    }
-    if (evaluation.evaluation?.durationMs ?? evaluation.durationMs) {
-      descriptors.set("durationMs", {
-        id: "durationMs",
-        label: "Duration",
-        direction: "lower",
-        kind: "duration_ms",
-        group: "execution",
-        primary: true,
-        semanticRole: "speed",
-      });
-    }
-    if (evaluation.evaluation?.usage?.total?.costUsd ?? evaluation.usage?.total?.costUsd) {
-      descriptors.set("usage.total.costUsd", {
-        id: "usage.total.costUsd",
-        label: "Cost",
-        direction: "lower",
-        kind: "currency_usd",
-        group: "usage",
-        primary: true,
-        semanticRole: "cost",
-      });
-    }
-  }
-  return [...descriptors.values()].sort(compareMetricDescriptors);
-}
-
-function metricDescriptor(metricId: string): EvaluationMetricDescriptor {
-  const isScoreMetric = metricId === "score";
-  return {
-    id: metricId,
-    label: formatMetricLabel(metricId),
-    direction: "higher",
-    kind: "number",
-    group: "metric",
-    primary: isScoreMetric,
-    ...(isScoreMetric ? { semanticRole: "performance" as const } : {}),
-  };
+  return buildWorkbenchEvaluationMetricDescriptors(evaluations);
 }
 
 const costAxisFormatter = new Intl.NumberFormat("en-US", {
@@ -276,39 +233,4 @@ function compareMetricRows(
     return valueOrder;
   }
   return left.evaluationLabel.localeCompare(right.evaluationLabel);
-}
-
-function compareMetricDescriptors(
-  left: EvaluationMetricDescriptor,
-  right: EvaluationMetricDescriptor,
-): number {
-  const rank = (descriptor: EvaluationMetricDescriptor) =>
-    descriptor.semanticRole === "performance"
-      ? 0
-      : descriptor.semanticRole === "speed"
-        ? 1
-        : descriptor.semanticRole === "cost"
-          ? 2
-          : descriptor.primary
-            ? 3
-            : 4;
-  const rankOrder = rank(left) - rank(right);
-  if (rankOrder !== 0) {
-    return rankOrder;
-  }
-  return left.label.localeCompare(right.label);
-}
-
-function formatMetricLabel(metricId: string): string {
-  if (metricId === "durationMs") {
-    return "Duration";
-  }
-  if (metricId === "usage.total.costUsd") {
-    return "Cost";
-  }
-  return metricId
-    .split(/[._-]+/u)
-    .filter(Boolean)
-    .map((segment) => segment.slice(0, 1).toUpperCase() + segment.slice(1))
-    .join(" ");
 }

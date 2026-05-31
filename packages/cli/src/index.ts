@@ -8,7 +8,6 @@ import { Writable } from "node:stream";
 import YAML from "yaml";
 
 import {
-  createCandidateFilePreview,
   createBaselineCandidateJob as createRuntimeBaselineCandidateJob,
   evaluationScorecardId,
   evaluationMeanMetrics,
@@ -32,7 +31,6 @@ import {
   resolveEngineCaseExecutionConfig,
   resolveWorkbenchResolvedSourceYaml,
   runtimeResources,
-  summarizeCandidateFiles,
   validateWorkbenchRunEnvelope,
   validateWorkbenchResolvedSourceYaml,
   parseWorkbenchAdapterAuthTarget,
@@ -47,7 +45,7 @@ import {
   type EvaluationScorecard,
   type EngineResolveBinding,
   type WorkbenchExecutionRuntimeInput,
-  type HostedWorkbenchJob,
+  type RemoteWorkbenchJob,
   type Json,
   type RunSummary,
   type RuntimeEvent,
@@ -57,11 +55,13 @@ import {
   type WorkbenchProjectState,
   type WorkbenchProjectStateImportResult,
   type WorkbenchProjectStateSource,
+  type WorkbenchRemoteRunRequest,
   type WorkbenchEngineCase,
   type WorkbenchExecutionDagCapacity,
   type WorkbenchAdapterAuthBundle,
   type WorkbenchAdapterAuthTarget,
   type WorkbenchAdapterAuthStatusRecord,
+  type WorkbenchInspection,
 } from "@workbench-ai/workbench-core";
 import {
   assertWorkbenchAdapterOperationResultOk,
@@ -85,11 +85,12 @@ import {
 
 import {
   commandUsage,
-  HOSTED_WATCH_LIFECYCLE_NOTE,
+  REMOTE_WATCH_LIFECYCLE_NOTE,
   LOCAL_DEV_OPEN_LIFECYCLE_NOTE,
   rootUsage,
 } from "./command-model.js";
 import { startLocalWorkbenchDevServer } from "./dev-open-server.js";
+import { createLocalWorkbenchInspection } from "./local-inspection.js";
 import {
   createWorkbenchInitScaffold,
   type InitAgent,
@@ -128,7 +129,7 @@ import {
   type WorkspaceSnapshotFile,
 } from "./workspace-snapshot.js";
 import {
-  hostedEngineResolveFiles,
+  remoteEngineResolveFiles,
   readLocalProjectSource,
   WORKBENCH_BENCHMARK_FILE,
   type LocalProjectSource,
@@ -173,7 +174,7 @@ interface LocalProjectStateApplyResult {
 
 interface CliRuntimeOptions {}
 
-type HostedRunWorkflow = "eval" | "improve";
+type RemoteRunWorkflow = "eval" | "improve";
 
 const require = createRequire(import.meta.url);
 
@@ -182,7 +183,7 @@ function getCliVersion(): string {
   return typeof manifest.version === "string" ? manifest.version : "unknown";
 }
 
-interface HostedTarget {
+interface RemoteTarget {
   projectId: string;
   owner?: string;
   projectName?: string;
@@ -191,7 +192,7 @@ interface HostedTarget {
   origin?: WorkbenchOrigin | null;
 }
 
-interface HostedDryRunTarget {
+interface RemoteDryRunTarget {
   projectRef: string;
   projectId?: string;
   owner?: string;
@@ -201,15 +202,13 @@ interface HostedDryRunTarget {
   origin?: WorkbenchOrigin | null;
 }
 
-interface HostedProjectSummary {
+interface RemoteProjectSummary {
   id?: string;
   ownerUsername?: string;
   name?: string;
   visibility?: "private" | "public";
   activeCandidateId?: string | null;
   starCount?: number;
-  runs?: unknown[];
-  candidates?: unknown[];
 }
 
 interface WorkbenchResourceUrls {
@@ -292,13 +291,13 @@ interface WorkbenchAdapterSourceSummary {
   overridesDefault?: boolean;
 }
 
-type HostedFile = WorkspaceSnapshotFile;
+type RemoteFile = WorkspaceSnapshotFile;
 
-interface HostedRunRecord {
+interface RemoteRunRecord {
   id: string;
   projectId?: string;
   status: string;
-  workflow?: HostedRunWorkflow;
+  workflow?: RemoteRunWorkflow;
   candidateId: string | null;
   candidateRunId?: string;
   candidateRunName?: string;
@@ -315,17 +314,20 @@ interface HostedRunRecord {
   outcome?: "ok" | "error" | "cancelled" | string | null;
   stoppedReason?: string;
   error?: string;
-  input?: Json;
+  retry?: {
+    sourceYaml?: string;
+    baseCandidateId?: string | null;
+  };
   urls?: WorkbenchResourceUrls;
 }
 
-interface HostedRunStartResponse {
-  run: HostedRunRecord;
+interface RemoteRunStartResponse {
+  run: RemoteRunRecord;
   reused?: boolean;
-  benchmark?: HostedProjectSummary & { id: string };
+  benchmark?: RemoteProjectSummary & { id: string };
 }
 
-interface HostedRunJobRecord {
+interface RemoteRunJobRecord {
   id: string;
   runId?: string;
   kind?: string;
@@ -334,9 +336,12 @@ interface HostedRunJobRecord {
   startedAt?: string;
   finishedAt?: string;
   updatedAt?: string;
-  input?: Json;
   output?: Json;
   error?: string;
+  purpose?: string;
+  caseId?: string;
+  sampleIndex?: number;
+  attemptIndex?: number;
 }
 
 interface LocalDevViewHint {
@@ -400,31 +405,31 @@ export async function runCli(
       return await pushBenchmark(argv.slice(1), io);
     }
     if (argv[0] === "eval") {
-      const hosted = extractHostedFlag(argv.slice(1));
-      return hosted.enabled
-        ? await startHostedWorkflow("eval", hosted.argv, io)
-        : await localEvaluateCandidate(hosted.argv, io, runtimeOptions);
+      const remote = extractRemoteFlag(argv.slice(1));
+      return remote.enabled
+        ? await startRemoteWorkflow("eval", remote.argv, io)
+        : await localEvaluateCandidate(remote.argv, io, runtimeOptions);
     }
     if (argv[0] === "retry") {
-      const hosted = extractHostedFlag(argv.slice(1));
-      return hosted.enabled
-        ? await retryHostedWorkflow(hosted.argv, io)
-        : await localRetry(hosted.argv, io, runtimeOptions);
+      const remote = extractRemoteFlag(argv.slice(1));
+      return remote.enabled
+        ? await retryRemoteWorkflow(remote.argv, io)
+        : await localRetry(remote.argv, io, runtimeOptions);
     }
     if (argv[0] === "improve") {
-      const hosted = extractHostedFlag(argv.slice(1));
-      return hosted.enabled
-        ? await startHostedWorkflow("improve", hosted.argv, io)
-        : await localRun(hosted.argv, io, runtimeOptions);
+      const remote = extractRemoteFlag(argv.slice(1));
+      return remote.enabled
+        ? await startRemoteWorkflow("improve", remote.argv, io)
+        : await localRun(remote.argv, io, runtimeOptions);
     }
     if (argv[0] === "restore") {
       return await localRestore(argv.slice(1), io);
     }
     if (argv[0] === "open") {
-      const hosted = extractHostedFlag(argv.slice(1));
-      return hosted.enabled
-        ? await openWorkbench(hosted.argv, io)
-        : await localDevOpen(hosted.argv, io);
+      const remote = extractRemoteFlag(argv.slice(1));
+      return remote.enabled
+        ? await openWorkbench(remote.argv, io)
+        : await localDevOpen(remote.argv, io);
     }
     if (argv[0] === "auth") {
       return await runAuthCommand(argv.slice(1), io);
@@ -435,6 +440,9 @@ export async function runCli(
     if (argv[0] === "traces") {
       return await runTracesCommand(argv.slice(1), io);
     }
+    if (argv[0] === "diagnose") {
+      return await localDiagnose(argv.slice(1), io);
+    }
     const commandPath = argv.slice(0, 2).join(" ");
     const rest = argv.slice(2);
     switch (commandPath) {
@@ -442,6 +450,12 @@ export async function runCli(
         return await localRunList(rest, io);
       case "runs show":
         return await localRunShow(rest, io);
+      case "evaluations list":
+        return await localEvaluationList(rest, io);
+      case "evaluations show":
+        return await localEvaluationShow(rest, io);
+      case "executions trace":
+        return await localExecutionTrace(rest, io);
       case "candidates list":
         return await localCandidateList(rest, io);
       case "candidates show":
@@ -496,6 +510,18 @@ function commandPathForHelp(argv: readonly string[]): string {
     return positionals.slice(0, 2).join(" ");
   }
   if (
+    positionals[0] === "evaluations" &&
+    ["list", "show"].includes(positionals[1] ?? "")
+  ) {
+    return positionals.slice(0, 2).join(" ");
+  }
+  if (
+    positionals[0] === "executions" &&
+    ["trace"].includes(positionals[1] ?? "")
+  ) {
+    return positionals.slice(0, 2).join(" ");
+  }
+  if (
     positionals[0] === "candidates" &&
     ["list", "show", "files", "preview"].includes(positionals[1] ?? "")
   ) {
@@ -504,14 +530,14 @@ function commandPathForHelp(argv: readonly string[]): string {
   return positionals[0] ?? "";
 }
 
-function extractHostedFlag(argv: readonly string[]): {
+function extractRemoteFlag(argv: readonly string[]): {
   enabled: boolean;
   argv: string[];
 } {
   let enabled = false;
   const next: string[] = [];
   for (const arg of argv) {
-    if (arg === "--hosted") {
+    if (arg === "--remote") {
       enabled = true;
     } else {
       next.push(arg);
@@ -844,7 +870,7 @@ function splitWorkspaceError(error: unknown): string[] {
 interface LocalRetryTarget {
   sourceId: string;
   sourceKind: "evaluation" | "run";
-  workflow: HostedRunWorkflow;
+  workflow: RemoteRunWorkflow;
   candidateId: string;
   candidateRunId: string;
   samples: number;
@@ -867,14 +893,14 @@ interface RetryCommandResult {
   retried: {
     id: string;
     kind: "evaluation" | "run";
-    workflow: HostedRunWorkflow;
+    workflow: RemoteRunWorkflow;
   };
   runId?: string | null;
   evaluationId?: string | null;
   candidateId?: string | null;
   activeCandidateId?: string | null;
   localView?: LocalDevViewHint;
-  run?: HostedRunRecord;
+  run?: RemoteRunRecord;
   urls?: WorkbenchResourceUrls;
   failedJobCount?: number;
   error?: string;
@@ -1265,7 +1291,7 @@ async function localRun(
       executionFingerprint,
     },
   );
-  const runTraceJobs: HostedWorkbenchJob[] = [];
+  const runTraceJobs: RemoteWorkbenchJob[] = [];
   const attempts = budget;
   for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
     snapshot = await loadLocalArchive(workspace);
@@ -1315,7 +1341,7 @@ async function localRun(
       capacity: devCapacity,
     });
     const candidateRevision = candidateRevisionJobs[0]!;
-    const completedJobs: HostedWorkbenchJob[] = [candidateRevision];
+    const completedJobs: RemoteWorkbenchJob[] = [candidateRevision];
     if (candidateRevision.status === "succeeded") {
       const candidateRevisionFiles =
         completedJobOutputFiles(candidateRevision).length > 0
@@ -1655,14 +1681,14 @@ function selectLocalOptimizerBaselineTraceJobs(
     evaluations: readonly EvaluationScorecard[];
     runs: readonly RunSummary[];
   },
-  jobs: readonly HostedWorkbenchJob[],
+  jobs: readonly RemoteWorkbenchJob[],
   target: {
     benchmarkFingerprint: string;
     candidateId: string;
     candidateRunId: string;
     executionFingerprint: string;
   },
-): HostedWorkbenchJob[] {
+): RemoteWorkbenchJob[] {
   const runById = new Map(snapshot.runs.map((run) => [run.id, run]));
   const evaluation = snapshot.evaluations
     .filter((entry) => {
@@ -1996,7 +2022,7 @@ async function resolveLocalEvaluationWork(
 ): Promise<{
   reusableEvaluation: EvaluationScorecard | null;
   missingPairs: CaseSamplePair[];
-  priorAttemptJobs: HostedWorkbenchJob[];
+  priorAttemptJobs: RemoteWorkbenchJob[];
 } | null> {
   const runById = new Map(snapshot.runs.map((run) => [run.id, run]));
   const matchingEvaluations = snapshot.evaluations.filter((evaluation) => {
@@ -2162,7 +2188,10 @@ function latestCompletedAttemptJobsByPair<T extends {
   return byPair;
 }
 
-function caseSamplePairFromJob(job: { input?: Json }): CaseSamplePair | null {
+function caseSamplePairFromJob(job: { input?: Json; caseId?: string; sampleIndex?: number }): CaseSamplePair | null {
+  if (job.caseId && Number.isSafeInteger(job.sampleIndex) && job.sampleIndex! >= 0) {
+    return { caseId: job.caseId, sampleIndex: job.sampleIndex! };
+  }
   const input = readRecord(job.input);
   const execution = readRecord(input?.execution);
   const metadata = readRecord(execution?.metadata);
@@ -2304,15 +2333,15 @@ function resolveProjectPath(root: string, filePath: string): string {
 
 async function executeLocalDevelopmentJob(
   args: WorkbenchExecutionRuntimeInput,
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   return await executeWorkbenchExecutionJob(args, {
-    sandboxProvider: DOCKER_SANDBOX_BACKEND,
+    sandboxBackend: DOCKER_SANDBOX_BACKEND,
     loadLocalAdapterAuthProfiles: true,
   });
 }
 
 async function executeLocalDevelopmentDag(args: {
-  jobs: readonly HostedWorkbenchJob[];
+  jobs: readonly RemoteWorkbenchJob[];
   spec: ReturnType<typeof resolveWorkbenchResolvedSourceYaml>;
   adapterManifests: readonly ResolvedWorkbenchAdapter["manifest"][];
   adapterFiles?: readonly SurfaceSnapshotFile[];
@@ -2321,7 +2350,7 @@ async function executeLocalDevelopmentDag(args: {
   engineCases: WorkbenchExecutionRuntimeInput["engineCases"];
   traceFiles?: readonly SurfaceSnapshotFile[];
   capacity: WorkbenchExecutionDagCapacity;
-}): Promise<HostedWorkbenchJob[]> {
+}): Promise<RemoteWorkbenchJob[]> {
   const completedById = new Map(
     args.jobs
       .filter(isTerminalLocalJob)
@@ -2330,7 +2359,7 @@ async function executeLocalDevelopmentDag(args: {
   const result = await runWorkbenchExecutionDag({
     jobs: args.jobs,
     capacity: args.capacity,
-    sandboxProvider: DOCKER_SANDBOX_BACKEND,
+    sandboxBackend: DOCKER_SANDBOX_BACKEND,
     executeJob: async (job) => {
       return await executeLocalDevelopmentJob({
         job,
@@ -2392,7 +2421,7 @@ function readPositiveEnvNumber(name: string): number {
   return value;
 }
 
-function isTerminalLocalJob(job: HostedWorkbenchJob): boolean {
+function isTerminalLocalJob(job: RemoteWorkbenchJob): boolean {
   return job.status === "succeeded" || job.status === "failed" || job.status === "cancelled";
 }
 
@@ -2585,21 +2614,29 @@ async function localRestore(
   return 0;
 }
 
+function localInspectionFromParsed(parsed: ParsedArgs): WorkbenchInspection {
+  return createLocalWorkbenchInspection({ workspace: resolveDir(parsed) });
+}
+
 async function localCandidateList(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  const snapshot = await loadLocalArchive(resolveDir(parsed));
+  const inspection = localInspectionFromParsed(parsed);
+  const snapshot = await inspection.snapshot();
+  const candidates = await Promise.all(
+    snapshot.summaries.map((candidate: { id: string }) => inspection.candidate({ id: candidate.id })),
+  );
   writeOutput(
-    snapshot.candidates,
+    candidates,
     parsed,
     io,
     (candidates) =>
       candidates
         .map(
-          (candidate) =>
+          (candidate: CandidateRecord) =>
             `${candidate.id}\t${candidate.status}\tevaluation ${formatCandidateEvaluationScore(candidate)}${snapshot.activeId === candidate.id ? "\tactive" : ""}`,
         )
         .join("\n") || "No candidates.",
@@ -2613,9 +2650,10 @@ async function localCandidateShow(
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "candidate", "json"]));
-  const snapshot = await loadLocalArchive(resolveDir(parsed));
+  const inspection = localInspectionFromParsed(parsed);
+  const snapshot = await inspection.snapshot();
   const candidateId = readCandidateIdFlag(parsed, snapshot);
-  const candidate = readLocalCandidate(snapshot, candidateId);
+  const candidate = await inspection.candidate({ id: candidateId });
   writeOutput(
     candidate,
     parsed,
@@ -2624,7 +2662,7 @@ async function localCandidateShow(
       [
         `${record.id}\t${record.status}`,
         `benchmark\t${record.benchmarkFingerprint}`,
-        `candidate\t${record.candidateFingerprint ?? record.candidateFingerprint}`,
+        `candidate\t${record.candidateFingerprint}`,
         `evaluation\t${formatCandidateEvaluationSummary(record)}`,
         ...(record.baseId ? [`base\t${record.baseId}`] : []),
       ].join("\n"),
@@ -2638,13 +2676,10 @@ async function localCandidateFiles(
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "candidate", "json"]));
-  const snapshot = await loadLocalArchive(resolveDir(parsed));
+  const inspection = localInspectionFromParsed(parsed);
+  const snapshot = await inspection.snapshot();
   const candidateId = readCandidateIdFlag(parsed, snapshot);
-  const candidate = readLocalCandidate(snapshot, candidateId);
-  const files = summarizeCandidateFiles(
-    readLocalCandidateFiles(snapshot, candidateId),
-    candidate.fileChanges,
-  );
+  const files = await inspection.candidateFiles({ id: candidateId });
   writeOutput(
     files,
     parsed,
@@ -2663,10 +2698,11 @@ async function localCandidatePreview(
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "candidate", "path", "output", "view", "json"]));
-  const snapshot = await loadLocalArchive(resolveDir(parsed));
+  const inspection = localInspectionFromParsed(parsed);
+  const snapshot = await inspection.snapshot();
   const candidateId = readCandidateIdFlag(parsed, snapshot);
-  const preview = createCandidateFilePreview({
-    files: readLocalCandidateFiles(snapshot, candidateId),
+  const preview = await inspection.candidatePreview({
+    id: candidateId,
     path: requireFlag(parsed, "path"),
     view: readPreviewMode(parsed),
   });
@@ -2690,14 +2726,14 @@ async function localRunList(
 ): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["dir", "json"]));
-  const snapshot = await loadLocalArchive(resolveDir(parsed));
+  const snapshot = await localInspectionFromParsed(parsed).snapshot();
   writeOutput(
     snapshot.runs,
     parsed,
     io,
     (runs) =>
       runs
-        .map((run) =>
+        .map((run: RunSummary) =>
           `${run.id}\t${run.workflow}\t${run.status}\t${run.outcome ?? "pending"}\t${run.attemptsExecuted ?? 0}/${run.attemptsRequested ?? 0}`
         )
         .join("\n") || "No runs.",
@@ -2710,29 +2746,186 @@ async function localRunShow(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "jobs", "failures", "json"]));
   const runId = parsed.positionals[0];
   if (!runId) {
     throw new UsageError("workbench runs show requires RUN_ID.");
   }
-  const snapshot = await loadLocalArchive(resolveDir(parsed));
-  const run = snapshot.runs.find((entry) => entry.id === runId);
-  if (!run) {
-    throw new UsageError(`Run not found: ${runId}`);
-  }
+  const inspection = localInspectionFromParsed(parsed);
+  const detail = await inspection.run({
+    id: runId,
+    includeJobs: parsed.flags.jobs === true || parsed.flags.failures === true,
+  });
+  const diagnosis = parsed.flags.failures === true
+    ? await inspection.diagnose({ targetId: runId })
+    : null;
   writeOutput(
-    run,
+    parsed.flags.failures === true
+      ? { ...detail, diagnosis }
+      : detail,
+    parsed,
+    io,
+    (record) => {
+      const run = record.run;
+      const jobs = "jobs" in record && Array.isArray(record.jobs)
+        ? record.jobs
+        : [];
+      const failures = "diagnosis" in record && record.diagnosis
+        ? record.diagnosis.failures
+        : [];
+      return [
+        `${run.id}\t${run.workflow}\t${run.status}`,
+        `outcome\t${run.outcome ?? "pending"}`,
+        `started\t${run.startedAt}`,
+        ...(run.finishedAt ? [`finished\t${run.finishedAt}`] : []),
+        `attempts\t${run.attemptsExecuted ?? 0}/${run.attemptsRequested ?? 0}`,
+        `samples\t${run.samples ?? 0}`,
+        ...(jobs.length > 0
+          ? [
+              "jobs",
+              ...jobs.map((job) =>
+                `${job.id}\t${job.kind}\t${job.status}${job.error ? `\t${job.error}` : ""}`
+              ),
+            ]
+          : []),
+        ...(failures.length > 0
+          ? [
+              "failures",
+              ...failures.map(formatFailureLine),
+            ]
+          : []),
+      ].join("\n");
+    },
+  );
+  return 0;
+}
+
+async function localEvaluationList(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
+  const comparison = await localInspectionFromParsed(parsed).evaluations();
+  writeOutput(
+    comparison,
+    parsed,
+    io,
+    (record) =>
+      record.rows
+        .map((row: {
+          evaluationId: string;
+          status: string;
+          score: number | null;
+          candidateLabel: string;
+          configurationLabel: string;
+          runId: string;
+        }) =>
+          `${row.evaluationId}\t${row.status}\t${formatNullableMetric(row.score)}\t${row.candidateLabel}\t${row.configurationLabel}\t${row.runId}`
+        )
+        .join("\n") || "No evaluations.",
+  );
+  return 0;
+}
+
+async function localEvaluationShow(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
+  const evaluationId = parsed.positionals[0];
+  if (!evaluationId) {
+    throw new UsageError("workbench evaluations show requires EVALUATION_ID.");
+  }
+  const evaluation = await localInspectionFromParsed(parsed).evaluation({ id: evaluationId });
+  writeOutput(
+    evaluation,
     parsed,
     io,
     (record) =>
       [
-        `${record.id}\t${record.workflow}\t${record.status}`,
-        `outcome\t${record.outcome ?? "pending"}`,
-        `started\t${record.startedAt}`,
-        ...(record.finishedAt ? [`finished\t${record.finishedAt}`] : []),
-        `attempts\t${record.attemptsExecuted ?? 0}/${record.attemptsRequested ?? 0}`,
-        `samples\t${record.samples ?? 0}`,
+        `${record.id}\t${record.status}`,
+        `candidate\t${record.candidateName ?? record.candidateId}`,
+        `run\t${record.runId}`,
+        `samples\t${record.completedSampleCount}/${record.sampleCount}`,
+        `errors\t${record.errorSampleCount}`,
+        `score\t${formatNullableMetric(record.metrics?.score?.mean ?? null)}`,
+        ...(record.error ? [`error\t${record.error}`] : []),
+        ...(record.evaluation.cases?.length
+          ? [
+              "cases",
+              ...record.evaluation.cases.map((entry: {
+                id: string;
+                status?: string;
+                metrics?: { score?: { mean?: number | null } };
+              }) =>
+                `${entry.id}\t${entry.status ?? "unknown"}\t${formatNullableMetric(entry.metrics?.score?.mean ?? null)}`
+              ),
+            ]
+          : []),
       ].join("\n"),
+  );
+  return 0;
+}
+
+async function localExecutionTrace(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "run", "job", "json"]));
+  const runId = requireFlag(parsed, "run");
+  const jobId = requireFlag(parsed, "job");
+  const detail = await localInspectionFromParsed(parsed).executionTrace({ runId, jobId });
+  writeOutput(
+    detail,
+    parsed,
+    io,
+    (record) =>
+      record.executions
+        .map((execution: {
+          id: string;
+          kind: string;
+          status: string;
+          jobIds: string[];
+          sessions: unknown[];
+          trace: {
+            spans: unknown[];
+            events: unknown[];
+            summaries: unknown[];
+          };
+        }) =>
+          [
+            `${execution.id}\t${execution.kind}\t${execution.status}`,
+            `jobs\t${execution.jobIds.join(",")}`,
+            `sessions\t${execution.sessions.length}`,
+            `spans\t${execution.trace.spans.length}`,
+            `events\t${execution.trace.events.length}`,
+            `summaries\t${execution.trace.summaries.length}`,
+          ].join("\n")
+        )
+        .join("\n\n") || "No execution trace.",
+  );
+  return 0;
+}
+
+async function localDiagnose(
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(argv);
+  rejectUnknownFlags(parsed, new Set(["dir", "json"]));
+  rejectUnexpectedPositionals(parsed, "workbench diagnose", 1);
+  const diagnosis = await localInspectionFromParsed(parsed).diagnose({ targetId: parsed.positionals[0] ?? null });
+  writeOutput(
+    diagnosis,
+    parsed,
+    io,
+    (record) =>
+      record.failures.length > 0
+        ? record.failures.map(formatFailureLine).join("\n")
+        : "No failures.",
   );
   return 0;
 }
@@ -3524,8 +3717,11 @@ fs.writeFileSync(resultPath, JSON.stringify({
 async function login(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["base-url", "no-open", "json"]));
-  const baseUrl =
-    asOptionalString(parsed.flags["base-url"]) ?? DEFAULT_BASE_URL;
+  const config = await loadConfig();
+  const baseUrl = selectWorkbenchBaseUrl({
+    explicitBaseUrl: asOptionalString(parsed.flags["base-url"]),
+    configBaseUrl: config.baseUrl,
+  });
   const authorization = await requestDeviceAuthorization(baseUrl);
   if (parsed.flags.json === true) {
     writeJson(
@@ -3555,9 +3751,7 @@ async function logout(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(argv);
   rejectUnknownFlags(parsed, new Set(["json"]));
   const config = await loadConfig();
-  const baseUrl = normalizeBaseUrl(
-    process.env.WORKBENCH_API_URL ?? config.baseUrl ?? DEFAULT_BASE_URL,
-  );
+  const baseUrl = selectWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
   if (config.accessToken) {
     await fetch(`${baseUrl}/api/oauth/revoke`, {
       method: "POST",
@@ -3584,8 +3778,8 @@ async function authStatus(argv: readonly string[], io: CliIo): Promise<number> {
   const baseUrl = await effectiveBaseUrl();
   const profileStatus = await readWorkbenchProfileStatus(config);
   const adapterStatuses = await localWorkbenchAdapterAuthStore().listStatus();
-  const hostedAuth = profileStatus.authenticated
-    ? await readHostedAdapterAuthStatuses().catch((error: unknown) => ({
+  const remoteAuth = profileStatus.authenticated
+    ? await readRemoteAdapterAuthStatuses().catch((error: unknown) => ({
         adapters: [],
         error: error instanceof Error ? error.message : String(error),
       }))
@@ -3597,7 +3791,7 @@ async function authStatus(argv: readonly string[], io: CliIo): Promise<number> {
   const adapterAuth = await projectAdapterAuthStatus(
     dir,
     adapterStatuses,
-    hostedAuth.adapters,
+    remoteAuth.adapters,
   ).catch(() => []);
   const result = {
     ok: true,
@@ -3607,7 +3801,7 @@ async function authStatus(argv: readonly string[], io: CliIo): Promise<number> {
       username: profileStatus.profile?.username ?? null,
     },
     adapterStatuses,
-    hostedAuth,
+    remoteAuth,
     adapterAuth,
   };
   writeOutput(result, parsed, io, (record) => {
@@ -3621,7 +3815,7 @@ async function authStatus(argv: readonly string[], io: CliIo): Promise<number> {
             "",
             "Required adapter auth:",
             ...value.adapterAuth.map((adapter) =>
-              `${adapter.adapter}${adapter.profile !== "default" ? ` profile ${adapter.profile}` : ""}: local ${adapter.local.status}${adapter.local.method ? ` (${adapter.local.method})` : ""}${adapter.local.reason ? ` (${adapter.local.reason})` : ""}, hosted ${adapter.hosted.status}${adapter.hosted.method ? ` (${adapter.hosted.method})` : ""}${adapter.hosted.reason ? ` (${adapter.hosted.reason})` : ""}`
+              `${adapter.adapter}${adapter.profile !== "default" ? ` profile ${adapter.profile}` : ""}: local ${adapter.local.status}${adapter.local.method ? ` (${adapter.local.method})` : ""}${adapter.local.reason ? ` (${adapter.local.reason})` : ""}, remote ${adapter.remote.status}${adapter.remote.method ? ` (${adapter.remote.method})` : ""}${adapter.remote.reason ? ` (${adapter.remote.reason})` : ""}`
             ),
           ]
         : []),
@@ -3633,13 +3827,13 @@ async function authStatus(argv: readonly string[], io: CliIo): Promise<number> {
 async function projectAdapterAuthStatus(
   dir: string,
   adapterStatuses: WorkbenchAdapterAuthStatusRecord[],
-  hostedAdapters: HostedAdapterAuthStatus[],
+  remoteAdapters: RemoteAdapterAuthStatus[],
 ): Promise<Array<{
   adapter: string;
   slot?: string;
   profile: string;
   local: { status: string; method?: string; reason?: string };
-  hosted: { status: string; method?: string; reason?: string };
+  remote: { status: string; method?: string; reason?: string };
 }>> {
   const spec = (await readLocalProjectSource(dir)).spec;
   const adapters = await resolveWorkbenchAdaptersForProject(
@@ -3650,7 +3844,7 @@ async function projectAdapterAuthStatus(
     adapterAuthStatusKey(status.adapterId, status.slot, status.profile),
     status,
   ]));
-  const hostedAdapterStatusMap = new Map(hostedAdapters.map((status) => [
+  const remoteAdapterStatusMap = new Map(remoteAdapters.map((status) => [
     adapterAuthStatusKey(status.adapterId, status.slot, status.profile),
     status,
   ]));
@@ -3661,7 +3855,7 @@ async function projectAdapterAuthStatus(
       target.slot,
       target.profile,
     ));
-    const hostedAdapterStatus = hostedAdapterStatusMap.get(adapterAuthStatusKey(
+    const remoteAdapterStatus = remoteAdapterStatusMap.get(adapterAuthStatusKey(
       target.adapter,
       target.slot,
       target.profile,
@@ -3675,18 +3869,18 @@ async function projectAdapterAuthStatus(
             ...(adapterStatus.reason ? { reason: adapterStatus.reason } : {}),
           }
         : { status: "disconnected" },
-      hosted: hostedAdapterStatus
+      remote: remoteAdapterStatus
         ? {
-            status: hostedAdapterStatus.status,
-            ...(hostedAdapterStatus.method ? { method: hostedAdapterStatus.method } : {}),
-            ...(hostedAdapterStatus.reason ? { reason: hostedAdapterStatus.reason } : {}),
+            status: remoteAdapterStatus.status,
+            ...(remoteAdapterStatus.method ? { method: remoteAdapterStatus.method } : {}),
+            ...(remoteAdapterStatus.reason ? { reason: remoteAdapterStatus.reason } : {}),
           }
         : { status: "disconnected" },
     };
   });
 }
 
-interface HostedAdapterAuthStatus {
+interface RemoteAdapterAuthStatus {
   adapterId: string;
   slot?: string;
   profile: string;
@@ -3697,10 +3891,10 @@ interface HostedAdapterAuthStatus {
   reason?: string;
 }
 
-async function readHostedAdapterAuthStatuses(): Promise<{
-  adapters: HostedAdapterAuthStatus[];
+async function readRemoteAdapterAuthStatuses(): Promise<{
+  adapters: RemoteAdapterAuthStatus[];
 }> {
-  const adapterResponse = await apiRequest<{ adapters?: HostedAdapterAuthStatus[] }>(
+  const adapterResponse = await apiRequest<{ adapters?: RemoteAdapterAuthStatus[] }>(
     "/api/workbench/auth/adapters",
   );
   return {
@@ -4223,7 +4417,7 @@ async function pushBenchmark(
   const dir = resolveSourceDir(parsed);
   const source = await readLocalProjectSource(dir);
   const origin = await readWorkbenchOrigin(dir);
-  const baseUrl = await effectiveBaseUrl(origin?.baseUrl);
+  const baseUrl = await effectiveOriginBaseUrl(origin?.baseUrl);
   const visibility = readOptionalBenchmarkVisibility(parsed.flags.visibility);
   const createVisibility = visibility ?? "public";
   const dryRun = parsed.flags["dry-run"] === true;
@@ -4259,7 +4453,7 @@ async function pushBenchmark(
       );
       return 0;
     }
-    const { project, origin: nextOrigin, result } = await createHostedBenchmarkFromState({
+    const { project, origin: nextOrigin, result } = await createRemoteBenchmarkFromState({
       baseUrl,
       dir,
       state,
@@ -4294,7 +4488,7 @@ async function pushBenchmark(
 
   const projectId = origin.projectId;
   if (!projectId) {
-    throw new UsageError("Missing hosted benchmark. Run workbench push from a source directory.");
+    throw new UsageError("Missing remote benchmark. Run workbench push from a source directory.");
   }
   if (dryRun) {
     const remoteProject = await verifyLinkedPushDryRunTarget({
@@ -4311,7 +4505,7 @@ async function pushBenchmark(
         baseUrl,
         benchmarkId: projectId,
         remote: origin.remote,
-        benchmark: hostedProjectSummaryForOutput(remoteProject),
+        benchmark: remoteProjectSummaryForOutput(remoteProject),
         benchmarkName: source.spec.name,
         visibility: visibility ?? "unchanged",
         sourceFileCount: sourceFileCount(source),
@@ -4333,7 +4527,7 @@ async function pushBenchmark(
     },
     baseUrl,
   );
-  const responseProject = hostedProjectSummaryFromState(response.state);
+  const responseProject = remoteProjectSummaryFromState(response.state);
   const publishedProject = await applyRequestedProjectVisibility({
     baseUrl,
     projectId: responseProject.id,
@@ -4378,9 +4572,9 @@ async function verifyLinkedPushDryRunTarget(args: {
   baseUrl: string;
   origin: WorkbenchOrigin;
   projectId: string;
-}): Promise<HostedProjectSummary & { id: string; ownerUsername?: string; name?: string }> {
+}): Promise<RemoteProjectSummary & { id: string; ownerUsername?: string; name?: string }> {
   const response = await apiRequest<{
-    benchmark: HostedProjectSummary & { id: string; ownerUsername?: string; name?: string };
+    benchmark: RemoteProjectSummary & { id: string; ownerUsername?: string; name?: string };
   }>(projectApiPath(args.projectId), {}, args.baseUrl);
   const expected = parseOriginRemote(args.origin);
   const actualOwner = response.benchmark.ownerUsername;
@@ -4396,9 +4590,9 @@ async function verifyLinkedPushDryRunTarget(args: {
   return response.benchmark;
 }
 
-function hostedProjectSummaryForOutput(
-  project: HostedProjectSummary & { id?: string; ownerUsername?: string; name?: string },
-): HostedProjectSummary {
+function remoteProjectSummaryForOutput(
+  project: RemoteProjectSummary & { id?: string; ownerUsername?: string; name?: string },
+): RemoteProjectSummary {
   return {
     ...(project.id ? { id: project.id } : {}),
     ...(project.ownerUsername ? { ownerUsername: project.ownerUsername } : {}),
@@ -4409,12 +4603,12 @@ function hostedProjectSummaryForOutput(
   };
 }
 
-async function createHostedBenchmarkFromState(args: {
+async function createRemoteBenchmarkFromState(args: {
   baseUrl: string;
   dir: string;
   state: WorkbenchProjectState;
 }): Promise<{
-  project: HostedProjectSummary & { id: string; name: string; ownerUsername?: string };
+  project: RemoteProjectSummary & { id: string; name: string; ownerUsername?: string };
   origin: WorkbenchOrigin;
   result: WorkbenchProjectStateImportResult;
 }> {
@@ -4426,7 +4620,7 @@ async function createHostedBenchmarkFromState(args: {
     },
     args.baseUrl,
   );
-  const project = hostedProjectSummaryFromState(result.state);
+  const project = remoteProjectSummaryFromState(result.state);
   const applied = await acceptPushedProjectStateToLocal({
     dir: args.dir,
     baseUrl: args.baseUrl,
@@ -4438,18 +4632,18 @@ async function createHostedBenchmarkFromState(args: {
 async function applyRequestedProjectVisibility(args: {
   baseUrl: string;
   projectId: string;
-  responseProject: HostedProjectSummary & { ownerUsername?: string };
+  responseProject: RemoteProjectSummary & { ownerUsername?: string };
   visibility?: "private" | "public";
-}): Promise<HostedProjectSummary & { ownerUsername?: string }> {
+}): Promise<RemoteProjectSummary & { ownerUsername?: string }> {
   if (args.visibility === "public") {
-    return (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
+    return (await apiRequest<{ benchmark: RemoteProjectSummary & { ownerUsername?: string } }>(
       projectApiPath(args.projectId, "/publish"),
       { method: "PUT" },
       args.baseUrl,
     )).benchmark;
   }
   if (args.visibility === "private") {
-    return (await apiRequest<{ benchmark: HostedProjectSummary & { ownerUsername?: string } }>(
+    return (await apiRequest<{ benchmark: RemoteProjectSummary & { ownerUsername?: string } }>(
       projectApiPath(args.projectId, "/publish"),
       { method: "DELETE" },
       args.baseUrl,
@@ -4537,7 +4731,7 @@ async function pullProject(
   }
   const dir = resolveDir(parsed);
   const origin = await requireWorkbenchOrigin(dir);
-  const baseUrl = await effectiveBaseUrl(origin.baseUrl);
+  const baseUrl = await effectiveOriginBaseUrl(origin.baseUrl);
   const remoteRef = parseOriginRemote(origin);
   const state = await apiRequest<WorkbenchProjectState>(
     publicProjectStateApiPath(remoteRef),
@@ -4632,27 +4826,19 @@ async function acceptPushedProjectStateToLocal(args: {
   return { origin, runtime: runtime.stats };
 }
 
-interface HostedRetryTarget {
+interface RemoteRetryTarget {
   sourceId: string;
   sourceKind: "evaluation" | "run";
-  workflow: HostedRunWorkflow;
-  request: {
-    workflow: HostedRunWorkflow;
-    budget?: number;
-    samples: number;
-    candidateId?: string;
-    sourceYaml: string;
-    preserveActive?: boolean;
-    selectedSamples?: CaseSamplePair[];
-  };
+  workflow: RemoteRunWorkflow;
+  request: WorkbenchRemoteRunRequest;
 }
 
-interface HostedRunDetail {
-  run: HostedRunRecord;
-  jobs: HostedRunJobRecord[];
+interface RemoteRunDetail {
+  run: RemoteRunRecord;
+  jobs: RemoteRunJobRecord[];
 }
 
-async function retryHostedWorkflow(
+async function retryRemoteWorkflow(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
@@ -4665,7 +4851,7 @@ async function retryHostedWorkflow(
     "timeout-ms",
     "json",
   ]));
-  rejectUnexpectedPositionals(parsed, "workbench retry --hosted", 1);
+  rejectUnexpectedPositionals(parsed, "workbench retry --remote", 1);
   const targetId = parsed.positionals[0];
   if (!targetId) {
     throw new UsageError("Missing required TARGET_ID.");
@@ -4676,8 +4862,8 @@ async function retryHostedWorkflow(
   )) {
     throw new UsageError("--interval-ms and --timeout-ms require --watch.");
   }
-  const target = await resolveHostedTarget(parsed, { requireProjectIdentity: true });
-  const retryTarget = await resolveHostedRetryTarget(target, targetId);
+  const target = await resolveRemoteTarget(parsed, { requireProjectIdentity: true });
+  const retryTarget = await resolveRemoteRetryTarget(target, targetId);
   const watchIntervalMs =
     parsed.flags.watch === true
       ? parsePositiveInt(parsed.flags["interval-ms"], 1000, "interval-ms")
@@ -4686,7 +4872,7 @@ async function retryHostedWorkflow(
     parsed.flags.watch === true
       ? parseOptionalPositiveInt(parsed.flags["timeout-ms"], "timeout-ms")
       : undefined;
-  const response = await apiRequest<HostedRunStartResponse>(
+  const response = await apiRequest<RemoteRunStartResponse>(
     projectApiPath(target.projectId, "/runs"),
     {
       method: "POST",
@@ -4694,25 +4880,25 @@ async function retryHostedWorkflow(
     },
     target.baseUrl,
   );
-  const runTarget = hostedTargetForRunStartResponse(target, response);
+  const runTarget = remoteTargetForRunStartResponse(target, response);
   const startedRun = withRunUrls(runTarget, response.run);
   if (parsed.flags.watch === true) {
     if (parsed.flags.json !== true) {
       io.stdout.write(
-        `${formatHostedRunStarted(startedRun, retryTarget.workflow).trimEnd()}\n${HOSTED_WATCH_LIFECYCLE_NOTE}\n`,
+        `${formatRemoteRunStarted(startedRun, retryTarget.workflow).trimEnd()}\n${REMOTE_WATCH_LIFECYCLE_NOTE}\n`,
       );
     }
-    const watched = await watchHostedRun({
+    const watched = await watchRemoteRun({
       parsed,
       target: runTarget,
       runId: response.run.id,
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
     });
-    const outputRun = withRunUrls(runTarget, await withHostedRunFailureSummary(runTarget, watched));
-    await tryImportTerminalHostedProjectState({ target: runTarget, io });
+    const outputRun = withRunUrls(runTarget, await withRemoteRunFailureSummary(runTarget, watched));
+    await tryImportTerminalRemoteProjectState({ target: runTarget, io });
     const result: RetryCommandResult = {
-      ok: hostedRunSucceeded(watched),
+      ok: remoteRunSucceeded(watched),
       retried: {
         id: retryTarget.sourceId,
         kind: retryTarget.sourceKind,
@@ -4727,7 +4913,7 @@ async function retryHostedWorkflow(
       ...(outputRun.error ? { error: outputRun.error } : {}),
     };
     writeOutput(result, parsed, io, formatRetryCommandResult);
-    return hostedRunSucceeded(watched) ? 0 : 1;
+    return remoteRunSucceeded(watched) ? 0 : 1;
   }
   const result: RetryCommandResult = {
     ok: true,
@@ -4746,23 +4932,23 @@ async function retryHostedWorkflow(
   return 0;
 }
 
-async function resolveHostedRetryTarget(
-  target: HostedTarget,
+async function resolveRemoteRetryTarget(
+  target: RemoteTarget,
   targetId: string,
-): Promise<HostedRetryTarget> {
+): Promise<RemoteRetryTarget> {
   if (targetId.startsWith("eval_")) {
-    return await resolveHostedEvaluationRetryTarget(target, targetId);
+    return await resolveRemoteEvaluationRetryTarget(target, targetId);
   }
-  const detail = await readHostedRunDetail(target, targetId);
+  const detail = await readRemoteRunDetail(target, targetId);
   const run = detail.run;
   if (run.status !== "finished") {
     throw new UsageError(`Run ${run.id} is ${run.status}; wait for it to finish before retrying.`);
   }
-  if (!hostedRunRecordFailed(run)) {
-    throw new UsageError(`Run ${run.id} did not fail; use workbench ${run.workflow ?? "eval"} --hosted to intentionally run it again.`);
+  if (!remoteRunRecordFailed(run)) {
+    throw new UsageError(`Run ${run.id} did not fail; use workbench ${run.workflow ?? "eval"} --remote to intentionally run it again.`);
   }
   if (run.workflow === "eval") {
-    const candidateId = hostedRunEvaluationCandidateId(run, detail.jobs);
+    const candidateId = remoteRunEvaluationCandidateId(run, detail.jobs);
     if (!candidateId) {
       throw new UsageError(`Run ${run.id} has no candidate id to retry.`);
     }
@@ -4771,17 +4957,18 @@ async function resolveHostedRetryTarget(
       sourceKind: "run",
       workflow: "eval",
       request: {
+        schema: "workbench.remote.run.request.v1",
         workflow: "eval",
         samples: run.samples ?? 1,
         candidateId,
-        sourceYaml: hostedRetrySourceYaml(run, run.id),
+        sourceYaml: remoteRetrySourceYaml(run, run.id),
         preserveActive: true,
         ...retrySampleSelectionFromJobs(detail.jobs),
       },
     };
   }
   if (run.workflow === "improve") {
-    const baseCandidateId = stringValue(readRecord(run.input)?.baseCandidateId);
+    const baseCandidateId = stringValue(readRecord(run.retry)?.baseCandidateId);
     if (!baseCandidateId) {
       throw new UsageError(`Run ${run.id} is missing its base candidate id.`);
     }
@@ -4790,11 +4977,12 @@ async function resolveHostedRetryTarget(
       sourceKind: "run",
       workflow: "improve",
       request: {
+        schema: "workbench.remote.run.request.v1",
         workflow: "improve",
         samples: run.samples ?? 1,
         budget: run.budget ?? run.attemptsRequested ?? 1,
         candidateId: baseCandidateId,
-        sourceYaml: hostedRetrySourceYaml(run, run.id),
+        sourceYaml: remoteRetrySourceYaml(run, run.id),
         preserveActive: true,
       },
     };
@@ -4802,13 +4990,13 @@ async function resolveHostedRetryTarget(
   throw new UsageError(`Run ${run.id} has no retryable workflow.`);
 }
 
-async function resolveHostedEvaluationRetryTarget(
-  target: HostedTarget,
+async function resolveRemoteEvaluationRetryTarget(
+  target: RemoteTarget,
   evaluationId: string,
-): Promise<HostedRetryTarget> {
+): Promise<RemoteRetryTarget> {
   const snapshot = await apiRequest<{
     evaluations: RetryEvaluationSummary[];
-    runs: HostedRunRecord[];
+    runs: RemoteRunRecord[];
   }>(
     projectApiPath(target.projectId, "/workbench/snapshot"),
     {},
@@ -4816,26 +5004,27 @@ async function resolveHostedEvaluationRetryTarget(
   );
   const evaluation = snapshot.evaluations.find((entry) => entry.id === evaluationId);
   if (!evaluation) {
-    throw new UsageError(`Hosted evaluation not found: ${evaluationId}`);
+    throw new UsageError(`Remote evaluation not found: ${evaluationId}`);
   }
   const run = snapshot.runs.find((entry) => entry.id === evaluation.runId) ?? null;
   if (!evaluationScorecardFailed(evaluation, run)) {
-    throw new UsageError(`Evaluation ${evaluation.id} did not fail; use workbench eval --hosted to intentionally run it again.`);
+    throw new UsageError(`Evaluation ${evaluation.id} did not fail; use workbench eval --remote to intentionally run it again.`);
   }
   if (!run) {
     throw new UsageError(`Evaluation ${evaluation.id} is missing its run record.`);
   }
-  const detail = await readHostedRunDetail(target, run.id);
+  const detail = await readRemoteRunDetail(target, run.id);
   const detailedRun = detail.run;
   return {
     sourceId: evaluationId,
     sourceKind: "evaluation",
     workflow: "eval",
     request: {
+      schema: "workbench.remote.run.request.v1",
       workflow: "eval",
       samples: evaluation.sampleCount || detailedRun.samples || 1,
       candidateId: evaluation.candidateId,
-      sourceYaml: hostedRetrySourceYaml(detailedRun, detailedRun.id),
+      sourceYaml: remoteRetrySourceYaml(detailedRun, detailedRun.id),
       preserveActive: true,
       ...retrySampleSelectionFromJobs(detail.jobs),
     },
@@ -4843,13 +5032,13 @@ async function resolveHostedEvaluationRetryTarget(
 }
 
 function retrySampleSelectionFromJobs(
-  jobs: readonly HostedRunJobRecord[],
+  jobs: readonly RemoteRunJobRecord[],
 ): { selectedSamples: CaseSamplePair[] } | Record<string, never> {
   const selectedSamples = uniqueCaseSamplePairs(
     jobs
       .filter((job) =>
         job.status !== "succeeded" &&
-        executionPurposeFromJobInput(job.input) === "attempt"
+        readRunJobPurpose(job) === "attempt"
       )
       .map(caseSamplePairFromJob)
       .filter((pair): pair is CaseSamplePair => pair !== null),
@@ -4873,19 +5062,19 @@ function uniqueCaseSamplePairs(
   );
 }
 
-async function readHostedRunDetail(
-  target: HostedTarget,
+async function readRemoteRunDetail(
+  target: RemoteTarget,
   runId: string,
-): Promise<HostedRunDetail> {
-  return await apiRequest<HostedRunDetail>(
+): Promise<RemoteRunDetail> {
+  return await apiRequest<RemoteRunDetail>(
     projectApiPath(target.projectId, `/runs/${encodeURIComponent(runId)}`),
     {},
     target.baseUrl,
   );
 }
 
-async function tryImportTerminalHostedProjectState(args: {
-  target: HostedTarget;
+async function tryImportTerminalRemoteProjectState(args: {
+  target: RemoteTarget;
   io: CliIo;
 }): Promise<void> {
   const origin = args.target.origin;
@@ -4907,31 +5096,31 @@ async function tryImportTerminalHostedProjectState(args: {
     });
   } catch (error) {
     args.io.stderr.write(
-      `Hosted run finished, but local project state was not updated: ${errorMessage(error)}\n`,
+      `Remote run finished, but local project state was not updated: ${errorMessage(error)}\n`,
     );
   }
 }
 
-function hostedRetrySourceYaml(
-  run: { input?: Json },
+function remoteRetrySourceYaml(
+  run: RemoteRunRecord,
   runId: string,
 ): string {
-  const sourceYaml = stringValue(readRecord(run.input)?.sourceYaml);
+  const sourceYaml = stringValue(readRecord(run.retry)?.sourceYaml);
   if (!sourceYaml) {
     throw new UsageError(`Run ${runId} is missing its recorded source configuration.`);
   }
   return sourceYaml;
 }
 
-function hostedRunRecordFailed(run: HostedRunRecord): boolean {
+function remoteRunRecordFailed(run: RemoteRunRecord): boolean {
   return run.outcome === "error" ||
     run.outcome === "cancelled" ||
     (run.failedJobCount ?? 0) > 0 ||
     Boolean(run.error);
 }
 
-async function startHostedWorkflow(
-  workflow: HostedRunWorkflow,
+async function startRemoteWorkflow(
+  workflow: RemoteRunWorkflow,
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
@@ -4956,7 +5145,7 @@ async function startHostedWorkflow(
   }
   rejectUnknownFlags(parsed, allowedFlags);
   if (parsed.positionals.length > 1) {
-    throw new UsageError(`workbench ${workflow} --hosted accepts at most one source file or directory argument.`);
+    throw new UsageError(`workbench ${workflow} --remote accepts at most one source file or directory argument.`);
   }
   const sourceArg = resolveSourceDir(parsed);
   const samples = parsePositiveInt(parsed.flags.samples, 1, "samples");
@@ -4973,15 +5162,15 @@ async function startHostedWorkflow(
   const defaultProjectSource = await readLocalProjectSource(path.resolve(sourceArg));
   const selectedRunIds = workflow === "eval"
     ? resolveCandidateRunSelection(defaultProjectSource, runsFlag)
-    : [singleRequestedRunId(runsFlag, `workbench ${workflow} --hosted`) ?? defaultProjectSource.candidateRunId];
+    : [singleRequestedRunId(runsFlag, `workbench ${workflow} --remote`) ?? defaultProjectSource.candidateRunId];
   if (workflow === "eval" && selectedRunIds.length > 1) {
     let failed = 0;
     const results: unknown[] = [];
     for (const runId of selectedRunIds) {
       const captured = createCapturingIo(io);
-      const code = await startHostedWorkflow(
+      const code = await startRemoteWorkflow(
         workflow,
-        hostedWorkflowArgsForRun({
+        remoteWorkflowArgsForRun({
           parsed,
           sourceDir: defaultProjectSource.dir,
           runId,
@@ -5002,31 +5191,24 @@ async function startHostedWorkflow(
       },
       parsed,
       io,
-      () => `Processed ${selectedRunIds.length} hosted candidate run(s); ${failed} failed.`,
+      () => `Processed ${selectedRunIds.length} remote candidate run(s); ${failed} failed.`,
     );
     return failed === 0 ? 0 : 1;
   }
   const selectedCandidateId = workflow === "eval"
     ? asOptionalString(parsed.flags.candidate)
     : asOptionalString(parsed.flags.base);
-  const request: {
-    workflow: HostedRunWorkflow;
-    budget?: number;
-    samples: number;
-    candidateId?: string;
-    sourceYaml?: string;
-    candidateFiles?: HostedFile[];
-    adapterFiles?: HostedFile[];
-    rerun?: boolean;
-  } =
+  const request: WorkbenchRemoteRunRequest =
     workflow === "improve"
       ? {
+          schema: "workbench.remote.run.request.v1",
           workflow,
           budget,
           samples,
           ...(selectedCandidateId ? { candidateId: selectedCandidateId } : {}),
         }
       : {
+          schema: "workbench.remote.run.request.v1",
           workflow,
           samples,
           ...(selectedCandidateId ? { candidateId: selectedCandidateId } : {}),
@@ -5052,7 +5234,7 @@ async function startHostedWorkflow(
       : undefined;
   const dryRun = parsed.flags["dry-run"] === true;
   if (dryRun) {
-    const target = await resolveHostedDryRunTarget(parsed, { sourceDir: projectSource.dir });
+    const target = await resolveRemoteDryRunTarget(parsed, { sourceDir: projectSource.dir });
     writeOutput(
       {
         ok: true,
@@ -5065,28 +5247,29 @@ async function startHostedWorkflow(
       },
       parsed,
       io,
-      () => `Would start hosted ${workflow} for ${target.projectRef}.`,
+      () => `Would start remote ${workflow} for ${target.projectRef}.`,
     );
     return 0;
   }
-  const target = await resolveHostedTarget(parsed, {
+  const target = await resolveRemoteTarget(parsed, {
     requireProjectIdentity: true,
     sourceDir: projectSource.dir,
   });
   if (workflow === "improve") {
-    request.candidateId = await ensureHostedImproveBaseCandidate({
+    request.candidateId = await ensureRemoteImproveBaseCandidate({
       parsed,
       target,
       samples: request.samples,
       candidateId: selectedCandidateId,
       sourceYaml: projectSource.specSource,
+      candidateFiles: projectSource.candidateFiles,
       adapterFiles: projectSource.adapterFiles,
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
       io,
     });
   }
-  const response = await apiRequest<HostedRunStartResponse>(
+  const response = await apiRequest<RemoteRunStartResponse>(
     projectApiPath(target.projectId, "/runs"),
     {
       method: "POST",
@@ -5094,16 +5277,16 @@ async function startHostedWorkflow(
     },
     target.baseUrl,
   );
-  const runTarget = hostedTargetForRunStartResponse(target, response);
+  const runTarget = remoteTargetForRunStartResponse(target, response);
   const startedRun = withRunUrls(runTarget, response.run);
   const startedRunOutput = response.reused === true
     ? { ...startedRun, reused: true }
     : startedRun;
   if (response.reused === true && response.run.status === "finished") {
-    await tryImportTerminalHostedProjectState({ target: runTarget, io });
+    await tryImportTerminalRemoteProjectState({ target: runTarget, io });
     writeOutput(
       {
-        ok: hostedRunSucceeded(response.run),
+        ok: remoteRunSucceeded(response.run),
         reused: true,
         workflow,
         runId: startedRun.id,
@@ -5111,99 +5294,102 @@ async function startHostedWorkflow(
       },
       parsed,
       io,
-      () => `Reused hosted ${workflow} ${startedRun.id}. Use --rerun to intentionally run it again.`,
+      () => `Reused remote ${workflow} ${startedRun.id}. Use --rerun to intentionally run it again.`,
     );
-    return hostedRunSucceeded(response.run) ? 0 : 1;
+    return remoteRunSucceeded(response.run) ? 0 : 1;
   }
   if (parsed.flags.watch === true) {
     if (parsed.flags.json !== true) {
       io.stdout.write(
-        `${formatHostedRunStarted(startedRun, workflow).trimEnd()}\n${HOSTED_WATCH_LIFECYCLE_NOTE}\n`,
+        `${formatRemoteRunStarted(startedRun, workflow).trimEnd()}\n${REMOTE_WATCH_LIFECYCLE_NOTE}\n`,
       );
     }
-    const watched = await watchHostedRun({
+    const watched = await watchRemoteRun({
       parsed,
       target: runTarget,
       runId: response.run.id,
       intervalMs: watchIntervalMs ?? 1000,
       timeoutMs: watchTimeoutMs,
     });
-    const outputRun = await withHostedRunFailureSummary(runTarget, watched);
-    await tryImportTerminalHostedProjectState({ target: runTarget, io });
+    const outputRun = await withRemoteRunFailureSummary(runTarget, watched);
+    await tryImportTerminalRemoteProjectState({ target: runTarget, io });
     writeOutput(
       withRunUrls(runTarget, outputRun),
       parsed,
       io,
-      formatHostedRunResult,
+      formatRemoteRunResult,
     );
-    return hostedRunSucceeded(watched) ? 0 : 1;
+    return remoteRunSucceeded(watched) ? 0 : 1;
   }
   writeOutput(startedRunOutput, parsed, io, (run) =>
-    formatHostedRunStarted(run as HostedRunRecord, workflow).trimEnd(),
+    formatRemoteRunStarted(run as RemoteRunRecord, workflow).trimEnd(),
   );
   return 0;
 }
 
-async function ensureHostedImproveBaseCandidate(args: {
+async function ensureRemoteImproveBaseCandidate(args: {
   parsed: ParsedArgs;
-  target: HostedTarget;
+  target: RemoteTarget;
   samples: number;
   candidateId?: string;
   sourceYaml: string;
-  adapterFiles: HostedFile[];
+  candidateFiles: RemoteFile[];
+  adapterFiles: RemoteFile[];
   intervalMs: number;
   timeoutMs?: number;
   io: CliIo;
 }): Promise<string> {
   if (args.candidateId) {
-    const candidate = await readHostedCandidateSummary(args.target, args.candidateId);
+    const candidate = await readRemoteCandidateSummary(args.target, args.candidateId);
     if (!candidate) {
       throw new UsageError(
         `Base candidate ${args.candidateId} was not found for the current benchmark.`,
       );
     }
-    if (hostedCandidateIsEvaluated(candidate)) {
+    if (remoteCandidateIsEvaluated(candidate)) {
       return args.candidateId;
     }
   } else {
-    const activeCandidate = await readEvaluatedActiveHostedCandidate(args.target);
+    const activeCandidate = await readEvaluatedActiveRemoteCandidate(args.target);
     if (activeCandidate) {
       return activeCandidate.id;
     }
   }
-  const response = await apiRequest<HostedRunStartResponse>(
+  const response = await apiRequest<RemoteRunStartResponse>(
     projectApiPath(args.target.projectId, "/runs"),
     {
       method: "POST",
       body: {
+        schema: "workbench.remote.run.request.v1",
         workflow: "eval",
         samples: args.samples,
         ...(args.candidateId ? { candidateId: args.candidateId } : {}),
         sourceYaml: args.sourceYaml,
+        ...(args.candidateId ? {} : { candidateFiles: args.candidateFiles }),
         ...(args.adapterFiles.length > 0 ? { adapterFiles: args.adapterFiles } : {}),
       },
     },
     args.target.baseUrl,
   );
-  const runTarget = hostedTargetForRunStartResponse(args.target, response);
-  const watched = await watchHostedRun({
+  const runTarget = remoteTargetForRunStartResponse(args.target, response);
+  const watched = await watchRemoteRun({
     parsed: args.parsed,
     target: runTarget,
     runId: response.run.id,
     intervalMs: args.intervalMs,
     timeoutMs: args.timeoutMs,
   });
-  if (!hostedRunSucceeded(watched)) {
+  if (!remoteRunSucceeded(watched)) {
     throw new UsageError(`Parent candidate eval ${watched.id} failed; improve was not started.`);
   }
   if (!watched.candidateId) {
     throw new UsageError(`Parent candidate eval ${watched.id} did not produce a candidate.`);
   }
-  await tryImportTerminalHostedProjectState({ target: runTarget, io: args.io });
+  await tryImportTerminalRemoteProjectState({ target: runTarget, io: args.io });
   return watched.candidateId;
 }
 
-function hostedWorkflowArgsForRun(args: {
+function remoteWorkflowArgsForRun(args: {
   parsed: ParsedArgs;
   sourceDir: string;
   runId: string;
@@ -5232,17 +5418,17 @@ function appendStringFlag(args: string[], name: string, value: string | undefine
   }
 }
 
-interface HostedCandidateSummary {
+interface RemoteCandidateSummary {
   id: string;
   status?: string;
   eval?: unknown;
 }
 
-async function readHostedCandidateSummary(
-  target: HostedTarget,
+async function readRemoteCandidateSummary(
+  target: RemoteTarget,
   candidateId: string,
-): Promise<HostedCandidateSummary | null> {
-  const response = await apiRequest<{ candidates: HostedCandidateSummary[] }>(
+): Promise<RemoteCandidateSummary | null> {
+  const response = await apiRequest<{ candidates: RemoteCandidateSummary[] }>(
     projectApiPath(target.projectId, "/candidates"),
     {},
     target.baseUrl,
@@ -5250,10 +5436,10 @@ async function readHostedCandidateSummary(
   return response.candidates.find((entry) => entry.id === candidateId) ?? null;
 }
 
-async function readEvaluatedActiveHostedCandidate(
-  target: HostedTarget,
-): Promise<HostedCandidateSummary | null> {
-  const response = await apiRequest<{ benchmark: HostedProjectSummary }>(
+async function readEvaluatedActiveRemoteCandidate(
+  target: RemoteTarget,
+): Promise<RemoteCandidateSummary | null> {
+  const response = await apiRequest<{ benchmark: RemoteProjectSummary }>(
     projectApiPath(target.projectId),
     {},
     target.baseUrl,
@@ -5262,11 +5448,11 @@ async function readEvaluatedActiveHostedCandidate(
   if (!activeCandidateId) {
     return null;
   }
-  const candidate = await readHostedCandidateSummary(target, activeCandidateId);
-  return candidate && hostedCandidateIsEvaluated(candidate) ? candidate : null;
+  const candidate = await readRemoteCandidateSummary(target, activeCandidateId);
+  return candidate && remoteCandidateIsEvaluated(candidate) ? candidate : null;
 }
 
-function hostedCandidateIsEvaluated(candidate: HostedCandidateSummary): boolean {
+function remoteCandidateIsEvaluated(candidate: RemoteCandidateSummary): boolean {
   return candidate.status === "evaluated" || candidate.eval != null;
 }
 
@@ -5278,7 +5464,7 @@ async function openWorkbench(
   rejectUnknownFlags(parsed, new Set(["dir", "benchmark", "no-open", "json"]));
   if (parsed.positionals.length > 1) {
     throw new UsageError(
-      `Unexpected argument for workbench open --hosted: ${parsed.positionals.slice(1).join(" ")}`,
+      `Unexpected argument for workbench open --remote: ${parsed.positionals.slice(1).join(" ")}`,
     );
   }
   const target = await resolveOpenTarget(parsed);
@@ -5296,7 +5482,7 @@ async function openWorkbench(
 }
 
 function buildWorkbenchWebUrl(
-  target: HostedTarget,
+  target: RemoteTarget,
   ref?: string,
 ): string {
   const urls = buildWorkbenchResourceUrls(target);
@@ -5313,10 +5499,10 @@ function buildWorkbenchWebUrl(
   return buildWorkbenchResourceUrls(target, { candidateId: ref }).candidateEvaluation!;
 }
 
-async function resolveHostedTarget(
+async function resolveRemoteTarget(
   parsed: ParsedArgs,
   options: { requireProjectIdentity?: boolean; sourceArg?: string; sourceDir?: string } = {},
-): Promise<HostedTarget> {
+): Promise<RemoteTarget> {
   if (options.sourceArg !== undefined && parsed.flags.dir !== undefined) {
     throw new UsageError("Use either --dir or SOURCE, not both.");
   }
@@ -5325,7 +5511,7 @@ async function resolveHostedTarget(
     : resolveDir(parsed, options.sourceArg);
   const origin = await readWorkbenchOrigin(dir);
   const explicitProject = asOptionalString(parsed.flags.benchmark);
-  const baseUrl = await effectiveBaseUrl(origin?.baseUrl);
+  const baseUrl = await effectiveOriginBaseUrl(origin?.baseUrl);
   if (explicitProject && (!isRemoteProjectId(explicitProject) || options.requireProjectIdentity === true)) {
     const project = await resolveRemoteProject(explicitProject, baseUrl);
     return {
@@ -5340,7 +5526,7 @@ async function resolveHostedTarget(
   const projectId = explicitProject ?? origin?.projectId;
   if (!projectId) {
     throw new UsageError(
-      "Missing hosted benchmark. Run workbench push, workbench clone, or pass --benchmark OWNER/BENCHMARK.",
+      "Missing remote benchmark. Run workbench push, workbench clone, or pass --benchmark OWNER/BENCHMARK.",
     );
   }
   const originRemote = origin ? parseOriginRemote(origin) : null;
@@ -5356,10 +5542,10 @@ async function resolveHostedTarget(
   };
 }
 
-async function resolveHostedDryRunTarget(
+async function resolveRemoteDryRunTarget(
   parsed: ParsedArgs,
   options: { sourceArg?: string; sourceDir?: string } = {},
-): Promise<HostedDryRunTarget> {
+): Promise<RemoteDryRunTarget> {
   if (options.sourceArg !== undefined && parsed.flags.dir !== undefined) {
     throw new UsageError("Use either --dir or SOURCE, not both.");
   }
@@ -5368,7 +5554,7 @@ async function resolveHostedDryRunTarget(
     : resolveDir(parsed, options.sourceArg);
   const origin = await readWorkbenchOrigin(dir);
   const explicitProject = asOptionalString(parsed.flags.benchmark);
-  const baseUrl = await effectiveBaseUrl(origin?.baseUrl);
+  const baseUrl = await effectiveOriginBaseUrl(origin?.baseUrl);
   if (explicitProject) {
     if (isRemoteProjectId(explicitProject)) {
       return {
@@ -5402,13 +5588,13 @@ async function resolveHostedDryRunTarget(
     };
   }
   throw new UsageError(
-    "Missing hosted benchmark. Run workbench push, workbench clone, or pass --benchmark OWNER/BENCHMARK.",
+    "Missing remote benchmark. Run workbench push, workbench clone, or pass --benchmark OWNER/BENCHMARK.",
   );
 }
 
 async function resolveOpenTarget(
   parsed: ParsedArgs,
-): Promise<HostedTarget & { openRef?: string }> {
+): Promise<RemoteTarget & { openRef?: string }> {
   const ref = parsed.positionals[0];
   if (
     ref &&
@@ -5441,13 +5627,13 @@ async function resolveOpenTarget(
     };
   }
   return {
-    ...(await resolveHostedTarget(parsed, { requireProjectIdentity: true })),
+    ...(await resolveRemoteTarget(parsed, { requireProjectIdentity: true })),
     ...(ref ? { openRef: ref } : {}),
   };
 }
 
 function buildWorkbenchResourceUrls(
-  target: Pick<HostedTarget, "baseUrl" | "projectId"> & { owner?: string; projectName?: string },
+  target: Pick<RemoteTarget, "baseUrl" | "projectId"> & { owner?: string; projectName?: string },
   refs: {
     runId?: string | null;
     candidateId?: string | null;
@@ -5544,9 +5730,9 @@ async function resolveRemoteProject(
 }
 
 function withRunUrls(
-  target: HostedTarget,
-  run: HostedRunRecord,
-): HostedRunRecord {
+  target: RemoteTarget,
+  run: RemoteRunRecord,
+): RemoteRunRecord {
   if (!target.owner || !target.projectName) {
     return { ...run };
   }
@@ -5559,16 +5745,16 @@ function withRunUrls(
   };
 }
 
-function hostedTargetForRunStartResponse(
-  target: HostedTarget,
-  response: HostedRunStartResponse,
-): HostedTarget {
+function remoteTargetForRunStartResponse(
+  target: RemoteTarget,
+  response: RemoteRunStartResponse,
+): RemoteTarget {
   const projectId = response.benchmark?.id ?? response.run.projectId ?? target.projectId;
   if (projectId === target.projectId && !response.benchmark) {
     return target;
   }
   const origin = target.origin?.projectId === projectId ? target.origin : null;
-  const next: HostedTarget = {
+  const next: RemoteTarget = {
     ...target,
     projectId,
     origin,
@@ -5586,9 +5772,9 @@ function hostedTargetForRunStartResponse(
   return next;
 }
 
-function hostedRunEvaluationCandidateId(
-  run: HostedRunRecord,
-  jobs: readonly HostedRunJobRecord[] = [],
+function remoteRunEvaluationCandidateId(
+  run: RemoteRunRecord,
+  jobs: readonly RemoteRunJobRecord[] = [],
 ): string | null {
   if (run.outputCandidateId) {
     return run.outputCandidateId;
@@ -5654,7 +5840,7 @@ function runtimeBundleForProjectVisibility(
 ): WorkbenchRuntimeBundle {
   return {
     ...runtime,
-    candidates: runtime.candidates.map((candidate) => ({
+    candidates: runtime.candidates.map((candidate: CandidateRecord) => ({
       ...candidate,
       visibility,
     })),
@@ -5662,7 +5848,7 @@ function runtimeBundleForProjectVisibility(
 }
 
 function localProjectStateSource(source: LocalProjectSource): WorkbenchProjectStateSource {
-  const request = hostedProjectSourceRequest(source);
+  const request = remoteProjectSourceRequest(source);
   const stateSource: WorkbenchProjectStateSource = {
     source: request.source,
     files: source.sourceFiles.map((file) => ({ ...file })),
@@ -5682,7 +5868,7 @@ function localProjectStateSource(source: LocalProjectSource): WorkbenchProjectSt
   };
 }
 
-function toSurfaceSnapshotFile(file: HostedFile | SurfaceSnapshotFile): SurfaceSnapshotFile {
+function toSurfaceSnapshotFile(file: RemoteFile | SurfaceSnapshotFile): SurfaceSnapshotFile {
   return {
     path: file.path,
     kind: "kind" in file ? file.kind : file.encoding === "base64" ? "binary" : "text",
@@ -5692,9 +5878,9 @@ function toSurfaceSnapshotFile(file: HostedFile | SurfaceSnapshotFile): SurfaceS
   };
 }
 
-function hostedProjectSummaryFromState(
+function remoteProjectSummaryFromState(
   state: WorkbenchProjectState,
-): HostedProjectSummary & {
+): RemoteProjectSummary & {
   id: string;
   name: string;
   ownerUsername?: string;
@@ -5711,15 +5897,15 @@ function sourceFileCount(source: LocalProjectSource): number {
   return source.sourceFiles.length;
 }
 
-function hostedProjectSourceRequest(source: LocalProjectSource): {
+function remoteProjectSourceRequest(source: LocalProjectSource): {
   source: string;
-  candidateFiles: HostedFile[];
-  engineResolveFiles: HostedFile[];
+  candidateFiles: RemoteFile[];
+  engineResolveFiles: RemoteFile[];
   engineResolveBinding: EngineResolveBinding;
-  adapterFiles: HostedFile[];
+  adapterFiles: RemoteFile[];
   dockerfile: string;
   runtimeDockerfile: string;
-  runtimeFiles: HostedFile[];
+  runtimeFiles: RemoteFile[];
   network: "off" | "on";
   resources: Partial<{
     cpu: number;
@@ -5728,11 +5914,11 @@ function hostedProjectSourceRequest(source: LocalProjectSource): {
     timeoutMinutes: number;
   }>;
 } {
-  const { network, resources } = hostedEnvironmentOptions(source);
+  const { network, resources } = remoteEnvironmentOptions(source);
   return {
     source: source.specSource,
     candidateFiles: source.candidateFiles,
-    engineResolveFiles: hostedEngineResolveFiles(source),
+    engineResolveFiles: remoteEngineResolveFiles(source),
     engineResolveBinding: engineResolveBindingForSpec(source.spec),
     adapterFiles: source.adapterFiles,
     dockerfile: source.dockerfile,
@@ -5747,7 +5933,7 @@ function isRemoteProjectId(value: string): boolean {
   return /^wb_[a-f0-9]{12}$/u.test(value);
 }
 
-function hostedEnvironmentOptions(source: LocalProjectSource): {
+function remoteEnvironmentOptions(source: LocalProjectSource): {
   network: "off" | "on";
   resources: {
     cpu: number;
@@ -5765,20 +5951,20 @@ function hostedEnvironmentOptions(source: LocalProjectSource): {
   };
 }
 
-async function watchHostedRun(args: {
+async function watchRemoteRun(args: {
   parsed: ParsedArgs;
-  target: HostedTarget;
+  target: RemoteTarget;
   runId: string;
   intervalMs: number;
   timeoutMs?: number;
-}): Promise<HostedRunRecord> {
+}): Promise<RemoteRunRecord> {
   const deadline =
     args.timeoutMs === undefined ? undefined : Date.now() + args.timeoutMs;
-  let lastRun: HostedRunRecord | null = null;
+  let lastRun: RemoteRunRecord | null = null;
   while (true) {
-    let response: { run: HostedRunRecord };
+    let response: { run: RemoteRunRecord };
     try {
-      response = await apiRequest<{ run: HostedRunRecord }>(
+      response = await apiRequest<{ run: RemoteRunRecord }>(
         projectApiPath(args.target.projectId, `/runs/${encodeURIComponent(args.runId)}`),
         {},
         args.target.baseUrl,
@@ -5808,7 +5994,7 @@ async function watchHostedRun(args: {
   }
 }
 
-function formatHostedRunResult(run: HostedRunRecord): string {
+function formatRemoteRunResult(run: RemoteRunRecord): string {
   const candidateId = run.outputCandidateId ?? run.candidateId;
   const activeDetail = run.activeCandidateId && candidateId && run.activeCandidateId !== candidateId
     ? `; active ${run.activeCandidateId}`
@@ -5827,7 +6013,7 @@ function formatRetryCommandResult(result: RetryCommandResult): string {
   const runId = run?.id ?? result.runId ?? "unknown";
   const scope = `${result.retried.kind} ${result.retried.id}`;
   const verb = run
-    ? run.status === "finished" ? "finished as hosted run" : "started as hosted run"
+    ? run.status === "finished" ? "finished as remote run" : "started as remote run"
     : "finished as local run";
   return [
     `Retry of ${scope} ${verb} ${runId}.`,
@@ -5844,9 +6030,9 @@ function formatRetryCommandResult(result: RetryCommandResult): string {
   ].join("\n");
 }
 
-function formatHostedRunStarted(
-  run: HostedRunRecord,
-  fallbackWorkflow: HostedRunWorkflow,
+function formatRemoteRunStarted(
+  run: RemoteRunRecord,
+  fallbackWorkflow: RemoteRunWorkflow,
 ): string {
   const candidateId = run.outputCandidateId ?? run.candidateId;
   return [
@@ -5858,11 +6044,8 @@ function formatHostedRunStarted(
   ].join("\n");
 }
 
-function readRunJobPurpose(job: HostedRunJobRecord): string | null {
-  const input = readRecord(job.input);
-  const execution = readRecord(input?.execution);
-  const purpose = execution?.purpose;
-  return typeof purpose === "string" && purpose ? purpose : null;
+function readRunJobPurpose(job: RemoteRunJobRecord): string | null {
+  return job.purpose && job.purpose.trim() ? job.purpose : null;
 }
 
 function readRecord(value: unknown): Record<string, unknown> | null {
@@ -5887,42 +6070,31 @@ function readFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-async function withHostedRunFailureSummary(
-  target: HostedTarget,
-  run: HostedRunRecord,
-): Promise<HostedRunRecord> {
-  if (hostedRunSucceeded(run) || run.error || (run.failedJobCount ?? 0) <= 0) {
+async function withRemoteRunFailureSummary(
+  target: RemoteTarget,
+  run: RemoteRunRecord,
+): Promise<RemoteRunRecord> {
+  if (remoteRunSucceeded(run) || run.error || (run.failedJobCount ?? 0) <= 0) {
     return run;
   }
-  const error = await readHostedRunFailureSummary(target, run.id);
+  const error = await readRemoteRunFailureSummary(target, run.id);
   return error ? { ...run, error } : run;
 }
 
-async function readHostedRunFailureSummary(
-  target: HostedTarget,
+async function readRemoteRunFailureSummary(
+  target: RemoteTarget,
   runId: string,
 ): Promise<string | null> {
   try {
-    const project = await apiRequest<{
-      benchmark: {
-        jobs: Array<{
-          id: string;
-          runId: string;
-          status: string;
-          error?: string;
-        }>;
-      };
-    }>(projectApiPath(target.projectId), {}, target.baseUrl);
-    const failed = project.benchmark.jobs.find(
-      (job) => job.runId === runId && job.status === "failed" && job.error,
-    );
+    const detail = await readRemoteRunDetail(target, runId);
+    const failed = detail.jobs.find((job) => job.status === "failed" && job.error);
     return failed?.error ? `First failed job ${failed.id}: ${failed.error}` : null;
   } catch {
     return null;
   }
 }
 
-function hostedRunSucceeded(run: HostedRunRecord): boolean {
+function remoteRunSucceeded(run: RemoteRunRecord): boolean {
   if (run.status !== "finished") {
     return false;
   }
@@ -5941,16 +6113,6 @@ async function readWorkbenchOrigin(dir: string): Promise<WorkbenchOrigin | null>
       throw new UsageError(`Workbench origin is malformed: ${workbenchOriginPath(dir)}`);
     }
     const originRecord = parsed as Partial<WorkbenchOrigin>;
-    const keys = Object.keys(originRecord).sort();
-    const expectedKeys = [
-      "baseUrl",
-      "linkedAt",
-      "projectId",
-      "remote",
-      "runtimeFingerprint",
-      "sourceFingerprint",
-      "sourceRevisionId",
-    ];
     if (
       typeof originRecord.projectId !== "string" ||
       typeof originRecord.baseUrl !== "string" ||
@@ -5964,9 +6126,6 @@ async function readWorkbenchOrigin(dir: string): Promise<WorkbenchOrigin | null>
       originRecord.sourceFingerprint.length === 0 ||
       originRecord.runtimeFingerprint.length === 0
     ) {
-      throw new UsageError(`Workbench origin is malformed: ${workbenchOriginPath(dir)}`);
-    }
-    if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) {
       throw new UsageError(`Workbench origin is malformed: ${workbenchOriginPath(dir)}`);
     }
     return {
@@ -6032,7 +6191,7 @@ async function writeWorkbenchOriginFromState(
     args.state.base.runtimeFingerprint ??
     workbenchRuntimeBundleFingerprint(args.state.runtime);
   if (!sourceRevisionId || !sourceFingerprint || !runtimeFingerprint) {
-    throw new UsageError("Hosted project state is missing required origin metadata.");
+    throw new UsageError("Remote project state is missing required origin metadata.");
   }
   return await writeWorkbenchOrigin(dir, {
     baseUrl: args.baseUrl,
@@ -6076,12 +6235,29 @@ function workbenchOriginPath(dir: string): string {
   return path.join(dir, ".workbench", "origin.json");
 }
 
-async function effectiveBaseUrl(preferred?: string): Promise<string> {
+async function effectiveBaseUrl(): Promise<string> {
   const config = await loadConfig();
+  return selectWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
+}
+
+async function effectiveOriginBaseUrl(originBaseUrl?: string): Promise<string> {
+  const config = await loadConfig();
+  return selectWorkbenchBaseUrl({
+    originBaseUrl,
+    configBaseUrl: config.baseUrl,
+  });
+}
+
+function selectWorkbenchBaseUrl(input: {
+  explicitBaseUrl?: string;
+  originBaseUrl?: string;
+  configBaseUrl?: string;
+} = {}): string {
   return normalizeBaseUrl(
-    process.env.WORKBENCH_API_URL ??
-      preferred ??
-      config.baseUrl ??
+    input.explicitBaseUrl ??
+      input.originBaseUrl ??
+      process.env.WORKBENCH_API_URL ??
+      input.configBaseUrl ??
       DEFAULT_BASE_URL,
   );
 }
@@ -6095,7 +6271,7 @@ async function readWorkbenchProfileStatus(
   if (!config.accessToken) {
     return { authenticated: false, profile: null };
   }
-  const baseUrl = await effectiveBaseUrl(config.baseUrl);
+  const baseUrl = selectWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
   try {
     const response = await fetch(`${baseUrl}/api/workbench/profile`, {
       headers: {
@@ -6127,12 +6303,9 @@ async function apiRequest<T>(
   baseUrlOverride?: string,
 ): Promise<T> {
   const config = await loadConfig();
-  const baseUrl = normalizeBaseUrl(
-    baseUrlOverride ??
-      process.env.WORKBENCH_API_URL ??
-      config.baseUrl ??
-      DEFAULT_BASE_URL,
-  );
+  const baseUrl = baseUrlOverride !== undefined
+    ? normalizeBaseUrl(baseUrlOverride)
+    : selectWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
   const method = options.method ?? "GET";
   const canRetry = method === "GET";
   let lastError: unknown = null;
@@ -6830,6 +7003,36 @@ function formatMetricValue(value: number): string {
   return value.toFixed(2);
 }
 
+function formatNullableMetric(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? formatMetricValue(value)
+    : "n/a";
+}
+
+function formatFailureLine(failure: {
+  kind: string;
+  id: string;
+  status?: string;
+  runId?: string;
+  candidateId?: string;
+  jobId?: string;
+  caseId?: string;
+  sampleIndex?: number;
+  error?: string;
+}): string {
+  return [
+    failure.kind,
+    failure.id,
+    failure.status ?? "failed",
+    failure.runId ? `run=${failure.runId}` : null,
+    failure.candidateId ? `candidate=${failure.candidateId}` : null,
+    failure.jobId ? `job=${failure.jobId}` : null,
+    failure.caseId ? `case=${failure.caseId}` : null,
+    typeof failure.sampleIndex === "number" ? `sample=${failure.sampleIndex}` : null,
+    failure.error ?? null,
+  ].filter(Boolean).join("\t");
+}
+
 function resolveDir(parsed: ParsedArgs, positionalDir?: string): string {
   const resolved = path.resolve(
     asOptionalString(parsed.flags.dir) ?? positionalDir ?? process.cwd(),
@@ -6919,7 +7122,7 @@ async function resolveLocalProjectForExecution(
 }
 
 function completedJobOutputFiles(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
 ): SurfaceSnapshotFile[] {
   const output = asJsonRecord(job.output);
   const files = Array.isArray(output.files)
@@ -7022,7 +7225,7 @@ function formatSpecImprover(
 
 async function writeFiles(
   outputDir: string,
-  files: HostedFile[],
+  files: RemoteFile[],
 ): Promise<void> {
   await fs.mkdir(outputDir, { recursive: true });
   for (const file of files) {
@@ -7040,7 +7243,7 @@ async function writeFiles(
 
 async function syncSourceFiles(
   outputDir: string,
-  files: HostedFile[],
+  files: RemoteFile[],
 ): Promise<void> {
   const previousPaths = await readManagedSourceFilePaths(outputDir);
   const nextPaths = new Set(files.map((file) => file.path));

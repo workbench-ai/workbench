@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   DOCKER_SANDBOX_BACKEND,
   runWorkbenchExecutionDag,
-  type HostedWorkbenchJob,
+  type RemoteWorkbenchJob,
 } from "../src/index.ts";
 
 describe("workbench execution DAG scheduler", () => {
@@ -14,7 +14,7 @@ describe("workbench execution DAG scheduler", () => {
 
     const result = await runWorkbenchExecutionDag({
       jobs,
-      sandboxProvider: DOCKER_SANDBOX_BACKEND,
+      sandboxBackend: DOCKER_SANDBOX_BACKEND,
       capacity: { cpu: 5, memoryGb: 5, diskGb: 5 },
       executeJob: async (job) => {
         active += 1;
@@ -42,7 +42,7 @@ describe("workbench execution DAG scheduler", () => {
 
     const result = await runWorkbenchExecutionDag({
       jobs,
-      sandboxProvider: DOCKER_SANDBOX_BACKEND,
+      sandboxBackend: DOCKER_SANDBOX_BACKEND,
       capacity: { cpu: 3, memoryGb: 3, diskGb: 3 },
       executeJob: async (job) => {
         if (job.id.startsWith("score-")) {
@@ -66,7 +66,7 @@ describe("workbench execution DAG scheduler", () => {
 
     const result = await runWorkbenchExecutionDag({
       jobs,
-      sandboxProvider: DOCKER_SANDBOX_BACKEND,
+      sandboxBackend: DOCKER_SANDBOX_BACKEND,
       capacity: { cpu: 2, memoryGb: 2, diskGb: 2 },
       executeJob: async (job) => {
         active += 1;
@@ -90,7 +90,7 @@ describe("workbench execution DAG scheduler", () => {
 
     const result = await runWorkbenchExecutionDag({
       jobs,
-      sandboxProvider: DOCKER_SANDBOX_BACKEND,
+      sandboxBackend: DOCKER_SANDBOX_BACKEND,
       capacity: { cpu: 2, memoryGb: 2, diskGb: 2 },
       executeJob: async (job) =>
         job.id === "runner"
@@ -111,7 +111,7 @@ describe("workbench execution DAG scheduler", () => {
 
     const result = await runWorkbenchExecutionDag({
       jobs: [candidateRevision, runner],
-      sandboxProvider: DOCKER_SANDBOX_BACKEND,
+      sandboxBackend: DOCKER_SANDBOX_BACKEND,
       capacity: { cpu: 1, memoryGb: 1, diskGb: 1 },
       executeJob: async (job) => {
         started.push(job.id);
@@ -127,7 +127,7 @@ describe("workbench execution DAG scheduler", () => {
 function testJob(
   id: string,
   dependsOn: readonly string[] = [],
-): HostedWorkbenchJob {
+): RemoteWorkbenchJob {
   return {
     id,
     projectId: "benchmark",
@@ -153,10 +153,10 @@ function testJob(
         },
       },
     },
-  } as unknown as HostedWorkbenchJob;
+  } as unknown as RemoteWorkbenchJob;
 }
 
-function succeededJob(job: HostedWorkbenchJob): HostedWorkbenchJob {
+function succeededJob(job: RemoteWorkbenchJob): RemoteWorkbenchJob {
   return {
     ...job,
     status: "succeeded",
@@ -165,7 +165,7 @@ function succeededJob(job: HostedWorkbenchJob): HostedWorkbenchJob {
   };
 }
 
-function failedJob(job: HostedWorkbenchJob, error: string): HostedWorkbenchJob {
+function failedJob(job: RemoteWorkbenchJob, error: string): RemoteWorkbenchJob {
   return {
     ...job,
     status: "failed",

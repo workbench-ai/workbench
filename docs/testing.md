@@ -61,15 +61,15 @@ The score should come from Harbor's normalized result through the adapter. Harbo
 
 ## Workbench Cloud Remote Checks
 
-The open CLI includes Cloud remote commands, but hosted implementation is owned by `products/workbench-cloud`. With a local Workbench Cloud server running, source and state commands can be checked with:
+The open CLI includes Cloud remote commands, but remote implementation is owned by `products/workbench-cloud`. With a local Workbench Cloud server running, source and state commands can be checked with:
 
 ```bash
 WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli push --json
 WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli pull --json
-WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli eval --hosted --samples 1 --dry-run --json
+WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli eval --remote --samples 1 --dry-run --json
 ```
 
-Hosted execution checks should use the Workbench Cloud smoke command:
+Remote execution checks should use the Workbench Cloud smoke command:
 
 ```bash
 AUTH_SECRET=test-secret \
@@ -80,7 +80,7 @@ WORKBENCH_RUNTIME_REGISTRY=127.0.0.1:5050 \
 pnpm --dir ../workbench-cloud smoke:local
 ```
 
-That smoke command starts the cloud-owned builder, host supervisor, and sandbox host. The CLI docs intentionally do not describe worker internals or provider implementation details.
+That smoke command starts the cloud-owned builder, host supervisor, and sandbox host. The CLI docs intentionally do not describe worker internals or sandbox backend implementation details.
 
 ## Three-Statement Bench
 

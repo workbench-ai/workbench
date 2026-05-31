@@ -1,6 +1,6 @@
 # Workbench Skill-Eval Catalog
 
-This directory holds the product-local ergonomics catalog for the `workbench` CLI skill. It tests whether the skill drives project commands, Workbench Cloud remotes, hosted `--hosted` execution, and eval-authoring docs correctly when creating benchmark evaluations.
+This directory holds the product-local ergonomics catalog for the `workbench` CLI skill. It tests whether the skill drives project commands, Workbench Cloud remotes, remote `--remote` execution, and eval-authoring docs correctly when creating benchmark evaluations.
 
 It is not the public guide for creating Workbench benchmark evaluations. Eval authoring guidance lives under `products/workbench/docs/evals/` and is copied into installed skills as `references/docs/evals/`.
 
@@ -14,9 +14,9 @@ The evals intentionally cover the repo-like CLI, Workbench Cloud remote layer, a
 - idempotent pushes
 - starting and watching eval/improve workflows
 - opening or returning Workbench Cloud URLs so an agent can keep an embedded browser aligned with CLI work
-- opening hosted URLs returned by hosted lifecycle commands
+- opening remote URLs returned by remote lifecycle commands
 
-They should reward the public project workflow, hosted `--hosted` workflow, and eval-authoring behavior.
+They should reward the public project workflow, remote `--remote` workflow, and eval-authoring behavior.
 
 Validate the catalog from `products/workbench`:
 

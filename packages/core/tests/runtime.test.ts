@@ -43,7 +43,7 @@ import {
   type CandidateRecord,
   type WorkbenchRunWorkload,
   type WorkbenchEngineCase,
-  type HostedWorkbenchJob,
+  type RemoteWorkbenchJob,
   type SandboxExecutionFileStore,
   type SandboxPlane,
   type SurfaceSnapshotFile,
@@ -320,7 +320,7 @@ describe("Workbench runtime generic execution", () => {
       },
       trace: { trace_id: "job_1", spans: [], events: [], summaries: [] },
       traceSessions: [],
-    } as HostedWorkbenchJob & { trace: unknown; traceSessions: unknown };
+    } as RemoteWorkbenchJob & { trace: unknown; traceSessions: unknown };
     expect(sanitizeWorkbenchRuntimeJobForExchange(job)).toEqual({
       id: "job_1",
       runId: "run_1",
@@ -361,9 +361,9 @@ describe("Workbench runtime generic execution", () => {
       await publishWorkbenchProgressStdoutEnvelope({
         url: unexpected.url,
         body: {
-          type: "workbench.job.progress",
+          schema: "workbench.remote.job.progress.v1",
           ownerUserId: "user_runtime",
-          progressToken: "progress-token",
+          leaseToken: "progress-token",
           batch,
         },
       }, {
@@ -374,9 +374,9 @@ describe("Workbench runtime generic execution", () => {
       await publishWorkbenchProgressStdoutEnvelope({
         url: expected.url,
         body: {
-          type: "workbench.job.progress",
+          schema: "workbench.remote.job.progress.v1",
           ownerUserId: "other_user",
-          progressToken: "progress-token",
+          leaseToken: "progress-token",
           batch,
         },
       }, {
@@ -390,8 +390,8 @@ describe("Workbench runtime generic execution", () => {
       await publishWorkbenchProgressStdoutEnvelope({
         url: expected.url,
         body: {
-          type: "workbench.job.progress",
-          progressToken: "progress-token",
+          schema: "workbench.remote.job.progress.v1",
+          leaseToken: "progress-token",
           batch,
         },
       }, {
@@ -402,7 +402,7 @@ describe("Workbench runtime generic execution", () => {
       expect(expected.requests).toEqual([
         expect.objectContaining({
           ownerUserId: "user_runtime",
-          progressToken: "progress-token",
+          leaseToken: "progress-token",
         }),
       ]);
       expect(unexpected.requests).toHaveLength(0);
@@ -639,7 +639,7 @@ describe("Workbench runtime generic execution", () => {
       .not.toContain("secret.txt");
   });
 
-  test("creates hosted workloads from resolved engine-resolve files", () => {
+  test("creates remote workloads from resolved engine-resolve files", () => {
     const spec = resolveWorkbenchResolvedSourceYaml(runtimeSpec());
     const now = "2026-04-27T00:00:00.000Z";
     const engineCases = [engineCase(
@@ -753,7 +753,7 @@ describe("Workbench runtime generic execution", () => {
         sampleIndex: 0,
         caseId: "case-001",
       },
-    } as HostedWorkbenchJob, now);
+    } as RemoteWorkbenchJob, now);
     const completed = {
       ...job,
       status: "succeeded" as const,
@@ -773,7 +773,7 @@ describe("Workbench runtime generic execution", () => {
         ]),
         traces: [`.workbench/traces/${job.id}/runner/session/events.ndjson`],
       },
-    } as HostedWorkbenchJob;
+    } as RemoteWorkbenchJob;
     const files = createOptimizerTraceInputFiles({
       jobs: [completed],
     });
@@ -816,7 +816,7 @@ describe("Workbench runtime generic execution", () => {
           { path: `.workbench/traces/job_attempt/engine/result.json`, content: "{\"protocol\":\"workbench.adapter-result.v1\",\"operation\":\"engine.run\",\"ok\":true,\"value\":{\"score\":1}}\n" },
         ]),
       },
-    } as HostedWorkbenchJob;
+    } as RemoteWorkbenchJob;
     const baselineJob = {
       ...attemptJob,
       id: "job_baseline",
@@ -829,7 +829,7 @@ describe("Workbench runtime generic execution", () => {
         attemptIndex: 0,
         baseline: true,
       },
-    } as HostedWorkbenchJob;
+    } as RemoteWorkbenchJob;
     const generatedCandidateJob = {
       ...attemptJob,
       id: "job_generated_candidate",
@@ -841,7 +841,7 @@ describe("Workbench runtime generic execution", () => {
         candidateId: "candidate_trace_002",
         attemptIndex: 0,
       },
-    } as HostedWorkbenchJob;
+    } as RemoteWorkbenchJob;
 
     const files = createOptimizerTraceInputFiles({
       jobs: [baselineJob, generatedCandidateJob, attemptJob],
@@ -1030,7 +1030,7 @@ describe("Workbench runtime generic execution", () => {
     const runningRunner = runningJob(attemptJobs[0]!, now);
     const runnerExecution = executionFromJob(runningRunner);
     const progress = await tryCreateProgressCaptureServer();
-    let completedRunner: HostedWorkbenchJob | null = null;
+    let completedRunner: RemoteWorkbenchJob | null = null;
     try {
       completedRunner = await executeWorkbenchAttemptWithRuntimeControl({
         job: runningRunner,
@@ -1047,7 +1047,7 @@ describe("Workbench runtime generic execution", () => {
         } : undefined,
       });
       if (progress) {
-        expect(progress.requests.map((request) => request.progressToken)).toEqual([
+        expect(progress.requests.map((request) => request.leaseToken)).toEqual([
           "progress-token",
           "progress-token",
         ]);
@@ -1080,8 +1080,8 @@ describe("Workbench runtime generic execution", () => {
     const progressEnvelope = (seq: number): WorkbenchProgressStdoutEnvelope => ({
       url: progress?.url ?? "http://127.0.0.1:9/progress",
       body: {
-        type: "workbench.job.progress",
-        progressToken: "progress-token",
+        schema: "workbench.remote.job.progress.v1",
+        leaseToken: "progress-token",
         batch: {
           projectId: "project_runtime",
           runId: "run_runtime",
@@ -1275,7 +1275,7 @@ describe("Workbench runtime generic execution", () => {
       baseId: null,
       attemptIndex: 0,
     });
-    const attemptJob: HostedWorkbenchJob = {
+    const attemptJob: RemoteWorkbenchJob = {
       id: "job_exec_run_runtime_attempt_000_current_sample_000_score",
       projectId: "project_runtime",
       runId: "run_runtime",
@@ -1298,7 +1298,7 @@ describe("Workbench runtime generic execution", () => {
           inputs: [],
           outputs: [],
         },
-      } as unknown as HostedWorkbenchJob["input"],
+      } as unknown as RemoteWorkbenchJob["input"],
       output: {
         ok: true,
         candidateId,
@@ -1337,7 +1337,7 @@ describe("Workbench runtime generic execution", () => {
             metrics: { score: 0.9 },
           }],
         },
-      } as unknown as HostedWorkbenchJob["output"],
+      } as unknown as RemoteWorkbenchJob["output"],
     };
 
     const materialized = materializeWorkbenchRunResult({
@@ -1425,7 +1425,7 @@ describe("Workbench runtime generic execution", () => {
       baseId: null,
       attemptIndex: 0,
     });
-    const attemptJob: HostedWorkbenchJob = {
+    const attemptJob: RemoteWorkbenchJob = {
       ...runningJob({
         id: "job_existing_eval_score",
         projectId: "project_runtime",
@@ -1449,7 +1449,7 @@ describe("Workbench runtime generic execution", () => {
             outputs: [],
           },
         },
-      } as unknown as HostedWorkbenchJob, now),
+      } as unknown as RemoteWorkbenchJob, now),
       status: "succeeded",
       attempt: 1,
       finishedAt: now,
@@ -1471,7 +1471,7 @@ describe("Workbench runtime generic execution", () => {
             metrics: { score: 0.82 },
           }],
         },
-      } as unknown as HostedWorkbenchJob["output"],
+      } as unknown as RemoteWorkbenchJob["output"],
     };
 
     const materialized = materializeWorkbenchRunResult({
@@ -1517,7 +1517,7 @@ describe("Workbench runtime generic execution", () => {
       baseId: null,
       attemptIndex: 0,
     });
-    const attemptJob: HostedWorkbenchJob = {
+    const attemptJob: RemoteWorkbenchJob = {
       ...runningJob({
         id: "job_invalid_score",
         projectId: "project_runtime",
@@ -1541,7 +1541,7 @@ describe("Workbench runtime generic execution", () => {
             outputs: [],
           },
         },
-      } as unknown as HostedWorkbenchJob, now),
+      } as unknown as RemoteWorkbenchJob, now),
       status: "succeeded",
       attempt: 1,
       finishedAt: now,
@@ -1563,7 +1563,7 @@ describe("Workbench runtime generic execution", () => {
             metrics: { score: 0.1 },
           }],
         },
-      } as unknown as HostedWorkbenchJob["output"],
+      } as unknown as RemoteWorkbenchJob["output"],
     };
 
     const materialized = materializeWorkbenchRunResult({
@@ -1616,7 +1616,7 @@ describe("Workbench runtime generic execution", () => {
       engineCases,
       now,
     });
-    const completedAttempts = attemptJobs.map((job, index): HostedWorkbenchJob => {
+    const completedAttempts = attemptJobs.map((job, index): RemoteWorkbenchJob => {
       const caseId = index === 0 ? "case-a" : "case-b";
       const score = index === 0 ? 0.9 : 0.3;
       const finishedAt = new Date(Date.parse(now) + ((index + 1) * 1000)).toISOString();
@@ -1751,7 +1751,7 @@ describe("Workbench runtime generic execution", () => {
       engineCases,
       now,
     });
-    const completedAttempts = attemptJobs.map((job): HostedWorkbenchJob => {
+    const completedAttempts = attemptJobs.map((job): RemoteWorkbenchJob => {
       const caseId = job.input && typeof job.input === "object" && !Array.isArray(job.input)
         ? String((job.input as { caseId?: unknown }).caseId)
         : "";
@@ -1873,7 +1873,7 @@ describe("Workbench runtime generic execution", () => {
       engineCases: [engineCase("case-a", "Case A")],
       now,
     });
-    const completedAttempt: HostedWorkbenchJob = {
+    const completedAttempt: RemoteWorkbenchJob = {
       ...runningJob(attemptJob!, now),
       status: "succeeded",
       attempt: 1,
@@ -2511,11 +2511,11 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
     });
 
     expect(completedEngine.status).toBe("succeeded");
-    const { files: _files, ...hostedStyleEngineOutput } =
+    const { files: _files, ...remoteStyleEngineOutput } =
       completedEngine.output as Record<string, unknown>;
-    const hostedStyleCompletedEngine = {
+    const remoteStyleCompletedEngine = {
       ...completedEngine,
-      output: hostedStyleEngineOutput,
+      output: remoteStyleEngineOutput,
     };
     const candidateRevision = createBaselineCandidateJob({
       ownerUserId: "user_runtime",
@@ -2532,7 +2532,7 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
       benchmarkFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
       startedAt: now,
       spec,
-      jobs: [candidateRevision, hostedStyleCompletedEngine],
+      jobs: [candidateRevision, remoteStyleCompletedEngine],
       existingCandidateCount: 0,
     });
     const sample = materialized.candidates[0]?.eval?.samples[0];
@@ -2686,17 +2686,17 @@ fs.writeFileSync(path.join(output, "workbench-result.json"), JSON.stringify({
 
 async function executeWorkbenchAttemptWithRuntimeControl(
   args: Parameters<typeof executeWorkbenchExecutionJob>[0],
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   return await executeWorkbenchExecutionJob(args, {
-    sandboxProvider: "test-current-runtime",
-    createSandboxPlaneForProvider(_provider, runtimeArgs, startedAt, fileStore) {
+    sandboxBackend: "test-current-runtime",
+    createSandboxPlaneForBackend(_backend, runtimeArgs, startedAt, fileStore) {
       return createCurrentRuntimeControlSandboxPlane(runtimeArgs, startedAt, fileStore);
     },
   });
 }
 
 function createCurrentRuntimeControlSandboxPlane(
-  runtimeArgs: Parameters<NonNullable<Parameters<typeof executeWorkbenchExecutionJob>[1]["createSandboxPlaneForProvider"]>>[1],
+  runtimeArgs: Parameters<NonNullable<Parameters<typeof executeWorkbenchExecutionJob>[1]["createSandboxPlaneForBackend"]>>[1],
   startedAt: string,
   fileStore: SandboxExecutionFileStore,
 ): SandboxPlane {
@@ -2755,8 +2755,8 @@ function createCurrentRuntimeControlSandboxPlane(
 }
 
 interface CapturedProgressRequest {
-  type: string;
-  progressToken: string;
+  schema: string;
+  leaseToken: string;
   ownerUserId?: string;
   batch: {
     events: Array<{
@@ -2837,7 +2837,7 @@ async function readRequestBody(request: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function runningJob(job: HostedWorkbenchJob, now: string): HostedWorkbenchJob {
+function runningJob(job: RemoteWorkbenchJob, now: string): RemoteWorkbenchJob {
   return {
     ...job,
     status: "running",
@@ -2846,7 +2846,7 @@ function runningJob(job: HostedWorkbenchJob, now: string): HostedWorkbenchJob {
   };
 }
 
-function executionFromJob(job: HostedWorkbenchJob) {
+function executionFromJob(job: RemoteWorkbenchJob) {
   const input = job.input as { execution?: unknown };
   if (!input.execution || typeof input.execution !== "object" || Array.isArray(input.execution)) {
     throw new Error("test job omitted execution");
@@ -2854,7 +2854,7 @@ function executionFromJob(job: HostedWorkbenchJob) {
   return input.execution as Parameters<typeof createWorkbenchExecutionCapability>[0];
 }
 
-function completedOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[] {
+function completedOutputFiles(job: RemoteWorkbenchJob): SurfaceSnapshotFile[] {
   const output = job.output && typeof job.output === "object" && !Array.isArray(job.output)
     ? job.output as Record<string, unknown>
     : {};
@@ -2869,7 +2869,7 @@ function completedOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[] {
     : [];
 }
 
-function completedScore(job: HostedWorkbenchJob): number | undefined {
+function completedScore(job: RemoteWorkbenchJob): number | undefined {
   const output = job.output && typeof job.output === "object" && !Array.isArray(job.output)
     ? job.output as Record<string, unknown>
     : {};

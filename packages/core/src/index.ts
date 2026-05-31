@@ -12,9 +12,6 @@ import type {
   CandidateCaseReview,
   CandidateFilePreview,
   CandidateFileSummary,
-  CandidateLineageEdge,
-  CandidateLineageGraph,
-  CandidateLineageNode,
   CandidateRecord,
   CandidateSummary,
   EvalCaseStatus,
@@ -23,10 +20,10 @@ import type {
   EvaluationRecord,
   EvaluationScorecard,
   EvaluationSampleRecord,
-  HostedWorkbenchEnvironment,
-  HostedWorkbenchEnvironmentVersion,
-  HostedWorkbenchFileInput,
-  HostedWorkbenchJob,
+  RemoteWorkbenchEnvironment,
+  RemoteWorkbenchEnvironmentVersion,
+  RemoteWorkbenchFileInput,
+  RemoteWorkbenchJob,
   Json,
   MetricStats,
   RunSummary,
@@ -40,6 +37,7 @@ import type {
   WorkbenchProjectStateImportResult,
   WorkbenchProjectStateRemote,
   WorkbenchProjectStateSource,
+  WorkbenchRemoteRunRequest,
   WorkbenchCandidatePatch,
   WorkbenchAdapterInvocation,
   WorkbenchExecutionCapability,
@@ -127,8 +125,8 @@ import {
   type SandboxPlane,
 } from "./sandbox-plane.ts";
 import {
-  createSandboxBackendPlaneForProvider,
-  type WorkbenchSandboxProviderName,
+  createSandboxBackendPlaneForBackend,
+  type WorkbenchSandboxBackendName,
 } from "./sandbox-backends/index.ts";
 import { applyWorkbenchCandidatePatch } from "./candidate-patch.ts";
 import {
@@ -373,6 +371,39 @@ export {
   resolveWorkbenchJobGroupStatus,
 } from "./execution-evidence.ts";
 export {
+  buildCandidateLineage,
+  buildWorkbenchEvaluationComparison,
+  buildWorkbenchEvaluationMetricDescriptors,
+  formatEvaluationConfigurationLabel,
+  isCompleteEvaluationSummary,
+  readEvaluationScore,
+  type WorkbenchCandidateEvaluationRollup,
+  type WorkbenchEvaluationComparison,
+  type WorkbenchEvaluationComparisonRow,
+  type WorkbenchEvaluationMetricDescriptor,
+} from "@workbench-ai/workbench-contract";
+export {
+  WorkbenchInspectionError,
+  createWorkbenchInspection,
+  type WorkbenchFailureDetail,
+  type WorkbenchFailureDiagnosis,
+  type WorkbenchFailureKind,
+  type WorkbenchInspection,
+  type WorkbenchInspectionBackend,
+  type WorkbenchInspectionCandidateInput,
+  type WorkbenchInspectionCandidatePreviewInput,
+  type WorkbenchInspectionCaseReviewInput,
+  type WorkbenchInspectionErrorOptions,
+  type WorkbenchInspectionEvaluationInput,
+  type WorkbenchInspectionExecutionInput,
+  type WorkbenchInspectionExecutionPreviewInput,
+  type WorkbenchInspectionFileListInput,
+  type WorkbenchInspectionFilePreviewInput,
+  type WorkbenchInspectionPreviewInput,
+  type WorkbenchInspectionRunDetail,
+  type WorkbenchInspectionRunInput,
+} from "./inspection.ts";
+export {
   buildWorkbenchTraceSessionsFromFiles,
   combineWorkbenchTraceSessions,
   finalizeWorkbenchExecutionTraceForJob,
@@ -383,20 +414,17 @@ export {
 } from "./execution-traces.ts";
 export {
   DOCKER_SANDBOX_BACKEND,
-  assertSandboxHostHealthForProvider,
+  assertSandboxHostHealthForBackend,
   createDockerSandboxBackendDescriptor,
   createDockerSandboxPlane,
-  resolveWorkbenchSandboxProviderName,
-  sandboxProviderAdmissionForResources,
-  sandboxProviderDefaultMaxConcurrentJobs,
-  sandboxProviderLeaseScope,
-  sandboxHostHealthExpectationForProvider,
-  type SandboxProviderAdmission,
-  type SandboxProviderHostCost,
-  type SandboxProviderLeaseRequest,
-  type SandboxProviderRequestedResources,
+  resolveWorkbenchSandboxBackendName,
+  sandboxBackendAdmissionForResources,
+  sandboxHostHealthExpectationForBackend,
+  type SandboxBackendAdmission,
+  type SandboxBackendHostCost,
+  type SandboxBackendRequestedResources,
   type SandboxHostHealthExpectation,
-  type WorkbenchSandboxProviderName,
+  type WorkbenchSandboxBackendName,
 } from "./sandbox-backends/index.ts";
 export type {
   WorkbenchExecutionEventPublisher,
@@ -408,7 +436,7 @@ export type {
   CandidateRecord,
   EngineResolveBinding,
   EvaluationScorecard,
-  HostedWorkbenchJob,
+  RemoteWorkbenchJob,
   Json,
   RunSummary,
   RuntimeEvent,
@@ -425,6 +453,7 @@ export type {
   WorkbenchProjectStateImportResult,
   WorkbenchProjectStateRemote,
   WorkbenchProjectStateSource,
+  WorkbenchRemoteRunRequest,
   WorkbenchExecutionCapability,
   WorkbenchExecutionTrace,
   WorkbenchTraceSession,
@@ -433,8 +462,8 @@ export type {
 } from "@workbench-ai/workbench-contract";
 
 export function sanitizeWorkbenchRuntimeJobForExchange(
-  job: HostedWorkbenchJob,
-): HostedWorkbenchJob {
+  job: RemoteWorkbenchJob,
+): RemoteWorkbenchJob {
   const {
     leaseUntil: _leaseUntil,
     wakeupLeaseUntil: _wakeupLeaseUntil,
@@ -444,16 +473,21 @@ export function sanitizeWorkbenchRuntimeJobForExchange(
     trace: _trace,
     traceSessions: _traceSessions,
     ...portable
-  } = job as HostedWorkbenchJob & {
+  } = job as RemoteWorkbenchJob & {
+    claimTokenHash?: unknown;
+    hostId?: unknown;
+    leaseUntil?: unknown;
     trace?: unknown;
     traceSessions?: unknown;
+    wakeupLeaseUntil?: unknown;
+    workerId?: unknown;
   };
   return { ...portable };
 }
 
 export function compactWorkbenchRuntimeJobForExchange(
-  job: HostedWorkbenchJob,
-): HostedWorkbenchJob {
+  job: RemoteWorkbenchJob,
+): RemoteWorkbenchJob {
   const portable = sanitizeWorkbenchRuntimeJobForExchange(job);
   return {
     ...portable,
@@ -867,8 +901,8 @@ function normalizeSourcePathForContentFingerprint(value: string): string {
 }
 
 function runtimeJobForProjectStateFingerprint(
-  job: HostedWorkbenchJob,
-): HostedWorkbenchJob {
+  job: RemoteWorkbenchJob,
+): RemoteWorkbenchJob {
   const portable = sanitizeWorkbenchRuntimeJobForExchange(job);
   const output = portable.output;
   if (!output || typeof output !== "object" || Array.isArray(output)) {
@@ -1038,7 +1072,7 @@ export interface WorkbenchRunMaterialization {
 }
 
 export interface WorkbenchRunWorkload {
-  job: HostedWorkbenchJob;
+  job: RemoteWorkbenchJob;
   spec: GenericRunSpec;
   candidateId: string;
   attemptIndex: number;
@@ -1073,7 +1107,7 @@ export interface RuntimeWorkloadResult {
   durationMs?: number;
 }
 
-export const DEFAULT_ENVIRONMENT_VERSIONS: HostedWorkbenchEnvironmentVersion[] =
+export const DEFAULT_ENVIRONMENT_VERSIONS: RemoteWorkbenchEnvironmentVersion[] =
   [
     {
       id: "envv_python_3_12",
@@ -1163,7 +1197,7 @@ export const DEFAULT_ENVIRONMENT_VERSIONS: HostedWorkbenchEnvironmentVersion[] =
     },
   ];
 
-export const DEFAULT_ENVIRONMENTS: HostedWorkbenchEnvironment[] = [
+export const DEFAULT_ENVIRONMENTS: RemoteWorkbenchEnvironment[] = [
   {
     id: "env_python",
     name: "Python",
@@ -1209,7 +1243,7 @@ export function loadAuthoredWorkbenchSourceDocument(args: {
   sourceYaml: string;
   path?: string;
   sourceFiles?: readonly SurfaceSnapshotFile[];
-  cases?: HostedWorkbenchFileInput[];
+  cases?: RemoteWorkbenchFileInput[];
 }): AuthoredWorkbenchSourceDocument {
   const spec = parseAuthoredWorkbenchSourceSpec(args.sourceYaml);
   return {
@@ -1496,7 +1530,7 @@ export function materializeWorkbenchRunResult(args: {
   candidateSourceFiles?: readonly SurfaceSnapshotFile[];
   startedAt: string;
   spec: GenericRunSpec;
-  jobs: readonly HostedWorkbenchJob[];
+  jobs: readonly RemoteWorkbenchJob[];
   previousCandidate?: CandidateRecord | null;
   existingCandidateCount: number;
   selection?: {
@@ -1515,13 +1549,13 @@ export function materializeWorkbenchRunResult(args: {
   const candidateRevisions = completed
     .filter((job) => workbenchExecutionPurpose(job) === "improve")
     .map((job) => normalizeCandidateRevisionJobOutput(job.output))
-    .filter((output): output is HostedCandidateRevisionJobOutput => output !== null)
+    .filter((output): output is RemoteCandidateRevisionJobOutput => output !== null)
     .sort((left, right) => left.attemptIndex - right.attemptIndex);
   const evaluationJobs = args.jobs.filter(
     (job) =>
       workbenchExecutionPurpose(job) === "attempt",
   );
-  const evaluationsByCandidate = new Map<string, HostedWorkbenchJob[]>();
+  const evaluationsByCandidate = new Map<string, RemoteWorkbenchJob[]>();
   for (const job of evaluationJobs) {
     const candidateId =
       readJobString(job.output, "candidateId") ??
@@ -1911,7 +1945,7 @@ function isGeneratedExecutionOutputSegment(segment: string): boolean {
 }
 
 export function createOptimizerTraceInputFiles(args: {
-  jobs: readonly HostedWorkbenchJob[];
+  jobs: readonly RemoteWorkbenchJob[];
 }): SurfaceSnapshotFile[] {
   const files: SurfaceSnapshotFile[] = [];
   const executions: Json[] = [];
@@ -2014,9 +2048,9 @@ export function workbenchEngineCaseIdsForImproveEvaluation(args: {
 }
 
 export function filterOptimizerTraceJobsForCaseIds(
-  jobs: readonly HostedWorkbenchJob[],
+  jobs: readonly RemoteWorkbenchJob[],
   caseIds: readonly string[],
-): HostedWorkbenchJob[] {
+): RemoteWorkbenchJob[] {
   const allowed = new Set(caseIds);
   if (allowed.size === 0) {
     return [];
@@ -2130,12 +2164,12 @@ export function workbenchRunExecutionFingerprint(args: {
   return hash.digest("hex");
 }
 
-function isOptimizerTraceInputJob(job: HostedWorkbenchJob): boolean {
+function isOptimizerTraceInputJob(job: RemoteWorkbenchJob): boolean {
   return isTerminalExecutionJob(job) &&
     workbenchExecutionPurpose(job) === "attempt";
 }
 
-function isTerminalExecutionJob(job: HostedWorkbenchJob): boolean {
+function isTerminalExecutionJob(job: RemoteWorkbenchJob): boolean {
   return job.kind === "execute" && (
     job.status === "succeeded" ||
     job.status === "failed" ||
@@ -2144,8 +2178,8 @@ function isTerminalExecutionJob(job: HostedWorkbenchJob): boolean {
 }
 
 function compareTraceInputJobs(
-  left: HostedWorkbenchJob,
-  right: HostedWorkbenchJob,
+  left: RemoteWorkbenchJob,
+  right: RemoteWorkbenchJob,
 ): number {
   const leftAttempt = readOptionalJobNumber(left.input, "attemptIndex") ?? -1;
   const rightAttempt = readOptionalJobNumber(right.input, "attemptIndex") ?? -1;
@@ -2155,7 +2189,7 @@ function compareTraceInputJobs(
     left.id.localeCompare(right.id);
 }
 
-function completedJobOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[] {
+function completedJobOutputFiles(job: RemoteWorkbenchJob): SurfaceSnapshotFile[] {
   const output = jsonRecord(job.output);
   if (!Array.isArray(output.files)) {
     return [];
@@ -2205,7 +2239,7 @@ function traceJsonOperation(file: SurfaceSnapshotFile): string | null {
 }
 
 function traceInputRequestFallback(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   operation: WorkbenchAdapterOperation,
 ): Record<string, Json> {
   const execution = jsonRecord(jsonRecord(job.input).execution);
@@ -2229,7 +2263,7 @@ function traceInputRequestFallback(
 }
 
 function traceInputResultFallback(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   operation: WorkbenchAdapterOperation,
 ): WorkbenchAdapterOperationResult {
   const output = jsonRecord(job.output);
@@ -2347,32 +2381,8 @@ export function filterCandidateSourceFiles(
     .map((file) => ({ ...file }));
 }
 
-export function buildCandidateLineage(args: {
-  summaries: readonly CandidateSummary[];
-  activeId: string | null;
-}): CandidateLineageGraph {
-  const orderedSummaries = args.summaries.slice().sort((left, right) => {
-    const createdAt = left.createdAt.localeCompare(right.createdAt);
-    return createdAt !== 0 ? createdAt : left.id.localeCompare(right.id);
-  });
-  const summaryIds = new Set(orderedSummaries.map((summary) => summary.id));
-  return {
-    activeId: args.activeId,
-    nodes: orderedSummaries.map(
-      (summary): CandidateLineageNode => ({
-        id: summary.id,
-        active: args.activeId === summary.id,
-        summary,
-      }),
-    ),
-    edges: orderedSummaries.flatMap((summary) =>
-      buildLineageEdges(summary, summaryIds),
-    ),
-  };
-}
-
 export function normalizeSurfaceFiles(
-  files: HostedWorkbenchFileInput[],
+  files: RemoteWorkbenchFileInput[],
 ): SurfaceSnapshotFile[] {
   const byPath = new Map<string, SurfaceSnapshotFile>();
   for (const file of files) {
@@ -2634,7 +2644,7 @@ function authoredAdapterSpecFromInvocation(
 }
 
 function summarizeCaseInputs(
-  files: HostedWorkbenchFileInput[],
+  files: RemoteWorkbenchFileInput[],
 ): AuthoredWorkbenchCaseSummary[] {
   if (files.length === 0) {
     return [];
@@ -2665,23 +2675,7 @@ function summarizeCaseInputs(
   });
 }
 
-function buildLineageEdges(
-  summary: CandidateSummary,
-  summaryIds: ReadonlySet<string>,
-): CandidateLineageEdge[] {
-  const edges: CandidateLineageEdge[] = [];
-  if (summary.baseId && summary.baseId !== summary.id && summaryIds.has(summary.baseId)) {
-    edges.push({
-      id: `anchor:${summary.baseId}:${summary.id}`,
-      kind: "anchor",
-      sourceId: summary.baseId,
-      targetId: summary.id,
-    });
-  }
-  return edges;
-}
-
-interface HostedSampleJobOutput {
+interface RemoteSampleJobOutput {
   candidateId: string;
   attemptIndex: number;
   sample: EvaluationSampleRecord;
@@ -2690,12 +2684,12 @@ interface HostedSampleJobOutput {
   traces: string[];
 }
 
-interface HostedMaterializedSampleOutput {
-  jobs: HostedWorkbenchJob[];
-  output: HostedSampleJobOutput;
+interface RemoteMaterializedSampleOutput {
+  jobs: RemoteWorkbenchJob[];
+  output: RemoteSampleJobOutput;
 }
 
-interface HostedCandidateRevisionJobOutput {
+interface RemoteCandidateRevisionJobOutput {
   candidateId: string;
   attemptIndex: number;
   baseId: string | null;
@@ -2707,7 +2701,7 @@ interface HostedCandidateRevisionJobOutput {
 }
 
 export function createWorkbenchRunWorkload(args: {
-  job: HostedWorkbenchJob;
+  job: RemoteWorkbenchJob;
   spec: GenericRunSpec;
   baseFiles: readonly SurfaceSnapshotFile[];
   engineResolveFiles: readonly SurfaceSnapshotFile[];
@@ -2819,11 +2813,11 @@ function createInitialCandidateFiles(args: {
 }
 
 export interface WorkbenchExecutionJobOptions {
-  sandboxProvider: string;
+  sandboxBackend: string;
   loadLocalAdapterAuthProfiles?: boolean;
   adapterAuthUpdateSink?: (profiles: readonly WorkbenchAdapterAuthBundle[]) => Promise<void>;
-  createSandboxPlaneForProvider?: (
-    provider: string,
+  createSandboxPlaneForBackend?: (
+    backend: string,
     args: WorkbenchExecutionRuntimeInput,
     startedAt: string,
     fileStore: SandboxExecutionFileStore,
@@ -2833,7 +2827,7 @@ export interface WorkbenchExecutionJobOptions {
 export async function executeWorkbenchExecutionJob(
   args: WorkbenchExecutionRuntimeInput,
   options: WorkbenchExecutionJobOptions,
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   const startedAt = args.job.startedAt ?? args.now ?? new Date().toISOString();
   const execution = readWorkbenchExecutionSpec(args.job);
   try {
@@ -2867,7 +2861,7 @@ async function executeWorkbenchExecutionJobWithResolvedAuth(
   runtimeArgs: WorkbenchExecutionRuntimeInput,
   options: WorkbenchExecutionJobOptions,
   startedAt: string,
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   const executionForRuntime = readWorkbenchExecutionSpec(runtimeArgs.job);
   const executor = workbenchExecutionExecutorForRuntimeInput(runtimeArgs);
   if (executor === "host") {
@@ -2887,9 +2881,9 @@ async function executeWorkbenchExecutionJobWithResolvedAuth(
     );
   }
   const fileStore = createWorkbenchSandboxFileStore(runtimeArgs);
-  const planeFactory = options.createSandboxPlaneForProvider ?? createSandboxBackendPlaneForProvider;
+  const planeFactory = options.createSandboxPlaneForBackend ?? createSandboxBackendPlaneForBackend;
   const plane = planeFactory(
-    options.sandboxProvider,
+    options.sandboxBackend,
     runtimeArgs,
     startedAt,
     fileStore,
@@ -2947,8 +2941,8 @@ async function withWorkbenchRuntimeControlServer(
   args: WorkbenchExecutionRuntimeInput,
   options: WorkbenchExecutionJobOptions,
   startedAt: string,
-  run: (env: Record<string, string>) => Promise<HostedWorkbenchJob>,
-): Promise<HostedWorkbenchJob> {
+  run: (env: Record<string, string>) => Promise<RemoteWorkbenchJob>,
+): Promise<RemoteWorkbenchJob> {
   const [{ createServer }] = await Promise.all([
     importNodeModule<typeof import("node:http")>(nodeBuiltin("http")),
   ]);
@@ -3223,7 +3217,7 @@ function adapterAuthTargetKey(target: {
 }
 
 export function workbenchExecutionPurpose(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
 ): WorkbenchExecutionSpec["purpose"] | null {
   return readWorkbenchExecutionPurpose(job);
 }
@@ -3233,7 +3227,7 @@ export async function executeAdapterInCurrentRuntime(
   execution: WorkbenchExecutionSpec,
   startedAt: string,
   capability: ReturnType<typeof createWorkbenchExecutionCapability>,
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   const eventPublisher = createWorkbenchExecutionEventPublisher({
     projectId: args.job.projectId,
     runId: args.job.runId,
@@ -3616,17 +3610,17 @@ function uniqueAdapterInvocations(
 }
 
 function completedJobFromSandboxResult(
-  fallbackJob: HostedWorkbenchJob,
+  fallbackJob: RemoteWorkbenchJob,
   startedAt: string,
   result: WorkbenchExecutionResult,
-): HostedWorkbenchJob {
+): RemoteWorkbenchJob {
   const completedJob = asRuntimeRecord(result.metadata).completedJob;
   if (
     completedJob &&
     typeof completedJob === "object" &&
     !Array.isArray(completedJob)
   ) {
-    return completedJob as HostedWorkbenchJob;
+    return completedJob as RemoteWorkbenchJob;
   }
   if (result.status === "succeeded") {
     const finishedAt = result.finishedAt || new Date().toISOString();
@@ -3660,8 +3654,8 @@ async function executeCandidateRevisionExecutionInCurrentRuntime(
   startedAt: string,
   capability: ReturnType<typeof createWorkbenchExecutionCapability>,
   eventPublisher?: WorkbenchExecutionEventPublisher,
-): Promise<HostedWorkbenchJob> {
-  const { workload, result } = await runHostedProtocolExecutionResult(
+): Promise<RemoteWorkbenchJob> {
+  const { workload, result } = await runRemoteProtocolExecutionResult(
     args,
     execution,
     startedAt,
@@ -3727,7 +3721,7 @@ async function executeAttemptExecutionInCurrentRuntime(
   startedAt: string,
   capability: ReturnType<typeof createWorkbenchExecutionCapability>,
   eventPublisher?: WorkbenchExecutionEventPublisher,
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   const workload = createWorkbenchRunWorkload({
     job: args.job,
     spec: args.spec,
@@ -3736,7 +3730,7 @@ async function executeAttemptExecutionInCurrentRuntime(
     engineCases: args.engineCases,
     traceFiles: args.traceFiles,
   });
-  const workloadResult = await runHostedCommandExecutionSteps(
+  const workloadResult = await runRemoteCommandExecutionSteps(
     args,
     workload,
     attemptStepsForExecution(execution, args.spec, args.adapterManifests),
@@ -3823,7 +3817,7 @@ export async function executeRuntimeControlOperationSequenceInCurrentRuntime(
   execution: WorkbenchExecutionSpec,
   startedAt: string,
   capability?: WorkbenchExecutionCapability,
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   void execution;
   void capability;
   if (!args.runtimeControlOperation) {
@@ -3843,7 +3837,7 @@ export async function executeRuntimeControlOperationSequenceInCurrentRuntime(
   const adapterAuth = await materializeSandboxAdapterAuth(runtimeArgs, childExecution);
   let result: RuntimeWorkloadResult;
   try {
-    result = await runHostedCommandExecutionSteps(
+    result = await runRemoteCommandExecutionSteps(
       {
         ...runtimeArgs,
         ...(adapterAuth.root ? { adapterAuthRoot: adapterAuth.root } : {}),
@@ -3891,9 +3885,9 @@ async function executeRuntimeControlOperationSequenceInSandbox(
   const childArgs = createRuntimeControlSandboxInput(args, request);
   const execution = readWorkbenchExecutionSpec(childArgs.job);
   const fileStore = createWorkbenchSandboxFileStore(childArgs);
-  const planeFactory = options.createSandboxPlaneForProvider ?? createSandboxBackendPlaneForProvider;
+  const planeFactory = options.createSandboxPlaneForBackend ?? createSandboxBackendPlaneForBackend;
   const plane = planeFactory(
-    options.sandboxProvider,
+    options.sandboxBackend,
     childArgs,
     startedAt,
     fileStore,
@@ -4019,7 +4013,7 @@ function createRuntimeControlSandboxInput(
       private: privateFiles,
     },
   };
-  const childJob: HostedWorkbenchJob = {
+  const childJob: RemoteWorkbenchJob = {
     ...args.job,
     id: childJobId,
     input: {
@@ -4087,7 +4081,7 @@ function runtimeControlStepForOperation(
 }
 
 function runtimeControlResultFromCompletedJob(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
 ): WorkbenchRuntimeControlOperationSequenceResult {
   return normalizeRuntimeControlResultOutput(asRuntimeRecord(job.output), job.status === "succeeded", job.error);
 }
@@ -4172,7 +4166,7 @@ function assertRuntimeControlScope(label: string, issues: readonly string[]): vo
   }
 }
 
-async function runHostedProtocolExecutionResult(
+async function runRemoteProtocolExecutionResult(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
   startedAt: string,
@@ -4187,7 +4181,7 @@ async function runHostedProtocolExecutionResult(
     engineCases: args.engineCases,
     traceFiles: args.traceFiles,
   });
-  const result = await runHostedCommandExecutionSteps(
+  const result = await runRemoteCommandExecutionSteps(
     args,
     workload,
     [protocolStepForExecution(execution, args.adapterManifests)],
@@ -4200,7 +4194,7 @@ async function runHostedProtocolExecutionResult(
   return { workload, result };
 }
 
-async function runHostedCommandExecutionSteps(
+async function runRemoteCommandExecutionSteps(
   args: WorkbenchExecutionRuntimeInput,
   workload: WorkbenchRunWorkload,
   steps: readonly WorkbenchWorkloadStepCommand[],
@@ -4306,7 +4300,7 @@ async function runHostedCommandExecutionSteps(
           await stageWorkbenchEnginePrivateFiles(workspace.root, workload);
           enginePrivateStaged = true;
         }
-        await resetHostedWorkloadStepOutput(workspace.root);
+        await resetRemoteWorkloadStepOutput(workspace.root);
         const stepAdapterId = step.adapter?.use ?? execution.adapter.use;
         const adapterRequestPath = await writeWorkbenchAdapterRequest(
           workspace.root,
@@ -4329,7 +4323,7 @@ async function runHostedCommandExecutionSteps(
           const adapterRoot = step.executor === "host"
             ? hostAdapterRoots.get(stepAdapterId)
             : undefined;
-          const command = createHostedWorkloadShellCommand(
+          const command = createRemoteWorkloadShellCommand(
             workspace.root,
             step.command,
             step.label,
@@ -4337,7 +4331,7 @@ async function runHostedCommandExecutionSteps(
           );
           await execFileAsync("sh", ["-c", command], {
             cwd: adapterRoot ?? workspace.root,
-            env: createHostedWorkloadAdapterEnv(
+            env: createRemoteWorkloadAdapterEnv(
               workspace.root,
               adapterRequestPath,
               adapterAuthEnvForStep(args, stepAdapterId),
@@ -4390,7 +4384,7 @@ async function runHostedCommandExecutionSteps(
         .catch(() => undefined);
     }
     if (exitCode !== 0) {
-      return await readHostedRunFailureResult(workspace.root, workload, {
+      return await readRemoteRunFailureResult(workspace.root, workload, {
         exitCode,
         error:
           runtimeError ?? `Runtime command exited with status ${exitCode}.`,
@@ -4434,14 +4428,14 @@ async function runCandidatePrepareCommand(args: {
     role,
   });
   try {
-    const shellCommand = createHostedWorkloadShellCommand(
+    const shellCommand = createRemoteWorkloadShellCommand(
       args.root,
       command,
       "candidate_prepare",
     );
     await args.execFileAsync("sh", ["-c", shellCommand], {
       cwd: args.root,
-      env: createHostedWorkloadPrepareEnv(args.root),
+      env: createRemoteWorkloadPrepareEnv(args.root),
       maxBuffer: 10 * 1024 * 1024,
       timeout: args.timeoutMs,
     });
@@ -4594,14 +4588,14 @@ function isCandidateEditPath(
 
 function environmentVersionForSpec(
   spec: GenericRunSpec,
-): Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec"> {
+): Pick<RemoteWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec"> {
   return environmentVersionForRuntime(spec.environment);
 }
 
 function environmentVersionForRuntime(
   runtime: GenericRunSpec["environment"],
-  base?: Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec">,
-): Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec"> {
+  base?: Pick<RemoteWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec">,
+): Pick<RemoteWorkbenchEnvironmentVersion, "id" | "imageRef" | "spec"> {
   const image = runtime.dockerfile;
   const resolved = findEnvironmentVersionForImage(
     image,
@@ -4632,12 +4626,12 @@ function environmentVersionForRuntime(
 }
 
 type RuntimeEnvironmentResources = Partial<
-  HostedWorkbenchEnvironmentVersion["spec"]["resources"]
+  RemoteWorkbenchEnvironmentVersion["spec"]["resources"]
 >;
 
 function definedEnvironmentResources(
   resources: RuntimeEnvironmentResources | undefined,
-): NonNullable<HostedWorkbenchEnvironmentVersion["spec"]["resources"]> {
+): NonNullable<RemoteWorkbenchEnvironmentVersion["spec"]["resources"]> {
   return {
     cpu: resources?.cpu ?? 2,
     memoryGb: resources?.memoryGb ?? 4,
@@ -4807,7 +4801,7 @@ function adapterFilePathWithinRoot(
   return normalized.slice(sourceRoot.length + 1);
 }
 
-async function readHostedRunFailureResult(
+async function readRemoteRunFailureResult(
   root: string,
   workload: WorkbenchRunWorkload,
   options: { exitCode: number; error: string; startedAt?: string },
@@ -4932,7 +4926,7 @@ function filterRuntimeOutputFiles(
   return files.filter((file) => !isWorkbenchInternalOutputPath(file.path));
 }
 
-function createHostedWorkloadShellCommand(
+function createRemoteWorkloadShellCommand(
   root: string,
   command: string,
   prefix = "",
@@ -4958,7 +4952,7 @@ function createHostedWorkloadShellCommand(
   ].join("; ");
 }
 
-async function resetHostedWorkloadStepOutput(
+async function resetRemoteWorkloadStepOutput(
   root: string,
 ): Promise<void> {
   const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
@@ -5076,14 +5070,14 @@ function requireImproveEdits(spec: GenericRunSpec): string[] {
   return edits;
 }
 
-function createHostedWorkloadAdapterEnv(
+function createRemoteWorkloadAdapterEnv(
   root: string,
   adapterRequestPath: string,
   adapterEnv: Record<string, string> = {},
   options: { adapterRoot?: string } = {},
   runtimeEnv: Record<string, string> = {},
 ): Record<string, string> {
-  const env = createHostedWorkloadBaseEnv();
+  const env = createRemoteWorkloadBaseEnv();
   env.WORKBENCH_ADAPTER_REQUEST = adapterRequestPath;
   env.WORKBENCH_OUTPUT = outputDir(root);
   env.WORKBENCH_RESULT = workbenchAdapterOperationResultPath(outputDir(root));
@@ -5100,13 +5094,13 @@ function createHostedWorkloadAdapterEnv(
   return env;
 }
 
-function createHostedWorkloadPrepareEnv(root: string): Record<string, string> {
-  const env = createHostedWorkloadBaseEnv();
+function createRemoteWorkloadPrepareEnv(root: string): Record<string, string> {
+  const env = createRemoteWorkloadBaseEnv();
   env.WORKBENCH_OUTPUT = outputDir(root);
   return env;
 }
 
-function createHostedWorkloadBaseEnv(): Record<string, string> {
+function createRemoteWorkloadBaseEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === "string") {
@@ -5449,8 +5443,8 @@ export function workloadTimeoutMs(spec: GenericRunSpec): number {
 
 export function findEnvironmentVersionForImage(
   image: string,
-  versions: readonly HostedWorkbenchEnvironmentVersion[],
-): HostedWorkbenchEnvironmentVersion | null {
+  versions: readonly RemoteWorkbenchEnvironmentVersion[],
+): RemoteWorkbenchEnvironmentVersion | null {
   const normalizedImage = normalizeDockerImageRef(image);
   return (
     versions.find(
@@ -5464,7 +5458,7 @@ export function normalizeDockerImageRef(image: string): string {
 }
 
 export function environmentVersionTimeoutMs(
-  version: Pick<HostedWorkbenchEnvironmentVersion, "spec"> | null | undefined,
+  version: Pick<RemoteWorkbenchEnvironmentVersion, "spec"> | null | undefined,
 ): number {
   const timeoutMinutes = version?.spec.resources.timeoutMinutes ?? 30;
   return Math.max(1, timeoutMinutes) * 60 * 1000;
@@ -5486,12 +5480,12 @@ function readExitCode(error: unknown): number {
 }
 
 function failWorkbenchRunJob(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   startedAt: string,
   error: unknown,
   finishedAt = new Date().toISOString(),
   result?: RuntimeWorkloadResult,
-): HostedWorkbenchJob {
+): RemoteWorkbenchJob {
   const message = error instanceof Error ? error.message : String(error);
   const output = {
     ok: false,
@@ -5576,7 +5570,7 @@ function evaluateSample(args: {
 
 function normalizeSampleJobOutput(
   value: unknown,
-): HostedSampleJobOutput | null {
+): RemoteSampleJobOutput | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -5616,9 +5610,9 @@ function normalizeSampleJobOutput(
 }
 
 function normalizeEvaluationSampleOutputs(
-  jobs: readonly HostedWorkbenchJob[],
-): HostedMaterializedSampleOutput[] {
-  return jobs.flatMap((job): HostedMaterializedSampleOutput[] => {
+  jobs: readonly RemoteWorkbenchJob[],
+): RemoteMaterializedSampleOutput[] {
+  return jobs.flatMap((job): RemoteMaterializedSampleOutput[] => {
     const output = normalizeSampleJobOutput(job.output);
     if (!output) {
       return [];
@@ -5672,7 +5666,7 @@ function runtimeTimedCaseResults(args: {
   }));
 }
 
-function readJobEngineCaseSplit(job: HostedWorkbenchJob): string | undefined {
+function readJobEngineCaseSplit(job: RemoteWorkbenchJob): string | undefined {
   const input = jsonRecord(job.input);
   const execution = jsonRecord(input.execution);
   const metadata = jsonRecord(execution.metadata);
@@ -5683,7 +5677,7 @@ function readJobEngineCaseSplit(job: HostedWorkbenchJob): string | undefined {
     : undefined;
 }
 
-function runtimeJobDurationMs(job: HostedWorkbenchJob): number | undefined {
+function runtimeJobDurationMs(job: RemoteWorkbenchJob): number | undefined {
   if (typeof job.startedAt !== "string" || typeof job.finishedAt !== "string") {
     return undefined;
   }
@@ -5720,8 +5714,8 @@ function maxIsoTimestamp(values: readonly string[]): string | null {
 
 function withJobUsage(
   sample: EvaluationSampleRecord,
-  _jobs: readonly HostedWorkbenchJob[],
-  attemptJob: HostedWorkbenchJob,
+  _jobs: readonly RemoteWorkbenchJob[],
+  attemptJob: RemoteWorkbenchJob,
 ): EvaluationSampleRecord {
   const usage = normalizeUsageSummary(jsonRecord(attemptJob.output).usage)
     ?? completeUsageSummary(sample.usage);
@@ -5736,7 +5730,7 @@ function withJobUsage(
 
 function normalizeCandidateRevisionJobOutput(
   value: unknown,
-): HostedCandidateRevisionJobOutput | null {
+): RemoteCandidateRevisionJobOutput | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -5778,12 +5772,12 @@ function normalizeCandidateRevisionJobOutput(
 }
 
 function errorEvaluationSamplesFromJobs(
-  jobs: readonly HostedWorkbenchJob[],
+  jobs: readonly RemoteWorkbenchJob[],
   candidateId: string,
   attemptIndex: number,
   completedSampleKeys: ReadonlySet<string>,
 ): EvaluationSampleRecord[] {
-  const groups = new Map<string, HostedWorkbenchJob[]>();
+  const groups = new Map<string, RemoteWorkbenchJob[]>();
   for (const job of jobs) {
     const key = evaluationSampleGroupKeyFromJob(job);
     if (!key || completedSampleKeys.has(key)) {
@@ -5797,7 +5791,7 @@ function errorEvaluationSamplesFromJobs(
 }
 
 function errorEvaluationSampleFromJobGroup(
-  jobs: readonly HostedWorkbenchJob[],
+  jobs: readonly RemoteWorkbenchJob[],
   candidateId: string,
   attemptIndex: number,
 ): EvaluationSampleRecord | null {
@@ -5844,7 +5838,7 @@ function errorEvaluationSampleFromJobGroup(
   };
 }
 
-function evaluationSampleGroupKeyFromOutput(output: HostedSampleJobOutput): string | null {
+function evaluationSampleGroupKeyFromOutput(output: RemoteSampleJobOutput): string | null {
   const caseId = output.sample.cases?.[0]?.id;
   if (!caseId) {
     return null;
@@ -5852,7 +5846,7 @@ function evaluationSampleGroupKeyFromOutput(output: HostedSampleJobOutput): stri
   return evaluationSampleGroupKey(caseId, output.sample.index);
 }
 
-function evaluationSampleGroupKeyFromJob(job: HostedWorkbenchJob): string | null {
+function evaluationSampleGroupKeyFromJob(job: RemoteWorkbenchJob): string | null {
   const sampleIndex = readOptionalJobNumber(job.input, "sampleIndex");
   const caseId = readJobString(job.input, "caseId");
   if (sampleIndex === null || !caseId) {
@@ -5868,7 +5862,7 @@ function evaluationSampleGroupKey(
   return `${caseId}\0${sampleIndex}`;
 }
 
-function summarizeEvaluationJobErrors(jobs: readonly HostedWorkbenchJob[]): string | null {
+function summarizeEvaluationJobErrors(jobs: readonly RemoteWorkbenchJob[]): string | null {
   const failures = jobs
     .map((job) => job.error ? `${job.id}: ${job.error}` : null)
     .filter((entry): entry is string => entry !== null);
@@ -5880,7 +5874,7 @@ function summarizeEvaluationJobErrors(jobs: readonly HostedWorkbenchJob[]): stri
     : `${failures.length} evaluation job errors: ${failures.join("; ")}`;
 }
 
-function jobTracePaths(job: HostedWorkbenchJob): string[] {
+function jobTracePaths(job: RemoteWorkbenchJob): string[] {
   const output =
     job.output && typeof job.output === "object" && !Array.isArray(job.output)
       ? (job.output as Record<string, unknown>)
@@ -5896,8 +5890,8 @@ function jobTracePaths(job: HostedWorkbenchJob): string[] {
 }
 
 function compareSampleOutputs(
-  left: HostedSampleJobOutput,
-  right: HostedSampleJobOutput,
+  left: RemoteSampleJobOutput,
+  right: RemoteSampleJobOutput,
 ): number {
   const sampleOrder = left.sample.index - right.sample.index;
   if (sampleOrder !== 0) {

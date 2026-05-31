@@ -1,7 +1,7 @@
 import type {
   CandidateSummary,
   EvaluationSummary,
-  HostedWorkbenchJob,
+  RemoteWorkbenchJob,
   RunSummary,
 } from "../types";
 
@@ -9,7 +9,7 @@ type BadgeTone = "success" | "warning" | "destructive" | "outline" | "accent";
 type WorkbenchDisplayStatus =
   | CandidateSummary["status"]
   | EvaluationSummary["status"]
-  | HostedWorkbenchJob["status"]
+  | RemoteWorkbenchJob["status"]
   | RunSummary["status"]
   | RunSummary["outcome"];
 

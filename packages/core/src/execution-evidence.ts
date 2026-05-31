@@ -1,7 +1,7 @@
 import type {
   CandidateCaseReview,
-  HostedWorkbenchJob,
-  HostedWorkbenchJobStatus,
+  RemoteWorkbenchJob,
+  RemoteWorkbenchJobStatus,
   Json,
   WorkbenchExecutionEventRole,
   WorkbenchExecutionSpec,
@@ -13,12 +13,12 @@ import type {
 import { mergeWorkbenchExecutionTracesByJob } from "./execution-traces.ts";
 
 export function buildCandidateCaseExecutionRefs(args: {
-  jobs: readonly HostedWorkbenchJob[];
+  jobs: readonly RemoteWorkbenchJob[];
   candidateId: string;
   caseId: string;
   sampleIndex?: number;
 }): CandidateCaseReview["executions"] {
-  const groups = new Map<string, HostedWorkbenchJob[]>();
+  const groups = new Map<string, RemoteWorkbenchJob[]>();
   for (const job of args.jobs) {
     const kind = readWorkbenchExecutionPurpose(job);
     const jobCandidateId =
@@ -84,18 +84,18 @@ export function buildCandidateCaseExecutionRefs(args: {
 }
 
 export function buildWorkbenchExecutionEvidence(args: {
-  jobs: readonly HostedWorkbenchJob[];
+  jobs: readonly RemoteWorkbenchJob[];
   traceIdPrefix: string;
   traceForJob: (
-    job: HostedWorkbenchJob,
+    job: RemoteWorkbenchJob,
     role: WorkbenchExecutionEventRole,
   ) => WorkbenchExecutionTrace;
   traceSessionsForJob?: (
-    job: HostedWorkbenchJob,
+    job: RemoteWorkbenchJob,
     role: WorkbenchExecutionEventRole,
   ) => WorkbenchTraceSession[];
 }): WorkbenchExecutionEvidence[] {
-  const groups = new Map<string, HostedWorkbenchJob[]>();
+  const groups = new Map<string, RemoteWorkbenchJob[]>();
   for (const job of args.jobs) {
     if (isBaselineMaterializationJob(job)) {
       continue;
@@ -177,7 +177,7 @@ export function buildWorkbenchExecutionEvidence(args: {
 }
 
 export function readWorkbenchExecutionPurpose(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
 ): WorkbenchExecutionSpec["purpose"] | null {
   if (job.kind !== "execute") {
     return null;
@@ -188,13 +188,13 @@ export function readWorkbenchExecutionPurpose(
     : null;
 }
 
-export function readWorkbenchExecutionId(job: HostedWorkbenchJob): string | null {
+export function readWorkbenchExecutionId(job: RemoteWorkbenchJob): string | null {
   const id = readExecutionRecord(job)?.id;
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
 export function readWorkbenchExecutionMetadataString(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   key: string,
 ): string | null {
   const raw = readWorkbenchExecutionMetadataValue(job, key);
@@ -202,7 +202,7 @@ export function readWorkbenchExecutionMetadataString(
 }
 
 export function readWorkbenchExecutionMetadataNumber(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   key: string,
 ): number | null {
   const raw = readWorkbenchExecutionMetadataValue(job, key);
@@ -216,8 +216,8 @@ export function isWorkbenchExecutionActive(
 }
 
 export function resolveWorkbenchJobGroupStatus(
-  jobs: readonly { status: HostedWorkbenchJobStatus }[],
-): HostedWorkbenchJobStatus {
+  jobs: readonly { status: RemoteWorkbenchJobStatus }[],
+): RemoteWorkbenchJobStatus {
   if (jobs.some((job) => job.status === "running")) {
     return "running";
   }
@@ -234,7 +234,7 @@ export function resolveWorkbenchJobGroupStatus(
 }
 
 function readWorkbenchExecutionMetadataValue(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   key: string,
 ): unknown {
   const input = asRecord(job.input);
@@ -243,12 +243,12 @@ function readWorkbenchExecutionMetadataValue(
   return metadata?.[key] ?? input?.[key] ?? null;
 }
 
-function readExecutionRecord(job: HostedWorkbenchJob): Record<string, unknown> | null {
+function readExecutionRecord(job: RemoteWorkbenchJob): Record<string, unknown> | null {
   const input = asRecord(job.input);
   return asRecord(input?.execution);
 }
 
-function isBaselineMaterializationJob(job: HostedWorkbenchJob): boolean {
+function isBaselineMaterializationJob(job: RemoteWorkbenchJob): boolean {
   const input = asRecord(job.input);
   const execution = asRecord(input?.execution);
   const metadata = asRecord(execution?.metadata);
@@ -304,8 +304,8 @@ function compareExecutionRecency(
 }
 
 function compareWorkbenchExecutionJobs(
-  left: HostedWorkbenchJob,
-  right: HostedWorkbenchJob,
+  left: RemoteWorkbenchJob,
+  right: RemoteWorkbenchJob,
 ): number {
   return (
     executionKindOrder(readWorkbenchExecutionPurpose(left)) -
@@ -318,8 +318,8 @@ function compareWorkbenchExecutionJobs(
 }
 
 function compareWorkbenchTraceJobs(
-  left: HostedWorkbenchJob,
-  right: HostedWorkbenchJob,
+  left: RemoteWorkbenchJob,
+  right: RemoteWorkbenchJob,
 ): number {
   return (
     executionKindOrder(readWorkbenchExecutionPurpose(left)) -
@@ -376,7 +376,7 @@ function readExecutionRecencyMs(execution: CandidateCaseReview["executions"][num
   );
 }
 
-function readJobRecencyMs(job: HostedWorkbenchJob): number {
+function readJobRecencyMs(job: RemoteWorkbenchJob): number {
   return (
     parseTimestampMs(job.finishedAt) ??
     parseTimestampMs(job.startedAt) ??

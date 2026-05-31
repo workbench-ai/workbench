@@ -51,7 +51,7 @@ export function assertWorkbenchAdapterAuthEnvNameAllowed(name: string): void {
   }
 }
 
-export interface HostedWorkbenchProject {
+export interface RemoteWorkbenchProject {
   id: string;
   ownerUserId: string;
   ownerUsername: string;
@@ -65,7 +65,7 @@ export interface HostedWorkbenchProject {
   starCount: number;
 }
 
-export interface HostedWorkbenchProjectSummary {
+export interface RemoteWorkbenchProjectSummary {
   id: string;
   ownerUsername: string;
   name: string;
@@ -88,7 +88,7 @@ export interface WorkbenchSpecValidation {
   warnings: string[];
 }
 
-export interface HostedWorkbenchSpecVersion {
+export interface RemoteWorkbenchSpecVersion {
   id: string;
   projectId: string;
   ordinal: number;
@@ -98,7 +98,7 @@ export interface HostedWorkbenchSpecVersion {
   validation: WorkbenchSpecValidation;
 }
 
-export interface HostedWorkbenchEnvironment {
+export interface RemoteWorkbenchEnvironment {
   id: string;
   name: string;
   description: string;
@@ -108,11 +108,11 @@ export interface HostedWorkbenchEnvironment {
   updatedAt: string;
 }
 
-export interface HostedWorkbenchEnvironmentVersion {
+export interface RemoteWorkbenchEnvironmentVersion {
   id: string;
   environmentId: string;
   name: string;
-  spec: HostedWorkbenchEnvironmentSpec;
+  spec: RemoteWorkbenchEnvironmentSpec;
   imageRef: string;
   sourceHash: string;
   sourceType: "builtin" | "dockerfile";
@@ -128,7 +128,7 @@ export interface HostedWorkbenchEnvironmentVersion {
   updatedAt: string;
 }
 
-export interface HostedWorkbenchEnvironmentSpec {
+export interface RemoteWorkbenchEnvironmentSpec {
   base: string;
   resources: {
     cpu: number;
@@ -146,7 +146,7 @@ export interface BlobObjectRef {
   sha256: string;
 }
 
-export type HostedWorkbenchSnapshotKind =
+export type RemoteWorkbenchSnapshotKind =
   | "candidate"
   | "engineResolve"
   | "adapters"
@@ -173,7 +173,7 @@ export interface SurfaceSnapshot {
   files: SurfaceSnapshotFile[];
 }
 
-export interface HostedWorkbenchFileInput {
+export interface RemoteWorkbenchFileInput {
   path: string;
   content: string;
   encoding?: WorkspaceWriteEncoding;
@@ -188,25 +188,25 @@ export interface EngineResolveBinding {
   };
 }
 
-export interface HostedWorkbenchSnapshotBase {
+export interface RemoteWorkbenchSnapshotBase {
   files: SurfaceSnapshotFile[];
   updatedAt: string;
 }
 
-export interface HostedWorkbenchEngineResolveSnapshot
-  extends HostedWorkbenchSnapshotBase {
+export interface RemoteWorkbenchEngineResolveSnapshot
+  extends RemoteWorkbenchSnapshotBase {
   kind: "engineResolve";
   engineResolveBinding: EngineResolveBinding;
 }
 
-export interface HostedWorkbenchStandardSnapshot
-  extends HostedWorkbenchSnapshotBase {
-  kind: Exclude<HostedWorkbenchSnapshotKind, "engineResolve">;
+export interface RemoteWorkbenchStandardSnapshot
+  extends RemoteWorkbenchSnapshotBase {
+  kind: Exclude<RemoteWorkbenchSnapshotKind, "engineResolve">;
 }
 
-export type HostedWorkbenchSnapshot =
-  | HostedWorkbenchEngineResolveSnapshot
-  | HostedWorkbenchStandardSnapshot;
+export type RemoteWorkbenchSnapshot =
+  | RemoteWorkbenchEngineResolveSnapshot
+  | RemoteWorkbenchStandardSnapshot;
 
 export type CandidateStatus =
   | "running"
@@ -373,6 +373,48 @@ export interface EvaluationScorecard extends EvaluationSummary {
   evaluation: EvaluationRecord;
 }
 
+export interface WorkbenchEvaluationMetricDescriptor {
+  id: string;
+  label: string;
+  direction: "higher" | "lower";
+  kind: "number" | "duration_ms" | "currency_usd";
+  group: "metric" | "execution" | "usage" | "other";
+  primary: boolean;
+  semanticRole?: "performance" | "speed" | "cost";
+}
+
+export interface WorkbenchEvaluationComparisonRow {
+  evaluationId: string;
+  runId: string;
+  candidateId: string;
+  candidateLabel: string;
+  configurationLabel: string;
+  status: EvaluationSummary["status"];
+  score: number | null;
+  metrics: Record<string, number>;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
+export interface WorkbenchCandidateEvaluationRollup {
+  candidateId: string;
+  candidateLabel: string;
+  evaluationCount: number;
+  completeEvaluationCount: number;
+  scoredEvaluationCount: number;
+  bestEvaluationId: string | null;
+  bestScore: number | null;
+  meanScore: number | null;
+}
+
+export interface WorkbenchEvaluationComparison {
+  evaluations: EvaluationSummary[];
+  rows: WorkbenchEvaluationComparisonRow[];
+  candidates: WorkbenchCandidateEvaluationRollup[];
+  metrics: WorkbenchEvaluationMetricDescriptor[];
+}
+
 export interface CandidateSummary {
   id: string;
   name?: string;
@@ -414,6 +456,253 @@ export interface CandidateLineageGraph {
   activeId: string | null;
   nodes: CandidateLineageNode[];
   edges: CandidateLineageEdge[];
+}
+
+export function buildCandidateLineage(args: {
+  summaries: readonly CandidateSummary[];
+  activeId: string | null;
+}): CandidateLineageGraph {
+  const orderedSummaries = args.summaries.slice().sort((left, right) => {
+    const createdAt = left.createdAt.localeCompare(right.createdAt);
+    return createdAt !== 0 ? createdAt : left.id.localeCompare(right.id);
+  });
+  const summaryIds = new Set(orderedSummaries.map((summary) => summary.id));
+  return {
+    activeId: args.activeId,
+    nodes: orderedSummaries.map((summary): CandidateLineageNode => ({
+      id: summary.id,
+      active: args.activeId === summary.id,
+      summary,
+    })),
+    edges: orderedSummaries.flatMap((summary) =>
+      buildLineageEdges(summary, summaryIds),
+    ),
+  };
+}
+
+export function buildWorkbenchEvaluationComparison(
+  evaluations: readonly EvaluationSummary[],
+): WorkbenchEvaluationComparison {
+  const rows = evaluations.map(evaluationComparisonRow);
+  const rollups = buildEvaluationRollups(evaluations);
+  return {
+    evaluations: evaluations.map((evaluation) => ({ ...evaluation })),
+    rows,
+    candidates: rollups,
+    metrics: buildWorkbenchEvaluationMetricDescriptors(evaluations),
+  };
+}
+
+export function buildWorkbenchEvaluationMetricDescriptors(
+  evaluations: readonly EvaluationSummary[],
+): WorkbenchEvaluationMetricDescriptor[] {
+  const descriptors = new Map<string, WorkbenchEvaluationMetricDescriptor>();
+  for (const evaluation of evaluations.filter(isCompleteEvaluationSummary)) {
+    for (const metricId of Object.keys(evaluation.metrics ?? {})) {
+      descriptors.set(metricId, metricDescriptor(metricId));
+    }
+    if (evaluation.selectionMetric && evaluation.selectionScore) {
+      descriptors.set(evaluation.selectionMetric, metricDescriptor(evaluation.selectionMetric));
+    }
+    if (evaluation.durationMs) {
+      descriptors.set("durationMs", {
+        id: "durationMs",
+        label: "Duration",
+        direction: "lower",
+        kind: "duration_ms",
+        group: "execution",
+        primary: true,
+        semanticRole: "speed",
+      });
+    }
+    if (evaluation.usage?.total?.costUsd) {
+      descriptors.set("usage.total.costUsd", {
+        id: "usage.total.costUsd",
+        label: "Cost",
+        direction: "lower",
+        kind: "currency_usd",
+        group: "usage",
+        primary: true,
+        semanticRole: "cost",
+      });
+    }
+  }
+  return [...descriptors.values()].sort(compareMetricDescriptors);
+}
+
+export function readEvaluationScore(evaluation: EvaluationSummary): number | null {
+  const score = evaluation.selectionMetric === "score"
+    ? evaluation.selectionScore?.mean ?? evaluation.metrics?.score?.mean
+    : evaluation.metrics?.score?.mean;
+  return typeof score === "number" && Number.isFinite(score) ? score : null;
+}
+
+export function isCompleteEvaluationSummary(
+  evaluation: Pick<EvaluationSummary, "status" | "sampleCount" | "completedSampleCount" | "errorSampleCount">,
+): boolean {
+  return evaluation.status === "completed" &&
+    evaluation.errorSampleCount === 0 &&
+    evaluation.completedSampleCount >= evaluation.sampleCount;
+}
+
+export function formatEvaluationConfigurationLabel(
+  evaluation: Pick<EvaluationSummary, "candidateRunName" | "candidateRunId">,
+): string {
+  return evaluation.candidateRunName?.trim() ||
+    evaluation.candidateRunId?.trim() ||
+    "Default configuration";
+}
+
+function evaluationComparisonRow(
+  evaluation: EvaluationSummary,
+): WorkbenchEvaluationComparisonRow {
+  return {
+    evaluationId: evaluation.id,
+    runId: evaluation.runId,
+    candidateId: evaluation.candidateId,
+    candidateLabel: candidateDisplayName(evaluation),
+    configurationLabel: formatEvaluationConfigurationLabel(evaluation),
+    status: evaluation.status,
+    score: readEvaluationScore(evaluation),
+    metrics: readEvaluationMetricMeans(evaluation),
+    createdAt: evaluation.createdAt,
+    updatedAt: evaluation.updatedAt,
+    ...(evaluation.error ? { error: evaluation.error } : {}),
+  };
+}
+
+function buildEvaluationRollups(
+  evaluations: readonly EvaluationSummary[],
+): WorkbenchCandidateEvaluationRollup[] {
+  const byCandidate = new Map<string, EvaluationSummary[]>();
+  for (const evaluation of evaluations) {
+    const entries = byCandidate.get(evaluation.candidateId) ?? [];
+    entries.push(evaluation);
+    byCandidate.set(evaluation.candidateId, entries);
+  }
+  return [...byCandidate.entries()]
+    .map(([candidateId, entries]) => candidateEvaluationRollup(candidateId, entries))
+    .sort((left, right) =>
+      (right.bestScore ?? Number.NEGATIVE_INFINITY) -
+        (left.bestScore ?? Number.NEGATIVE_INFINITY) ||
+      left.candidateLabel.localeCompare(right.candidateLabel) ||
+      left.candidateId.localeCompare(right.candidateId)
+    );
+}
+
+function candidateEvaluationRollup(
+  candidateId: string,
+  evaluations: readonly EvaluationSummary[],
+): WorkbenchCandidateEvaluationRollup {
+  const scored = evaluations
+    .filter(isCompleteEvaluationSummary)
+    .map((evaluation) => ({ evaluation, score: readEvaluationScore(evaluation) }))
+    .filter((entry): entry is { evaluation: EvaluationSummary; score: number } =>
+      entry.score !== null,
+    );
+  const best = scored.slice().sort((left, right) =>
+    right.score - left.score ||
+    right.evaluation.updatedAt.localeCompare(left.evaluation.updatedAt) ||
+    right.evaluation.id.localeCompare(left.evaluation.id)
+  )[0] ?? null;
+  const labelEvaluation = best?.evaluation ?? evaluations[0];
+  return {
+    candidateId,
+    candidateLabel: labelEvaluation ? candidateDisplayName(labelEvaluation) : candidateId,
+    evaluationCount: evaluations.length,
+    completeEvaluationCount: evaluations.filter(isCompleteEvaluationSummary).length,
+    scoredEvaluationCount: scored.length,
+    bestEvaluationId: best?.evaluation.id ?? null,
+    bestScore: best?.score ?? null,
+    meanScore: scored.length > 0
+      ? scored.reduce((sum, entry) => sum + entry.score, 0) / scored.length
+      : null,
+  };
+}
+
+function metricDescriptor(metricId: string): WorkbenchEvaluationMetricDescriptor {
+  const scoreMetric = metricId === "score";
+  return {
+    id: metricId,
+    label: formatMetricLabel(metricId),
+    direction: "higher",
+    kind: "number",
+    group: "metric",
+    primary: scoreMetric,
+    ...(scoreMetric ? { semanticRole: "performance" as const } : {}),
+  };
+}
+
+function compareMetricDescriptors(
+  left: WorkbenchEvaluationMetricDescriptor,
+  right: WorkbenchEvaluationMetricDescriptor,
+): number {
+  const rank = (descriptor: WorkbenchEvaluationMetricDescriptor) =>
+    descriptor.semanticRole === "performance"
+      ? 0
+      : descriptor.semanticRole === "speed"
+        ? 1
+        : descriptor.semanticRole === "cost"
+          ? 2
+          : descriptor.primary
+            ? 3
+            : 4;
+  return rank(left) - rank(right) || left.label.localeCompare(right.label);
+}
+
+function formatMetricLabel(metricId: string): string {
+  if (metricId === "durationMs") {
+    return "Duration";
+  }
+  if (metricId === "usage.total.costUsd") {
+    return "Cost";
+  }
+  return metricId
+    .split(/[._-]+/u)
+    .filter(Boolean)
+    .map((segment) => segment.slice(0, 1).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function readEvaluationMetricMeans(
+  evaluation: EvaluationSummary,
+): Record<string, number> {
+  const entries: Array<[string, MetricStats]> = [
+    ...Object.entries(evaluation.metrics ?? {}),
+    ...(evaluation.durationMs ? [["durationMs", evaluation.durationMs] as [string, MetricStats]] : []),
+    ...(evaluation.usage?.total?.costUsd
+      ? [["usage.total.costUsd", evaluation.usage.total.costUsd] as [string, MetricStats]]
+      : []),
+  ];
+  return Object.fromEntries(
+    entries
+      .filter((entry) => Number.isFinite(entry[1].mean))
+      .map(([key, value]) => [key, value.mean]),
+  );
+}
+
+function candidateDisplayName(
+  candidate: Pick<EvaluationSummary, "candidateName" | "candidateVersion" | "candidateId">,
+): string {
+  return candidate.candidateName?.trim() ||
+    `Candidate v${candidate.candidateVersion}` ||
+    candidate.candidateId;
+}
+
+function buildLineageEdges(
+  summary: CandidateSummary,
+  summaryIds: ReadonlySet<string>,
+): CandidateLineageEdge[] {
+  const edges: CandidateLineageEdge[] = [];
+  if (summary.baseId && summary.baseId !== summary.id && summaryIds.has(summary.baseId)) {
+    edges.push({
+      id: `anchor:${summary.baseId}:${summary.id}`,
+      kind: "anchor",
+      sourceId: summary.baseId,
+      targetId: summary.id,
+    });
+  }
+  return edges;
 }
 
 export type CandidatePreviewMode = "diff" | "raw" | "rendered";
@@ -466,7 +755,7 @@ export interface CandidateCaseExecutionRef {
   runId: string;
   kind: string;
   role: WorkbenchExecutionEventRole;
-  status: HostedWorkbenchJobStatus;
+  status: RemoteWorkbenchJobStatus;
   jobIds: string[];
   executionIds: string[];
   createdAt?: string;
@@ -484,7 +773,7 @@ export interface CandidateCaseReview {
   caseLabel: string;
   sampleId?: string;
   sampleIndex?: number;
-  status?: EvalCaseStatus | HostedWorkbenchJobStatus;
+  status?: EvalCaseStatus | RemoteWorkbenchJobStatus;
   metrics: Record<string, number>;
   durationMs?: number;
   source?: EvalCaseSource;
@@ -495,11 +784,11 @@ export interface CandidateCaseReview {
 
 export type RunStatus = "queued" | "running" | "finished";
 export type RunOutcome = "ok" | "error" | "cancelled";
-export type HostedRunWorkflow = "eval" | "improve";
+export type RemoteRunWorkflow = "eval" | "improve";
 
 export interface RunSummary {
   id: string;
-  workflow: HostedRunWorkflow;
+  workflow: RemoteRunWorkflow;
   benchmarkFingerprint: string;
   status: RunStatus;
   candidateId?: string | null;
@@ -551,7 +840,7 @@ export interface RuntimeEvent {
   candidateId?: string;
   baseId?: string;
   activeId?: string;
-  status?: CandidateStatus | HostedWorkbenchJobStatus;
+  status?: CandidateStatus | RemoteWorkbenchJobStatus;
   metrics?: Record<string, number>;
   detail?: Record<string, Json>;
 }
@@ -582,7 +871,7 @@ export interface WorkbenchRuntimeBundle {
   candidateFiles: WorkbenchRuntimeCandidateFiles[];
   evaluations: EvaluationScorecard[];
   runs: WorkbenchRuntimeRun[];
-  jobs: HostedWorkbenchJob[];
+  jobs: RemoteWorkbenchJob[];
   executionFiles: WorkbenchRuntimeExecutionFiles[];
   events: RuntimeEvent[];
 }
@@ -657,6 +946,63 @@ export interface WorkbenchProjectStateImportResult {
   };
   runtime: WorkbenchRuntimeImportResult;
   state: WorkbenchProjectState;
+}
+
+export type WorkbenchRemoteContractSchema =
+  | "workbench.remote.capabilities.v1"
+  | "workbench.remote.run.request.v1"
+  | "workbench.remote.job.claim_request.v1"
+  | "workbench.remote.job.claim.v1"
+  | "workbench.remote.job.renewal.v1"
+  | "workbench.remote.job.renewal_result.v1"
+  | "workbench.remote.job.progress.v1"
+  | "workbench.remote.job.completion.v1"
+  | "workbench.remote.job.retry.v1";
+
+export type WorkbenchRemoteProductionSandbox = "firecracker";
+export type WorkbenchRemoteLocalSandbox = "docker";
+export type WorkbenchRemoteNetworkPolicy = "open" | "none";
+
+export interface WorkbenchRemoteCapabilities {
+  schema: "workbench.remote.capabilities.v1";
+  contractVersion: 1;
+  projectState: {
+    schema: WorkbenchProjectState["schema"];
+    guardedSourceWrites: true;
+    immutableRuntimeFacts: true;
+  };
+  execution: {
+    fencedJobLeases: true;
+    idempotentCompletion: true;
+    progressIsBestEffort: true;
+    maxJobsPerRun: number;
+  };
+  sandbox: {
+    production: WorkbenchRemoteProductionSandbox;
+    local: WorkbenchRemoteLocalSandbox;
+    networkPolicies: WorkbenchRemoteNetworkPolicy[];
+  };
+  blobs: {
+    contentAddressed: boolean;
+    maxUploadBytes: number;
+  };
+}
+
+export interface WorkbenchRemoteRunRequest {
+  schema: "workbench.remote.run.request.v1";
+  workflow: "eval" | "improve";
+  budget?: number;
+  samples: number;
+  candidateId?: string;
+  sourceYaml?: string;
+  candidateFiles?: RemoteWorkbenchFileInput[];
+  adapterFiles?: RemoteWorkbenchFileInput[];
+  selectedSamples?: Array<{
+    caseId: string;
+    sampleIndex: number;
+  }>;
+  preserveActive?: boolean;
+  rerun?: boolean;
 }
 
 export interface AuthoredWorkbenchCandidateRunSpec extends WorkbenchAuthoredAdapterSpec {
@@ -1028,7 +1374,7 @@ export interface WorkbenchExecutionEvidence {
   kind: string;
   executionId: string | null;
   role: WorkbenchExecutionEventRole;
-  status: HostedWorkbenchJobStatus;
+  status: RemoteWorkbenchJobStatus;
   jobIds: string[];
   executionIds: string[];
   candidateId?: string;
@@ -1068,32 +1414,108 @@ export interface AuthoredWorkbenchSourceDocument {
   cases: AuthoredWorkbenchCaseSummary[];
 }
 
-export type HostedWorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
-export type HostedWorkbenchJobKind = "execute";
+export type RemoteWorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type RemoteWorkbenchJobKind = "execute";
 
-export interface HostedWorkbenchJob {
+export interface RemoteWorkbenchJob {
   id: string;
   projectId: string;
   runId: string;
   candidateId?: string;
-  kind: HostedWorkbenchJobKind;
-  status: HostedWorkbenchJobStatus;
+  kind: RemoteWorkbenchJobKind;
+  status: RemoteWorkbenchJobStatus;
   attempt: number;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
   finishedAt?: string;
-  leaseUntil?: string;
-  wakeupLeaseUntil?: string;
-  hostId?: string;
-  workerId?: string;
-  claimTokenHash?: string;
   input: Json;
   output?: Json;
   error?: string;
 }
 
-export interface HostedWorkbenchRun extends WorkbenchRuntimeRun {
+export interface WorkbenchRemoteJobClaimRequest {
+  schema: "workbench.remote.job.claim_request.v1";
+  ownerUserId: string;
+  projectId: string;
+  runId: string;
+  jobId: string;
+  hostId: string;
+  workerId?: string;
+}
+
+export type WorkbenchRemoteJobClaimDisposition = "claimed" | "delete" | "retry";
+
+export type WorkbenchRemoteJobClaim =
+  | WorkbenchRemoteJobClaimGranted
+  | WorkbenchRemoteJobClaimMiss;
+
+export interface WorkbenchRemoteJobClaimGranted {
+  schema: "workbench.remote.job.claim.v1";
+  claimed: true;
+  disposition: "claimed";
+  reason: "claimed";
+  ownerUserId: string;
+  projectId: string;
+  runId: string;
+  jobId: string;
+  leaseToken: string;
+  leaseUntil: string;
+  job: RemoteWorkbenchJob;
+  input: Json;
+}
+
+export interface WorkbenchRemoteJobClaimMiss {
+  schema: "workbench.remote.job.claim.v1";
+  claimed: false;
+  disposition: Exclude<WorkbenchRemoteJobClaimDisposition, "claimed">;
+  reason: string;
+}
+
+export interface WorkbenchRemoteJobRenewal {
+  schema: "workbench.remote.job.renewal.v1";
+  ownerUserId: string;
+  projectId: string;
+  runId: string;
+  jobId: string;
+  leaseToken: string;
+}
+
+export interface WorkbenchRemoteJobRenewalResult {
+  schema: "workbench.remote.job.renewal_result.v1";
+  renewed: boolean;
+  leaseUntil?: string;
+}
+
+export interface WorkbenchRemoteJobProgress {
+  schema: "workbench.remote.job.progress.v1";
+  ownerUserId: string;
+  leaseToken: string;
+  batch: WorkbenchExecutionEventBatch;
+}
+
+export interface WorkbenchRemoteJobCompletion {
+  schema: "workbench.remote.job.completion.v1";
+  ownerUserId: string;
+  projectId: string;
+  runId: string;
+  jobId: string;
+  leaseToken: string;
+  completedJob: RemoteWorkbenchJob;
+  adapterAuthProfiles?: Json[];
+}
+
+export interface WorkbenchRemoteJobRetry {
+  schema: "workbench.remote.job.retry.v1";
+  ownerUserId: string;
+  projectId: string;
+  runId: string;
+  jobId: string;
+  leaseToken: string;
+  reason: string;
+}
+
+export interface RemoteWorkbenchRun extends WorkbenchRuntimeRun {
   projectId: string;
   environmentVersionId?: string;
   specVersionId: string;

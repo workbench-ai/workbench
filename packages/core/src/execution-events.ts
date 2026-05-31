@@ -149,9 +149,9 @@ async function publishProgressBatch(
 export interface WorkbenchProgressStdoutEnvelope {
   url: string;
   body: {
-    type: "workbench.job.progress";
+    schema: "workbench.remote.job.progress.v1";
     ownerUserId?: string;
-    progressToken: string;
+    leaseToken: string;
     batch: WorkbenchExecutionEventBatch;
   };
 }
@@ -238,7 +238,7 @@ export async function publishWorkbenchProgressStdoutEnvelope(
     body: {
       ...envelope.body,
       ...(target.ownerUserId ? { ownerUserId: target.ownerUserId } : {}),
-      progressToken: target.token,
+      leaseToken: target.token,
     },
   });
 }
@@ -248,7 +248,7 @@ function progressEnvelopeMatchesTarget(
   target: WorkbenchExecutionProgressTarget,
 ): boolean {
   return envelope.url === target.url &&
-    envelope.body.progressToken === target.token &&
+    envelope.body.leaseToken === target.token &&
     (
       !target.ownerUserId ||
       envelope.body.ownerUserId === undefined ||
@@ -267,9 +267,9 @@ function progressStdoutEnvelope(
   return {
     url: target.url,
     body: {
-      type: "workbench.job.progress",
+      schema: "workbench.remote.job.progress.v1",
       ...(target.ownerUserId ? { ownerUserId: target.ownerUserId } : {}),
-      progressToken: target.token,
+      leaseToken: target.token,
       batch,
     },
   };
@@ -301,7 +301,7 @@ function isProgressStdoutEnvelope(value: unknown): value is WorkbenchProgressStd
     return false;
   }
   const bodyRecord = body as Record<string, unknown>;
-  return bodyRecord.type === "workbench.job.progress"
-    && typeof bodyRecord.progressToken === "string"
+  return bodyRecord.schema === "workbench.remote.job.progress.v1"
+    && typeof bodyRecord.leaseToken === "string"
     && Boolean(bodyRecord.batch);
 }

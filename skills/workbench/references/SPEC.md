@@ -7,7 +7,7 @@ Workbench is a repo-like benchmark workbench built on `version: 4` benchmark/can
 
 Candidate manifests own every choice about how that candidate runs and improves: files, prepare commands, runnable agent/model variants, the default run, and optional improve settings. The core benchmark stays focused on what is measured.
 
-The built-in `workbench` engine is the native engine for task directories, Docker environments, rubric scoring, and test scoring. Its `engine.with` config owns `environment`, optional `tasks` path selection, and the `score` adapter slot. Score helpers such as `tests` and `rubric` are slot targets, not core adapter categories. Rubric scoring runs one judge agent turn per criterion and uses `score.with.parallelism` as the single configurable throttle for those criterion turns; the helper publishes each criterion judge as a trace session plus scorecard/result files under the parent attempt job. The core runtime records only the generic engine job result, trace sessions, trace files, and artifacts. Harbor interop is supplied by an external engine adapter declared from a benchmark-contained path, npm package, or git ref and selected with `engine.use: harbor`. Top-level `environment`, `tasks`, and `score` from older source shapes are not part of the target contract.
+The built-in `workbench` engine is the native engine for task directories, Docker environments, rubric scoring, and test scoring. Its `engine.with` config owns `environment`, optional `tasks` path selection, and the `score` adapter slot. Score helpers such as `tests` and `rubric` are slot targets, not core adapter categories. Rubric scoring runs one judge agent turn per criterion and uses `score.with.parallelism` as the single configurable throttle for those criterion turns; the helper publishes each criterion judge as a trace session plus scorecard/result files under the parent attempt job. The core runtime records only the generic engine job result, trace sessions, trace files, and artifacts. Harbor interop is supplied by an external engine adapter declared from a benchmark-contained path, npm package, or git ref and selected with `engine.use: harbor`. Top-level `environment`, `tasks`, and `score` are not Workbench source primitives.
 
 ## Source Shape
 
@@ -38,7 +38,7 @@ engine:
       use: tests
 ```
 
-`engine.with.environment.network.egress` is binary: `open` allows normal internet egress and `none` disables egress from the benchmark sandbox. Omitted `network` defaults to `open`. Workbench does not expose per-host network allowlists because provider support is inconsistent; benchmarks that need contamination protection should use `egress: none`, which may also block model and API clients.
+`engine.with.environment.network.egress` is binary: `open` allows normal internet egress and `none` disables egress from the benchmark sandbox. Omitted `network` defaults to `open`; benchmarks that need contamination protection should use `egress: none`, which may also block model and API clients.
 
 Omitting `engine.with.tasks` is the canonical native task-package shape; the built-in `workbench` engine reads `tasks/`. Use `engine.with.tasks.path` only when the native task directory is not `tasks/`:
 
@@ -112,7 +112,7 @@ engine:
     path: harbor-dataset
 ```
 
-The Harbor engine adapter is a thin Workbench bridge to Harbor. Harbor itself owns `instruction.md`, `task.toml`, `environment/`, `tests/`, MCP server config, health checks, `solution/`, candidate invocation, verifier/reward behavior, artifact handoff, and same-sandbox versus separate-sandbox verifier topology. Workbench YAML does not duplicate Harbor verifier, artifact, environment, or step configuration. Workbench core does not call `harbor run` directly or expose Harbor as a special core runtime mode. A Harbor adapter normally declares `operations.engine.run.executor: host`, calls Harbor's inspect/export or run entrypoint, offers Workbench runtime-control as a sandbox provider when Harbor asks for sandboxes, and normalizes Harbor's final result into the same `workbench.adapter.v3` request and `workbench.adapter-result.v1` result used by every engine. Core records metrics and criteria as separate normalized fields and does not infer one from the other. Use benchmark-contained paths for portable Cloud runs; if an engine reads outside the benchmark tree, its `engine.resolve` operation must emit inspectable resolved files.
+The Harbor engine adapter is a thin Workbench bridge to Harbor. Harbor itself owns `instruction.md`, `task.toml`, `environment/`, `tests/`, MCP server config, health checks, `solution/`, candidate invocation, verifier/reward behavior, artifact handoff, and same-sandbox versus separate-sandbox verifier topology. Workbench YAML does not duplicate Harbor verifier, artifact, environment, or step configuration. Workbench core does not call `harbor run` directly or expose Harbor as a special core runtime mode. A Harbor adapter normally declares `operations.engine.run.executor: host`, calls Harbor's inspect/export or run entrypoint, offers Workbench runtime-control as a sandbox backend when Harbor asks for sandboxes, and normalizes Harbor's final result into the same `workbench.adapter.v3` request and `workbench.adapter-result.v1` result used by every engine. Core records metrics and criteria as separate normalized fields and does not infer one from the other. Use benchmark-contained paths for portable Cloud runs; if an engine reads outside the benchmark tree, its `engine.resolve` operation must emit inspectable resolved files.
 
 ## Cloud Source Boundary
 
@@ -136,31 +136,35 @@ Verifier files are not present during candidate prepare or in the candidate adap
 workbench init [DIR] --command NAME
 workbench check [SOURCE] [--dir DIR] [--json]
 workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--json]
-workbench eval --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
+workbench eval --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
 workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]
-workbench improve --hosted [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
+workbench improve --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
 workbench retry TARGET_ID [--dir DIR] [--json]
-workbench retry --hosted TARGET_ID [--dir DIR] [--benchmark OWNER/BENCHMARK] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
+workbench retry --remote TARGET_ID [--dir DIR] [--benchmark OWNER/BENCHMARK] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
+workbench runs list|show ...
+workbench evaluations list|show ...
+workbench executions trace --run RUN_ID --job JOB_ID ...
+workbench diagnose [RUN_OR_EVALUATION_ID] ...
 workbench candidates list|show|files|preview ...
 workbench traces collect|list [--providers codex,claude] [--since 30d] [--workspace DIR] [--limit N] [--json]
 workbench traces show TRACE_ID [--providers codex,claude] [--since 30d] [--workspace DIR] [--json]
 workbench open [SOURCE] [--dir DIR] [--run RUN_ID] [--host HOST] [--port N] [--no-open] [--json]
-workbench open --hosted [OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--no-open] [--json]
+workbench open --remote [OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--no-open] [--json]
 workbench clone OWNER/BENCHMARK [DIR] [--dry-run] [--json]
 workbench pull [--dir DIR] [--dry-run] [--json]
 workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--json]
 ```
 
-`clone`, `pull`, and `push` exchange one project-state envelope. Source files are the authored benchmark and candidate tree. Runtime history is the durable set of candidates, evaluations, runs, jobs, events, candidate files, execution files, and the explicit active candidate pointer. Source changes are guarded by the last exchanged revision/fingerprint; local pull refuses to overwrite changed local source, hosted push refuses to overwrite changed hosted source, and runtime history merges idempotently as immutable facts. Workbench does not infer active state from the latest or best candidate during sync. If the explicit active candidate does not match the current benchmark fingerprint, active state is `null`; if source later returns to a fingerprint with explicit run active facts, that explicit active candidate is restored.
+`clone`, `pull`, and `push` exchange one project-state envelope. Source files are the authored benchmark and candidate tree. Runtime history is the durable set of candidates, evaluations, runs, jobs, events, candidate files, execution files, and the explicit active candidate pointer. Source changes are guarded by the last exchanged revision/fingerprint; local pull refuses to overwrite changed local source, remote push refuses to overwrite changed remote source, and runtime history merges idempotently as immutable facts. Workbench does not infer active state from the latest or best candidate during sync. If the explicit active candidate does not match the current benchmark fingerprint, active state is `null`; if source later returns to a fingerprint with explicit run active facts, that explicit active candidate is restored.
 
 `.workbench/origin.json` is an exact remote pointer and base record: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`.
 
-Hosted benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so `OWNER/BENCHMARK` is the only public benchmark reference shape.
+Remote benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so `OWNER/BENCHMARK` is the only public benchmark reference shape.
 
-`workbench eval` and `workbench improve` reuse completed work only when the candidate, run configuration, source, adapters, benchmark, and requested samples/budget match; `--rerun` is the explicit duplicate-spend escape hatch. Local and hosted improve default to the evaluated active candidate when that candidate belongs to the current benchmark fingerprint; otherwise they evaluate and use the authored current candidate. Runtime candidates are automatically versioned display snapshots such as `Skill v1`, `Skill v2`, and `Skill v3`; authored YAML owns the candidate family and run configurations, not version labels.
+`workbench eval` and `workbench improve` reuse completed work only when the candidate, run configuration, source, adapters, benchmark, and requested samples/budget match; `--rerun` is the explicit duplicate-spend escape hatch. Local and remote improve default to the evaluated active candidate when that candidate belongs to the current benchmark fingerprint; otherwise they evaluate and use the authored current candidate. Runtime candidates are automatically versioned display snapshots such as `Skill v1`, `Skill v2`, and `Skill v3`; authored YAML owns the candidate family and run configurations, not version labels.
 
-When watched or reused hosted lifecycle work reaches a terminal state from a checkout linked to the same remote project, the CLI imports the hosted project-state envelope back into local under the same local-source guard used by `pull`. Successful `push` also imports the accepted runtime state so local and hosted active pointers stay aligned. Explicit `--benchmark` targets for a different project do not mutate the current checkout.
+When watched or reused remote lifecycle work reaches a terminal state from a checkout linked to the same remote project, the CLI imports the remote project-state envelope back into local under the same local-source guard used by `pull`. Successful `push` also imports the accepted runtime state so local and remote active pointers stay aligned. Explicit `--benchmark` targets for a different project do not mutate the current checkout.
 
 Once an active candidate exists, eval records scores without moving that active pointer. Improve output uses `outputCandidateId` for the produced version and `activeCandidateId` for the current best evaluated candidate after scoring. They can differ when a newer version scores below the incumbent.
 
-`workbench open` and hosted browser routes are read-only inspection surfaces. They expose candidates, evaluations, cases, traces, scorecards, and files for review; execution actions such as eval, improve, retry, cancellation, push, and pull stay in the CLI.
+`workbench open`, local CLI inspection commands, and remote browser routes are read-only inspection surfaces over the same generic Workbench read interface. They expose candidates, evaluations, cases, traces, scorecards, files, lineage, and failure state for review; execution actions such as eval, improve, retry, cancellation, push, and pull stay in lifecycle APIs and CLI commands.

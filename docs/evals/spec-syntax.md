@@ -83,9 +83,9 @@ tests:
 
 ## Required Fields
 
-`benchmark.yaml` requires `version: 4`, `name`, `description`, and `engine`. Native Workbench evals use `engine: { use: workbench, with: ... }`; that engine config requires `environment` and `score`. `engine.with.tasks` is optional for the built-in `workbench` engine; when omitted, it reads the default `tasks/` directory. Use `engine.with.tasks.path` only when the native task directory is not the default. Harbor evals declare an external Harbor engine adapter source under `adapters` and use benchmark-contained paths such as `engine: { use: harbor, with: { path: terminal-bench-subset } }`; if an engine reads data outside the benchmark tree, its `engine.resolve` adapter must emit the resolved files needed by Cloud. Top-level `environment`, `tasks`, and `score` from older source shapes are not part of the target contract.
+`benchmark.yaml` requires `version: 4`, `name`, `description`, and `engine`. Native Workbench evals use `engine: { use: workbench, with: ... }`; that engine config requires `environment` and `score`. `engine.with.tasks` is optional for the built-in `workbench` engine; when omitted, it reads the default `tasks/` directory. Use `engine.with.tasks.path` only when the native task directory is not the default. Harbor evals declare an external Harbor engine adapter source under `adapters` and use benchmark-contained paths such as `engine: { use: harbor, with: { path: terminal-bench-subset } }`; if an engine reads data outside the benchmark tree, its `engine.resolve` adapter must emit the resolved files needed by Cloud. Top-level `environment`, `tasks`, and `score` are not Workbench source primitives.
 
-`engine.with.environment.network.egress` accepts only `open` or `none`. Omitted `network` defaults to `open`; use `none` to disable sandbox egress for contamination-sensitive benchmarks. Workbench does not support per-host allowlists, and `egress: none` may also block model/API clients used by the candidate.
+`engine.with.environment.network.egress` accepts only `open` or `none`. Omitted `network` defaults to `open`; use `none` to disable sandbox egress for contamination-sensitive benchmarks, noting that it may also block model/API clients used by the candidate.
 
 A candidate manifest requires `version: 4`, `name`, `files`, and at least one entry under `runs`. It may include `defaultRun`, `prepare.command`, and `improve`. Prepare is a generic shell command from `/workspace`, not an adapter operation. Each `runs.<id>` entry has a human name plus the normal adapter invocation shape.
 
@@ -137,7 +137,7 @@ engine:
     path: terminal-bench-subset
 ```
 
-The Harbor engine adapter should be a thin bridge to Harbor. Harbor `task.toml` and the Harbor runtime read `instruction.md`, `environment/`, `tests/`, MCP server config, health checks, `solution/`, artifact handoff, candidate invocation, verifier/reward behavior, and same-sandbox versus separate-sandbox verifier topology. Workbench core does not parse Harbor directories or call `harbor run` directly. The adapter calls Harbor inspect/export and run APIs, exposes Workbench runtime-control as a sandbox provider when Harbor asks for sandboxes, and returns normalized Workbench evaluation data.
+The Harbor engine adapter should be a thin bridge to Harbor. Harbor `task.toml` and the Harbor runtime read `instruction.md`, `environment/`, `tests/`, MCP server config, health checks, `solution/`, artifact handoff, candidate invocation, verifier/reward behavior, and same-sandbox versus separate-sandbox verifier topology. Workbench core does not parse Harbor directories or call `harbor run` directly. The adapter calls Harbor inspect/export and run APIs, exposes Workbench runtime-control as a sandbox backend when Harbor asks for sandboxes, and returns normalized Workbench evaluation data.
 
 ## Scoring
 

@@ -1,13 +1,13 @@
 import type {
-  HostedWorkbenchJob,
+  RemoteWorkbenchJob,
   Json,
 } from "@workbench-ai/workbench-contract";
 
 import {
-  sandboxProviderAdmissionForResources,
-  type SandboxProviderHostCost,
-  type SandboxProviderRequestedResources,
-  type WorkbenchSandboxProviderName,
+  sandboxBackendAdmissionForResources,
+  type SandboxBackendHostCost,
+  type SandboxBackendRequestedResources,
+  type WorkbenchSandboxBackendName,
 } from "./sandbox-backends/index.ts";
 
 export interface WorkbenchExecutionDagCapacity {
@@ -17,21 +17,21 @@ export interface WorkbenchExecutionDagCapacity {
 }
 
 export interface WorkbenchExecutionDagResult {
-  jobs: HostedWorkbenchJob[];
+  jobs: RemoteWorkbenchJob[];
   maxConcurrency: number;
   startedJobCount: number;
   cancelledJobCount: number;
 }
 
 export interface WorkbenchExecutionDagRunInput {
-  jobs: readonly HostedWorkbenchJob[];
+  jobs: readonly RemoteWorkbenchJob[];
   capacity: WorkbenchExecutionDagCapacity;
-  sandboxProvider: WorkbenchSandboxProviderName;
-  executeJob: (job: HostedWorkbenchJob) => Promise<HostedWorkbenchJob>;
+  sandboxBackend: WorkbenchSandboxBackendName;
+  executeJob: (job: RemoteWorkbenchJob) => Promise<RemoteWorkbenchJob>;
   now?: () => string;
-  onJobQueued?: (job: HostedWorkbenchJob) => void;
-  onJobStarted?: (job: HostedWorkbenchJob) => void;
-  onJobFinished?: (job: HostedWorkbenchJob) => void;
+  onJobQueued?: (job: RemoteWorkbenchJob) => void;
+  onJobStarted?: (job: RemoteWorkbenchJob) => void;
+  onJobFinished?: (job: RemoteWorkbenchJob) => void;
 }
 
 interface RunningJob {
@@ -46,12 +46,12 @@ export async function runWorkbenchExecutionDag(
 ): Promise<WorkbenchExecutionDagResult> {
   assertPositiveCapacity(args.capacity);
   const now = args.now ?? (() => new Date().toISOString());
-  const jobsById = new Map<string, HostedWorkbenchJob>();
-  const pending = new Map<string, HostedWorkbenchJob>();
-  const terminal = new Map<string, HostedWorkbenchJob>();
+  const jobsById = new Map<string, RemoteWorkbenchJob>();
+  const pending = new Map<string, RemoteWorkbenchJob>();
+  const terminal = new Map<string, RemoteWorkbenchJob>();
   const running = new Map<string, RunningJob>();
   const dependencies = new Map<string, string[]>();
-  const results = new Map<string, HostedWorkbenchJob>();
+  const results = new Map<string, RemoteWorkbenchJob>();
   const originalOrder = args.jobs.map((job) => job.id);
   let activeCost: WorkbenchExecutionDagCapacity = emptyCapacity();
   let maxConcurrency = 0;
@@ -95,7 +95,7 @@ export async function runWorkbenchExecutionDag(
       if (ready.length > 0) {
         const blocked = ready[0]!;
         throw new Error(
-          `Job ${blocked.id} requires ${formatCapacity(workbenchJobHostCost(blocked, args.sandboxProvider))}, ` +
+          `Job ${blocked.id} requires ${formatCapacity(workbenchJobHostCost(blocked, args.sandboxBackend))}, ` +
           `which exceeds available dev capacity ${formatCapacity(args.capacity)}.`,
         );
       }
@@ -133,7 +133,7 @@ export async function runWorkbenchExecutionDag(
         progressed = true;
         continue;
       }
-      const cost = workbenchJobHostCost(job, args.sandboxProvider);
+      const cost = workbenchJobHostCost(job, args.sandboxBackend);
       const available = subtractCapacity(args.capacity, activeCost);
       if (!capacityFits(available, cost)) {
         continue;
@@ -141,7 +141,7 @@ export async function runWorkbenchExecutionDag(
       pending.delete(job.id);
       activeCost = addCapacity(activeCost, cost);
       const startedAt = now();
-      const runningJob: HostedWorkbenchJob = {
+      const runningJob: RemoteWorkbenchJob = {
         ...job,
         status: "running",
         startedAt,
@@ -157,11 +157,11 @@ export async function runWorkbenchExecutionDag(
     return progressed;
   }
 
-  function readyPendingJobs(): HostedWorkbenchJob[] {
+  function readyPendingJobs(): RemoteWorkbenchJob[] {
     return [...pending.values()].filter((job) => dependencyTerminalStatus(job) === "ready");
   }
 
-  function dependencyTerminalStatus(job: HostedWorkbenchJob): "ready" | "blocked" | "failed" | "cancelled" {
+  function dependencyTerminalStatus(job: RemoteWorkbenchJob): "ready" | "blocked" | "failed" | "cancelled" {
     const jobDependencies = dependencies.get(job.id) ?? [];
     let blocked = false;
     for (const dependencyId of jobDependencies) {
@@ -184,12 +184,12 @@ export async function runWorkbenchExecutionDag(
   }
 
   function cancelPendingJob(
-    job: HostedWorkbenchJob,
+    job: RemoteWorkbenchJob,
     dependencyStatus: "failed" | "cancelled",
   ): void {
     pending.delete(job.id);
     const finishedAt = now();
-    const cancelled: HostedWorkbenchJob = {
+    const cancelled: RemoteWorkbenchJob = {
       ...job,
       status: "cancelled",
       updatedAt: finishedAt,
@@ -203,10 +203,10 @@ export async function runWorkbenchExecutionDag(
   }
 
   async function finishJob(
-    runningJob: HostedWorkbenchJob,
+    runningJob: RemoteWorkbenchJob,
     cost: WorkbenchExecutionDagCapacity,
   ): Promise<void> {
-    let completed: HostedWorkbenchJob;
+    let completed: RemoteWorkbenchJob;
     try {
       completed = await args.executeJob(runningJob);
     } catch (error) {
@@ -228,7 +228,7 @@ export async function runWorkbenchExecutionDag(
   }
 }
 
-export function workbenchJobDependencies(job: HostedWorkbenchJob): string[] {
+export function workbenchJobDependencies(job: RemoteWorkbenchJob): string[] {
   const input = jsonRecord(job.input);
   const dependsOn = input.dependsOn;
   return Array.isArray(dependsOn)
@@ -237,8 +237,8 @@ export function workbenchJobDependencies(job: HostedWorkbenchJob): string[] {
 }
 
 export function workbenchJobResources(
-  job: HostedWorkbenchJob,
-): SandboxProviderRequestedResources {
+  job: RemoteWorkbenchJob,
+): SandboxBackendRequestedResources {
   const resources = jsonRecord(jsonRecord(jsonRecord(job.input).execution).policy).resources;
   const record = jsonRecord(resources);
   return {
@@ -250,10 +250,10 @@ export function workbenchJobResources(
 }
 
 export function workbenchJobHostCost(
-  job: HostedWorkbenchJob,
-  provider: WorkbenchSandboxProviderName,
-): SandboxProviderHostCost {
-  return sandboxProviderAdmissionForResources(provider, workbenchJobResources(job)).hostCost;
+  job: RemoteWorkbenchJob,
+  backend: WorkbenchSandboxBackendName,
+): SandboxBackendHostCost {
+  return sandboxBackendAdmissionForResources(backend, workbenchJobResources(job)).hostCost;
 }
 
 export function addCapacity(
@@ -291,7 +291,7 @@ function emptyCapacity(): WorkbenchExecutionDagCapacity {
   return { cpu: 0, memoryGb: 0, diskGb: 0 };
 }
 
-function isTerminalJob(job: HostedWorkbenchJob): boolean {
+function isTerminalJob(job: RemoteWorkbenchJob): boolean {
   return job.status === "succeeded" || job.status === "failed" || job.status === "cancelled";
 }
 

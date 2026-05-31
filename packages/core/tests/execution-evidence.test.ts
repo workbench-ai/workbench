@@ -4,7 +4,7 @@ import {
   buildCandidateCaseExecutionRefs,
   buildWorkbenchExecutionEvidence,
   finalizeWorkbenchExecutionTraceForJob,
-  type HostedWorkbenchJob,
+  type RemoteWorkbenchJob,
   type WorkbenchExecutionTrace,
 } from "../src/index.ts";
 
@@ -101,7 +101,7 @@ describe("workbench execution evidence", () => {
       job,
       stageId: "attempt",
       trace: {
-        trace_id: "hosted-score",
+        trace_id: "remote-score",
         spans: [{
           id: "tool",
           parent_id: null,
@@ -157,7 +157,7 @@ function executionJob(args: {
   minute: number;
   purpose?: "attempt" | "improve";
   baseline?: boolean;
-}): HostedWorkbenchJob {
+}): RemoteWorkbenchJob {
   const timestamp = `2026-05-05T00:${String(args.minute).padStart(2, "0")}:00.000Z`;
   return {
     id: args.id,

@@ -50,7 +50,7 @@ export const WORKBENCH_BENCHMARK_FILE = BENCHMARK_SPEC_FILE;
 export const WORKBENCH_CANDIDATES_DIR = "candidates";
 export const WORKBENCH_CANDIDATE_FILE = CANDIDATE_SPEC_FILE;
 
-export type HostedFile = WorkspaceSnapshotFile;
+export type RemoteFile = WorkspaceSnapshotFile;
 
 export interface LocalProjectSource {
   dir: string;
@@ -71,11 +71,11 @@ export interface LocalProjectSource {
   dockerfilePath: string;
   dockerfile: string;
   runtimeDockerfile: string;
-  dockerfileFiles: HostedFile[];
-  candidateFiles: HostedFile[];
-  engineResolveFiles: HostedFile[];
+  dockerfileFiles: RemoteFile[];
+  candidateFiles: RemoteFile[];
+  engineResolveFiles: RemoteFile[];
   adapters: ResolvedWorkbenchAdapter[];
-  adapterFiles: HostedFile[];
+  adapterFiles: RemoteFile[];
   caseIds: string[];
   engineCases: WorkbenchEngineCase[];
   engineResolve: LocalEngineResolveInvocation;
@@ -178,7 +178,7 @@ export async function readLocalProjectSource(
     ? normalizeSurfaceFiles(await readSnapshotFiles(absoluteCandidateFilesPath))
     : [];
   const rawEngineResolveFiles = engineResolveFilesFromBundles(normalizedSources.engineCases);
-  const engineResolveFiles = toHostedFiles(rawEngineResolveFiles);
+  const engineResolveFiles = toRemoteFiles(rawEngineResolveFiles);
   const engineCases = normalizedSources.engineCases;
   if (engineCases.length === 0) {
     throw new WorkspaceSnapshotError(
@@ -205,11 +205,11 @@ export async function readLocalProjectSource(
     dockerfilePath,
     dockerfile,
     runtimeDockerfile: composedDockerfile,
-    dockerfileFiles: toHostedFiles(dockerfileSourceFiles(dockerfileSources)),
-    candidateFiles: toHostedFiles(candidateFiles),
+    dockerfileFiles: toRemoteFiles(dockerfileSourceFiles(dockerfileSources)),
+    candidateFiles: toRemoteFiles(candidateFiles),
     engineResolveFiles,
     adapters,
-    adapterFiles: toHostedFiles(adapterFiles),
+    adapterFiles: toRemoteFiles(adapterFiles),
     caseIds,
     engineCases,
     engineResolve: normalizedSources.engineResolve,
@@ -266,7 +266,7 @@ export async function readLocalAuthoredProjectSource(
   };
 }
 
-export function hostedEngineResolveFiles(source: LocalProjectSource): HostedFile[] {
+export function remoteEngineResolveFiles(source: LocalProjectSource): RemoteFile[] {
   return [
     ...source.engineResolveFiles,
     {
@@ -999,7 +999,7 @@ function adapterSourceSnapshotPath(
     : `adapters/${adapter.manifest.id}/${filePath}`;
 }
 
-function toHostedFiles(files: readonly SurfaceSnapshotFile[]): HostedFile[] {
+function toRemoteFiles(files: readonly SurfaceSnapshotFile[]): RemoteFile[] {
   return files.map((file) => ({
     path: file.path,
     content: file.content,

@@ -10,7 +10,7 @@ import {
 } from "../src/lib/routes";
 
 describe("workbench location routes", () => {
-  test("parses candidate routes under a hosted benchmark mount", () => {
+  test("parses candidate routes under a remote benchmark mount", () => {
     expect(
       parseWorkbenchLocation(
         {
@@ -40,7 +40,7 @@ describe("workbench location routes", () => {
     ).toBe("/benchmarks/alice/demo/candidates/candidate_123");
   });
 
-  test("parses and serializes candidate index views under a hosted benchmark mount", () => {
+  test("parses and serializes candidate index views under a remote benchmark mount", () => {
     expect(
       parseWorkbenchLocation(
         {
@@ -222,7 +222,7 @@ describe("workbench location routes", () => {
     ).toBe("/benchmarks/alice/demo/candidates/candidate_123?evaluation=eval_456&case=case-001");
   });
 
-  test("parses and serializes evaluation index routes under a hosted benchmark mount", () => {
+  test("parses and serializes evaluation index routes under a remote benchmark mount", () => {
     expect(
       parseWorkbenchLocation(
         {

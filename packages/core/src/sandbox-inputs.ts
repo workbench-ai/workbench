@@ -1,6 +1,6 @@
 import type {
   BlobObjectRef,
-  HostedWorkbenchJob,
+  RemoteWorkbenchJob,
   Json,
   SurfaceSnapshotFile,
   WorkbenchExecutionCapability,
@@ -31,7 +31,7 @@ import {
   engineCaseFilesForRuntimeInput,
 } from "./generic-spec.ts";
 
-export function readWorkbenchExecutionSpec(job: HostedWorkbenchJob): WorkbenchExecutionSpec {
+export function readWorkbenchExecutionSpec(job: RemoteWorkbenchJob): WorkbenchExecutionSpec {
   const input = asRuntimeRecord(job.input);
   const execution = input.execution;
   if (!execution || typeof execution !== "object" || Array.isArray(execution)) {
@@ -136,9 +136,9 @@ export function createSandboxAdapterRequest(
 }
 
 export function sanitizeWorkbenchExecutionJobForSandbox(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   execution: WorkbenchExecutionSpec,
-): HostedWorkbenchJob {
+): RemoteWorkbenchJob {
   const input = asRuntimeRecord(job.input);
   const sanitizedInput: Record<string, Json> = {};
   for (const [key, value] of Object.entries(input)) {
@@ -175,7 +175,7 @@ export function materializedInputForSandboxRequest(input: SandboxMaterializedInp
 }
 
 export async function executionResultFromCompletedSandboxJob(args: {
-  completedJob: HostedWorkbenchJob;
+  completedJob: RemoteWorkbenchJob;
   execution: WorkbenchExecutionSpec;
   startedAt: string;
   backend: string;
@@ -264,16 +264,16 @@ export async function sha256Hex(body: string): Promise<string> {
 }
 
 export function withSandboxCompletionMetadata(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   metadata: WorkbenchSandboxExecutionMetadata,
-): HostedWorkbenchJob {
+): RemoteWorkbenchJob {
   return attachSandboxMetadataToJob(job, createWorkbenchSandboxExecutionMetadata(metadata) as unknown as Json);
 }
 
 export function attachSandboxMetadataToJob(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   metadata: unknown,
-): HostedWorkbenchJob {
+): RemoteWorkbenchJob {
   const output = asRuntimeRecord(job.output);
   if (!job.output || Array.isArray(job.output) || typeof job.output !== "object") {
     return job;

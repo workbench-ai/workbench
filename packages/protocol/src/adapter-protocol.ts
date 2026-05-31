@@ -18,6 +18,9 @@ import type {
 import {
   normalizeWorkbenchAdapterOperation,
 } from "./adapter-manifest.ts";
+import {
+  normalizeSurfaceSnapshotFiles,
+} from "./snapshot-files.ts";
 
 export const WORKBENCH_ADAPTER_PROTOCOL = "workbench.adapter.v3";
 export const WORKBENCH_ADAPTER_RESULT_PROTOCOL = "workbench.adapter-result.v1";
@@ -334,14 +337,11 @@ function normalizeResult(value: unknown, label: string): WorkbenchResult {
 
 function normalizeCandidatePatch(value: unknown, label: string): WorkbenchCandidatePatch {
   const record = requiredJsonRecord(value, label);
-  if (!Array.isArray(record.files)) {
-    throw new Error(`${label}.files must be an array.`);
-  }
   if (!Array.isArray(record.fileChanges) || !record.fileChanges.every((entry) => typeof entry === "string")) {
     throw new Error(`${label}.fileChanges must be a string array.`);
   }
   return {
-    files: record.files as unknown as WorkbenchCandidatePatch["files"],
+    files: normalizeSurfaceSnapshotFiles(record.files, `${label}.files`),
     fileChanges: [...record.fileChanges],
     ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
     ...(record.feedback !== undefined ? { feedback: record.feedback as Json } : {}),

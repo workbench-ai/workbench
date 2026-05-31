@@ -1,5 +1,5 @@
 import type {
-  HostedWorkbenchJob,
+  RemoteWorkbenchJob,
   Json,
   SurfaceSnapshotFile,
   WorkbenchExecutionSpec,
@@ -74,8 +74,8 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   environmentRef?: string;
   environmentRefsByCase?: ReadonlyMap<string, string>;
   baseId?: string | null;
-}): HostedWorkbenchJob[] {
-  const jobs: HostedWorkbenchJob[] = [];
+}): RemoteWorkbenchJob[] {
+  const jobs: RemoteWorkbenchJob[] = [];
   const engineCases = args.engineCases;
   const caseIds = args.caseIds && args.caseIds.length > 0
     ? [...args.caseIds]
@@ -167,7 +167,7 @@ export function createWorkbenchExecutionJob(args: {
   baseFiles?: readonly SurfaceSnapshotFile[];
   traceFiles?: readonly SurfaceSnapshotFile[];
   baseId?: string | null;
-}): HostedWorkbenchJob {
+}): RemoteWorkbenchJob {
   const attemptIndex = readExecutionMetadataNumber(args.execution, "attemptIndex");
   const sampleIndex = readExecutionMetadataNumber(args.execution, "sampleIndex");
   const caseId = readExecutionMetadataString(args.execution, "caseId");
@@ -253,7 +253,7 @@ export function createBaselineCandidateJob(args: {
   baseId: string | null;
   attemptIndex: number;
   fileSet?: Json;
-}): HostedWorkbenchJob {
+}): RemoteWorkbenchJob {
   const execution = createBaselineCandidateExecution({
     ownerUserId: args.ownerUserId,
     projectId: args.projectId,
@@ -304,7 +304,7 @@ export function workbenchExecutionJobId(executionId: string): string {
   return `job_${executionId.replace(/[^a-z0-9_]/giu, "_")}`;
 }
 
-export function workbenchExecutionJobPurpose(job: HostedWorkbenchJob): WorkbenchExecutionSpec["purpose"] | null {
+export function workbenchExecutionJobPurpose(job: RemoteWorkbenchJob): WorkbenchExecutionSpec["purpose"] | null {
   if (job.kind !== "execute") {
     return null;
   }

@@ -1,12 +1,12 @@
 # Workbench Architecture
 
-`SPEC.md` defines the user-facing source and command contract. This document defines the open Workbench package boundary. Hosted control-plane implementation belongs to `products/workbench-cloud`.
+`SPEC.md` defines the user-facing source and command contract. This document defines the open Workbench package boundary. Remote control-plane implementation belongs to `products/workbench-cloud`.
 
 ## Repository Shape
 
 Workbench is the open repo-like project surface:
 
-- `packages/cli`: the published `workbench` command, command registry, project lifecycle commands, Workbench Cloud remote client, API client, config handling, output formatting, and CLI tests.
+- `packages/cli`: the published `workbench` command, command registry, project lifecycle commands, remote backend client, API client, config handling, output formatting, and CLI tests.
 - `packages/protocol`: the public adapter protocol. It owns adapter manifests, operation request and result parsing, adapter definition helpers, typed slots, and auth-requirement discovery for `workbench.adapter.v3`. Engine, candidate, and improve adapters use this protocol; individual protocol operations are not public authored primitives.
 - `packages/contract`: serializable DTOs shared by the CLI, Workbench Cloud API, reusable UI, and execution helpers.
 - `packages/core`: the public execution core. It owns split YAML validation, source resolution, benchmark fingerprints, candidate file snapshots, engine execution graph planning, Docker-backed local execution, sandbox capability validation, candidate/evaluation materialization, runs, lineage, file previews, and generic trace DTO helpers.
@@ -18,20 +18,20 @@ Workbench is the open repo-like project surface:
 - `docs/`: canonical public CLI and eval-authoring docs rendered by Workbench Cloud.
 - `plans/`: product plan history indexed by `plans/index.md`.
 
-`products/workbench-cloud/packages/cloud-runtime` is intentionally outside this product. It owns hosted worker entrypoints, Firecracker, Daytona, E2B, remote runtime overlays, environment builders, queue workers, and production sandbox-host behavior.
+`products/workbench-cloud/packages/cloud-runtime` is intentionally outside this product. It owns remote worker entrypoints, Firecracker, environment builders, queue workers, and production sandbox-host behavior. Production remote backends use Firecracker; local Workbench execution remains Docker-backed inside the open Workbench packages.
 
 The `packages/cli` package owns the `workbench` binary implementation, command registry, output formatting, and command tests. It is not the documentation or skill ownership boundary. Product docs and skills stay at the Workbench product root so the same source describes the engine, public adapter protocol, browser UI, and optional Workbench Cloud remote behavior without making those concepts look CLI-owned.
 
 ## Ownership Boundaries
 
-- The CLI owns project lifecycle commands and the open Cloud remote surface: `login`, `clone`, `pull`, `push`, and hosted execution through `eval --hosted`, `improve --hosted`, `retry --hosted`, and `open --hosted`.
+- The CLI owns project lifecycle commands and the open remote backend client surface: `login`, `clone`, `pull`, `push`, and remote execution through `eval --remote`, `improve --remote`, `retry --remote`, and `open --remote`.
 - The protocol package owns the stable adapter contract. Engine, candidate, and improve adapter authors should not need to import Web or cloud-runtime code.
-- The core package owns portable Workbench semantics and local Docker execution. Its authored source model is benchmark engine plus candidate manifests. It must not depend on Next.js, AWS SDKs, Stripe, Cognito, Daytona, E2B, Firecracker implementation code, Terraform, or hosted worker entrypoints.
+- The core package owns portable Workbench semantics and local Docker execution. Its authored source model is benchmark engine plus candidate manifests. It must not depend on Next.js, AWS SDKs, Stripe, Cognito, Firecracker implementation code, Terraform, or remote worker entrypoints.
 - The CLI ships a default adapter catalog as ordinary adapter manifests. Core can execute adapters, but it does not special-case default adapter ids. A project-declared adapter source with the same id as a default adapter intentionally overrides that default for the project; wrapping is implemented by that replacement adapter delegating however it chooses.
-- Workbench Cloud owns hosted persistence, billing, auth, Web routes, production infrastructure, queue workers, remote provider admission, and hosted sandbox providers.
+- Workbench Cloud owns managed remote persistence, billing, auth, Web routes, production infrastructure, queue workers, runner admission, and sandbox backend implementation.
 - Shared UI stays presentation-only. It renders benchmark, candidate, run, evaluation, lineage, file, and trace DTOs without owning execution rules.
 
-This is a git/GitHub-style split: `workbench` is the open client and engine; Workbench Cloud is an optional hosted remote service implemented by cloud-owned private packages.
+This is a git/GitHub-style split: `workbench` is the open client and engine; remote backend implementations live below the Workbench Cloud product boundary and its distributions.
 
 ## Public Source Repository
 
@@ -62,23 +62,23 @@ Core compiles eval and improve requests into generic executions:
 
 Workbench-native task loading and `tests`/`rubric` scoring behavior belongs to the built-in `workbench` engine. Scoring helpers may be implemented through the adapter protocol, but they are not core adapter categories. Rubric scoring fans out to one judge agent turn per criterion and owns `parallelism` as the only configurable throttle for those criterion turns; the helper publishes each criterion judge as a trace session plus scorecard/result files under the parent attempt job, while the core runtime records one generic engine job result, trace-session set, trace-file set, and artifact bundle. Harbor is not a core runtime mode; `engine.use: harbor` selects an external engine adapter, declared from a local path, npm package, or git ref, that bridges Workbench to Harbor. Harbor itself owns Harbor task parsing, MCP server config, health checks, environment interpretation, candidate invocation, artifact handoff, verifier topology, verifier/reward behavior, result semantics, and criteria semantics through its `task.toml` and runtime. Engines that need a trusted controller declare `operations.engine.run.executor: host`; Workbench runs that adapter controller in the trusted local or Cloud worker process through the same request/result protocol and the same runtime-control capability, without a Harbor-specific branch.
 
-Local execution uses the public Docker sandbox backend in `packages/core/src/sandbox-backends/docker.ts` for sandbox-executor operations and runtime-control child operation sequences. The same sandbox-plane interface validates input scope, output scope, allocation metadata, handles, and execution capabilities before any sandboxed adapter command runs. Host-executor operations bypass Workbench sandbox allocation for the controller itself, but the controller can request child sandboxes through runtime-control. Remote provider implementations are private cloud-runtime code that wrap the public core execution function with hosted provider factories.
+Local execution uses the public Docker sandbox backend in `packages/core/src/sandbox-backends/docker.ts` for sandbox-executor operations and runtime-control child operation sequences. The same sandbox-plane interface validates input scope, output scope, allocation metadata, handles, and execution capabilities before any sandboxed adapter command runs. Host-executor operations bypass Workbench sandbox allocation for the controller itself, but the controller can request child sandboxes through runtime-control. Remote sandbox implementations are private cloud-runtime code that wrap the public core execution function with backend factories.
 
 ## Stores
 
 Local project state lives under `.workbench/` inside the project:
 
 - `.workbench/runtime` stores local runs, candidates, evaluations, traces, and file snapshots.
-- `.workbench/origin.json` stores only `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt` for `clone`, `pull`, `push`, and hosted execution.
+- `.workbench/origin.json` stores only `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt` for `clone`, `pull`, `push`, and remote execution.
 
-`clone`, `pull`, and `push` exchange one project-state envelope: authored source plus portable runtime history. Watched or reused terminal hosted lifecycle commands import that same envelope back into a linked checkout when local source still matches the remembered base. Authored source is guarded by the last exchanged revision/fingerprint; runtime records are durable immutable facts that merge by id and reject same-id different-content conflicts. Workbench Cloud also stores owner/profile, visibility, billing, queue leases, provider capacity, and sandbox-host state; those cloud-only fields are not copied into local project state or between projects.
+`clone`, `pull`, and `push` exchange one project-state envelope: authored source plus portable runtime history. Watched or reused terminal remote lifecycle commands import that same envelope back into a linked checkout when local source still matches the remembered base. Authored source is guarded by the last exchanged revision/fingerprint; runtime records are durable immutable facts that merge by id and reject same-id different-content conflicts. Remote backends also store owner/profile, visibility, billing, queue leases, runner allocation, and sandbox-host state; those backend-only fields are not copied into local project state or between projects.
 
 ## Invariants
 
-- Public packages are publishable without proprietary hosted infrastructure.
-- Public package manifests must not depend on AWS SDKs, Next.js, NextAuth, Stripe, Daytona, E2B, or cloud-owned runtime packages.
+- Public packages are publishable without proprietary remote infrastructure.
+- Public package manifests must not depend on AWS SDKs, Next.js, NextAuth, Stripe, Firecracker implementation code, or cloud-owned runtime packages.
 - `workbench --help`, `docs/cli.md`, `SPEC.md`, tests, and the authored `workbench` skill must describe the same command surface.
 - The CLI must work outside git repositories.
 - The CLI must remain automation-friendly: stable JSON with `--json`, explicit flags, useful non-zero failures, and no hidden interactive prompts.
-- Adapter commands receive the standard `WORKBENCH_ADAPTER_REQUEST` file and must rely only on its `paths` object for staged filesystem locations. They do not receive source YAML files, job claim tokens, worker tokens, queue credentials, hosted billing state, or sandbox control request internals.
+- Adapter commands receive the standard `WORKBENCH_ADAPTER_REQUEST` file and must rely only on its `paths` object for staged filesystem locations. They do not receive source YAML files, job claim tokens, worker tokens, queue credentials, remote billing state, or sandbox control request internals.
 - `workbench.adapter.v3` is the adapter manifest and request protocol. Adapter operations return one `workbench.adapter-result.v1` file, and operation-specific result values belong to that protocol boundary. Public authoring docs should expose engine, candidate, and improve first; operation names are adapter-implementation details.

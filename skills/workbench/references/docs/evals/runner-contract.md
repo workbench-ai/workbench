@@ -6,7 +6,7 @@ For the built-in `workbench` engine, each attempt is one top-level `engine.run` 
 
 Default catalog adapters such as `codex` and `claude` implement candidate run and candidate improve behavior. The built-in `workbench` engine owns native task loading plus `tests` and `rubric` scoring helpers. The rubric helper runs one judge agent turn per criterion and owns `parallelism` as the only configurable throttle for those criterion turns; core runtime remains generic and records the normalized engine result. Harbor is an external engine adapter. External adapters, including project-declared overrides for default catalog ids, run through the same `workbench.adapter.v3` request and `workbench.adapter-result.v1` result contract inside the composed environment declared by the engine plus adapter setup.
 
-During hosted execution, agent adapters may publish live `job_progress` event batches before the terminal job output exists. These batches are best-effort UI progress and trace deltas. The completed adapter result remains authoritative.
+During remote execution, agent adapters may publish live `job_progress` event batches before the terminal job output exists. These batches are best-effort UI progress and trace deltas. The completed adapter result remains authoritative.
 
 Adapters may report execution usage on the completed result. Provider-reported cost is authoritative. When the provider does not report cost, Workbench estimates from its checked-in LiteLLM price snapshot using the exact model string emitted by the adapter.
 

@@ -7,15 +7,15 @@ import {
 } from "@workbench-ai/workbench-core";
 
 import {
-  hostedEngineResolveFiles,
-  type HostedFile,
+  remoteEngineResolveFiles,
+  type RemoteFile,
   type LocalProjectSource,
 } from "./project-source.js";
 
 export function localBenchmarkFingerprint(project: LocalProjectSource): string {
   return workbenchBenchmarkContentFingerprint({
     sourceYaml: project.specSource,
-    engineResolveFiles: hostedEngineResolveFiles(project).map(toSurfaceFile),
+    engineResolveFiles: remoteEngineResolveFiles(project).map(toSurfaceFile),
     engineResolveBinding: engineResolveBindingForSpec(project.spec),
     adapterFiles: project.adapterFiles.map(toSurfaceFile),
     adapterManifests: project.adapters.map((adapter) => adapter.manifest),
@@ -46,7 +46,7 @@ export function localCandidateFingerprint(project: LocalProjectSource): string {
   });
 }
 
-function toSurfaceFile(file: HostedFile | SurfaceSnapshotFile): SurfaceSnapshotFile {
+function toSurfaceFile(file: RemoteFile | SurfaceSnapshotFile): SurfaceSnapshotFile {
   return {
     path: file.path,
     kind: "kind" in file ? file.kind : file.encoding === "base64" ? "binary" : "text",

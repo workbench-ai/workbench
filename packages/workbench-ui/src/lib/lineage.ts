@@ -1,4 +1,9 @@
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
+import {
+  buildCandidateLineage,
+  type CandidateLineageEdge,
+  type CandidateLineageGraph,
+} from "@workbench-ai/workbench-contract";
 
 import type {
   CandidateSummary,
@@ -24,24 +29,6 @@ export interface LineageNodeData extends Record<string, unknown> {
 
 export type LineageNode = Node<LineageNodeData, "candidate">;
 export type LineageEdge = Edge<Record<string, never>>;
-interface LineageSemanticEdge {
-  id: string;
-  kind: "anchor";
-  sourceId: string;
-  targetId: string;
-}
-
-interface CandidateLineageNode {
-  id: string;
-  active: boolean;
-  summary: CandidateSummary;
-}
-
-interface CandidateLineageGraph {
-  activeId: string | null;
-  nodes: CandidateLineageNode[];
-  edges: LineageSemanticEdge[];
-}
 
 interface ElkInstance {
   layout(graph: Record<string, unknown>): Promise<{
@@ -156,7 +143,7 @@ export async function buildLineageFlow(
 
 async function layoutLineageNodes<T extends LineageNodeData>(
   nodes: ReadonlyArray<Node<T, "candidate">>,
-  edges: ReadonlyArray<LineageSemanticEdge | LineageEdge>,
+  edges: ReadonlyArray<CandidateLineageEdge | LineageEdge>,
 ): Promise<Array<Node<T, "candidate">>> {
   const elk = await getElkInstance();
   const layout = await elk.layout({
@@ -216,42 +203,4 @@ function buildLineageNodeData(args: {
     statusText,
     scoreText: args.scoreText,
   };
-}
-
-function buildCandidateLineage(args: {
-  summaries: readonly CandidateSummary[];
-  activeId: string | null;
-}): CandidateLineageGraph {
-  const orderedSummaries = args.summaries
-    .slice()
-    .sort((left, right) => {
-      const createdAt = left.createdAt.localeCompare(right.createdAt);
-      return createdAt !== 0 ? createdAt : left.id.localeCompare(right.id);
-    });
-  const summaryIds = new Set(orderedSummaries.map((summary) => summary.id));
-  return {
-    activeId: args.activeId,
-    nodes: orderedSummaries.map((summary): CandidateLineageNode => ({
-      id: summary.id,
-      active: args.activeId === summary.id,
-      summary,
-    })),
-    edges: orderedSummaries.flatMap((summary) => buildLineageEdges(summary, summaryIds)),
-  };
-}
-
-function buildLineageEdges(
-  summary: CandidateSummary,
-  summaryIds: ReadonlySet<string>,
-): LineageSemanticEdge[] {
-  const edges: LineageSemanticEdge[] = [];
-  if (summary.baseId && summary.baseId !== summary.id && summaryIds.has(summary.baseId)) {
-    edges.push({
-      id: `anchor:${summary.baseId}:${summary.id}`,
-      kind: "anchor",
-      sourceId: summary.baseId,
-      targetId: summary.id,
-    });
-  }
-  return edges;
 }

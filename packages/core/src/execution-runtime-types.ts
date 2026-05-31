@@ -1,6 +1,6 @@
 import type {
-  HostedWorkbenchEnvironmentVersion,
-  HostedWorkbenchJob,
+  RemoteWorkbenchEnvironmentVersion,
+  RemoteWorkbenchJob,
   Json,
   SurfaceSnapshotFile,
   WorkbenchAdapterInvocation,
@@ -24,9 +24,9 @@ import type {
 } from "@workbench-ai/workbench-protocol";
 
 export interface WorkbenchExecutionRuntimeInput {
-  job: HostedWorkbenchJob;
+  job: RemoteWorkbenchJob;
   spec: GenericRunSpec;
-  environmentVersion?: Pick<HostedWorkbenchEnvironmentVersion, "id" | "imageRef" | "sourceHash" | "spec">;
+  environmentVersion?: Pick<RemoteWorkbenchEnvironmentVersion, "id" | "imageRef" | "sourceHash" | "spec">;
   environmentDockerfile?: string;
   baseFiles: readonly SurfaceSnapshotFile[];
   engineResolveFiles: readonly SurfaceSnapshotFile[];

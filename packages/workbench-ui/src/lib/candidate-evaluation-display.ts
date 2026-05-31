@@ -1,4 +1,9 @@
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
+import {
+  formatEvaluationConfigurationLabel,
+  isCompleteEvaluationSummary,
+  readEvaluationScore,
+} from "@workbench-ai/workbench-contract";
 
 import type { EvaluationSummary } from "../types";
 import {
@@ -144,11 +149,11 @@ export function resolveEvaluationCandidateDisplay(
   };
 }
 
-export function formatEvaluationConfigurationLabel(evaluation: EvaluationSummary): string {
-  return evaluation.candidateRunName?.trim() ||
-    evaluation.candidateRunId?.trim() ||
-    "Default configuration";
-}
+export {
+  formatEvaluationConfigurationLabel,
+  isCompleteEvaluationSummary,
+  readEvaluationScore,
+};
 
 export function resolveCandidateEvaluationRollupDisplay(
   rollup: CandidateEvaluationRollup | null | undefined,
@@ -180,21 +185,6 @@ export function resolveCandidateEvaluationRollupDisplay(
     countText,
     ariaText: `${scoreText}, ${meanText}, ${bestConfigurationText}, ${countText}`,
   };
-}
-
-export function readEvaluationScore(evaluation: EvaluationSummary): number | null {
-  const score = evaluation.selectionMetric === "score"
-    ? evaluation.selectionScore?.mean ?? evaluation.metrics?.score?.mean
-    : evaluation.metrics?.score?.mean;
-  return typeof score === "number" && Number.isFinite(score) ? score : null;
-}
-
-export function isCompleteEvaluationSummary(
-  evaluation: Pick<EvaluationSummary, "status" | "sampleCount" | "completedSampleCount" | "errorSampleCount">,
-): boolean {
-  return evaluation.status === "completed" &&
-    evaluation.errorSampleCount === 0 &&
-    evaluation.completedSampleCount >= evaluation.sampleCount;
 }
 
 function compareEvaluationRecency(

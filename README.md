@@ -4,7 +4,7 @@ Workbench is an open-source, local-first benchmark workbench for evaluating and 
 
 This public repository contains the Workbench CLI package, core benchmark engine, adapter protocol, reusable Workbench UI, the shared CLI Web UI package used by that UI, first-party agent driver packages used by the built-in adapters, documentation, environments, and the installable Workbench agent skill.
 
-Hosted Workbench Cloud infrastructure, hosted persistence, billing, auth, worker fleet code, and Terraform are not part of this repository.
+Managed Workbench Cloud infrastructure, remote persistence, billing, auth, worker fleet code, and Terraform are not part of this repository.
 
 ## Install The Agent Skill
 

@@ -219,6 +219,28 @@ describe("Workbench adapter protocol", () => {
         metrics: { accuracy: 0.75 },
       },
     });
+
+    expect(normalizeWorkbenchAdapterOperationResult({
+      protocol: "workbench.adapter-result.v1",
+      operation: "candidate.improve",
+      value: {
+        files: [{
+          path: "prompt.md",
+          content: "updated\n",
+        }],
+        fileChanges: ["prompt.md"],
+      },
+    }, "candidate.improve")).toMatchObject({
+      value: {
+        files: [{
+          path: "prompt.md",
+          kind: "text",
+          encoding: "utf8",
+          executable: false,
+        }],
+        fileChanges: ["prompt.md"],
+      },
+    });
   });
 
   test("posts runtime-control requests with the default no-timeout node client", async () => {
@@ -388,7 +410,7 @@ describe("Workbench adapter protocol", () => {
     expect(() => normalizeWorkbenchEngineResolveResult({
       environment: {
         network: {
-          egress: "allowlist",
+          egress: "private",
         },
       },
       cases: [],

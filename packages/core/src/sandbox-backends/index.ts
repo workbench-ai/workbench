@@ -16,14 +16,14 @@ import {
 } from "./docker.ts";
 import {
   DOCKER_SANDBOX_BACKEND,
-  type WorkbenchSandboxProviderName,
-  resolveWorkbenchSandboxProviderName,
+  type WorkbenchSandboxBackendName,
+  resolveWorkbenchSandboxBackendName,
 } from "./names.ts";
 
 export {
   DOCKER_SANDBOX_BACKEND,
-  resolveWorkbenchSandboxProviderName,
-  type WorkbenchSandboxProviderName,
+  resolveWorkbenchSandboxBackendName,
+  type WorkbenchSandboxBackendName,
 } from "./names.ts";
 export {
   createDockerSandboxBackendDescriptor,
@@ -31,73 +31,62 @@ export {
 } from "./docker.ts";
 
 export interface SandboxHostHealthExpectation {
-  provider: WorkbenchSandboxProviderName;
-  backend: string;
+  backend: WorkbenchSandboxBackendName;
   capabilities: SandboxBackendCapabilities;
 }
 
-export interface SandboxProviderRequestedResources {
+export interface SandboxBackendRequestedResources {
   cpu: number;
   memoryGb: number;
   diskGb?: number;
   timeoutMinutes?: number;
 }
 
-export interface SandboxProviderHostCost {
+export interface SandboxBackendHostCost {
   cpu: number;
   memoryGb: number;
   diskGb: number;
 }
 
-export interface SandboxProviderLeaseRequest {
-  scope: string;
-  units: number;
+export interface SandboxBackendAdmission {
+  backend: WorkbenchSandboxBackendName;
+  hostCost: SandboxBackendHostCost;
 }
 
-export interface SandboxProviderAdmission {
-  provider: WorkbenchSandboxProviderName;
-  hostCost: SandboxProviderHostCost;
-  providerLeases: SandboxProviderLeaseRequest[];
-}
-
-export function createSandboxBackendPlaneForProvider(
-  provider: string,
+export function createSandboxBackendPlaneForBackend(
+  backend: string,
   args: WorkbenchExecutionRuntimeInput,
   startedAt: string,
   fileStore: SandboxExecutionFileStore,
 ): SandboxPlane {
-  const resolved = resolveWorkbenchSandboxProviderName(provider);
+  const resolved = resolveWorkbenchSandboxBackendName(backend);
   if (resolved !== DOCKER_SANDBOX_BACKEND) {
-    throw new Error(`Unsupported local sandbox provider ${provider}.`);
+    throw new Error(`Unsupported local sandbox backend ${backend}.`);
   }
   return createDockerSandboxPlane(args, startedAt, fileStore);
 }
 
-export function sandboxHostHealthExpectationForProvider(
-  provider: WorkbenchSandboxProviderName,
+export function sandboxHostHealthExpectationForBackend(
+  backend: WorkbenchSandboxBackendName,
 ): SandboxHostHealthExpectation {
-  if (provider !== DOCKER_SANDBOX_BACKEND) {
-    resolveWorkbenchSandboxProviderName(provider);
+  if (backend !== DOCKER_SANDBOX_BACKEND) {
+    resolveWorkbenchSandboxBackendName(backend);
   }
   return {
-    provider,
-    backend: provider,
+    backend,
     capabilities: createDockerSandboxBackendDescriptor().capabilities,
   };
 }
 
-export function assertSandboxHostHealthForProvider(
+export function assertSandboxHostHealthForBackend(
   value: unknown,
-  provider: WorkbenchSandboxProviderName,
+  backend: WorkbenchSandboxBackendName,
 ): void {
-  const expected = sandboxHostHealthExpectationForProvider(provider);
+  const expected = sandboxHostHealthExpectationForBackend(backend);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("sandbox host health response must be an object.");
   }
   const record = value as Record<string, unknown>;
-  if (record.provider !== expected.provider) {
-    throw new Error(`sandbox host provider ${String(record.provider ?? "missing")} does not match expected ${expected.provider}.`);
-  }
   if (record.backend !== expected.backend) {
     throw new Error(`sandbox host backend ${String(record.backend ?? "missing")} does not match expected ${expected.backend}.`);
   }
@@ -106,18 +95,12 @@ export function assertSandboxHostHealthForProvider(
   }
 }
 
-export function sandboxProviderDefaultMaxConcurrentJobs(
-  _provider: WorkbenchSandboxProviderName,
-): number | null {
-  return null;
-}
-
-export function sandboxProviderAdmissionForResources(
-  provider: WorkbenchSandboxProviderName,
-  resources: SandboxProviderRequestedResources,
-): SandboxProviderAdmission {
-  if (provider !== DOCKER_SANDBOX_BACKEND) {
-    resolveWorkbenchSandboxProviderName(provider);
+export function sandboxBackendAdmissionForResources(
+  backend: WorkbenchSandboxBackendName,
+  resources: SandboxBackendRequestedResources,
+): SandboxBackendAdmission {
+  if (backend !== DOCKER_SANDBOX_BACKEND) {
+    resolveWorkbenchSandboxBackendName(backend);
   }
   assertPositiveResource(resources.cpu, "resources.cpu");
   assertPositiveResource(resources.memoryGb, "resources.memoryGb");
@@ -125,20 +108,13 @@ export function sandboxProviderAdmissionForResources(
     assertPositiveResource(resources.diskGb, "resources.diskGb");
   }
   return {
-    provider,
+    backend,
     hostCost: {
       cpu: resources.cpu,
       memoryGb: resources.memoryGb,
       diskGb: resources.diskGb ?? 1,
     },
-    providerLeases: [],
   };
-}
-
-export function sandboxProviderLeaseScope(
-  provider: WorkbenchSandboxProviderName,
-): string {
-  throw new Error(`Local sandbox provider ${provider} does not use provider leases.`);
 }
 
 function isSandboxBackendCapabilities(value: unknown): value is SandboxBackendDescriptor["capabilities"] {

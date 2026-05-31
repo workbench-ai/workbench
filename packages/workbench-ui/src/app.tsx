@@ -158,7 +158,7 @@ import type {
   CandidateWorkspaceFilePreview,
   CandidateWorkspaceFileSummary,
   AuthoredWorkbenchSourceDocument,
-  HostedWorkbenchJob,
+  RemoteWorkbenchJob,
   RunSummary,
   BenchmarkSnapshot,
   WorkbenchExecutionEvidence,
@@ -206,7 +206,7 @@ interface SourceYamlFile {
 
 type CandidateCaseExecution = CandidateCaseReview["executions"][number];
 type TimedExecutionRecord = {
-  status: HostedWorkbenchJob["status"];
+  status: RemoteWorkbenchJob["status"];
   createdAt?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -3939,7 +3939,7 @@ function resolveExecutionRefsDurationMs(
 }
 
 function resolveExecutionCollectionStatus(
-  records: Array<{ status: HostedWorkbenchJob["status"] }>,
+  records: Array<{ status: RemoteWorkbenchJob["status"] }>,
   emptyStatus: string,
 ): string {
   if (records.some((record) => record.status === "running")) {
@@ -4023,15 +4023,15 @@ function parseTimestampMs(value: string | null | undefined): number | null {
   return Number.isFinite(timestampMs) ? timestampMs : null;
 }
 
-function isActiveExecutionStatus(status: HostedWorkbenchJob["status"]): boolean {
+function isActiveExecutionStatus(status: RemoteWorkbenchJob["status"]): boolean {
   return status === "queued" || status === "running";
 }
 
-function isTimedExecutionStatus(status: HostedWorkbenchJob["status"]): boolean {
+function isTimedExecutionStatus(status: RemoteWorkbenchJob["status"]): boolean {
   return status === "running";
 }
 
-function hasActiveExecutionRecords(records: readonly { status: HostedWorkbenchJob["status"] }[]): boolean {
+function hasActiveExecutionRecords(records: readonly { status: RemoteWorkbenchJob["status"] }[]): boolean {
   return records.some((record) => isActiveExecutionStatus(record.status));
 }
 

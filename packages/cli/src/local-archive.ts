@@ -15,7 +15,7 @@ import {
   workbenchSurfaceFilesEqualForExchange,
   type CandidateRecord,
   type EvaluationScorecard,
-  type HostedWorkbenchJob,
+  type RemoteWorkbenchJob,
   type RunSummary,
   type RuntimeEvent,
   type Json,
@@ -49,7 +49,7 @@ export interface LocalArchiveIndex {
   events: RuntimeEvent[];
 }
 
-export type LocalArchivedJob = HostedWorkbenchJob & {
+export type LocalArchivedJob = RemoteWorkbenchJob & {
   trace?: WorkbenchExecutionTrace;
   traceSessions?: WorkbenchTraceSession[];
 };
@@ -134,7 +134,7 @@ export async function saveLocalArchive(
 
 export async function saveLocalJobs(
   workspace: string,
-  jobs: readonly HostedWorkbenchJob[],
+  jobs: readonly RemoteWorkbenchJob[],
 ): Promise<void> {
   if (jobs.length === 0) {
     return;
@@ -220,7 +220,7 @@ export async function importLocalRuntimeBundle(
   }));
   const existingJobById = new Map(existingJobs.map((job) => [job.id, job]));
   const incomingJobById = new Map(
-    bundle.jobs.map(sanitizeRuntimeJobForExchange).map((job) => [job.id, job]),
+    bundle.jobs.map(sanitizeRuntimeJobForExchange).map((job: RemoteWorkbenchJob) => [job.id, job]),
   );
   for (const group of bundle.executionFiles) {
     const jobId = localRecordName(group.jobId);
@@ -301,14 +301,14 @@ export function runtimeBundleStats(
 }
 
 export function sanitizeRuntimeJobForExchange(
-  job: HostedWorkbenchJob,
-): HostedWorkbenchJob {
+  job: RemoteWorkbenchJob,
+): RemoteWorkbenchJob {
   return sanitizeWorkbenchRuntimeJobForExchange(job);
 }
 
 function sanitizeRuntimeJobForArchive(
-  job: HostedWorkbenchJob,
-): HostedWorkbenchJob {
+  job: RemoteWorkbenchJob,
+): RemoteWorkbenchJob {
   const {
     leaseUntil: _leaseUntil,
     wakeupLeaseUntil: _wakeupLeaseUntil,
@@ -316,13 +316,19 @@ function sanitizeRuntimeJobForArchive(
     workerId: _workerId,
     claimTokenHash: _claimTokenHash,
     ...portable
-  } = job;
+  } = job as RemoteWorkbenchJob & {
+    claimTokenHash?: unknown;
+    hostId?: unknown;
+    leaseUntil?: unknown;
+    wakeupLeaseUntil?: unknown;
+    workerId?: unknown;
+  };
   return { ...portable };
 }
 
 async function writeArchivedLocalJobs(
   workspace: string,
-  jobs: readonly HostedWorkbenchJob[],
+  jobs: readonly RemoteWorkbenchJob[],
   executionFilesByJobId: ReadonlyMap<string, readonly SurfaceSnapshotFile[]>,
 ): Promise<void> {
   if (jobs.length === 0) {
@@ -570,8 +576,8 @@ function runtimeRecordsEqual<T>(left: T, right: T): boolean {
 }
 
 function runtimeJobsEqualForExchange(
-  left: HostedWorkbenchJob,
-  right: HostedWorkbenchJob,
+  left: RemoteWorkbenchJob,
+  right: RemoteWorkbenchJob,
 ): boolean {
   if (runtimeRecordsEqual(runtimeComparableJob(left), runtimeComparableJob(right))) {
     return true;
@@ -582,7 +588,7 @@ function runtimeJobsEqualForExchange(
   );
 }
 
-function runtimeComparableJob(job: HostedWorkbenchJob): HostedWorkbenchJob {
+function runtimeComparableJob(job: RemoteWorkbenchJob): RemoteWorkbenchJob {
   const comparable = sanitizeRuntimeJobForExchange(job);
   const output = comparable.output;
   if (!output || typeof output !== "object" || Array.isArray(output)) {
@@ -662,7 +668,7 @@ function runtimeRunIdentityForExchange(run: RunSummary): unknown {
   };
 }
 
-function runtimeJobIdentityForExchange(job: HostedWorkbenchJob): unknown {
+function runtimeJobIdentityForExchange(job: RemoteWorkbenchJob): unknown {
   return {
     id: job.id,
     runId: job.runId,
@@ -781,10 +787,10 @@ function compareLocalCandidateRecords(
 }
 
 function archivedLocalJob(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   outputFiles: readonly SurfaceSnapshotFile[],
   traceSourceFiles: readonly SurfaceSnapshotFile[],
-): HostedWorkbenchJob & { trace: WorkbenchExecutionTrace; traceSessions: WorkbenchTraceSession[] } {
+): RemoteWorkbenchJob & { trace: WorkbenchExecutionTrace; traceSessions: WorkbenchTraceSession[] } {
   const output = jsonRecord(job.output);
   const existingTrace = readExistingTrace(job);
   const existingTraceSessions = readExistingTraceSessions(job);
@@ -801,7 +807,7 @@ function archivedLocalJob(
   };
 }
 
-function readExistingTrace(job: HostedWorkbenchJob): WorkbenchExecutionTrace | null {
+function readExistingTrace(job: RemoteWorkbenchJob): WorkbenchExecutionTrace | null {
   const trace = (job as LocalArchivedJob).trace;
   if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
     return null;
@@ -816,7 +822,7 @@ function readExistingTrace(job: HostedWorkbenchJob): WorkbenchExecutionTrace | n
   };
 }
 
-function readExistingTraceSessions(job: HostedWorkbenchJob): WorkbenchTraceSession[] {
+function readExistingTraceSessions(job: RemoteWorkbenchJob): WorkbenchTraceSession[] {
   const sessions = (job as LocalArchivedJob).traceSessions;
   if (!Array.isArray(sessions)) {
     return [];
@@ -837,7 +843,7 @@ function isWorkbenchReservedArchivePath(filePath: string): boolean {
   return filePath === ".workbench" || filePath.startsWith(".workbench/");
 }
 
-function buildLocalJobTrace(job: HostedWorkbenchJob): WorkbenchExecutionTrace {
+function buildLocalJobTrace(job: RemoteWorkbenchJob): WorkbenchExecutionTrace {
   const purpose = readExecutionPurpose(job);
   const role = purpose === "improve" ? "improver" : "engine";
   const stageId = purpose ?? "execution";
@@ -927,7 +933,7 @@ function buildLocalJobTrace(job: HostedWorkbenchJob): WorkbenchExecutionTrace {
 }
 
 function buildLocalJobTraceSessions(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   outputFiles: readonly SurfaceSnapshotFile[],
 ): WorkbenchTraceSession[] {
   const purpose = readExecutionPurpose(job);
@@ -939,7 +945,7 @@ function buildLocalJobTraceSessions(
   });
 }
 
-function completedJobOutputFiles(job: HostedWorkbenchJob): SurfaceSnapshotFile[] {
+function completedJobOutputFiles(job: RemoteWorkbenchJob): SurfaceSnapshotFile[] {
   const output = jsonRecord(job.output);
   if (!Array.isArray(output.files)) {
     return [];
@@ -958,12 +964,12 @@ function isSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
   );
 }
 
-function readExecutionPurpose(job: HostedWorkbenchJob): string | null {
+function readExecutionPurpose(job: RemoteWorkbenchJob): string | null {
   const input = jsonRecord(job.input);
   return stringValue(jsonRecord(input.execution).purpose);
 }
 
-function traceStatusForJob(status: HostedWorkbenchJob["status"]): WorkbenchTraceSpan["status"] {
+function traceStatusForJob(status: RemoteWorkbenchJob["status"]): WorkbenchTraceSpan["status"] {
   if (status === "succeeded") return "completed";
   if (status === "failed") return "failed";
   if (status === "cancelled") return "canceled";
@@ -972,7 +978,7 @@ function traceStatusForJob(status: HostedWorkbenchJob["status"]): WorkbenchTrace
 }
 
 function localJobOutputMessage(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   output: Record<string, unknown>,
 ): string | null {
   const purpose = readExecutionPurpose(job);
@@ -987,7 +993,7 @@ function localJobOutputMessage(
 }
 
 function traceSummary(
-  job: HostedWorkbenchJob,
+  job: RemoteWorkbenchJob,
   stageId: string,
   status: WorkbenchTraceSpan["status"],
   startedAt: string,

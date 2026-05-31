@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 
 describe("workbench browser layout contracts", () => {
-  test("benchmark pane brand links back to the home route unless hosted shell overrides it", () => {
+  test("benchmark pane brand links back to the home route unless remote shell overrides it", () => {
     const appSource = readFileSync(
       new URL("../src/app.tsx", import.meta.url),
       "utf8",
@@ -17,7 +17,7 @@ describe("workbench browser layout contracts", () => {
     expect(appSource).toContain("navigate(createBenchmarkRoute())");
   });
 
-  test("hosted controls mount into the shared workspace top bar", () => {
+  test("remote controls mount into the shared workspace top bar", () => {
     const appSource = readFileSync(
       new URL("../src/app.tsx", import.meta.url),
       "utf8",

@@ -1,6 +1,6 @@
 import {
   WORKBENCH_EXECUTION_NETWORK_EGRESS_VALUES,
-  type HostedWorkbenchJob,
+  type RemoteWorkbenchJob,
   type Json,
   type WorkbenchExecutionSpec,
 } from "@workbench-ai/workbench-contract";
@@ -237,7 +237,7 @@ async function runDockerSandboxExecution(
   args: WorkbenchExecutionRuntimeInput,
   sandbox: SandboxHandle,
   execution: WorkbenchExecutionSpec,
-): Promise<HostedWorkbenchJob> {
+): Promise<RemoteWorkbenchJob> {
   const metadata = asRuntimeRecord(sandbox.metadata);
   const root = readRequiredMetadataString(metadata, "root", DOCKER_SANDBOX_BACKEND);
   const responsePath = readRequiredMetadataString(metadata, "response", DOCKER_SANDBOX_BACKEND);
@@ -337,7 +337,7 @@ async function runDockerSandboxExecution(
     throw new Error("Sandbox adapter runner response omitted job.");
   }
   await persistWorkbenchAdapterAuthUpdates(args, response.adapterAuthProfiles);
-  return response.job as HostedWorkbenchJob;
+  return response.job as RemoteWorkbenchJob;
 }
 
 function dockerRuntimeMountArgs(mounts: readonly DockerRuntimeMount[]): string[] {

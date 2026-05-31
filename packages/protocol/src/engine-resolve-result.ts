@@ -1,11 +1,14 @@
-import path from "node:path";
-
 import {
   isWorkbenchExecutionNetworkEgress,
   type SurfaceSnapshotFile,
   type WorkbenchExecutionNetworkPolicy,
   type WorkbenchExecutionResources,
 } from "@workbench-ai/workbench-contract";
+
+import {
+  normalizeSurfaceRelativePath,
+  normalizeSurfaceSnapshotFiles,
+} from "./snapshot-files.ts";
 
 export interface WorkbenchEngineCaseEnvironmentSpec {
   dockerfile?: string;
@@ -71,7 +74,7 @@ export function normalizeWorkbenchEngineCase(
     throw new Error(`${label}.id must be a non-empty string.`);
   }
   return {
-    id: normalizeRelativePath(record.id, `${label}.id`),
+    id: normalizeSurfaceRelativePath(record.id, `${label}.id`),
     case: normalizeWorkbenchEngineCaseSpec(record.case, `${label}.case`),
     files: normalizeWorkbenchEngineCaseFiles(record.files, `${label}.files`),
   };
@@ -174,41 +177,7 @@ function normalizeEngineResolveFiles(
   value: unknown,
   label: string,
 ): SurfaceSnapshotFile[] {
-  if (value === undefined) {
-    return [];
-  }
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be an array.`);
-  }
-  return value.map((entry, index) => {
-    const record = requiredRecord(entry, `${label}[${index}]`);
-    if (typeof record.path !== "string" || record.path.trim().length === 0) {
-      throw new Error(`${label}[${index}].path must be a non-empty string.`);
-    }
-    if (typeof record.content !== "string") {
-      throw new Error(`${label}[${index}].content must be a string.`);
-    }
-    const encoding: SurfaceSnapshotFile["encoding"] = record.encoding === "base64" ? "base64" : "utf8";
-    const kind: SurfaceSnapshotFile["kind"] = record.kind === "binary" || encoding === "base64" ? "binary" : "text";
-    return {
-      path: normalizeRelativePath(record.path, `${label}[${index}].path`),
-      kind,
-      encoding,
-      content: record.content,
-      executable: record.executable === true,
-    };
-  }).sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function normalizeRelativePath(filePath: string, label: string): string {
-  const normalized = path.posix.normalize(filePath.replace(/\\/gu, "/").replace(/^\/+/u, ""));
-  if (!normalized || normalized === "." || normalized.includes("\0")) {
-    throw new Error(`${label} must be a non-empty relative path.`);
-  }
-  if (normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized)) {
-    throw new Error(`${label} must not escape the engine-resolve result.`);
-  }
-  return normalized;
+  return normalizeSurfaceSnapshotFiles(value, label, { optional: true });
 }
 
 function requiredRecord(value: unknown, label: string): Record<string, unknown> {

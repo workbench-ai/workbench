@@ -1,6 +1,6 @@
 # Tasks And Fixtures
 
-Tasks are part of the Workbench project and are pushed to Workbench Cloud by `workbench push` when hosted execution is needed. They are frozen onto each run. For the built-in `workbench` engine, public files are staged under `/workspace/input/case` before the candidate runs, verifier files are staged under `/workspace/private/engine` only for scoring, and candidate adapters never receive `paths.enginePrivate`. The default shared grading mode scores the runner-mutated child sandbox; `engine.with.grading.isolation: separate` scores a second child sandbox seeded with runner workspace/output artifacts.
+Tasks are part of the Workbench project and are pushed to Workbench Cloud by `workbench push` when remote execution is needed. They are frozen onto each run. For the built-in `workbench` engine, public files are staged under `/workspace/input/case` before the candidate runs, verifier files are staged under `/workspace/private/engine` only for scoring, and candidate adapters never receive `paths.enginePrivate`. The default shared grading mode scores the runner-mutated child sandbox; `engine.with.grading.isolation: separate` scores a second child sandbox seeded with runner workspace/output artifacts.
 
 Native Workbench task directories are source input for the built-in `workbench` engine. The engine owns native task parsing. For native task packages, omit `engine.with.tasks` to use the default `tasks/` directory. Use explicit `engine.with.tasks.path` only when the native task directory is not the default.
 
@@ -69,7 +69,7 @@ Do not put mutable prompts, templates, or scripts in tasks when Workbench should
 
 Every smoke task should contain verifier material that lets the engine produce a numeric result. Empty `tests/` folders are placeholders only; they should not be treated as passing tasks.
 
-Hosted benchmark publication uploads binary files as base64 automatically, so tasks may contain real `.docx`, `.xlsx`, `.pdf`, or `.pptx` files alongside text, JSON, or verifier scripts.
+Remote benchmark publication uploads binary files as base64 automatically, so tasks may contain real `.docx`, `.xlsx`, `.pdf`, or `.pptx` files alongside text, JSON, or verifier scripts.
 
 ## Harbor Layout
 
@@ -83,7 +83,7 @@ tests/
 solution/
 ```
 
-The `harbor` engine adapter is only the Workbench bridge. Harbor itself parses this source and owns how Harbor tasks become attempts, including candidate invocation, artifact handoff, verifier/reward behavior, health checks, MCP server config, and same-sandbox versus separate-sandbox verification from `task.toml`. Harbor `instruction.md` supplies the task text, `tests/` remains verifier-private, and `solution/` is preserved for oracle workflows but is not part of the normal public case input. The adapter should call Harbor inspect/export and run APIs, expose Workbench runtime-control as a sandbox provider when Harbor asks for sandboxes, and normalize the final Harbor result; core does not infer criteria from metrics or parse Harbor directories directly.
+The `harbor` engine adapter is only the Workbench bridge. Harbor itself parses this source and owns how Harbor tasks become attempts, including candidate invocation, artifact handoff, verifier/reward behavior, health checks, MCP server config, and same-sandbox versus separate-sandbox verification from `task.toml`. Harbor `instruction.md` supplies the task text, `tests/` remains verifier-private, and `solution/` is preserved for oracle workflows but is not part of the normal public case input. The adapter should call Harbor inspect/export and run APIs, expose Workbench runtime-control as a sandbox backend when Harbor asks for sandboxes, and normalize the final Harbor result; core does not infer criteria from metrics or parse Harbor directories directly.
 
 ## Task Count
 
