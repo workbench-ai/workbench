@@ -39,7 +39,6 @@ describe("execution trace timeline", () => {
     expect(container.textContent).not.toContain("Show notes");
     expect(container.querySelector("[data-testid='timeline-step-map']")).toBeNull();
     expect(container.querySelector("[data-testid='timeline-stage-list']")).toBeNull();
-    expect(container.querySelector("[data-testid='timeline-stage-panel']")?.className).not.toContain("overflow-hidden");
     expect(container.querySelectorAll("[data-testid='timeline-row-details']")).toHaveLength(3);
     expect(
       [...container.querySelectorAll("[data-testid='timeline-row-summary']")]

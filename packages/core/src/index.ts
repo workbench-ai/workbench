@@ -99,12 +99,15 @@ import {
   isJsonPayload,
   jsonRecord,
   nodeBuiltin,
+  normalizeRelativePath,
   numberValue,
+  readSurfaceFiles,
   normalizeRuntimeRegistry,
   quoteShellArg,
   resolveDockerRuntimeImageRef,
   resolveWorkbenchWorkerId,
   stringValue,
+  writeSurfaceFiles,
 } from "./runtime-utils.ts";
 import {
   createWorkbenchExecutionCapability,
@@ -241,12 +244,16 @@ export type {
 export {
   asRuntimeRecord,
   importNodeModule,
+  jsonRecord,
   nodeBuiltin,
+  normalizeRelativePath,
   normalizeWorkbenchWorkerId,
   normalizeRuntimeRegistry,
   quoteShellArg,
+  readSurfaceFiles,
   resolveDockerRuntimeImageRef,
   resolveWorkbenchWorkerId,
+  writeSurfaceFiles,
 } from "./runtime-utils.ts";
 export {
   assignUsageRole,
@@ -297,6 +304,7 @@ export {
   createWorkbenchSandboxFileStore,
   createSandboxAdapterRequest,
   executionResultFromCompletedSandboxJob,
+  isSurfaceSnapshotFile,
   materializeWorkbenchSandboxInput,
   readWorkbenchExecutionSpec,
   sanitizeWorkbenchExecutionJobForSandbox,
@@ -5211,100 +5219,6 @@ function runtimeEnginePrivateDir(root: string): string {
   return `${runtimePrivateDir(root)}/engine`;
 }
 
-async function writeSurfaceFiles(
-  root: string,
-  files: readonly SurfaceSnapshotFile[],
-): Promise<void> {
-  const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
-  const path = await importNodeModule<any>(nodeBuiltin("path"));
-  for (const file of files) {
-    const target = path.join(root, normalizeRelativePath(file.path));
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    const body =
-      file.encoding === "base64"
-        ? Buffer.from(file.content, "base64")
-        : Buffer.from(file.content, "utf8");
-    await fs.writeFile(target, body);
-    if (file.executable) {
-      await fs.chmod(target, 0o755).catch(() => undefined);
-    }
-  }
-}
-
-async function readSurfaceFiles(
-  root: string,
-  options: { ignorePath?: (path: string) => boolean } = {},
-): Promise<SurfaceSnapshotFile[]> {
-  const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
-  const path = await importNodeModule<any>(nodeBuiltin("path"));
-  const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
-  const files: SurfaceSnapshotFile[] = [];
-  async function walk(directory: string): Promise<void> {
-    const entries = await fs
-      .readdir(directory, { withFileTypes: true })
-      .catch(() => []);
-    for (const entry of entries) {
-      const absolutePath = path.join(directory, entry.name);
-      const relativePath = normalizeRelativePath(
-        path.relative(root, absolutePath).replace(/\\/gu, "/"),
-      );
-      if (options.ignorePath?.(relativePath)) {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        await walk(absolutePath);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      let body: Buffer;
-      let stats: { mode: number };
-      try {
-        body = await fs.readFile(absolutePath);
-        stats = await fs.stat(absolutePath);
-      } catch (error) {
-        if (isVanishedWalkEntry(error)) {
-          continue;
-        }
-        throw error;
-      }
-      const content = encodeSurfaceSnapshotContent(body, utf8Decoder);
-      files.push({
-        path: relativePath,
-        kind: content.encoding === "base64" ? "binary" : "text",
-        encoding: content.encoding,
-        content: content.content,
-        executable: (stats.mode & 0o111) !== 0,
-      });
-    }
-  }
-  await walk(root);
-  return files.sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function isVanishedWalkEntry(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  return code === "ENOENT" || code === "ENOTDIR";
-}
-
-function encodeSurfaceSnapshotContent(
-  body: Buffer,
-  utf8Decoder: { decode(input?: Uint8Array): string },
-): { encoding: "utf8" | "base64"; content: string } {
-  try {
-    return {
-      encoding: "utf8",
-      content: utf8Decoder.decode(body),
-    };
-  } catch {
-    return {
-      encoding: "base64",
-      content: body.toString("base64"),
-    };
-  }
-}
-
 function normalizeResultMetrics(
   value: unknown,
 ): Record<string, number> | undefined {
@@ -6240,18 +6154,6 @@ function metricStats(values: number[]): MetricStats {
     min: Math.min(...values),
     max: Math.max(...values),
   };
-}
-
-function normalizeRelativePath(filePath: string): string {
-  const normalized = filePath.replace(/\\/gu, "/").replace(/^\/+/u, "");
-  if (!normalized || normalized.includes("\0")) {
-    throw new Error("File paths must be non-empty relative paths.");
-  }
-  const parts = normalized.split("/");
-  if (parts.some((part) => part === ".." || part === "." || part === "")) {
-    throw new Error(`Unsafe relative file path: ${filePath}`);
-  }
-  return normalized;
 }
 
 function detectMimeType(filePath: string): string | null {

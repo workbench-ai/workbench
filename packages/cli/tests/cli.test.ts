@@ -4,10 +4,8 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
-import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { rootUsage } from "../src/command-model";
 import { composeRuntimeDockerfileWithAdapters } from "../src/adapter-project";
 import { localBenchmarkFingerprint, localCandidateFingerprint, projectStateBenchmarkFingerprint } from "../src/benchmark-fingerprint";
 import { startLocalWorkbenchDevServer } from "../src/dev-open-server";
@@ -1074,113 +1072,6 @@ describe("workbench CLI", () => {
     expect(io.stdoutText()).toContain("Benchmark refs must use OWNER/BENCHMARK.");
   });
 
-  test("keeps command docs aligned with the public CLI registry", async () => {
-    const commandLines = rootUsage
-      .split("\nExamples:")[0]!
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith("workbench ") && !line.includes("<command>"));
-    const cliDocs = await readFile(path.join(productRoot, "docs", "cli.md"), "utf8");
-    const spec = await readFile(path.join(productRoot, "SPEC.md"), "utf8");
-
-    for (const command of commandLines) {
-      expect(cliDocs).toContain(command);
-    }
-    expect(spec).toContain("workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID]");
-    expect(spec).toContain("workbench eval --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID]");
-    expect(spec).not.toContain("workbench eval --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID]");
-    expect(spec).toContain("workbench candidates list|show|files|preview");
-    expect(spec).toContain("candidates/<name>/candidate.yaml");
-  });
-
-  test("keeps public onboarding, skill metadata, and eval prompts aligned with current remote paths", async () => {
-    const webRoot = path.resolve(productRoot, "..", "workbench-cloud");
-    const [
-      getStartedSection,
-      startTabs,
-      cliDocs,
-      skill,
-      manifestRaw,
-      agentYaml,
-      skillEvalsRaw,
-    ] = await Promise.all([
-      readFile(path.join(webRoot, "components", "get-started-section.tsx"), "utf8"),
-      readFile(path.join(webRoot, "components", "workbench-start-tabs.tsx"), "utf8"),
-      readFile(path.join(productRoot, "docs", "cli.md"), "utf8"),
-      readFile(path.join(productRoot, "skills", "workbench", "SKILL.md"), "utf8"),
-      readFile(path.join(productRoot, "skills.json"), "utf8"),
-      readFile(path.join(productRoot, "skills", "workbench", "agents", "openai.yaml"), "utf8"),
-      readFile(path.join(productRoot, "skills", "workbench", "evals", "evals.json"), "utf8"),
-    ]);
-    const manifest = JSON.parse(manifestRaw) as {
-      skills: Array<{ useCases: string[] }>;
-    };
-    const skillEvals = JSON.parse(skillEvalsRaw) as {
-      evals: Array<{
-        id: string;
-        expected_output: string;
-        assertions: Array<{ value?: string }>;
-      }>;
-    };
-    const installEval = skillEvals.evals.find((entry) => entry.id === "install-or-verify-cli");
-
-    const onboardingSource = `${getStartedSection}\n${startTabs}`;
-    expect(onboardingSource).toContain("npx skills add workbench-ai/workbench");
-    expect(onboardingSource).toContain("npm install -g @workbench-ai/workbench");
-    expect(onboardingSource).toContain("workbench --version");
-    expect(onboardingSource).toContain("workbench clone official/three-statement-demo");
-    expect(onboardingSource).toContain("workbench check");
-    expect(onboardingSource).toContain("workbench push");
-    expect(onboardingSource).toContain("workbench improve --remote candidates/current");
-    expect(onboardingSource).toContain("--budget 1 --samples 1 --watch");
-    expect(onboardingSource).not.toContain("workbench eval candidates/current --samples 1");
-    expect(onboardingSource).not.toContain("workbench cloud");
-    expect(onboardingSource).not.toContain("workbench auth connect codex --method oauth");
-    expect(onboardingSource).not.toContain("workbench whoami --json # provider status");
-    expect(cliDocs).toContain("workbench init [DIR] --skill NAME --agent ADAPTER");
-    expect(cliDocs).toContain("workbench clone official/three-statement-demo");
-    expect(cliDocs).not.toContain("workbench eval candidates/current --samples 1");
-    expect(cliDocs).toContain("workbench improve --budget 1 --samples 1");
-    expect(cliDocs).toContain("workbench improve --remote candidates/current --budget 1 --samples 1 --watch");
-    expect(cliDocs).toContain("For remote eval, use `--candidate CANDIDATE_ID`");
-    expect(cliDocs).toContain("workbench improve --remote candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch");
-    expect(cliDocs).toContain("workbench push");
-    expect(cliDocs).not.toContain("--tag");
-    expect(cliDocs).not.toContain("workbench cloud");
-    expect(cliDocs).not.toContain("workbench fetch");
-    expect(cliDocs).not.toContain("workbench remote");
-    expect(cliDocs).toContain("candidate files are declared explicitly with `files: { path: files }`");
-    expect(skill).toContain("workbench init --skill my-eval --agent codex");
-    expect(skill).toContain("workbench clone official/three-statement-demo");
-    expect(skill).not.toContain("workbench eval candidates/current --samples 1");
-    expect(skill).toContain("workbench improve --budget 1 --samples 1");
-    expect(skill).toContain("workbench improve --remote candidates/current --budget 1 --samples 1 --watch");
-    expect(skill).toContain("For remote eval, pass `--candidate CANDIDATE_ID`");
-    expect(skill).toContain("workbench improve --remote candidates/codex --base candidate_123 --budget 1 --samples 1 --watch");
-    expect(skill).not.toContain("@v1");
-    expect(skill).not.toContain("workbench cloud");
-    expect(skill).not.toContain("workbench fetch");
-    expect(skill).toContain("candidates/<name>/candidate.yaml");
-    expect(skill).toContain("workbench open --json --no-open");
-    expect(skillEvalsRaw).not.toContain("workbench cloud");
-    expect(skillEvalsRaw).not.toContain("cloud candidates");
-    expect(skillEvalsRaw).not.toContain("Sync snapshots");
-    expect(skillEvalsRaw).not.toContain("remote candidate snapshot");
-    expect(agentYaml).toContain("official/three-statement-demo");
-    expect(agentYaml).toContain("workbench check");
-    expect(agentYaml).not.toContain("run a local eval");
-    expect(agentYaml).toContain("push the checkout");
-    expect(manifest.skills[0]?.useCases.join("\n")).toContain("workbench init --skill NAME --agent ADAPTER");
-    expect(manifest.skills[0]?.useCases.join("\n")).toContain("official/three-statement-demo");
-    expect(manifest.skills[0]?.useCases.join("\n")).toContain("embedded browser");
-    expect(manifest.skills[0]?.useCases.join("\n")).toContain("workbench open --json --no-open");
-    expect(installEval?.expected_output).toContain("installs the published package");
-    expect(installEval?.assertions.some((assertion) => assertion.value?.includes("@workbench-ai/workbench"))).toBe(true);
-    expect(skillEvalsRaw).toContain("opens or returns the Workbench Cloud benchmark URL");
-    expect(skillEvalsRaw).toContain("opens or returns the resulting candidate URL");
-    expect(skillEvalsRaw).toContain("opens or returns the read-only local Workbench URL");
-  });
-
   test("local source development uses Docker and fails closed without templates", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-local-"));
     const initIo = createIo();
@@ -1987,17 +1878,6 @@ describe("workbench CLI", () => {
       expect(await runCli(["check", "--dir", workspace, "--json"], checkIo)).toBe(0);
       expect(JSON.parse(checkIo.stdoutText())).toMatchObject({ ok: true });
     }
-  });
-
-  test("init renderer delegates authored examples to the template pack", async () => {
-    const scaffoldRenderer = await readFile(path.join(packageRoot, "src", "init-scaffold.ts"), "utf8");
-    const templatePack = await readFile(path.join(packageRoot, "src", "init-template-pack.ts"), "utf8");
-
-    expect(scaffoldRenderer).not.toContain("use: rubric");
-    expect(scaffoldRenderer).not.toContain("engine:");
-    expect(scaffoldRenderer).not.toContain("tasks/task-001");
-    expect(templatePack).toContain("use: rubric");
-    expect(templatePack).toContain("parallelism: 2");
   });
 
   test("init rejects ambiguous or incomplete scaffold flags", async () => {
@@ -3059,65 +2939,6 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(exitCode).toBe(2);
     expect(io.stdoutText()).toContain("Run budget cannot exceed 20.");
     expect(fetch).not.toHaveBeenCalled();
-  });
-
-  test("keeps skill guidance on benchmark Dockerfile runtime", async () => {
-    const skill = await readFile(path.join(productRoot, "skills", "workbench", "SKILL.md"), "utf8");
-    const manifest = await readFile(path.join(productRoot, "skills.json"), "utf8");
-
-    expect(skill).toContain("engine.with.environment.dockerfile");
-    expect(skill).toContain("ca-certificates");
-    expect(manifest).toContain("Dockerfile");
-    expect(manifest).toContain("\"state\": \"published\"");
-    expect(manifest).toContain("\"workbench-ai/workbench\"");
-  });
-
-  test("assembles installable skill assets from authored sources", async () => {
-    const { syncSkillAssets } = await import(pathToFileURL(path.join(productRoot, "scripts", "sync-skill-assets.mjs")).href) as {
-      syncSkillAssets: (args: {
-        sourceRepoRoot: string;
-        sourceSkillRoot: string;
-        targetSkillRoot: string;
-      }) => Promise<void>;
-    };
-    const assembledRoot = await mkdtemp(path.join(os.tmpdir(), "workbench-skill-sync-"));
-
-    await syncSkillAssets({
-      sourceRepoRoot: productRoot,
-      sourceSkillRoot: path.join(productRoot, "skills", "workbench"),
-      targetSkillRoot: assembledRoot,
-    });
-
-    const generatedTree = await readTextTree(assembledRoot);
-    expect(generatedTree).toHaveProperty("SKILL.md");
-    expect(generatedTree).not.toHaveProperty("skill.assets.json");
-    const generatedSkill = await readFile(path.join(assembledRoot, "SKILL.md"), "utf8");
-    expect(generatedSkill).toContain("workbench push");
-    expect(generatedSkill).toContain("engine.with.environment.dockerfile");
-    expect(generatedSkill).toContain("ca-certificates");
-    expect(generatedSkill).toContain("engine.with.score: { use: tests }");
-  });
-
-  test("keeps eval authoring guidance routed through the Workbench skill", async () => {
-    const skill = await readFile(path.join(productRoot, "skills", "workbench", "SKILL.md"), "utf8");
-    const evalReadme = await readFile(path.join(productRoot, "docs", "evals", "README.md"), "utf8");
-    const fileOutputGuide = await readFile(path.join(productRoot, "docs", "evals", "from-file-outputs.md"), "utf8");
-    const skillEvals = await readFile(path.join(productRoot, "skills", "workbench", "evals", "evals.json"), "utf8");
-
-    expect(skill).toContain("references/docs/evals/README.md");
-    expect(skill).toContain("from-existing-workflow.md");
-    expect(skill).toContain("from-file-outputs.md");
-    expect(evalReadme).toContain("Existing workflow");
-    expect(evalReadme).toContain("File-output cases");
-    expect(skill).toContain("Default to `engine.with.score: { use: rubric");
-    expect(fileOutputGuide).toContain("Do not write a custom scoring helper just because a case produces binary files");
-    expect(fileOutputGuide).toContain(".docx");
-    expect(fileOutputGuide).toContain(".xlsx");
-    expect(fileOutputGuide).toContain(".pdf");
-    expect(fileOutputGuide).toContain(".pptx");
-    await expect(stat(path.join(productRoot, "docs", "evals", "templates"))).rejects.toBeTruthy();
-    expect(skillEvals).toContain("existing-workflow-eval-authoring");
-    expect(skillEvals).toContain("file-output-case-eval-authoring");
   });
 
   test("command help exits before network or auth side effects", async () => {

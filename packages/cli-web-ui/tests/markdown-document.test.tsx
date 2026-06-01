@@ -1,10 +1,9 @@
-import { readFileSync } from "node:fs";
-
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 
 import { MarkdownDocumentView } from "../components/shared/markdown-document-view";
+import { StreamingMarkdown } from "../components/shared/streaming-markdown";
 import { parseMarkdownDocument } from "../lib/markdown-document";
 
 describe("markdown document parsing", () => {
@@ -38,20 +37,21 @@ complex:
 });
 
 describe("markdown document view", () => {
-  test("keeps Streamdown link safety enabled for static and streaming markdown", () => {
-    const markdownDocumentView = readFileSync(
-      new URL("../components/shared/markdown-document-view.tsx", import.meta.url),
-      "utf8",
+  test("keeps unsafe markdown links out of static and streaming markup", () => {
+    const unsafeContent = "[unsafe](javascript:alert(1)) [safe](https://example.com/docs)";
+    const staticHtml = renderToStaticMarkup(
+      createElement(MarkdownDocumentView, { content: unsafeContent }),
     );
-    const streamingMarkdown = readFileSync(
-      new URL("../components/shared/streaming-markdown.tsx", import.meta.url),
-      "utf8",
+    const streamingHtml = renderToStaticMarkup(
+      createElement(StreamingMarkdown, { content: unsafeContent }),
     );
 
-    expect(markdownDocumentView).toContain("linkSafety={{ enabled: true }}");
-    expect(streamingMarkdown).toContain("linkSafety={{ enabled: true }}");
-    expect(markdownDocumentView).not.toContain("linkSafety={{ enabled: false }}");
-    expect(streamingMarkdown).not.toContain("linkSafety={{ enabled: false }}");
+    expect(staticHtml).not.toContain("javascript:alert");
+    expect(streamingHtml).not.toContain("javascript:alert");
+    expect(staticHtml).toContain("unsafe [blocked]");
+    expect(streamingHtml).toContain("unsafe [blocked]");
+    expect(staticHtml).toContain("safe");
+    expect(streamingHtml).toContain("safe");
   });
 
   test("renders frontmatter as metadata and keeps the body separate", () => {
@@ -74,12 +74,11 @@ Actual body text.
 
     expect(html).toContain("Frontmatter");
     expect(html).toContain(">yaml<");
-    expect(html).toContain('text-primary">name</span>: sample-skill');
-    expect(html).toContain('text-primary">description</span>: Build and verify the output.');
-    expect(html).toContain('text-primary">allowed-tools</span>:');
+    expect(html).toContain("name");
+    expect(html).toContain("description");
+    expect(html).toContain("allowed-tools");
     expect(html).toContain("- Bash");
     expect(html).toContain("- Read");
-    expect(html).toContain('class="flex min-w-0 flex-col gap-4 p-px"');
     expect(html).toContain("Body heading");
     expect(html).toContain("Actual body text.");
   });

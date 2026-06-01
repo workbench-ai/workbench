@@ -12,6 +12,12 @@ import type {
   WorkbenchCandidatePatch,
 } from "@workbench-ai/workbench-contract";
 import {
+  jsonRecord,
+  normalizeRelativePath,
+  readSurfaceFiles,
+  writeSurfaceFiles,
+} from "@workbench-ai/workbench-core";
+import {
   ensureWorkbenchAdapterOutputDir,
   readWorkbenchAdapterOperationResult,
   readWorkbenchAdapterOperationRequest,
@@ -46,6 +52,18 @@ export interface ExecuteWorkbenchBuiltInAdapterCommandOptions {
   adapterAuthRequest?: Json;
   adapterAuthEnv?: Record<string, string>;
 }
+
+type AgentExecutionOptions = Pick<
+  ExecuteWorkbenchBuiltInAdapterCommandOptions,
+  "agentExecutor" | "adapterAuthRoot" | "adapterAuthRequest" | "adapterAuthEnv"
+>;
+type AdapterRequestHandler = (request: WorkbenchAdapterOperationRequest) => Promise<void>;
+
+const DIRECT_ADAPTER_HANDLERS: Partial<Record<WorkbenchBuiltInAdapterId, AdapterRequestHandler>> = {
+  command: executeCommandAdapterRequest,
+  tests: executeTestsEngineRequest,
+  workbench: executeWorkbenchEngineRequest,
+};
 
 interface BuiltInAgentAdapterSpec {
   agent: AgentProviderSpec;
@@ -104,16 +122,15 @@ export async function executeWorkbenchBuiltInAdapterCommand(
     request.paths.output = args.outputRoot;
   }
   await ensureWorkbenchAdapterOutputDir(request);
-  if (adapterId === "workbench") {
-    await executeWorkbenchEngineRequest(request);
-    return;
-  }
-  if (adapterId === "command") {
-    await executeCommandAdapterRequest(request);
-    return;
-  }
-  if (adapterId === "tests") {
-    await executeTestsEngineRequest(request);
+  const agentOptions: AgentExecutionOptions = {
+    agentExecutor: args.agentExecutor,
+    adapterAuthRoot: args.adapterAuthRoot,
+    adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
+    adapterAuthEnv: args.adapterAuthEnv,
+  };
+  const directHandler = DIRECT_ADAPTER_HANDLERS[adapterId];
+  if (directHandler) {
+    await directHandler(request);
     return;
   }
   if (adapterId === "rubric") {
@@ -124,12 +141,7 @@ export async function executeWorkbenchBuiltInAdapterCommand(
       request,
       workloadFromAdapterOperationRequest(request),
       builtInRubricSpecFromRequest(request),
-      {
-        agentExecutor: args.agentExecutor,
-        adapterAuthRoot: args.adapterAuthRoot,
-        adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
-        adapterAuthEnv: args.adapterAuthEnv,
-      },
+      agentOptions,
     );
     return;
   }
@@ -137,21 +149,11 @@ export async function executeWorkbenchBuiltInAdapterCommand(
     const workload = workloadFromAdapterOperationRequest(request);
     const agent = builtInAgentSpecFromRequest(request);
     if (request.operation === "candidate.improve") {
-      await writeAgentCandidateRevisionOutput(request, workload, agent, {
-        agentExecutor: args.agentExecutor,
-        adapterAuthRoot: args.adapterAuthRoot,
-        adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
-        adapterAuthEnv: args.adapterAuthEnv,
-      });
+      await writeAgentCandidateRevisionOutput(request, workload, agent, agentOptions);
       return;
     }
     if (request.operation === "candidate.run") {
-      await writeAgentCandidateOutput(request, workload, agent, {
-        agentExecutor: args.agentExecutor,
-        adapterAuthRoot: args.adapterAuthRoot,
-        adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
-        adapterAuthEnv: args.adapterAuthEnv,
-      });
+      await writeAgentCandidateOutput(request, workload, agent, agentOptions);
       return;
     }
     throw new Error(`Agent adapter ${adapterId} cannot handle ${request.operation}.`);
@@ -405,7 +407,7 @@ async function readOptionalSurfaceFiles(root: string | undefined): Promise<Surfa
   if (!root) {
     return [];
   }
-  return await readSurfaceFilesRecursive(root).catch((error: unknown) => {
+  return await readSurfaceFiles(root).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return [];
     }
@@ -609,27 +611,15 @@ async function readEditableCandidateWorkspaceFiles(
   root: string,
   edits: readonly string[],
 ): Promise<SurfaceSnapshotFile[]> {
-  const files: SurfaceSnapshotFile[] = [];
-  for (const edit of edits) {
-    const normalized = normalizeRelativePath(edit);
-    if (!normalized || isRuntimeWorkspacePath(normalized)) {
-      continue;
-    }
-    const absolutePath = path.join(root, normalized);
-    const stat = await fs.stat(absolutePath).catch(() => null);
-    if (!stat) {
-      continue;
-    }
-    if (stat.isDirectory()) {
-      await readSurfaceFilesInto(root, normalized, files);
-      continue;
-    }
-    if (stat.isFile()) {
-      files.push(await readSurfaceFile(root, normalized));
-    }
+  const editPaths = edits
+    .map(normalizeRelativePath)
+    .filter((filePath) => !isRuntimeWorkspacePath(filePath));
+  if (editPaths.length === 0) {
+    return [];
   }
+  const files = await readSurfaceFiles(root);
   return dedupeSurfaceFiles(files.filter((file) =>
-    isCandidateEditPath(file.path, edits) &&
+    isCandidateEditPath(file.path, editPaths) &&
     !isRuntimeWorkspacePath(file.path)
   ));
 }
@@ -688,7 +678,7 @@ async function readWorkbenchEngineCase(args: {
   taskDir: string;
   id: string;
 }): Promise<WorkbenchEngineCase> {
-  const sourceFiles = await readSurfaceFilesRecursive(args.taskDir);
+  const sourceFiles = await readSurfaceFiles(args.taskDir);
   const taskFile = sourceFiles.find((file) =>
     normalizeRelativePath(file.path) === TASK_CONTROL_FILE && file.encoding === "utf8"
   );
@@ -785,52 +775,6 @@ function stripTaskDirectory(
     }
     return [{ ...file, path: normalized.slice(prefix.length) }];
   }).sort((left, right) => left.path.localeCompare(right.path));
-}
-
-async function readSurfaceFilesRecursive(root: string): Promise<SurfaceSnapshotFile[]> {
-  const result: SurfaceSnapshotFile[] = [];
-  await readSurfaceFilesInto(root, "", result);
-  return result.sort((left, right) => left.path.localeCompare(right.path));
-}
-
-async function readSurfaceFilesInto(
-  root: string,
-  relativeDir: string,
-  result: SurfaceSnapshotFile[],
-): Promise<void> {
-  const entries = await fs.readdir(path.join(root, relativeDir), { withFileTypes: true });
-  for (const entry of entries) {
-    const relativePath = normalizeRelativePath(path.join(relativeDir, entry.name));
-    const absolutePath = path.join(root, relativePath);
-    if (entry.isDirectory()) {
-      await readSurfaceFilesInto(root, relativePath, result);
-      continue;
-    }
-    if (!entry.isFile()) {
-      continue;
-    }
-    result.push(await readSurfaceFile(root, relativePath));
-  }
-}
-
-async function readSurfaceFile(
-  root: string,
-  relativePath: string,
-): Promise<SurfaceSnapshotFile> {
-  const absolutePath = path.join(root, normalizeRelativePath(relativePath));
-  const [body, stat] = await Promise.all([
-    fs.readFile(absolutePath),
-    fs.stat(absolutePath),
-  ]);
-  const text = body.toString("utf8");
-  const isUtf8 = Buffer.from(text, "utf8").equals(body);
-  return {
-    path: normalizeRelativePath(relativePath),
-    kind: isUtf8 ? "text" : "binary",
-    encoding: isUtf8 ? "utf8" : "base64",
-    content: isUtf8 ? text : body.toString("base64"),
-    executable: (stat.mode & 0o111) !== 0,
-  };
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -1054,12 +998,7 @@ async function writeAgentCandidateOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
   candidate: BuiltInAgentAdapterSpec,
-  options: {
-    agentExecutor?: WorkbenchAgentTurnExecutor;
-    adapterAuthRoot?: string;
-    adapterAuthRequest?: Json;
-    adapterAuthEnv?: Record<string, string>;
-  } = {},
+  options: AgentExecutionOptions = {},
 ): Promise<void> {
   if (request.operation !== "candidate.run") {
     throw new Error("Agent candidate results can only complete candidate.run operations.");
@@ -1135,12 +1074,7 @@ async function writeAgentCandidateRevisionOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
   improver: BuiltInAgentAdapterSpec,
-  options: {
-    agentExecutor?: WorkbenchAgentTurnExecutor;
-    adapterAuthRoot?: string;
-    adapterAuthRequest?: Json;
-    adapterAuthEnv?: Record<string, string>;
-  },
+  options: AgentExecutionOptions,
 ): Promise<void> {
   if (request.operation !== "candidate.improve") {
     throw new Error("Agent improve results can only complete candidate.improve operations.");
@@ -1233,12 +1167,7 @@ async function writeRubricJudgeResult(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
   engine: BuiltInRubricAdapterSpec,
-  options: {
-    agentExecutor?: WorkbenchAgentTurnExecutor;
-    adapterAuthRoot?: string;
-    adapterAuthRequest?: Json;
-    adapterAuthEnv?: Record<string, string>;
-  } = {},
+  options: AgentExecutionOptions = {},
 ): Promise<void> {
   const agentExecutor = options.agentExecutor;
   const runtime = await importWorkbenchRuntime();
@@ -1385,15 +1314,11 @@ function jsonSurfaceFile(pathname: string, value: unknown): SurfaceSnapshotFile 
   };
 }
 
-async function runRubricCriterionJudge(args: {
+async function runRubricCriterionJudge(args: AgentExecutionOptions & {
   request: WorkbenchAdapterOperationRequest;
   workload: AdapterWorkload;
   engine: BuiltInRubricAdapterSpec;
   criterion: RubricCriterionSpec;
-  agentExecutor?: WorkbenchAgentTurnExecutor;
-  adapterAuthRoot?: string;
-  adapterAuthRequest?: Json;
-  adapterAuthEnv?: Record<string, string>;
   runtime: Awaited<ReturnType<typeof importWorkbenchRuntime>>;
 }): Promise<RubricCriterionJudgeRun> {
   const traceRoot = path.join(
@@ -1737,10 +1662,10 @@ async function createCandidatePatchFromWorkspace(args: {
   edits: readonly string[];
 }): Promise<WorkbenchCandidatePatch> {
   const before = new Map(
-    (await readSurfaceFilesRecursive(args.beforeRoot))
+    (await readSurfaceFiles(args.beforeRoot))
       .map((file) => [normalizeRelativePath(file.path), file]),
   );
-  const changedFiles = (await readSurfaceFilesRecursive(args.afterRoot))
+  const changedFiles = (await readSurfaceFiles(args.afterRoot))
     .map((file) => ({ ...file, path: normalizeRelativePath(file.path) }))
     .filter((file) =>
       isCandidateEditPath(file.path, args.edits) &&
@@ -1777,34 +1702,12 @@ function isRuntimeWorkspacePath(filePath: string): boolean {
     normalized.startsWith("private/");
 }
 
-async function writeSurfaceFiles(
-  root: string,
-  files: readonly SurfaceSnapshotFile[],
-): Promise<void> {
-  for (const file of files) {
-    const target = path.join(root, normalizeRelativePath(file.path));
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    const body = file.encoding === "base64"
-      ? Buffer.from(file.content, "base64")
-      : Buffer.from(file.content, "utf8");
-    await fs.writeFile(target, body);
-    if (file.executable) {
-      await fs.chmod(target, 0o755).catch(() => undefined);
-    }
-  }
-}
-
 function isCandidateEditPath(filePath: string, edits: readonly string[]): boolean {
   const normalized = normalizeRelativePath(filePath);
   return edits.some((entry) => {
     const editPath = normalizeRelativePath(entry).replace(/\/+$/u, "");
     return normalized === editPath || normalized.startsWith(`${editPath}/`);
   });
-}
-
-function normalizeRelativePath(filePath: string): string {
-  const normalized = filePath.replace(/\\/gu, "/").replace(/^\/+/u, "");
-  return normalized.split("/").filter(Boolean).join("/");
 }
 
 function parseAgentJsonObject(output: string, label: string): Record<string, unknown> {
@@ -1907,19 +1810,4 @@ function weightedCriteriaScore(
     denominator += weight;
   }
   return denominator > 0 ? Number((numerator / denominator).toFixed(6)) : undefined;
-}
-
-function jsonRecord(value: unknown): Record<string, Json> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, Json>
-    : {};
-}
-
-function isJsonPayload(value: unknown): value is Json {
-  return value === null ||
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean" ||
-    (Array.isArray(value) && value.every(isJsonPayload)) ||
-    (typeof value === "object" && value !== null && Object.values(value).every(isJsonPayload));
 }

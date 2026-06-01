@@ -77,10 +77,17 @@ NEXTAUTH_SECRET=test-secret \
 WORKBENCH_WORKER_TOKEN=local-worker-token \
 WORKBENCH_BUILDER_TOKEN=local-builder-token \
 WORKBENCH_RUNTIME_REGISTRY=127.0.0.1:5050 \
+WORKBENCH_BACKEND=aws \
+WORKBENCH_SANDBOX_BACKEND=docker \
+WORKBENCH_TABLE=local-workbench \
+WORKBENCH_BLOB_BUCKET=local-workbench-blobs \
+WORKBENCH_JOB_QUEUE_URL=http://127.0.0.1:4566/000000000000/workbench-jobs \
+WORKBENCH_AWS_ENDPOINT_URL=http://127.0.0.1:4566 \
+AWS_REGION=us-east-1 \
 pnpm --dir ../workbench-cloud smoke:local
 ```
 
-That smoke command starts the cloud-owned builder, host supervisor, and sandbox host. The CLI docs intentionally do not describe worker internals or sandbox backend implementation details.
+That smoke command expects a LocalStack-provisioned Workbench table, blob bucket, and SQS queue, then starts the cloud-owned builder, host supervisor, and sandbox host. The CLI docs intentionally do not describe worker internals or sandbox backend implementation details.
 
 ## Three-Statement Bench
 

@@ -152,6 +152,44 @@ export interface ExecutionTimeline {
   groups: ExecutionTimelineGroup[];
 }
 
+const ROW_LABEL_BY_KIND: Record<ExecutionTimelineRowKind, string> = {
+  agent: "Agent",
+  error: "Error",
+  note: "Note",
+  session: "Session",
+  tool: "Tool",
+  user: "User",
+  write: "Write",
+};
+
+const ROW_TONE_BY_KIND: Record<ExecutionTimelineRowKind, BadgeTone> = {
+  agent: "accent",
+  error: "destructive",
+  note: "outline",
+  session: "outline",
+  tool: "secondary",
+  user: "outline",
+  write: "success",
+};
+
+const ROW_ORDER_BY_KIND: Record<ExecutionTimelineRowKind, number> = {
+  user: 0,
+  session: 1,
+  tool: 2,
+  write: 2,
+  note: 2,
+  error: 2,
+  agent: 3,
+};
+
+const STATUS_RANK: Record<TraceSpanStatus, number> = {
+  canceled: 1,
+  completed: 0,
+  failed: 4,
+  running: 2,
+  warning: 3,
+};
+
 interface StageContext {
   key: string;
   stageId: string | null;
@@ -1194,22 +1232,7 @@ function latestMeaningfulEventMessage(
 }
 
 function rowLabelForKind(kind: ExecutionTimelineRowKind): string {
-  switch (kind) {
-    case "session":
-      return "Session";
-    case "user":
-      return "User";
-    case "agent":
-      return "Agent";
-    case "tool":
-      return "Tool";
-    case "write":
-      return "Write";
-    case "error":
-      return "Error";
-    case "note":
-      return "Note";
-  }
+  return ROW_LABEL_BY_KIND[kind];
 }
 
 function toneForRowKind(
@@ -1217,41 +1240,16 @@ function toneForRowKind(
   status: TraceSpan["status"] | null,
 ): BadgeTone {
   if (kind === "error") {
-    return "destructive";
+    return ROW_TONE_BY_KIND.error;
   }
   if (status === "warning") {
     return "warning";
   }
-  switch (kind) {
-    case "agent":
-      return "accent";
-    case "user":
-      return "outline";
-    case "write":
-      return "success";
-    case "tool":
-      return "secondary";
-    case "session":
-    case "note":
-    default:
-      return "outline";
-  }
+  return ROW_TONE_BY_KIND[kind];
 }
 
 function rowKindOrder(kind: ExecutionTimelineRowKind): number {
-  switch (kind) {
-    case "user":
-      return 0;
-    case "session":
-      return 1;
-    case "tool":
-    case "write":
-    case "note":
-    case "error":
-      return 2;
-    case "agent":
-      return 3;
-  }
+  return ROW_ORDER_BY_KIND[kind];
 }
 
 function deriveGroupDurationFromRows(rows: ExecutionTimelineRow[]): number {
@@ -1340,11 +1338,7 @@ function dominantGroupStatus(spans: TraceSpan[]): TraceSpan["status"] {
 }
 
 function statusRank(status: TraceSpan["status"]): number {
-  if (status === "failed") return 4;
-  if (status === "warning") return 3;
-  if (status === "running") return 2;
-  if (status === "canceled") return 1;
-  return 0;
+  return STATUS_RANK[status];
 }
 
 function readStringAttribute(

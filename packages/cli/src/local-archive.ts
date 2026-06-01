@@ -9,10 +9,15 @@ import {
   sanitizeWorkbenchRuntimeCandidateForExchange,
   sanitizeWorkbenchRuntimeJobForExchange,
   selectExecutionOutputFilesForInspection,
+  isSurfaceSnapshotFile,
+  jsonRecord,
+  normalizeRelativePath,
+  readSurfaceFiles,
   workbenchRuntimeExplicitActiveId,
   workbenchRuntimeBundleStats,
   workbenchRuntimeCandidateIdentityForExchange,
   workbenchSurfaceFilesEqualForExchange,
+  writeSurfaceFiles,
   type CandidateRecord,
   type EvaluationScorecard,
   type RemoteWorkbenchJob,
@@ -950,18 +955,7 @@ function completedJobOutputFiles(job: RemoteWorkbenchJob): SurfaceSnapshotFile[]
   if (!Array.isArray(output.files)) {
     return [];
   }
-  return output.files.filter(isSurfaceSnapshotFile).map((file) => ({ ...file }));
-}
-
-function isSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
-  const record = jsonRecord(value);
-  return (
-    typeof record.path === "string" &&
-    (record.kind === "text" || record.kind === "binary") &&
-    (record.encoding === "utf8" || record.encoding === "base64") &&
-    typeof record.content === "string" &&
-    typeof record.executable === "boolean"
-  );
+  return (output.files as unknown[]).filter(isSurfaceSnapshotFile).map((file) => ({ ...file }));
 }
 
 function readExecutionPurpose(job: RemoteWorkbenchJob): string | null {
@@ -1046,15 +1040,9 @@ function traceEvent(args: {
 
 function traceUsageSummary(value: unknown): WorkbenchTraceUsageSummary | null {
   const record = jsonRecord(value);
-  const usage = Object.keys(jsonRecord(record.total)).length > 0
-    ? jsonRecord(record.total)
-    : Object.keys(jsonRecord(record.improver)).length > 0
-      ? jsonRecord(record.improver)
-      : Object.keys(jsonRecord(record.runner)).length > 0
-        ? jsonRecord(record.runner)
-        : Object.keys(jsonRecord(record.engine)).length > 0
-          ? jsonRecord(record.engine)
-          : record;
+  const usage = ["total", "improver", "runner", "engine"]
+    .map((key) => jsonRecord(record[key]))
+    .find((entry) => Object.keys(entry).length > 0) ?? record;
   if (Object.keys(usage).length === 0) {
     return null;
   }
@@ -1073,12 +1061,6 @@ function traceUsageSummary(value: unknown): WorkbenchTraceUsageSummary | null {
     cost_source: stringValue(usage.costSource) ?? stringValue(usage.cost_source),
     pricing_source: stringValue(usage.pricingSource) ?? stringValue(usage.pricing_source),
   };
-}
-
-function jsonRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
 }
 
 function stringValue(value: unknown): string | null {
@@ -1162,74 +1144,4 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-async function writeSurfaceFiles(root: string, files: readonly SurfaceSnapshotFile[]): Promise<void> {
-  await fs.mkdir(root, { recursive: true });
-  for (const file of files) {
-    const target = path.join(root, normalizeRelativePath(file.path));
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    const body = file.encoding === "base64" ? Buffer.from(file.content, "base64") : Buffer.from(file.content, "utf8");
-    await fs.writeFile(target, body);
-    if (file.executable) {
-      await fs.chmod(target, 0o755).catch(() => undefined);
-    }
-  }
-}
-
-async function readSurfaceFiles(root: string): Promise<SurfaceSnapshotFile[]> {
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const files: SurfaceSnapshotFile[] = [];
-  async function walk(directory: string): Promise<void> {
-    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      const absolutePath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await walk(absolutePath);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      const body = await fs.readFile(absolutePath);
-      const relativePath = normalizeRelativePath(path.relative(root, absolutePath).replace(/\\/gu, "/"));
-      const stats = await fs.stat(absolutePath);
-      const content = encodeContent(body, decoder);
-      files.push({
-        path: relativePath,
-        kind: content.encoding === "base64" ? "binary" : "text",
-        encoding: content.encoding,
-        content: content.content,
-        executable: (stats.mode & 0o111) !== 0,
-      });
-    }
-  }
-  await walk(root);
-  return files.sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function encodeContent(body: Buffer, decoder: { decode(input?: Uint8Array): string }): { encoding: "utf8" | "base64"; content: string } {
-  try {
-    return {
-      encoding: "utf8",
-      content: decoder.decode(body),
-    };
-  } catch {
-    return {
-      encoding: "base64",
-      content: body.toString("base64"),
-    };
-  }
-}
-
-function normalizeRelativePath(filePath: string): string {
-  const normalized = filePath.replace(/\\/gu, "/").replace(/^\/+/u, "");
-  if (!normalized || normalized.includes("\0")) {
-    throw new Error("File paths must be non-empty relative paths.");
-  }
-  const parts = normalized.split("/");
-  if (parts.some((part) => part === ".." || part === "." || part === "")) {
-    throw new Error(`Unsafe relative file path: ${filePath}`);
-  }
-  return normalized;
 }

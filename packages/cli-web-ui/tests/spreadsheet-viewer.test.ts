@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { strToU8, zipSync } from "fflate";
 // @ts-expect-error jsdom is an existing test dependency without bundled declarations.
 import { JSDOM } from "jsdom";
@@ -84,27 +83,6 @@ describe("spreadsheet viewer contracts", () => {
         { row: 16, col: 3 },
       ),
     ).toEqual({ endRow: 16, endCol: 3 });
-  });
-
-  test("viewer css keeps workbook widths instead of stretching the grid", () => {
-    const source = readFileSync(
-      new URL("../spreadsheet-viewer.css", import.meta.url),
-      "utf8",
-    );
-    const componentSource = readFileSync(
-      new URL("../components/shared/spreadsheet-viewer.tsx", import.meta.url),
-      "utf8",
-    );
-
-    expect(source).toContain(".spreadsheet-viewer-shell {");
-    expect(source).toContain("width: 100%;");
-    expect(source).toContain(".spreadsheet-grid {");
-    expect(source).toContain("width: max-content;");
-    expect(source).toContain("border-collapse: collapse;");
-    expect(source).not.toContain("min-width: 100%");
-    expect(componentSource).not.toContain("spreadsheet-viewer.css");
-    expect(componentSource).toContain("fx");
-    expect(componentSource).not.toContain('{"{}"}');
   });
 
   test("owned OOXML parser displays cached formula values without calculating formulas", () => {

@@ -9,6 +9,7 @@ import type {
 } from "@workbench-ai/workbench-contract";
 
 import { normalizeUsageSummary } from "./execution-usage.ts";
+import { isJsonPayload } from "./runtime-utils.ts";
 
 export interface WorkbenchExecutionOutputPayloads {
   candidatePatch?: WorkbenchCandidatePatch;
@@ -231,7 +232,7 @@ function normalizeCandidatePatch(
     files,
     fileChanges,
     ...(typeof record?.summary === "string" ? { summary: record.summary } : {}),
-    ...(isJson(record?.feedback) ? { feedback: record.feedback } : {}),
+    ...(isJsonPayload(record?.feedback) ? { feedback: record.feedback } : {}),
   };
 }
 
@@ -251,7 +252,7 @@ function normalizeResult(
     ...(record?.cases !== undefined ? { cases: normalizeCaseResults(record.cases, `${contract.name}.cases`, issues) } : {}),
     ...(usage ? { usage } : {}),
     ...(typeof record?.summary === "string" ? { summary: record.summary } : {}),
-    ...(isJson(record?.feedback) ? { feedback: record.feedback } : {}),
+    ...(isJsonPayload(record?.feedback) ? { feedback: record.feedback } : {}),
   };
 }
 
@@ -315,10 +316,10 @@ function normalizeCaseResults(value: unknown, label: string, issues: string[]): 
       ...(status ? { status } : {}),
       ...(record.durationMs !== undefined ? { durationMs: readFiniteNumber(record.durationMs, `${itemLabel}.durationMs`, issues) ?? 0 } : {}),
       metrics: normalizeNumberRecord(record.metrics ?? {}, `${itemLabel}.metrics`, issues),
-      ...(isJson(record.source) && record.source && typeof record.source === "object" && !Array.isArray(record.source)
+      ...(isJsonPayload(record.source) && record.source && typeof record.source === "object" && !Array.isArray(record.source)
         ? { source: record.source as Record<string, Json> }
         : {}),
-      ...(isJson(record.feedback) ? { feedback: record.feedback } : {}),
+      ...(isJsonPayload(record.feedback) ? { feedback: record.feedback } : {}),
       ...(criteria && criteria.length > 0 ? { criteria } : {}),
     }];
   });
@@ -455,17 +456,4 @@ function isSafeRelativePath(filePath: string): boolean {
 
 function normalizeRelativePath(filePath: string): string {
   return filePath.replace(/\\/gu, "/").replace(/^\.\/+/u, "").replace(/\/+/gu, "/");
-}
-
-function isJson(value: unknown): value is Json {
-  if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
-    return true;
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJson);
-  }
-  if (value && typeof value === "object") {
-    return Object.values(value).every(isJson);
-  }
-  return false;
 }

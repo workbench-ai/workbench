@@ -4,45 +4,19 @@ import type {
 } from "@workbench-ai/workbench-contract";
 
 import {
-  importNodeModule,
-  nodeBuiltin,
+  normalizeRelativePath,
+  readSurfaceFiles,
 } from "./runtime-utils.ts";
 
 export const WORKBENCH_TRACE_ROOT = ".workbench/traces";
 
 export async function readOutputTraceFiles(outputRoot: string, traceRoot: string): Promise<SurfaceSnapshotFile[]> {
-  const fs = await importNodeModule<any>(nodeBuiltin("fs/promises"));
-  const path = await importNodeModule<any>(nodeBuiltin("path"));
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const files: SurfaceSnapshotFile[] = [];
-  async function walk(directory: string): Promise<void> {
-    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      const absolutePath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        const relativeDirectory = normalizeRelativePath(path.relative(outputRoot, absolutePath).replace(/\\/gu, "/"));
-        if (shouldSkipTraceDirectory(relativeDirectory)) {
-          continue;
-        }
-        await walk(absolutePath);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      const body = await fs.readFile(absolutePath);
-      const content = encodeTraceFileContent(body, decoder);
-      files.push({
-        path: normalizeRelativePath(`${traceRoot}/${path.relative(outputRoot, absolutePath).replace(/\\/gu, "/")}`),
-        kind: content.encoding === "base64" ? "binary" : "text",
-        encoding: content.encoding,
-        content: content.content,
-        executable: false,
-      });
-    }
-  }
-  await walk(outputRoot);
-  return files;
+  return (await readSurfaceFiles(outputRoot, { ignorePath: shouldSkipTraceDirectory }))
+    .map((file) => ({
+      ...file,
+      path: normalizeRelativePath(`${traceRoot}/${file.path}`),
+      executable: false,
+    }));
 }
 
 export function traceFilePaths(files: readonly SurfaceSnapshotFile[]): string[] {
@@ -88,20 +62,6 @@ function shouldSkipTraceDirectory(relativeDirectory: string): boolean {
     || relativeDirectory.includes("/session/workspace/");
 }
 
-function encodeTraceFileContent(body: Buffer, utf8Decoder: { decode(input?: Uint8Array): string }): { encoding: "utf8" | "base64"; content: string } {
-  try {
-    return {
-      encoding: "utf8",
-      content: utf8Decoder.decode(body),
-    };
-  } catch {
-    return {
-      encoding: "base64",
-      content: body.toString("base64"),
-    };
-  }
-}
-
 function sanitizeTracePathSegment(value: string): string {
   const sanitized = value
     .trim()
@@ -115,8 +75,4 @@ function tracePurposeSequence(purpose: WorkbenchExecutionPurpose): number {
     return 1;
   }
   return 2;
-}
-
-function normalizeRelativePath(filePath: string): string {
-  return filePath.replace(/\\/gu, "/").replace(/^\/+/u, "").replace(/\/+/gu, "/");
 }

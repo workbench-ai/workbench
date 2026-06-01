@@ -26,6 +26,8 @@ import {
   localWorkbenchAdapterAuthStore,
   materializeWorkbenchRunResult,
   normalizeSurfaceFiles,
+  isSurfaceSnapshotFile,
+  jsonRecord,
   planWorkbenchExecutionJobsForPurpose,
   runWorkbenchExecutionDag,
   resolveEngineCaseExecutionConfig,
@@ -145,6 +147,8 @@ interface CliIo {
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
 }
+
+type CliCommandHandler = (argv: readonly string[], io: CliIo) => Promise<number>;
 
 interface ParsedArgs {
   positionals: string[];
@@ -350,6 +354,31 @@ interface LocalDevViewHint {
 }
 
 const DEFAULT_BASE_URL = "https://v2.workbench.ai";
+const AUTH_COMMAND_HANDLERS: Record<string, CliCommandHandler> = {
+  connect: authConnect,
+  disconnect: authDisconnect,
+};
+const ADAPTERS_COMMAND_HANDLERS: Record<string, CliCommandHandler> = {
+  create: adaptersCreate,
+  inspect: adaptersInspect,
+  list: adaptersList,
+  test: adaptersTest,
+};
+const TRACES_COMMAND_HANDLERS: Record<string, CliCommandHandler> = {
+  collect: localTraceCollect,
+  list: localTraceList,
+  show: localTraceShow,
+};
+const TWO_SEGMENT_HELP_COMMANDS: Record<string, readonly string[]> = {
+  adapters: ["create", "list", "inspect", "test"],
+  auth: [],
+  candidates: ["list", "show", "files", "preview"],
+  evaluations: ["list", "show"],
+  executions: ["trace"],
+  runs: ["list", "show"],
+  traces: ["collect", "list", "show"],
+};
+
 export async function runCli(
   argv: readonly string[],
   io: CliIo = {
@@ -488,46 +517,12 @@ function commandPathForHelp(argv: readonly string[]): string {
   const positionals = argv.filter(
     (arg) => arg !== "--help" && arg !== "-h" && !arg.startsWith("--"),
   );
-  if (
-    positionals[0] === "adapters" &&
-    ["create", "list", "inspect", "test"].includes(positionals[1] ?? "")
-  ) {
+  const command = positionals[0] ?? "";
+  const subcommands = TWO_SEGMENT_HELP_COMMANDS[command];
+  if (subcommands && (subcommands.length === 0 || subcommands.includes(positionals[1] ?? ""))) {
     return positionals.slice(0, 2).join(" ");
   }
-  if (
-    positionals[0] === "traces" &&
-    ["collect", "list", "show"].includes(positionals[1] ?? "")
-  ) {
-    return positionals.slice(0, 2).join(" ");
-  }
-  if (positionals[0] === "auth") {
-    return positionals.slice(0, 2).join(" ");
-  }
-  if (
-    positionals[0] === "runs" &&
-    ["list", "show"].includes(positionals[1] ?? "")
-  ) {
-    return positionals.slice(0, 2).join(" ");
-  }
-  if (
-    positionals[0] === "evaluations" &&
-    ["list", "show"].includes(positionals[1] ?? "")
-  ) {
-    return positionals.slice(0, 2).join(" ");
-  }
-  if (
-    positionals[0] === "executions" &&
-    ["trace"].includes(positionals[1] ?? "")
-  ) {
-    return positionals.slice(0, 2).join(" ");
-  }
-  if (
-    positionals[0] === "candidates" &&
-    ["list", "show", "files", "preview"].includes(positionals[1] ?? "")
-  ) {
-    return positionals.slice(0, 2).join(" ");
-  }
-  return positionals[0] ?? "";
+  return command;
 }
 
 function extractRemoteFlag(argv: readonly string[]): {
@@ -2934,54 +2929,35 @@ async function runAuthCommand(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
-  const command = argv[0];
-  const rest = argv.slice(1);
-  switch (command) {
-    case "connect":
-      return await authConnect(rest, io);
-    case "disconnect":
-      return await authDisconnect(rest, io);
-    default:
-      throw new UsageError(`Unknown command: auth ${argv.join(" ")}`);
-  }
+  return await runSubCommand("auth", AUTH_COMMAND_HANDLERS, argv, io);
 }
 
 async function runAdaptersCommand(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
-  const command = argv[0];
-  const rest = argv.slice(1);
-  switch (command) {
-    case "create":
-      return await adaptersCreate(rest, io);
-    case "list":
-      return await adaptersList(rest, io);
-    case "inspect":
-      return await adaptersInspect(rest, io);
-    case "test":
-      return await adaptersTest(rest, io);
-    default:
-      throw new UsageError(`Unknown command: adapters ${argv.join(" ")}`);
-  }
+  return await runSubCommand("adapters", ADAPTERS_COMMAND_HANDLERS, argv, io);
 }
 
 async function runTracesCommand(
   argv: readonly string[],
   io: CliIo,
 ): Promise<number> {
-  const command = argv[0];
-  const rest = argv.slice(1);
-  switch (command) {
-    case "collect":
-      return await localTraceCollect(rest, io);
-    case "list":
-      return await localTraceList(rest, io);
-    case "show":
-      return await localTraceShow(rest, io);
-    default:
-      throw new UsageError(`Unknown command: traces ${argv.join(" ")}`);
+  return await runSubCommand("traces", TRACES_COMMAND_HANDLERS, argv, io);
+}
+
+async function runSubCommand(
+  group: string,
+  handlers: Record<string, CliCommandHandler>,
+  argv: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const command = argv[0] ?? "";
+  const handler = handlers[command];
+  if (!handler) {
+    throw new UsageError(`Unknown command: ${group} ${argv.join(" ")}`);
   }
+  return await handler(argv.slice(1), io);
 }
 
 interface LocalTraceQuery {
@@ -7124,31 +7100,11 @@ async function resolveLocalProjectForExecution(
 function completedJobOutputFiles(
   job: RemoteWorkbenchJob,
 ): SurfaceSnapshotFile[] {
-  const output = asJsonRecord(job.output);
+  const output = jsonRecord(job.output);
   const files = Array.isArray(output.files)
-    ? output.files.filter(isSurfaceSnapshotFile)
+    ? (output.files as unknown[]).filter(isSurfaceSnapshotFile)
     : [];
   return normalizeSurfaceFiles(files);
-}
-
-function asJsonRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function isSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
-  const record = asJsonRecord(value);
-  return (
-    typeof record.path === "string" &&
-    typeof record.content === "string" &&
-    (record.kind === undefined ||
-      record.kind === "text" ||
-      record.kind === "binary") &&
-    (record.encoding === undefined ||
-      record.encoding === "utf8" ||
-      record.encoding === "base64")
-  );
 }
 
 function createLocalEvent(

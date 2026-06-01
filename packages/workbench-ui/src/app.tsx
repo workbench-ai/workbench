@@ -3802,7 +3802,7 @@ function resolveScorecardCaseRows(scorecard: EvaluationScorecard): EvaluationCas
     return {
       id: caseStats.id,
       label: caseStats.label ?? caseStats.id,
-      status: caseStats.status ? formatCaseStatus(caseStats.status) : "completed",
+      status: caseStats.status ? formatOperationalStatus(caseStats.status) : "completed",
       completedSampleCount: caseStats.sampleCount,
       sampleCount: caseStats.sampleCount,
       metricValue,
@@ -3884,27 +3884,19 @@ function CaseFeedbackCard({
   return <StructuredValueCard title="Feedback" value={value} />;
 }
 
-function formatCaseStatus(status: string | undefined): string {
-  return formatOperationalStatus(status);
-}
+const OPERATIONAL_STATUS_LABELS: Record<string, string> = {
+  cancelled: "cancelled",
+  completed: "completed",
+  error: "error",
+  failed: "error",
+  pending: "pending",
+  queued: "queued",
+  running: "running",
+  succeeded: "completed",
+};
 
 function formatOperationalStatus(status: string | null | undefined): string {
-  switch (status) {
-    case "succeeded":
-      return "completed";
-    case "failed":
-      return "error";
-    case "cancelled":
-      return "cancelled";
-    case "queued":
-    case "running":
-    case "completed":
-    case "error":
-    case "pending":
-      return status;
-    default:
-      return "—";
-  }
+  return status ? OPERATIONAL_STATUS_LABELS[status] ?? "—" : "—";
 }
 
 function formatOptionalDuration(durationMs: number | null): string {

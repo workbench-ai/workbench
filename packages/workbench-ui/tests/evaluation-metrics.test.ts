@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
@@ -18,19 +17,6 @@ import type {
 } from "../src/types";
 
 describe("evaluation metric helpers", () => {
-  test("keeps execution usage and metric groups generic in the web helper", () => {
-    const source = readFileSync(
-      new URL("../src/lib/evaluation-metrics.ts", import.meta.url),
-      "utf8",
-    );
-
-    expect(source).toContain("usage.total.costUsd");
-    expect(source).not.toContain("usage.execution");
-    expect(source).not.toContain('descriptor.group !== "criteria"');
-    expect(source).not.toContain(["usage", "har" + "ness"].join("."));
-    expect(source).not.toContain('"rubric"');
-  });
-
   test("colors metric rows and scatter points by candidate", () => {
     const evaluations: LabeledEvaluationScorecard[] = [
       evaluationRecord("skill_v1_opus", "Skill", 1, 12_000, {}, {

@@ -1,5 +1,6 @@
 import type {
   Json,
+  SurfaceSnapshotFile,
 } from "@workbench-ai/workbench-contract";
 
 export async function importNodeModule<T>(specifier: string): Promise<T> {
@@ -28,6 +29,113 @@ export function numberValue(value: unknown): number | undefined {
 
 export function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+export function normalizeRelativePath(filePath: string): string {
+  const normalized = filePath.replace(/\\/gu, "/").replace(/^\/+/u, "");
+  if (!normalized || normalized.includes("\0")) {
+    throw new Error("File paths must be non-empty relative paths.");
+  }
+  const parts = normalized.split("/");
+  if (parts.some((part) => part === ".." || part === "." || part === "")) {
+    throw new Error(`Unsafe relative file path: ${filePath}`);
+  }
+  return normalized;
+}
+
+export async function writeSurfaceFiles(
+  root: string,
+  files: readonly SurfaceSnapshotFile[],
+): Promise<void> {
+  const fs = await importNodeModule<typeof import("node:fs/promises")>(nodeBuiltin("fs/promises"));
+  const path = await importNodeModule<typeof import("node:path")>(nodeBuiltin("path"));
+  await fs.mkdir(root, { recursive: true });
+  for (const file of files) {
+    const target = path.join(root, normalizeRelativePath(file.path));
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    const body =
+      file.encoding === "base64"
+        ? Buffer.from(file.content, "base64")
+        : Buffer.from(file.content, "utf8");
+    await fs.writeFile(target, body);
+    if (file.executable) {
+      await fs.chmod(target, 0o755).catch(() => undefined);
+    }
+  }
+}
+
+export async function readSurfaceFiles(
+  root: string,
+  options: { ignorePath?: (path: string) => boolean } = {},
+): Promise<SurfaceSnapshotFile[]> {
+  const fs = await importNodeModule<typeof import("node:fs/promises")>(nodeBuiltin("fs/promises"));
+  const path = await importNodeModule<typeof import("node:path")>(nodeBuiltin("path"));
+  const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+  const files: SurfaceSnapshotFile[] = [];
+  async function walk(directory: string): Promise<void> {
+    const entries = await fs
+      .readdir(directory, { withFileTypes: true })
+      .catch(() => []);
+    for (const entry of entries) {
+      const absolutePath = path.join(directory, entry.name);
+      const relativePath = normalizeRelativePath(
+        path.relative(root, absolutePath).replace(/\\/gu, "/"),
+      );
+      if (options.ignorePath?.(relativePath)) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await walk(absolutePath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      let body: Buffer;
+      let stats: { mode: number };
+      try {
+        body = await fs.readFile(absolutePath);
+        stats = await fs.stat(absolutePath);
+      } catch (error) {
+        if (isVanishedWalkEntry(error)) {
+          continue;
+        }
+        throw error;
+      }
+      const content = encodeSurfaceSnapshotContent(body, utf8Decoder);
+      files.push({
+        path: relativePath,
+        kind: content.encoding === "base64" ? "binary" : "text",
+        encoding: content.encoding,
+        content: content.content,
+        executable: (stats.mode & 0o111) !== 0,
+      });
+    }
+  }
+  await walk(root);
+  return files.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function isVanishedWalkEntry(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function encodeSurfaceSnapshotContent(
+  body: Buffer,
+  utf8Decoder: { decode(input?: Uint8Array): string },
+): { encoding: "utf8" | "base64"; content: string } {
+  try {
+    return {
+      encoding: "utf8",
+      content: utf8Decoder.decode(body),
+    };
+  } catch {
+    return {
+      encoding: "base64",
+      content: body.toString("base64"),
+    };
+  }
 }
 
 export function isJsonPayload(value: unknown): value is import("@workbench-ai/workbench-contract").Json {

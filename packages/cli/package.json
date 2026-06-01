@@ -1,6 +1,11 @@
 {
   "name": "@workbench-ai/workbench",
-  "version": "0.0.65",
+  "version": "0.0.66",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workbench-ai/workbench.git",
+    "directory": "packages/cli"
+  },
   "type": "module",
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
@@ -36,10 +41,5 @@
     "react-dom": "^19.2.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/workbench-ai/workbench.git",
-    "directory": "packages/cli"
   }
 }

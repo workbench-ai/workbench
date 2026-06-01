@@ -340,7 +340,3 @@ function asRecord(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown>
     : {};
 }
-
-function normalizeRelativePath(value: string): string {
-  return value.trim().replace(/\\/gu, "/").replace(/^\/+/u, "").replace(/\/+$/u, "");
-}

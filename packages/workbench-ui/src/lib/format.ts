@@ -12,6 +12,20 @@ type WorkbenchDisplayStatus =
   | RemoteWorkbenchJob["status"]
   | RunSummary["status"]
   | RunSummary["outcome"];
+type WorkbenchKnownStatus = NonNullable<WorkbenchDisplayStatus>;
+
+const BADGE_TONE_BY_STATUS: Partial<Record<WorkbenchKnownStatus, BadgeTone>> = {
+  agent_error: "destructive",
+  completed: "success",
+  error: "destructive",
+  eval_error: "destructive",
+  evaluated: "success",
+  failed: "destructive",
+  partial: "warning",
+  planned: "warning",
+  repair_exhausted: "warning",
+  running: "warning",
+};
 
 interface CandidateSelectionLabelOptions {
   summary: CandidateSummary;
@@ -247,21 +261,5 @@ export function badgeToneForStatus(
     | null
     | undefined,
 ): BadgeTone {
-  switch (status) {
-    case "evaluated":
-    case "completed":
-      return "success";
-    case "repair_exhausted":
-    case "running":
-    case "planned":
-    case "partial":
-      return "warning";
-    case "eval_error":
-    case "agent_error":
-    case "failed":
-    case "error":
-      return "destructive";
-    default:
-      return "outline";
-  }
+  return status ? BADGE_TONE_BY_STATUS[status] ?? "outline" : "outline";
 }

@@ -1,6 +1,11 @@
 {
   "name": "@workbench-ai/workbench-core",
-  "version": "0.0.65",
+  "version": "0.0.66",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workbench-ai/workbench.git",
+    "directory": "packages/core"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -33,10 +38,5 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/workbench-ai/workbench.git",
-    "directory": "packages/core"
   }
 }
