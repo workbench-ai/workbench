@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
+import { gzipSync } from "node:zlib";
 import YAML from "yaml";
 
 import {
@@ -25,6 +26,7 @@ import {
   DOCKER_SANDBOX_BACKEND,
   localWorkbenchAdapterAuthStore,
   materializeWorkbenchRunResult,
+  normalizeRelativePath,
   normalizeSurfaceFiles,
   isSurfaceSnapshotFile,
   jsonRecord,
@@ -41,8 +43,9 @@ import {
   workbenchImproveOptimizeSelector,
   workbenchImproveSelectionPolicy,
   workbenchProjectSourceFingerprint,
+  workbenchRuntimeCandidateIdentityForExchange,
   workbenchRuntimeBundleFingerprint,
-  workbenchRuntimeExplicitActiveId,
+  workbenchRuntimeProjectedActiveId,
   type CandidateRecord,
   type EvaluationScorecard,
   type EngineResolveBinding,
@@ -277,6 +280,7 @@ class WorkbenchApiRequestError extends Error {
 }
 
 const API_REQUEST_MAX_ATTEMPTS = 3;
+const API_REQUEST_GZIP_THRESHOLD_BYTES = 1024 * 1024;
 
 interface WorkbenchAdapterSummary {
   use: string;
@@ -296,6 +300,16 @@ interface WorkbenchAdapterSourceSummary {
 }
 
 type RemoteFile = WorkspaceSnapshotFile;
+
+interface LocalRunSourceInput {
+  benchmarkFingerprint: string;
+  sourceYaml: string;
+  engineResolveFiles: SurfaceSnapshotFile[];
+}
+
+type LocalRunRecord = RunSummary & {
+  input: LocalRunSourceInput;
+};
 
 interface RemoteRunRecord {
   id: string;
@@ -1249,7 +1263,12 @@ async function localRun(
       detail: { budget, samples, strategy: "greedy", optimizeOn: optimizeOnLabel, selectBy: selectByLabel },
     }),
   ];
-  const runningRun: RunSummary = {
+  const runInput = localRunInput({
+    benchmarkFingerprint,
+    sourceYaml: projectSource.specSource,
+    engineResolveFiles,
+  });
+  const runningRun: LocalRunRecord = {
     id: runId,
     workflow: "improve",
     benchmarkFingerprint,
@@ -1271,6 +1290,7 @@ async function localRun(
     executionFingerprint,
     activeCandidateId: snapshot.activeId,
     outputCandidateId: null,
+    input: runInput,
   };
   snapshot = upsertLocalRun(snapshot, runningRun, events);
   await saveLocalArchive(workspace, snapshot);
@@ -1439,7 +1459,7 @@ async function localRun(
   }
   snapshot = await loadLocalArchive(workspace);
   const finishedAt = new Date().toISOString();
-  const run: RunSummary = {
+  const run: LocalRunRecord = {
     id: runId,
     workflow: "improve",
     benchmarkFingerprint,
@@ -1465,6 +1485,7 @@ async function localRun(
     outcome: failedJobCount > 0 ? "error" : "ok",
     activeCandidateId: snapshot.activeId,
     outputCandidateId: outputCandidateId ?? snapshot.activeId,
+    input: runInput,
   };
   events.push(
     createLocalEvent("run_finished", finishedAt, {
@@ -1832,7 +1853,12 @@ async function localEvaluateCandidate(
     candidateId: evaluatedCandidateId,
     detail: { samples, strategy: "direct" },
   });
-  const runningRun: RunSummary = {
+  const runInput = localRunInput({
+    benchmarkFingerprint,
+    sourceYaml: projectSource.specSource,
+    engineResolveFiles,
+  });
+  const runningRun: LocalRunRecord = {
     id: runId,
     workflow: "eval",
     benchmarkFingerprint,
@@ -1852,6 +1878,7 @@ async function localEvaluateCandidate(
     executionFingerprint,
     activeCandidateId: activeCandidateIdBeforeEval,
     outputCandidateId: evaluatedCandidateId,
+    input: runInput,
   };
   snapshot = upsertLocalRun(snapshot, runningRun, [runStartedEvent]);
   await saveLocalArchive(workspace, snapshot);
@@ -1941,7 +1968,7 @@ async function localEvaluateCandidate(
       durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt)),
     },
   });
-  snapshot = upsertLocalRun(snapshot, {
+  const finishedRun: LocalRunRecord = {
     id: runId,
     workflow: "eval",
     benchmarkFingerprint,
@@ -1965,7 +1992,9 @@ async function localEvaluateCandidate(
     outcome: currentRunFailedJobCount > 0 ? "error" : "ok",
     activeCandidateId,
     outputCandidateId: evaluatedCandidateId,
-  }, [runFinishedEvent]);
+    input: runInput,
+  };
+  snapshot = upsertLocalRun(snapshot, finishedRun, [runFinishedEvent]);
   await saveLocalJobs(workspace, currentRunJobs);
   await saveLocalArchive(workspace, snapshot);
   const evaluation = materialized.evaluations[0] ?? null;
@@ -2280,9 +2309,8 @@ function localDevOpenUrl(
   if (!evaluation) {
     return new URL("candidates", baseUrl).toString();
   }
-  const params = new URLSearchParams({ evaluation: evaluation.id });
   return new URL(
-    `candidates/${encodeURIComponent(evaluation.candidateId)}?${params.toString()}`,
+    `evaluations/${encodeURIComponent(evaluation.id)}`,
     baseUrl,
   ).toString();
 }
@@ -2316,6 +2344,14 @@ function authoredBenchmarkSourceFiles(projectSource: LocalProjectSource): Surfac
     content: projectSource.benchmarkSource,
     executable: false,
   }];
+}
+
+function localRunInput(input: LocalRunSourceInput): LocalRunSourceInput {
+  return {
+    benchmarkFingerprint: input.benchmarkFingerprint,
+    sourceYaml: input.sourceYaml,
+    engineResolveFiles: normalizeSurfaceFiles(input.engineResolveFiles),
+  };
 }
 
 function shellQuote(value: string): string {
@@ -2696,11 +2732,16 @@ async function localCandidatePreview(
   const inspection = localInspectionFromParsed(parsed);
   const snapshot = await inspection.snapshot();
   const candidateId = readCandidateIdFlag(parsed, snapshot);
-  const preview = await inspection.candidatePreview({
+  const requestedPath = requireFlag(parsed, "path");
+  const surface = await inspection.candidateFileSurface({
     id: candidateId,
-    path: requireFlag(parsed, "path"),
+    path: requestedPath,
     view: readPreviewMode(parsed),
   });
+  const preview = surface.preview;
+  if (!preview || preview.path !== normalizeRelativePath(requestedPath)) {
+    throw new UsageError(`File not found: ${requestedPath}`);
+  }
   const content =
     preview.source?.content ?? preview.rendered_html ?? preview.diff ?? "";
   const outputPath = asOptionalString(parsed.flags.output);
@@ -4389,7 +4430,7 @@ async function pushBenchmark(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseArgs(argv);
-  rejectUnknownFlags(parsed, new Set(["dir", "visibility", "dry-run", "json"]));
+  rejectUnknownFlags(parsed, new Set(["dir", "visibility", "dry-run", "force", "json"]));
   const dir = resolveSourceDir(parsed);
   const source = await readLocalProjectSource(dir);
   const origin = await readWorkbenchOrigin(dir);
@@ -4397,17 +4438,18 @@ async function pushBenchmark(
   const visibility = readOptionalBenchmarkVisibility(parsed.flags.visibility);
   const createVisibility = visibility ?? "public";
   const dryRun = parsed.flags["dry-run"] === true;
+  const force = parsed.flags.force === true;
   const runtime = await exportLocalRuntimeBundle(dir, {
     currentBenchmarkFingerprint: localBenchmarkFingerprint(source),
   });
   const localRuntimeFingerprint = workbenchRuntimeBundleFingerprint(runtime);
-  const state = localProjectState({
-    source,
-    runtime,
-    origin,
-    visibility: createVisibility,
-  });
   if (!origin) {
+    const state = localProjectState({
+      source,
+      runtime,
+      origin,
+      visibility: createVisibility,
+    });
     if (dryRun) {
       writeOutput(
         {
@@ -4466,24 +4508,41 @@ async function pushBenchmark(
   if (!projectId) {
     throw new UsageError("Missing remote benchmark. Run workbench push from a source directory.");
   }
+  const remoteProject = force || dryRun
+    ? await readOriginProjectIfPresent({ baseUrl, origin })
+    : null;
   if (dryRun) {
-    const remoteProject = await verifyLinkedPushDryRunTarget({
-      baseUrl,
-      origin,
-      projectId,
+    const state = localProjectState({
+      source,
+      runtime,
+      origin: remoteProject
+        ? { ...origin, projectId: remoteProject.id }
+        : origin,
+      visibility: visibility ?? remoteProject?.visibility ?? createVisibility,
     });
+    if (!remoteProject && !force) {
+      throw new WorkbenchApiRequestError(
+        404,
+        `Workbench benchmark not found: ${origin.remote}`,
+        "",
+      );
+    }
+    if (!remoteProject && force) {
+      await assertForceCreateAllowed({ baseUrl, origin, sourceName: source.spec.name });
+    }
+    const action = force && !remoteProject ? "create" : force ? "replace" : "update";
     writeOutput(
       {
         ok: true,
         dryRun: true,
-        action: "update",
+        action,
         dir,
         baseUrl,
-        benchmarkId: projectId,
+        benchmarkId: remoteProject?.id ?? projectId,
         remote: origin.remote,
-        benchmark: remoteProjectSummaryForOutput(remoteProject),
+        ...(remoteProject ? { benchmark: remoteProjectSummaryForOutput(remoteProject) } : {}),
         benchmarkName: source.spec.name,
-        visibility: visibility ?? "unchanged",
+        visibility: visibility ?? (remoteProject ? remoteProject.visibility ?? "unchanged" : createVisibility),
         sourceFileCount: sourceFileCount(source),
         runtime: runtimeBundleStats(runtime),
         sourceFingerprint: state.source.fingerprint,
@@ -4491,10 +4550,116 @@ async function pushBenchmark(
       },
       parsed,
       io,
-      () => `Would push ${sourceFileCount(source)} source file(s) and runtime history to ${origin.remote}.`,
+      () => force && !remoteProject
+        ? `Would create ${origin.remote} from local project state.`
+        : force
+          ? `Would replace ${origin.remote} with local project state.`
+          : `Would push ${sourceFileCount(source)} source file(s) and runtime history to ${origin.remote}.`,
     );
     return 0;
   }
+  if (force) {
+    const targetOrigin = remoteProject
+      ? { ...origin, projectId: remoteProject.id }
+      : null;
+    const state = localProjectState({
+      source,
+      runtime,
+      origin: targetOrigin,
+      visibility: visibility ?? remoteProject?.visibility ?? createVisibility,
+    });
+    if (!remoteProject) {
+      await assertForceCreateAllowed({ baseUrl, origin, sourceName: source.spec.name });
+      const { project, origin: nextOrigin, result } = await createRemoteBenchmarkFromState({
+        baseUrl,
+        dir,
+        state,
+      });
+      writeOutput(
+        {
+          ok: true,
+          action: "create",
+          benchmark: project,
+          visibility: project.visibility ?? createVisibility,
+          origin: nextOrigin,
+          source: result.source,
+          runtime: result.runtime.stats,
+          urls: buildWorkbenchResourceUrls({
+            baseUrl,
+            projectId: project.id,
+            ...originRemoteUrlParts(nextOrigin),
+          }),
+        },
+        parsed,
+        io,
+        (record) => {
+          const value = record as { origin: WorkbenchOrigin; urls: WorkbenchResourceUrls };
+          return [
+            `Pushed ${value.origin.remote} (${value.origin.projectId}).`,
+            `Open benchmark: ${value.urls.benchmark}`,
+          ].join("\n");
+        },
+      );
+      return 0;
+    }
+    const response = await apiRequest<WorkbenchProjectStateImportResult>(
+      projectApiPath(remoteProject.id, "/state?force=true"),
+      {
+        method: "PUT",
+        body: state,
+      },
+      baseUrl,
+    );
+    assertAcceptedForceReplacement({
+      expected: state,
+      actual: response.state,
+    });
+    const responseProject = remoteProjectSummaryFromState(response.state);
+    const publishedProject = await applyRequestedProjectVisibility({
+      baseUrl,
+      projectId: responseProject.id,
+      responseProject,
+      visibility,
+    });
+    const applied = await acceptPushedProjectStateToLocal({
+      dir,
+      baseUrl,
+      state: response.state,
+    });
+    writeOutput(
+      {
+        ok: true,
+        action: "replace",
+        changed: true,
+        benchmark: publishedProject,
+        visibility: visibility ?? publishedProject.visibility ?? "unchanged",
+        origin: applied.origin,
+        source: response.source,
+        runtime: response.runtime.stats,
+        urls: buildWorkbenchResourceUrls({
+          baseUrl,
+          projectId: publishedProject.id ?? responseProject.id,
+          ...originRemoteUrlParts(applied.origin),
+        }),
+      },
+      parsed,
+      io,
+      (record) => {
+        const value = record as { origin: WorkbenchOrigin; urls: WorkbenchResourceUrls };
+        return [
+          `Replaced ${value.origin.remote} (${value.origin.projectId}).`,
+          `Open benchmark: ${value.urls.benchmark}`,
+        ].join("\n");
+      },
+    );
+    return 0;
+  }
+  const state = localProjectState({
+    source,
+    runtime,
+    origin,
+    visibility: createVisibility,
+  });
   const response = await apiRequest<WorkbenchProjectStateImportResult>(
     projectApiPath(projectId, "/state"),
     {
@@ -4544,26 +4709,97 @@ async function pushBenchmark(
   return 0;
 }
 
-async function verifyLinkedPushDryRunTarget(args: {
+async function readOriginProjectIfPresent(args: {
   baseUrl: string;
   origin: WorkbenchOrigin;
-  projectId: string;
-}): Promise<RemoteProjectSummary & { id: string; ownerUsername?: string; name?: string }> {
-  const response = await apiRequest<{
-    benchmark: RemoteProjectSummary & { id: string; ownerUsername?: string; name?: string };
-  }>(projectApiPath(args.projectId), {}, args.baseUrl);
-  const expected = parseOriginRemote(args.origin);
-  const actualOwner = response.benchmark.ownerUsername;
-  const actualProject = response.benchmark.name;
-  if (actualOwner !== expected.owner || actualProject !== expected.project) {
-    const actualRemote = actualOwner && actualProject
-      ? `${actualOwner}/${actualProject}`
-      : "unknown";
+}): Promise<RemoteProjectSummary & { id: string; ownerUsername?: string; name?: string } | null> {
+  try {
+    const response = await apiRequest<{
+      benchmark: RemoteProjectSummary & { id: string; ownerUsername?: string; name?: string };
+    }>(
+      publicProjectApiPath(parseOriginRemote(args.origin)),
+      {},
+      args.baseUrl,
+    );
+    return response.benchmark;
+  } catch (error) {
+    if (error instanceof WorkbenchApiRequestError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function assertForceCreateAllowed(args: {
+  baseUrl: string;
+  origin: WorkbenchOrigin;
+  sourceName: string;
+}): Promise<void> {
+  const target = parseOriginRemote(args.origin);
+  if (args.sourceName !== target.project) {
     throw new UsageError(
-      `Workbench origin points to ${args.origin.remote}, but ${args.projectId} resolved to ${actualRemote}.`,
+      `Local benchmark name ${args.sourceName} does not match force push target ${args.origin.remote}.`,
     );
   }
-  return response.benchmark;
+  const expectedOwner = target.owner;
+  const profileStatus = await readWorkbenchProfileStatus(
+    await loadConfig(),
+    args.baseUrl,
+  );
+  const actualOwner = profileStatus.profile?.username ?? null;
+  if (!profileStatus.authenticated || actualOwner !== expectedOwner) {
+    throw new WorkbenchApiRequestError(
+      404,
+      `Workbench benchmark not found or not writable: ${args.origin.remote}`,
+      "",
+    );
+  }
+}
+
+function assertAcceptedForceReplacement(args: {
+  expected: WorkbenchProjectState;
+  actual: WorkbenchProjectState;
+}): void {
+  const expectedSourceFingerprint = args.expected.source.fingerprint ??
+    workbenchProjectSourceFingerprint(args.expected.source);
+  const actualSourceFingerprint = args.actual.source.fingerprint ??
+    workbenchProjectSourceFingerprint(args.actual.source);
+  if (actualSourceFingerprint !== expectedSourceFingerprint) {
+    throw new Error(
+      `Workbench force push did not replace remote source. Expected ${expectedSourceFingerprint}, received ${actualSourceFingerprint}.`,
+    );
+  }
+  const expectedRuntime = runtimeReplacementSignature(args.expected.runtime);
+  const actualRuntime = runtimeReplacementSignature(args.actual.runtime);
+  if (JSON.stringify(actualRuntime) !== JSON.stringify(expectedRuntime)) {
+    throw new Error(
+      `Workbench force push did not replace remote runtime. Remote returned different record identity.`,
+    );
+  }
+}
+
+function runtimeReplacementSignature(runtime: WorkbenchRuntimeBundle): Json {
+  return {
+    activeId: runtime.activeId ?? null,
+    candidates: runtime.candidates
+      .map(workbenchRuntimeCandidateIdentityForExchange)
+      .sort((left, right) => left.id.localeCompare(right.id)),
+    candidateFiles: runtimeFileGroupSignature(runtime.candidateFiles, (group) => group.candidateId),
+    evaluations: runtime.evaluations.map((evaluation) => evaluation.id).sort(),
+    runs: runtime.runs.map((run) => run.id).sort(),
+    jobs: runtime.jobs.map((job) => job.id).sort(),
+    executionFiles: runtimeFileGroupSignature(runtime.executionFiles, (group) => group.jobId),
+    events: runtime.events.map((event) => event.id).sort(),
+  };
+}
+
+function runtimeFileGroupSignature<T extends { files: readonly SurfaceSnapshotFile[] }>(
+  groups: readonly T[],
+  idForGroup: (group: T) => string,
+): string[] {
+  return groups
+    .map((group) => `${idForGroup(group)}:${group.files.map((file) => file.path).sort().join("\n")}`)
+    .sort();
 }
 
 function remoteProjectSummaryForOutput(
@@ -5628,7 +5864,7 @@ function buildWorkbenchResourceUrls(
       ? evaluationScorecardId(refs.runId, refs.candidateId)
       : null;
     urls.candidateEvaluation = evaluationId
-      ? `${benchmark}/candidates/${encodeURIComponent(refs.candidateId)}?evaluation=${encodeURIComponent(evaluationId)}`
+      ? `${benchmark}/evaluations/${encodeURIComponent(evaluationId)}`
       : `${benchmark}/candidates/${encodeURIComponent(refs.candidateId)}`;
   }
   return urls;
@@ -5791,10 +6027,10 @@ function localProjectState(args: {
 }
 
 function projectStateRuntimeStats(state: WorkbenchProjectState): WorkbenchRuntimeBundleStats {
-  const activeId = workbenchRuntimeExplicitActiveId({
+  const activeId = workbenchRuntimeProjectedActiveId({
     candidates: state.runtime.candidates,
+    evaluations: state.runtime.evaluations,
     runs: state.runtime.runs,
-    preferredActiveId: state.runtime.activeId ?? null,
     benchmarkFingerprint: projectStateBenchmarkFingerprint(state.source),
   });
   return runtimeBundleStats({
@@ -6240,6 +6476,7 @@ function selectWorkbenchBaseUrl(input: {
 
 async function readWorkbenchProfileStatus(
   config: WorkbenchConfig,
+  baseUrlOverride?: string,
 ): Promise<{
   authenticated: boolean;
   profile: { username?: string; displayName?: string; email?: string } | null;
@@ -6247,7 +6484,7 @@ async function readWorkbenchProfileStatus(
   if (!config.accessToken) {
     return { authenticated: false, profile: null };
   }
-  const baseUrl = selectWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
+  const baseUrl = baseUrlOverride ?? selectWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
   try {
     const response = await fetch(`${baseUrl}/api/workbench/profile`, {
       headers: {
@@ -6284,6 +6521,7 @@ async function apiRequest<T>(
     : selectWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
   const method = options.method ?? "GET";
   const canRetry = method === "GET";
+  const requestBody = encodeJsonRequestBody(options.body);
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= API_REQUEST_MAX_ATTEMPTS; attempt += 1) {
     let response: Response;
@@ -6291,12 +6529,12 @@ async function apiRequest<T>(
       response = await fetch(`${baseUrl}${apiPath}`, {
         method,
         headers: {
-          "content-type": "application/json",
+          ...requestBody.headers,
           ...(config.accessToken
             ? { authorization: `Bearer ${config.accessToken}` }
             : {}),
         },
-        body: options.body == null ? undefined : JSON.stringify(options.body),
+        body: requestBody.body,
       });
     } catch (error) {
       lastError = error;
@@ -6324,6 +6562,26 @@ async function apiRequest<T>(
     return (await response.json()) as T;
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Workbench API request failed."));
+}
+
+function encodeJsonRequestBody(body: unknown): {
+  body?: Buffer | string;
+  headers: Record<string, string>;
+} {
+  if (body == null) {
+    return { headers: { "content-type": "application/json" } };
+  }
+  const text = JSON.stringify(body);
+  if (Buffer.byteLength(text) < API_REQUEST_GZIP_THRESHOLD_BYTES) {
+    return { body: text, headers: { "content-type": "application/json" } };
+  }
+  return {
+    body: gzipSync(text),
+    headers: {
+      "content-encoding": "gzip",
+      "content-type": "application/json",
+    },
+  };
 }
 
 function apiRequestRetryDelayMs(attempt: number): number {

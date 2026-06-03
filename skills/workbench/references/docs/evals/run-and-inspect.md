@@ -19,7 +19,7 @@ Use `workbench retry <run-id-or-evaluation-id>` only for failed local history. I
 
 Runtime candidates are versioned automatically. A manifest named `Skill` appears as `Skill v1`; successful improvement produces `Skill v2`, then `Skill v3`. Run configurations and samples sit under that candidate version.
 
-Once an active candidate exists, eval records scores without moving that active pointer. Improve JSON uses explicit candidate ids: `outputCandidateId` is the version produced by the improve run, while `activeCandidateId` is the current best evaluated candidate after scoring. These can differ when a newly produced version underperforms the incumbent.
+Once an active candidate exists, eval records scores without changing active. Improve JSON uses explicit candidate ids: `outputCandidateId` is the version produced by the improve run, while `activeCandidateId` is the current best evaluated candidate after scoring. These can differ when a newly produced version underperforms the incumbent.
 
 ## Remote Execution
 

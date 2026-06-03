@@ -4,8 +4,11 @@ import {
   WorkbenchInspectionError,
   candidateRecordWithoutDerivedFields,
   candidateSummaryFromRecord,
+  createCandidateFilePreview,
   createWorkbenchInspection,
   loadAuthoredWorkbenchSourceDocument,
+  selectedFilePath,
+  summarizeCandidateFiles,
   traceSessionLabel,
   type CandidateRecord,
   type EvaluationScorecard,
@@ -15,6 +18,7 @@ import {
   type WorkbenchExecutionTrace,
   type WorkbenchInspection,
   type WorkbenchInspectionBackend,
+  type WorkbenchInspectionFileSurface,
   type WorkbenchTraceSession,
 } from "@workbench-ai/workbench-core";
 
@@ -69,14 +73,30 @@ export function createLocalWorkbenchInspection(
     projectId: "local",
     snapshot: () => localBenchmarkSnapshot(context),
     spec: (input) => localSpecDocument(context, input.fingerprint),
-    sourceFiles: (input) => localBenchmarkMountedFiles(context, input.fingerprint),
+    sourceFiles: async (input) => {
+      const files = await localBenchmarkMountedFiles(context, input.fingerprint);
+      return summarizeCandidateFiles(files, files.map((file) => file.path));
+    },
+    sourceFileSurface: async (input) => {
+      const files = await localBenchmarkMountedFiles(context, input.fingerprint);
+      return localFileSurface(files, files.map((file) => file.path), input.path, input.view);
+    },
     candidate: (input) => readCandidateForInspection(context.workspace, input.id),
     candidateFiles: async (input) => {
       const candidate = await readCandidateForInspection(context.workspace, input.id);
-      return {
-        files: await readCandidateFilesForInspection(context.workspace, input.id),
-        changedPaths: candidate.fileChanges,
-      };
+      return summarizeCandidateFiles(
+        await readCandidateFilesForInspection(context.workspace, input.id),
+        candidate.fileChanges,
+      );
+    },
+    candidateFileSurface: async (input) => {
+      const candidate = await readCandidateForInspection(context.workspace, input.id);
+      return localFileSurface(
+        await readCandidateFilesForInspection(context.workspace, input.id),
+        candidate.fileChanges,
+        input.path,
+        input.view,
+      );
     },
     evaluation: (input) => readEvaluationForInspection(context.workspace, input.id),
     run: async (input) => {
@@ -90,12 +110,34 @@ export function createLocalWorkbenchInspection(
     },
     jobInRun: (input) =>
       readExecutionJobForRun(context.workspace, input.runId, input.jobId),
-    executionFiles: (input) =>
-      readExecutionFilesForRun(context.workspace, input.runId, input.jobId),
+    executionFiles: async (input) => {
+      const files = await readExecutionFilesForRun(context.workspace, input.runId, input.jobId);
+      return summarizeCandidateFiles(files, files.map((file) => file.path));
+    },
+    executionFileSurface: async (input) => {
+      const files = await readExecutionFilesForRun(context.workspace, input.runId, input.jobId);
+      return localFileSurface(files, files.map((file) => file.path), input.path, input.view);
+    },
     traceForJob: readLocalAggregateTrace,
     traceSessionsForJob: readLocalTraceSessions,
   };
   return createWorkbenchInspection(backend);
+}
+
+function localFileSurface(
+  files: readonly SurfaceSnapshotFile[],
+  changedPaths: readonly string[],
+  path: string | null | undefined,
+  view: "diff" | "raw" | "rendered" = "rendered",
+): WorkbenchInspectionFileSurface {
+  const summaries = summarizeCandidateFiles(files, changedPaths);
+  const previewPath = selectedFilePath(path, summaries);
+  return {
+    files: summaries,
+    preview: previewPath
+      ? createCandidateFilePreview({ files, path: previewPath, view })
+      : null,
+  };
 }
 
 export function createLocalProjectSourceReader(
@@ -159,9 +201,20 @@ async function localSpecDocument(
     requestedFingerprint !== currentFingerprint
   ) {
     const snapshot = await loadLocalArchiveIndex(workspace);
-    const document = localHistoricalBenchmarkDocument(snapshot, requestedFingerprint);
-    if (document) {
-      return document;
+    const source = localHistoricalBenchmarkSource(snapshot, requestedFingerprint);
+    if (source) {
+      return loadAuthoredWorkbenchSourceDocument({
+        sourceYaml: source.sourceYaml,
+        path: WORKBENCH_BENCHMARK_FILE,
+        sourceFiles: [{
+          path: WORKBENCH_BENCHMARK_FILE,
+          kind: "text",
+          encoding: "utf8",
+          content: source.sourceYaml,
+          executable: false,
+        }],
+        cases: source.engineResolveFiles,
+      });
     }
     throw new WorkbenchInspectionError(`Benchmark version not found: ${requestedFingerprint}`, { status: 404 });
   }
@@ -191,13 +244,21 @@ async function localBenchmarkMountedFiles(
     requestedFingerprint !== currentFingerprint
   ) {
     const snapshot = await loadLocalArchiveIndex(workspace);
-    return localHistoricalBenchmarkFiles(snapshot, requestedFingerprint);
+    const source = localHistoricalBenchmarkSource(snapshot, requestedFingerprint);
+    if (source) {
+      return source.engineResolveFiles.map((file) => ({ ...file }));
+    }
+    throw new WorkbenchInspectionError(`Benchmark version not found: ${requestedFingerprint}`, { status: 404 });
   }
   return inspectableEngineCaseFiles(projectSource.engineCases);
 }
 
 function publicLocalRunSummary(run: RunSummary): RunSummary {
-  const { executionFingerprint: _executionFingerprint, ...summary } = run;
+  const {
+    executionFingerprint: _executionFingerprint,
+    input: _input,
+    ...summary
+  } = run as RunSummary & { input?: unknown };
   return summary;
 }
 
@@ -231,30 +292,20 @@ function caseSummaryFilesFromEngineCases(
   ];
 }
 
-function localHistoricalBenchmarkDocument(
+function localHistoricalBenchmarkSource(
   snapshot: LocalArchiveIndex,
   benchmarkFingerprint: string,
-) {
-  const candidate = snapshot.candidates.find((entry) =>
-    entry.benchmarkFingerprint === benchmarkFingerprint && readBenchmarkSourceMetadata(entry)
-  );
-  const source = candidate ? readBenchmarkSourceMetadata(candidate) : null;
-  if (!source?.sourceYaml) {
-    return null;
+): { sourceYaml: string; engineResolveFiles: SurfaceSnapshotFile[] } | null {
+  for (const run of snapshot.runs) {
+    if (run.benchmarkFingerprint !== benchmarkFingerprint) {
+      continue;
+    }
+    const source = readRunSourceInput(run);
+    if (source) {
+      return source;
+    }
   }
-  return loadAuthoredWorkbenchSourceDocument({
-    sourceYaml: source.sourceYaml,
-    path: WORKBENCH_BENCHMARK_FILE,
-    sourceFiles: source.files,
-    cases: localHistoricalBenchmarkFiles(snapshot, benchmarkFingerprint),
-  });
-}
-
-function localHistoricalBenchmarkFiles(
-  _snapshot: LocalArchiveIndex,
-  _benchmarkFingerprint: string,
-): SurfaceSnapshotFile[] {
-  return [];
+  return null;
 }
 
 function inspectableEngineCaseFiles(
@@ -329,21 +380,22 @@ async function readCandidateFilesForInspection(
   );
 }
 
-function readBenchmarkSourceMetadata(candidate: CandidateRecord): {
+function readRunSourceInput(run: RunSummary): {
   sourceYaml: string;
-  files: SurfaceSnapshotFile[];
+  engineResolveFiles: SurfaceSnapshotFile[];
 } | null {
-  const benchmark = asRecord(asRecord(candidate.meta)?.benchmark);
-  const files = Array.isArray(benchmark?.files)
-    ? benchmark.files
-        .map(readSurfaceSnapshotFile)
-        .filter((file): file is SurfaceSnapshotFile => file !== null)
-    : [];
-  const sourceYaml = files.find((file) => file.path === WORKBENCH_BENCHMARK_FILE)?.content ?? null;
-  if (!sourceYaml) {
+  const input = asRecord((run as RunSummary & { input?: unknown }).input);
+  const sourceYaml = typeof input?.sourceYaml === "string" ? input.sourceYaml : null;
+  if (!input || !sourceYaml) {
     return null;
   }
-  return { sourceYaml, files };
+  const engineResolveFiles = Array.isArray(input.engineResolveFiles)
+    ? input.engineResolveFiles
+        .map(readSurfaceSnapshotFile)
+        .filter((file): file is SurfaceSnapshotFile => file !== null)
+        .sort((left, right) => left.path.localeCompare(right.path))
+    : [];
+  return { sourceYaml, engineResolveFiles };
 }
 
 function readSurfaceSnapshotFile(value: unknown): SurfaceSnapshotFile | null {

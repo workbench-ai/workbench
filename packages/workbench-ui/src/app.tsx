@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   ActivityIcon,
   AlertTriangleIcon,
@@ -19,14 +19,10 @@ import {
   DesktopWorkspaceSplit,
 } from "@workbench-ai/cli-web-ui/components/shared/desktop-workspace-split";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
+import { FilesBrowser } from "@workbench-ai/cli-web-ui/components/shared/files-browser";
 import { ProblemState } from "@workbench-ai/cli-web-ui/components/shared/problem-state";
-import {
-  FilesBrowser,
-} from "@workbench-ai/cli-web-ui/components/shared/files-browser";
-import { InspectorDialogShell } from "@workbench-ai/cli-web-ui/components/shared/inspector-dialog-shell";
 import { RouteToolbar } from "@workbench-ai/cli-web-ui/components/shared/route-toolbar";
 import { TextBlockView } from "@workbench-ai/cli-web-ui/components/shared/text-block-view";
-import { ExecutionTraceTimeline } from "@workbench-ai/cli-web-ui/components/shared/execution-trace-timeline";
 import { ViewSwitch } from "@workbench-ai/cli-web-ui/components/shared/view-switch";
 import { WorkbenchBrand } from "@workbench-ai/cli-web-ui/components/shared/workbench-brand";
 import { WorkspaceTopBar } from "@workbench-ai/cli-web-ui/components/shared/workspace-top-bar";
@@ -101,7 +97,6 @@ import {
   SourceYamlSkeleton,
   CandidateManifestSkeleton,
 } from "./components/loading-states";
-import { LineageGraph } from "./components/lineage-graph";
 import { StatusBadge } from "./components/status-badge";
 import { CandidateComparisonFilter, type CandidateFilterOption } from "./components/candidate-comparison-filter";
 import { SurfaceSection } from "./components/surface-section";
@@ -128,16 +123,26 @@ import {
   shortId,
   statusLabel,
 } from "./lib/format";
+import type {
+  WorkbenchFileSurfaceResponse,
+  WorkbenchWorkspaceInitialData,
+} from "./lib/initial-data";
 import {
   buildWorkbenchLocationHref,
-  createEvaluationsRoute,
+  createEvaluationCaseRoute,
+  createEvaluationRoute,
   createCandidateRoute,
   createCandidatesRoute,
+  createEvaluationsRoute,
   createBenchmarkRoute,
   parseWorkbenchLocation,
   parseWorkbenchRoute,
-  type CandidateDialog,
+  withBenchmarkSurface,
+  withEvaluationCaseSurface,
+  type BenchmarkSurfaceRoute,
+  type BenchmarkView,
   type CandidateView,
+  type EvaluationCaseRoute,
   type WorkbenchPersistentSearchParams,
   type WorkbenchRoute,
 } from "./lib/routes";
@@ -174,6 +179,13 @@ const EMPTY_PERSISTENT_SEARCH_PARAMS: WorkbenchPersistentSearchParams = {};
 
 type TraceSessionView = WorkbenchExecutionEvidence["sessions"][number];
 
+const ExecutionTraceTimeline = lazy(async () => ({
+  default: (await import("@workbench-ai/cli-web-ui/components/shared/execution-trace-timeline")).ExecutionTraceTimeline,
+}));
+const LineageGraph = lazy(async () => ({
+  default: (await import("./components/lineage-graph")).LineageGraph,
+}));
+
 interface CandidateRecordState {
   loading: boolean;
   error: string | null;
@@ -197,6 +209,14 @@ interface CandidateFilesState {
   loading: boolean;
   error: string | null;
   files: CandidateWorkspaceFileSummary[];
+}
+
+interface BenchmarkFingerprintOption {
+  fingerprint: string;
+  candidateCount: number;
+  evaluationCount: number;
+  runCount: number;
+  current: boolean;
 }
 
 interface SourceYamlFile {
@@ -228,16 +248,6 @@ interface CandidatePreviewState {
   loading: boolean;
   error: string | null;
   preview: CandidateWorkspaceFilePreview | null;
-}
-
-type BenchmarkSurfaceTab = "processed" | "manifest" | "files";
-
-interface BenchmarkFingerprintOption {
-  fingerprint: string;
-  candidateCount: number;
-  evaluationCount: number;
-  runCount: number;
-  current: boolean;
 }
 
 interface TraceDetailState {
@@ -281,6 +291,7 @@ export interface WorkbenchWorkspaceProps {
   routeBasePath?: string;
   initialPath?: string;
   initialSearch?: string;
+  initialData?: WorkbenchWorkspaceInitialData;
   persistentSearchParams?: WorkbenchPersistentSearchParams;
   headerControls?: ReactNode;
   brandHref?: string;
@@ -291,6 +302,7 @@ export function WorkbenchWorkspace({
   routeBasePath = "/workbench",
   initialPath = "/",
   initialSearch = "",
+  initialData,
   persistentSearchParams = EMPTY_PERSISTENT_SEARCH_PARAMS,
   headerControls,
   brandHref,
@@ -302,52 +314,48 @@ export function WorkbenchWorkspace({
     initialPath,
     initialSearch,
   );
-  const [snapshot, setSnapshot] = useState<BenchmarkSnapshot | null>(null);
-  const [specDocument, setSpecDocument] = useState<AuthoredWorkbenchSourceDocument | null>(null);
-  const [snapshotLoading, setSnapshotLoading] = useState(true);
+  const [snapshot, setSnapshot] = useState<BenchmarkSnapshot | null>(() => initialData?.snapshot ?? null);
+  const [specDocument, setSpecDocument] = useState<AuthoredWorkbenchSourceDocument | null>(() => initialData?.spec ?? null);
+  const [snapshotLoading, setSnapshotLoading] = useState(() => !initialData?.snapshot);
   const [snapshotRefreshing, setSnapshotRefreshing] = useState(false);
-  const [specLoading, setSpecLoading] = useState(true);
+  const [specLoading, setSpecLoading] = useState(() => !initialData?.spec);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [specError, setSpecError] = useState<string | null>(null);
   const [snapshotRefreshKey, setSnapshotRefreshKey] = useState(0);
-  const [recordState, setRecordState] = useState<CandidateRecordState>({
+  const [recordState, setRecordState] = useState<CandidateRecordState>(() => ({
     loading: false,
     error: null,
-    record: null,
-  });
-  const [evaluationRecordsState, setEvaluationRecordsState] = useState<EvaluationRecordsState>({
+    record: initialData?.candidateRecord ?? null,
+  }));
+  const [evaluationRecordsState, setEvaluationRecordsState] = useState<EvaluationRecordsState>(() => ({
     loading: false,
     error: null,
-    records: [],
-  });
-  const [benchmarkSurfaceTab, setBenchmarkSurfaceTab] = useState<BenchmarkSurfaceTab>("processed");
-  const [selectedBenchmarkFingerprint, setSelectedBenchmarkFingerprint] = useState<string | null>(null);
-  const [candidateFilesState, setCandidateFilesState] = useState<CandidateFilesState>({
+    records: initialData?.evaluation ? [initialData.evaluation] : [],
+  }));
+  const [candidateFilesState, setCandidateFilesState] = useState<CandidateFilesState>(() => ({
     loading: false,
     error: null,
-    files: [],
-  });
-  const [candidatePreviewState, setCandidatePreviewState] = useState<CandidatePreviewState>({
+    files: initialData?.candidateFileSurface?.files ?? [],
+  }));
+  const [candidatePreviewState, setCandidatePreviewState] = useState<CandidatePreviewState>(() => ({
     loading: false,
     error: null,
-    preview: null,
-  });
-  const [benchmarkFilesState, setBenchmarkFilesState] = useState<CandidateFilesState>({
+    preview: initialData?.candidateFileSurface?.preview ?? null,
+  }));
+  const [benchmarkFilesState, setBenchmarkFilesState] = useState<CandidateFilesState>(() => ({
     loading: false,
     error: null,
-    files: [],
-  });
-  const [selectedBenchmarkFilePath, setSelectedBenchmarkFilePath] = useState<string | null>(null);
-  const [benchmarkPreviewMode, setBenchmarkPreviewMode] = useState<CandidatePreviewMode>("rendered");
-  const [benchmarkDirectoryPath, setBenchmarkDirectoryPath] = useState<string | null>(null);
-  const [benchmarkPreviewState, setBenchmarkPreviewState] = useState<CandidatePreviewState>({
+    files: initialData?.benchmarkFileSurface?.files ?? [],
+  }));
+  const [benchmarkPreviewState, setBenchmarkPreviewState] = useState<CandidatePreviewState>(() => ({
     loading: false,
     error: null,
-    preview: null,
-  });
+    preview: initialData?.benchmarkFileSurface?.preview ?? null,
+  }));
   const [desktopDetailLeftPercent, setDesktopDetailLeftPercent] = useState(readDesktopDetailLeftPercent);
-  const benchmarkSurfaceFillsBody = benchmarkSurfaceTab === "files";
-  const shouldLoadBenchmarkSourceFiles = benchmarkSurfaceTab === "files";
+  const activeBenchmarkView = route.kind === "not-found" ? "overview" : route.benchmarkView;
+  const benchmarkSurfaceFillsBody = activeBenchmarkView === "files";
+  const shouldLoadBenchmarkSourceFiles = activeBenchmarkView === "files";
   const refreshSnapshot = useCallback(() => {
     setSnapshotRefreshKey((current) => current + 1);
   }, []);
@@ -356,6 +364,12 @@ export function WorkbenchWorkspace({
     [persistentSearchParams, route, routeBasePath],
   );
   const didMountRouteRefresh = useRef(false);
+  const seededSpec = useRef(Boolean(initialData?.spec));
+  const seededBenchmarkFileSurface = useRef(initialData?.benchmarkFileSurface ?? null);
+  const seededCandidateRecord = useRef(initialData?.candidateRecord ?? null);
+  const seededCandidateFileSurface = useRef(initialData?.candidateFileSurface ?? null);
+  const seededEvaluation = useRef(initialData?.evaluation ?? null);
+  const loadedBenchmarkSurfaceKey = useRef<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -431,7 +445,10 @@ export function WorkbenchWorkspace({
       ),
     [orderedCandidateSummaries, snapshot?.activeId],
   );
-  const routeBenchmarkFingerprint = useMemo(
+  const routeBenchmarkFingerprint = route.kind !== "not-found"
+    ? normalizeBenchmarkFingerprint(route.benchmarkFingerprint)
+    : null;
+  const routeCandidateBenchmarkFingerprint = useMemo(
     () =>
       normalizeBenchmarkFingerprint(
         route.kind === "candidate" && route.candidateId
@@ -441,13 +458,22 @@ export function WorkbenchWorkspace({
     [orderedCandidateSummaries, route],
   );
   const preferredBenchmarkFingerprint =
-    routeBenchmarkFingerprint ?? activeBenchmarkFingerprint ?? currentBenchmarkFingerprint;
+    routeBenchmarkFingerprint ??
+    routeCandidateBenchmarkFingerprint ??
+    activeBenchmarkFingerprint ??
+    currentBenchmarkFingerprint ??
+    benchmarkFingerprintOptions[0]?.fingerprint ??
+    null;
   const scopedBenchmarkFingerprint =
     routeBenchmarkFingerprint ??
-    (selectedBenchmarkFingerprint &&
-      benchmarkFingerprintOptions.some((option) => option.fingerprint === selectedBenchmarkFingerprint)
-      ? selectedBenchmarkFingerprint
-      : preferredBenchmarkFingerprint ?? benchmarkFingerprintOptions[0]?.fingerprint ?? null);
+    (preferredBenchmarkFingerprint &&
+      benchmarkFingerprintOptions.some((option) => option.fingerprint === preferredBenchmarkFingerprint)
+      ? preferredBenchmarkFingerprint
+      : benchmarkFingerprintOptions[0]?.fingerprint ?? null);
+  const sourceBenchmarkFingerprint =
+    scopedBenchmarkFingerprint && scopedBenchmarkFingerprint !== currentBenchmarkFingerprint
+      ? scopedBenchmarkFingerprint
+      : null;
   const currentBenchmarkSummaries = useMemo(
     () => filterCandidateSummariesByBenchmark({
       summaries: orderedCandidateSummaries,
@@ -484,13 +510,21 @@ export function WorkbenchWorkspace({
     ])),
     [currentBenchmarkSummaries],
   );
-  const routeEvaluationDialog =
-    (route.kind === "candidate" || route.kind === "evaluations") &&
-    route.dialog?.kind === "evaluation"
-      ? route.dialog
-      : null;
-  const routeEvaluationId = routeEvaluationDialog?.evaluationId ?? null;
-  const routeEvaluationCaseId = routeEvaluationDialog?.caseId ?? null;
+  const routeEvaluation = route.kind === "evaluation" ? route : null;
+  const routeEvaluationId = routeEvaluation?.evaluationId ?? null;
+  const routeEvaluationCaseId = routeEvaluation?.caseId ?? null;
+  const routeEvaluationCaseRoute: EvaluationCaseRoute = {
+    caseTab: routeEvaluationCaseId ? routeEvaluation?.caseTab ?? "score" : "score",
+    caseFilePath: routeEvaluationCaseId && routeEvaluation?.caseTab === "files"
+      ? routeEvaluation.caseFilePath
+      : null,
+    caseDirectoryPath: routeEvaluationCaseId && routeEvaluation?.caseTab === "files"
+      ? routeEvaluation.caseDirectoryPath
+      : null,
+    casePreviewMode: routeEvaluationCaseId && routeEvaluation?.caseTab === "files"
+      ? routeEvaluation.casePreviewMode
+      : "rendered",
+  };
   const routeEvaluationSummary = useMemo(
     () => routeEvaluationId && snapshot
       ? snapshot.evaluations.find((evaluation) => evaluation.id === routeEvaluationId) ?? null
@@ -515,14 +549,10 @@ export function WorkbenchWorkspace({
   const selectedCandidateSummary = selectedCandidateId
     ? currentBenchmarkSummaries.find((summary) => summary.id === selectedCandidateId) ?? null
     : null;
-  const selectedCandidateHasInspectableFiles = Boolean(selectedCandidateSummary);
+  const selectedCandidateHasInspectableFiles = Boolean(selectedCandidateId);
   const orderedCandidateFiles = useMemo(
     () => orderCandidateFiles(candidateFilesState.files),
     [candidateFilesState.files],
-  );
-  const orderedBenchmarkFiles = useMemo(
-    () => orderCandidateFiles(benchmarkFilesState.files),
-    [benchmarkFilesState.files],
   );
   const selectedCandidateFilePath = route.kind === "candidate" && route.view === "files"
     ? resolveSelectedCandidateFilePath({
@@ -536,17 +566,42 @@ export function WorkbenchWorkspace({
   const candidateDirectoryPath = route.kind === "candidate" && route.view === "files"
     ? route.directoryPath
     : null;
+  const orderedBenchmarkFiles = useMemo(
+    () => orderCandidateFiles(benchmarkFilesState.files),
+    [benchmarkFilesState.files],
+  );
+  const selectedBenchmarkFilePath = activeBenchmarkView === "files"
+    ? resolveSelectedCandidateFilePath({
+        routeFilePath: route.kind !== "not-found" ? route.benchmarkFilePath : null,
+        files: orderedBenchmarkFiles,
+      })
+    : null;
+  const benchmarkRouteFilePath = activeBenchmarkView === "files" && route.kind !== "not-found"
+    ? route.benchmarkFilePath
+    : null;
+  const benchmarkPreviewMode = activeBenchmarkView === "files" && route.kind !== "not-found"
+    ? route.benchmarkPreviewMode
+    : "rendered";
+  const benchmarkDirectoryPath = activeBenchmarkView === "files" && route.kind !== "not-found"
+    ? route.benchmarkDirectoryPath
+    : null;
   const prefersCompactWorkspaceLayout = useMediaQuery(COMPACT_WORKSPACE_LAYOUT_MEDIA_QUERY);
 
   useEffect(() => {
+    if (seededSpec.current) {
+      seededSpec.current = false;
+      setSpecLoading(false);
+      setSpecError(null);
+      return;
+    }
     const controller = new AbortController();
     let cancelled = false;
     setSpecLoading(true);
     setSpecError(null);
 
     const params = new URLSearchParams();
-    if (scopedBenchmarkFingerprint) {
-      params.set("fingerprint", scopedBenchmarkFingerprint);
+    if (sourceBenchmarkFingerprint) {
+      params.set("fingerprint", sourceBenchmarkFingerprint);
     }
 
     async function loadSpec() {
@@ -576,7 +631,7 @@ export function WorkbenchWorkspace({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, scopedBenchmarkFingerprint]);
+  }, [apiPath, sourceBenchmarkFingerprint]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -590,15 +645,45 @@ export function WorkbenchWorkspace({
 
   useEffect(() => {
     if (!shouldLoadBenchmarkSourceFiles) {
-      setBenchmarkFilesState((current) =>
-        current.files.length > 0
-          ? { ...current, loading: false, error: null }
-          : {
-              loading: false,
-              error: null,
-              files: [],
-            }
+      loadedBenchmarkSurfaceKey.current = null;
+      return;
+    }
+    const requestPath = benchmarkRouteFilePath;
+    const requestKey = fileSurfaceLoadKey(sourceBenchmarkFingerprint, requestPath, benchmarkPreviewMode);
+    const seededSurface = seededBenchmarkFileSurface.current;
+    if (seededSurface) {
+      const nextFilePath =
+        seededSurface.preview?.path ??
+        (requestPath && seededSurface.files.some((file) => file.path === requestPath)
+          ? requestPath
+          : resolvePreferredBenchmarkFilePath(seededSurface.files));
+      seededBenchmarkFileSurface.current = null;
+      loadedBenchmarkSurfaceKey.current = fileSurfaceLoadKey(
+        sourceBenchmarkFingerprint,
+        nextFilePath,
+        benchmarkPreviewMode,
       );
+      setBenchmarkFilesState({
+        loading: false,
+        error: null,
+        files: seededSurface.files,
+      });
+      setBenchmarkPreviewState({
+        loading: false,
+        error: null,
+        preview: seededSurface.preview,
+      });
+      if (route.kind !== "not-found" && nextFilePath !== route.benchmarkFilePath) {
+        navigate(withBenchmarkSurface(route, {
+          benchmarkView: "files",
+          benchmarkFilePath: nextFilePath,
+          benchmarkDirectoryPath: directoryPathForFile(nextFilePath),
+          benchmarkPreviewMode,
+        }), { replace: true });
+      }
+      return;
+    }
+    if (loadedBenchmarkSurfaceKey.current === requestKey) {
       return;
     }
     const controller = new AbortController();
@@ -608,114 +693,68 @@ export function WorkbenchWorkspace({
       error: null,
       files: [],
     });
-
-    const params = new URLSearchParams();
-    if (scopedBenchmarkFingerprint) {
-      params.set("fingerprint", scopedBenchmarkFingerprint);
-    }
-
-    void requestJson<CandidateWorkspaceFileSummary[]>(
-      apiPath(`/api/source/files${params.size ? `?${params.toString()}` : ""}`),
-      { signal: controller.signal },
-    ).then((files) => {
-      if (cancelled) {
-        return;
-      }
-      startTransition(() => {
-        setBenchmarkFilesState({
-          loading: false,
-          error: null,
-          files,
-        });
-      });
-    }).catch((error: unknown) => {
-      if (cancelled || controller.signal.aborted) {
-        return;
-      }
-      setBenchmarkFilesState({
-        loading: false,
-        error: toMessage(error),
-        files: [],
-      });
-    });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [apiPath, scopedBenchmarkFingerprint, shouldLoadBenchmarkSourceFiles]);
-
-  useEffect(() => {
-    const nextBenchmarkFingerprint =
-      routeBenchmarkFingerprint ??
-      (selectedBenchmarkFingerprint &&
-        benchmarkFingerprintOptions.some((option) => option.fingerprint === selectedBenchmarkFingerprint)
-        ? selectedBenchmarkFingerprint
-        : preferredBenchmarkFingerprint ?? benchmarkFingerprintOptions[0]?.fingerprint ?? null);
-    if (nextBenchmarkFingerprint !== selectedBenchmarkFingerprint) {
-      setSelectedBenchmarkFingerprint(nextBenchmarkFingerprint);
-    }
-  }, [
-    benchmarkFingerprintOptions,
-    preferredBenchmarkFingerprint,
-    routeBenchmarkFingerprint,
-    selectedBenchmarkFingerprint,
-  ]);
-
-  useEffect(() => {
-    const nextFilePath =
-      selectedBenchmarkFilePath && orderedBenchmarkFiles.some((file) => file.path === selectedBenchmarkFilePath)
-        ? selectedBenchmarkFilePath
-        : resolvePreferredBenchmarkFilePath(orderedBenchmarkFiles);
-    if (nextFilePath !== selectedBenchmarkFilePath) {
-      setSelectedBenchmarkFilePath(nextFilePath);
-      setBenchmarkDirectoryPath(directoryPathForFile(nextFilePath));
-    }
-  }, [orderedBenchmarkFiles, selectedBenchmarkFilePath]);
-
-  useEffect(() => {
-    if (!shouldLoadBenchmarkSourceFiles || !selectedBenchmarkFilePath) {
-      setBenchmarkPreviewState({
-        loading: false,
-        error: null,
-        preview: null,
-      });
-      return;
-    }
-
-    const controller = new AbortController();
-    let cancelled = false;
     setBenchmarkPreviewState({
       loading: true,
       error: null,
       preview: null,
     });
-    const params = new URLSearchParams({
-      path: selectedBenchmarkFilePath,
-      view: benchmarkPreviewMode,
-    });
-    if (scopedBenchmarkFingerprint) {
-      params.set("fingerprint", scopedBenchmarkFingerprint);
-    }
 
-    void requestJson<CandidateWorkspaceFilePreview>(
-      apiPath(`/api/source/preview?${params.toString()}`),
+    const params = new URLSearchParams();
+    if (sourceBenchmarkFingerprint) {
+      params.set("fingerprint", sourceBenchmarkFingerprint);
+    }
+    if (requestPath) {
+      params.set("path", requestPath);
+    }
+    params.set("view", benchmarkPreviewMode);
+
+    void requestJson<WorkbenchFileSurfaceResponse>(
+      apiPath(`/api/source/files${params.size ? `?${params.toString()}` : ""}`),
       { signal: controller.signal },
-    ).then((preview) => {
+    ).then((surface) => {
       if (cancelled) {
         return;
       }
+      const nextFilePath =
+        surface.preview?.path ??
+        (requestPath && surface.files.some((file) => file.path === requestPath)
+          ? requestPath
+          : resolvePreferredBenchmarkFilePath(surface.files));
+      loadedBenchmarkSurfaceKey.current = fileSurfaceLoadKey(
+        sourceBenchmarkFingerprint,
+        nextFilePath,
+        benchmarkPreviewMode,
+      );
       startTransition(() => {
+        setBenchmarkFilesState({
+          loading: false,
+          error: null,
+          files: surface.files,
+        });
         setBenchmarkPreviewState({
           loading: false,
           error: null,
-          preview,
+          preview: surface.preview,
         });
+        if (route.kind !== "not-found" && nextFilePath !== route.benchmarkFilePath) {
+          navigate(withBenchmarkSurface(route, {
+            benchmarkView: "files",
+            benchmarkFilePath: nextFilePath,
+            benchmarkDirectoryPath: directoryPathForFile(nextFilePath),
+            benchmarkPreviewMode,
+          }), { replace: true });
+        }
       });
     }).catch((error: unknown) => {
       if (cancelled || controller.signal.aborted) {
         return;
       }
+      loadedBenchmarkSurfaceKey.current = null;
+      setBenchmarkFilesState({
+        loading: false,
+        error: toMessage(error),
+        files: [],
+      });
       setBenchmarkPreviewState({
         loading: false,
         error: toMessage(error),
@@ -727,7 +766,15 @@ export function WorkbenchWorkspace({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, selectedBenchmarkFilePath, benchmarkPreviewMode, scopedBenchmarkFingerprint, shouldLoadBenchmarkSourceFiles]);
+  }, [
+    apiPath,
+    benchmarkRouteFilePath,
+    benchmarkPreviewMode,
+    navigate,
+    route,
+    sourceBenchmarkFingerprint,
+    shouldLoadBenchmarkSourceFiles,
+  ]);
 
   useEffect(() => {
     if (route.kind !== "candidate") {
@@ -737,7 +784,7 @@ export function WorkbenchWorkspace({
       return;
     }
     if (!selectedCandidateId) {
-      navigate(createCandidatesRoute(), { replace: true });
+      navigate(createCandidatesRoute({ benchmark: routeBenchmarkSurface(route) }), { replace: true });
       return;
     }
 
@@ -749,7 +796,7 @@ export function WorkbenchWorkspace({
           filePath: route.view === "files" ? route.filePath : null,
           directoryPath: route.view === "files" ? route.directoryPath : null,
           previewMode: route.view === "files" ? route.previewMode : "rendered",
-          dialog: route.dialog,
+          benchmark: routeBenchmarkSurface(route),
         }),
         { replace: true },
       );
@@ -757,40 +804,6 @@ export function WorkbenchWorkspace({
     }
 
   }, [navigate, orderedCandidateSummaries.length, route, selectedCandidateId, snapshot]);
-
-  useEffect(() => {
-    if (route.kind !== "candidate" || route.view !== "files" || !selectedCandidateId) {
-      return;
-    }
-    if (candidateFilesState.loading || candidateFilesState.error) {
-      return;
-    }
-
-    const nextFilePath = resolveSelectedCandidateFilePath({
-      routeFilePath: route.filePath,
-      files: orderedCandidateFiles,
-    });
-    if (nextFilePath !== route.filePath) {
-      navigate(
-        createCandidateRoute({
-          candidateId: selectedCandidateId,
-          view: "files",
-          filePath: nextFilePath,
-          directoryPath: route.directoryPath ?? directoryPathForFile(nextFilePath),
-          previewMode: route.previewMode,
-          dialog: route.dialog,
-        }),
-        { replace: true },
-      );
-    }
-  }, [
-    candidateFilesState.error,
-    candidateFilesState.loading,
-    navigate,
-    orderedCandidateFiles,
-    route,
-    selectedCandidateId,
-  ]);
 
   useEffect(() => {
     if (route.kind !== "candidate" || route.view !== "manifest" || !selectedCandidateId) {
@@ -803,12 +816,22 @@ export function WorkbenchWorkspace({
     }
 
     let cancelled = false;
+    const candidateId = selectedCandidateId;
+    if (seededCandidateRecord.current?.id === candidateId) {
+      const record = seededCandidateRecord.current;
+      seededCandidateRecord.current = null;
+      setRecordState({
+        loading: false,
+        error: null,
+        record,
+      });
+      return;
+    }
     setRecordState({
       loading: true,
       error: null,
       record: null,
     });
-    const candidateId = selectedCandidateId;
 
     async function loadRecord() {
       try {
@@ -853,6 +876,16 @@ export function WorkbenchWorkspace({
     }
 
     let cancelled = false;
+    const seeded = seededEvaluation.current;
+    if (seeded && evaluationIdsToLoad.length === 1 && evaluationIdsToLoad[0] === seeded.id) {
+      seededEvaluation.current = null;
+      setEvaluationRecordsState({
+        loading: false,
+        error: null,
+        records: [seeded],
+      });
+      return;
+    }
     setEvaluationRecordsState((current) => ({
       loading: current.records.length === 0,
       error: null,
@@ -907,57 +940,6 @@ export function WorkbenchWorkspace({
         error: null,
         files: [],
       });
-      return;
-    }
-
-    let cancelled = false;
-    setCandidateFilesState({
-      loading: true,
-      error: null,
-      files: [],
-    });
-    const candidateId = selectedCandidateId;
-
-    async function loadFiles() {
-      try {
-        const files = await requestJson<CandidateWorkspaceFileSummary[]>(
-          apiPath(`/api/candidate/files?id=${encodeURIComponent(candidateId)}`),
-        );
-        if (cancelled) {
-          return;
-        }
-        startTransition(() => {
-          setCandidateFilesState({
-            loading: false,
-            error: null,
-            files,
-          });
-        });
-      } catch (error) {
-        if (!cancelled) {
-          setCandidateFilesState({
-            loading: false,
-            error: toMessage(error),
-            files: [],
-          });
-        }
-      }
-    }
-
-    void loadFiles();
-    return () => {
-      cancelled = true;
-    };
-  }, [apiPath, route, selectedCandidateHasInspectableFiles, selectedCandidateId]);
-
-  useEffect(() => {
-    if (
-      route.kind !== "candidate" ||
-      route.view !== "files" ||
-      !selectedCandidateId ||
-      !selectedCandidateHasInspectableFiles ||
-      !selectedCandidateFilePath
-    ) {
       setCandidatePreviewState({
         loading: false,
         error: null,
@@ -967,36 +949,100 @@ export function WorkbenchWorkspace({
     }
 
     let cancelled = false;
+    const requestPath = route.filePath;
+    const seededSurface = seededCandidateFileSurface.current;
+    if (seededSurface?.candidateId === selectedCandidateId) {
+      seededCandidateFileSurface.current = null;
+      const nextFilePath =
+        seededSurface.preview?.path ??
+        resolveSelectedCandidateFilePath({
+          routeFilePath: requestPath,
+          files: orderCandidateFiles(seededSurface.files),
+        });
+      setCandidateFilesState({
+        loading: false,
+        error: null,
+        files: seededSurface.files,
+      });
+      setCandidatePreviewState({
+        loading: false,
+        error: null,
+        preview: seededSurface.preview,
+      });
+      if (nextFilePath !== route.filePath) {
+        navigateToCandidate({
+          candidateId: selectedCandidateId,
+          view: "files",
+          filePath: nextFilePath,
+          directoryPath: directoryPathForFile(nextFilePath),
+          previewMode: candidatePreviewMode,
+          replace: true,
+        });
+      }
+      return;
+    }
+    setCandidateFilesState({
+      loading: true,
+      error: null,
+      files: [],
+    });
     setCandidatePreviewState({
       loading: true,
       error: null,
       preview: null,
     });
     const candidateId = selectedCandidateId;
-    const filePath = selectedCandidateFilePath;
 
-    async function loadPreview() {
+    async function loadFiles() {
       try {
         const params = new URLSearchParams({
           id: candidateId,
-          path: filePath,
           view: candidatePreviewMode,
         });
-        const preview = await requestJson<CandidateWorkspaceFilePreview>(
-          apiPath(`/api/candidate/preview?${params.toString()}`),
+        if (requestPath) {
+          params.set("path", requestPath);
+        }
+        const surface = await requestJson<WorkbenchFileSurfaceResponse>(
+          apiPath(`/api/candidate/files?${params.toString()}`),
         );
         if (cancelled) {
           return;
         }
+        const nextFilePath =
+          surface.preview?.path ??
+          resolveSelectedCandidateFilePath({
+            routeFilePath: requestPath,
+            files: orderCandidateFiles(surface.files),
+          });
         startTransition(() => {
+          setCandidateFilesState({
+            loading: false,
+            error: null,
+            files: surface.files,
+          });
           setCandidatePreviewState({
             loading: false,
             error: null,
-            preview,
+            preview: surface.preview,
           });
+          if (nextFilePath !== requestPath) {
+            navigateToCandidate({
+              candidateId,
+              view: "files",
+              filePath: nextFilePath,
+              directoryPath: directoryPathForFile(nextFilePath),
+              previewMode: candidatePreviewMode,
+              replace: true,
+            });
+          }
         });
       } catch (error) {
         if (!cancelled) {
+          setCandidateFilesState({
+            loading: false,
+            error: toMessage(error),
+            files: [],
+          });
           setCandidatePreviewState({
             loading: false,
             error: toMessage(error),
@@ -1006,11 +1052,17 @@ export function WorkbenchWorkspace({
       }
     }
 
-    void loadPreview();
+    void loadFiles();
     return () => {
       cancelled = true;
     };
-  }, [apiPath, candidatePreviewMode, route, selectedCandidateFilePath, selectedCandidateHasInspectableFiles, selectedCandidateId]);
+  }, [
+    apiPath,
+    candidatePreviewMode,
+    route,
+    selectedCandidateHasInspectableFiles,
+    selectedCandidateId,
+  ]);
 
   const routeEvaluationScorecard = routeEvaluationId
     ? evaluationRecordsState.records.find((record) => record.id === routeEvaluationId) ?? null
@@ -1024,6 +1076,7 @@ export function WorkbenchWorkspace({
     routeEvaluationCaseId ? routeEvaluationCandidateId : null,
     routeEvaluationCaseId ? (routeEvaluationSummary?.runId ?? routeEvaluationScorecard?.runId ?? null) : null,
     routeEvaluationCaseId,
+    initialData?.caseReview ?? null,
   );
 
   function navigateToCandidate(args: {
@@ -1032,7 +1085,6 @@ export function WorkbenchWorkspace({
     filePath?: string | null;
     directoryPath?: string | null;
     previewMode?: CandidatePreviewMode;
-    dialog?: CandidateDialog | null;
     replace?: boolean;
   }) {
     const view = args.view ?? (route.kind === "candidate" ? route.view : "overview");
@@ -1047,7 +1099,7 @@ export function WorkbenchWorkspace({
         previewMode: view === "files"
           ? args.previewMode ?? (route.kind === "candidate" && route.view === "files" ? route.previewMode : "rendered")
           : "rendered",
-        dialog: args.dialog ?? (route.kind === "candidate" ? route.dialog : null),
+        benchmark: routeBenchmarkSurface(route),
       }),
       args.replace ? { replace: true } : undefined,
     );
@@ -1060,26 +1112,12 @@ export function WorkbenchWorkspace({
       filePath: route.kind === "candidate" && route.view === "files" ? route.filePath : null,
       directoryPath: route.kind === "candidate" && route.view === "files" ? route.directoryPath : null,
       previewMode: route.kind === "candidate" && route.view === "files" ? route.previewMode : "rendered",
-      dialog: null,
-    });
-  }
-
-  function createCurrentCandidateRoute(dialog: CandidateDialog | null): WorkbenchRoute | null {
-    if (route.kind !== "candidate" || !selectedCandidateId) {
-      return null;
-    }
-    return createCandidateRoute({
-      candidateId: selectedCandidateId,
-      view: route.view,
-      filePath: route.view === "files" ? route.filePath : null,
-      directoryPath: route.view === "files" ? route.directoryPath : null,
-      previewMode: route.view === "files" ? route.previewMode : "rendered",
-      dialog,
     });
   }
 
   const routeHref = (next: WorkbenchRoute) => buildWorkbenchLocationHref(next, routeBasePath, persistentSearchParams);
-  const benchmarkHref = routeHref(createBenchmarkRoute());
+  const benchmarkRouteState = routeBenchmarkSurface(route);
+  const benchmarkHref = routeHref(createBenchmarkRoute(benchmarkRouteState));
 
   const objectSurface = (() => {
     if (route.kind === "not-found") {
@@ -1169,12 +1207,10 @@ export function WorkbenchWorkspace({
             ? runtimeState.candidateStateById.get(selectedCandidateId) ?? null
             : null}
           evaluations={currentBenchmarkEvaluations}
-          onOpenEvaluation={(evaluationId) => {
-            const next = createCurrentCandidateRoute({ kind: "evaluation", evaluationId });
-            if (next) {
-              navigate(next);
-            }
-          }}
+          onOpenEvaluation={(evaluationId) => navigate(createEvaluationRoute({
+            evaluationId,
+            benchmark: routeBenchmarkSurface(route),
+          }))}
         />
       );
     }
@@ -1188,9 +1224,38 @@ export function WorkbenchWorkspace({
             evaluations={currentBenchmarkEvaluations}
             rows={currentBenchmarkEvaluationRows}
             candidateLabelById={currentBenchmarkCandidateLabelById}
-            onSelectEvaluation={(evaluationId) => navigate(createEvaluationsRoute({
-              dialog: { kind: "evaluation", evaluationId },
+            onSelectEvaluation={(evaluationId) => navigate(createEvaluationRoute({
+              evaluationId,
+              benchmark: routeBenchmarkSurface(route),
             }))}
+          />
+        </ScrollableObjectSurface>
+      );
+    }
+
+    if (route.kind === "evaluation") {
+      return (
+        <ScrollableObjectSurface>
+          <EvaluationDetailSurface
+            evaluationId={route.evaluationId}
+            evaluationSummary={routeEvaluationSummary}
+            state={evaluationRecordsState}
+            selectedCaseId={route.caseId}
+            caseRoute={routeEvaluationCaseRoute}
+            caseReviewState={evaluationCaseReviewState}
+            onSelectCase={(caseId) => navigate(caseId
+              ? createEvaluationCaseRoute({
+                  evaluationId: route.evaluationId,
+                  caseId,
+                  benchmark: routeBenchmarkSurface(route),
+                })
+              : createEvaluationRoute({
+                  evaluationId: route.evaluationId,
+                  benchmark: routeBenchmarkSurface(route),
+                }))}
+            onCaseRouteChange={(caseRoute, options) =>
+              navigate(withEvaluationCaseSurface(route, caseRoute), options)}
+            apiPath={apiPath}
           />
         </ScrollableObjectSurface>
       );
@@ -1207,7 +1272,7 @@ export function WorkbenchWorkspace({
         candidateStateById={runtimeState.candidateStateById}
         selectedCandidateId={selectedCandidateId}
         view={route.kind === "candidates" ? route.view : "archive"}
-        onViewChange={(view) => navigate(createCandidatesRoute({ view }))}
+        onViewChange={(view) => navigate(createCandidatesRoute({ view, benchmark: routeBenchmarkSurface(route) }))}
         onSelectCandidate={handleSelectCandidate}
       />
     );
@@ -1231,7 +1296,9 @@ export function WorkbenchWorkspace({
       aria-label="Collapse details pane"
       title="Collapse details pane"
       data-testid="object-pane-collapse"
-      onClick={() => navigate(createBenchmarkRoute())}
+      onClick={() => route.kind !== "not-found"
+        ? navigate(createBenchmarkRoute(routeBenchmarkSurface(route)))
+        : navigate(createBenchmarkRoute())}
     >
       <PanelRightCloseIcon />
       <span className="sr-only">Collapse details pane</span>
@@ -1240,11 +1307,12 @@ export function WorkbenchWorkspace({
 
   const benchmarkSurface = (
     <BenchmarkSurface
-      activeTab={benchmarkSurfaceTab}
-      onActiveTabChange={setBenchmarkSurfaceTab}
-      selectedBenchmarkFingerprint={scopedBenchmarkFingerprint}
-      currentBenchmarkFingerprint={currentBenchmarkFingerprint}
-      benchmarkFingerprintOptions={benchmarkFingerprintOptions}
+      activeTab={activeBenchmarkView}
+      onActiveTabChange={(benchmarkView) => {
+        if (route.kind !== "not-found") {
+          navigate(withBenchmarkSurface(route, { benchmarkView }));
+        }
+      }}
       specDocument={specDocument}
       specError={specError}
       sourceFilesState={benchmarkFilesState}
@@ -1253,12 +1321,45 @@ export function WorkbenchWorkspace({
       sourceDirectoryPath={benchmarkDirectoryPath}
       sourcePreviewState={benchmarkPreviewState}
       onSelectSourceFile={(filePath) => {
-        setSelectedBenchmarkFilePath(filePath);
-        setBenchmarkDirectoryPath(directoryPathForFile(filePath));
+        if (route.kind !== "not-found") {
+          navigate(withBenchmarkSurface(route, {
+            benchmarkView: "files",
+            benchmarkFilePath: filePath,
+            benchmarkDirectoryPath: directoryPathForFile(filePath),
+            benchmarkPreviewMode,
+          }));
+        }
       }}
-      onSourceDirectoryChange={setBenchmarkDirectoryPath}
-      onSourcePreviewModeChange={setBenchmarkPreviewMode}
-      onBenchmarkFingerprintChange={setSelectedBenchmarkFingerprint}
+      onSourceDirectoryChange={(directoryPath) => {
+        if (route.kind !== "not-found") {
+          navigate(withBenchmarkSurface(route, {
+            benchmarkView: "files",
+            benchmarkFilePath: selectedBenchmarkFilePath,
+            benchmarkDirectoryPath: directoryPath,
+            benchmarkPreviewMode,
+          }));
+        }
+      }}
+      onSourcePreviewModeChange={(benchmarkPreviewMode) => {
+        if (route.kind !== "not-found") {
+          navigate(withBenchmarkSurface(route, {
+            benchmarkView: "files",
+            benchmarkFilePath: selectedBenchmarkFilePath,
+            benchmarkDirectoryPath: benchmarkDirectoryPath,
+            benchmarkPreviewMode,
+          }));
+        }
+      }}
+      selectedBenchmarkFingerprint={scopedBenchmarkFingerprint}
+      currentBenchmarkFingerprint={currentBenchmarkFingerprint}
+      benchmarkFingerprintOptions={benchmarkFingerprintOptions}
+      onBenchmarkFingerprintChange={(fingerprint) => {
+        if (route.kind !== "not-found") {
+          navigate(withBenchmarkSurface(route, {
+            benchmarkFingerprint: fingerprint === currentBenchmarkFingerprint ? null : fingerprint,
+          }));
+        }
+      }}
       loading={specLoading}
       actions={objectPaneCollapseAction}
     />
@@ -1279,7 +1380,7 @@ export function WorkbenchWorkspace({
                   return;
                 }
                 event.preventDefault();
-                navigate(createBenchmarkRoute());
+                navigate(createBenchmarkRoute(benchmarkRouteState));
               }}
             >
               <WorkbenchBrand />
@@ -1352,7 +1453,8 @@ export function WorkbenchWorkspace({
   const objectSurfaceFillsBody =
     (route.kind === "candidate" && route.view === "files") ||
     route.kind === "candidates" ||
-    route.kind === "evaluations";
+    route.kind === "evaluations" ||
+    route.kind === "evaluation";
 
   const objectPane = (
     <WorkspacePane
@@ -1379,60 +1481,6 @@ export function WorkbenchWorkspace({
       {objectSurface}
     </WorkspacePane>
   );
-  const candidateContextDialog = route.kind === "candidate" ? route.dialog : null;
-  const evaluationsContextDialog = route.kind === "evaluations" ? route.dialog : null;
-  const contextualDialogs = (
-    <>
-      {candidateContextDialog?.kind === "evaluation" ? (
-        <EvaluationDetailDialog
-          open
-          evaluationId={candidateContextDialog.evaluationId}
-          evaluationSummary={routeEvaluationSummary}
-          state={evaluationRecordsState}
-          selectedCaseId={candidateContextDialog.caseId ?? null}
-          caseReviewState={evaluationCaseReviewState}
-          onClose={() => {
-            const next = createCurrentCandidateRoute(null);
-            if (next) {
-              navigate(next);
-            }
-          }}
-          onSelectCase={(caseId) => {
-            const next = createCurrentCandidateRoute({
-              kind: "evaluation",
-              evaluationId: candidateContextDialog.evaluationId,
-              caseId,
-            });
-            if (next) {
-              navigate(next);
-            }
-          }}
-          apiPath={apiPath}
-        />
-      ) : null}
-
-      {evaluationsContextDialog?.kind === "evaluation" ? (
-        <EvaluationDetailDialog
-          open
-          evaluationId={evaluationsContextDialog.evaluationId}
-          evaluationSummary={routeEvaluationSummary}
-          state={evaluationRecordsState}
-          selectedCaseId={evaluationsContextDialog.caseId ?? null}
-          caseReviewState={evaluationCaseReviewState}
-          onClose={() => navigate(createEvaluationsRoute())}
-          onSelectCase={(caseId) => navigate(createEvaluationsRoute({
-            dialog: {
-              kind: "evaluation",
-              evaluationId: evaluationsContextDialog.evaluationId,
-              caseId,
-            },
-          }))}
-          apiPath={apiPath}
-        />
-      ) : null}
-    </>
-  );
-
   return (
     <WorkspaceRoot
       mainId="main-content"
@@ -1455,8 +1503,6 @@ export function WorkbenchWorkspace({
           separatorLabel="Resize details pane"
         />
       )}
-
-      {contextualDialogs}
     </WorkspaceRoot>
   );
 }
@@ -1510,7 +1556,7 @@ function useWorkbenchRoute(
     };
   }, [persistentSearchParams, routeBasePath]);
 
-  function navigate(next: WorkbenchRoute, options: { replace?: boolean } = {}) {
+  const navigate = useCallback((next: WorkbenchRoute, options: { replace?: boolean } = {}) => {
     const href = buildWorkbenchLocationHref(next, routeBasePath, persistentSearchParams);
     const current = `${window.location.pathname}${window.location.search}`;
     if (href !== current) {
@@ -1520,7 +1566,7 @@ function useWorkbenchRoute(
       pathname: window.location.pathname,
       search: window.location.search,
     }, routeBasePath));
-  }
+  }, [persistentSearchParams, routeBasePath]);
 
   return [route, navigate];
 }
@@ -1554,19 +1600,20 @@ function WorkbenchBenchmarkNavigation({
   const value =
     route.kind === "candidates" || route.kind === "candidate"
       ? "candidates"
-      : route.kind === "evaluations"
+      : route.kind === "evaluations" || route.kind === "evaluation"
           ? "evaluations"
           : null;
+  const benchmark = routeBenchmarkSurface(route);
   const items = [
     {
       value: "candidates",
       label: "Candidates",
-      route: createCandidatesRoute(),
+      route: createCandidatesRoute({ benchmark }),
     },
     {
       value: "evaluations",
       label: "Evaluations",
-      route: createEvaluationsRoute(),
+      route: createEvaluationsRoute({ benchmark }),
     },
   ] as const;
 
@@ -1574,7 +1621,7 @@ function WorkbenchBenchmarkNavigation({
     <nav aria-label="Benchmark navigation" className="flex min-w-0 items-center gap-1 overflow-x-auto md:justify-end">
       {items.map((item) => {
         const active = item.value === value;
-        const targetRoute = active ? createBenchmarkRoute() : item.route;
+        const targetRoute = active ? createBenchmarkRoute(benchmark) : item.route;
         return (
           <Button
             key={item.value}
@@ -1608,6 +1655,9 @@ function objectPaneTitle(args: {
   }
   if (args.route.kind === "evaluations") {
     return "Evaluations";
+  }
+  if (args.route.kind === "evaluation") {
+    return args.route.caseId ? "Evaluation Case" : "Evaluation";
   }
   if (args.route.kind === "not-found") {
     return "Not found";
@@ -1648,16 +1698,20 @@ function WorkbenchBreadcrumbs({
     ? selectedCandidateSummary
       ? formatCandidateName(selectedCandidateSummary)
       : "Candidate"
+    : route.kind === "evaluation"
+      ? route.caseId ?? "Evaluation"
     : route.kind === "evaluations"
       ? "Evaluations"
       : route.kind === "not-found"
         ? "Not found"
         : "Candidates";
   const parentRoute =
-    route.kind === "candidate" ? createCandidatesRoute() :
+    route.kind === "candidate" ? createCandidatesRoute({ benchmark: routeBenchmarkSurface(route) }) :
+    route.kind === "evaluation" ? createEvaluationsRoute({ benchmark: routeBenchmarkSurface(route) }) :
     null;
   const parentLabel =
     route.kind === "candidate" ? "Candidates" :
+    route.kind === "evaluation" ? "Evaluations" :
     null;
 
   return (
@@ -1665,10 +1719,10 @@ function WorkbenchBreadcrumbs({
       <BreadcrumbList className="min-w-0 flex-nowrap">
         <BreadcrumbItem>
           <BreadcrumbLink
-            href={routeHref(createBenchmarkRoute())}
+            href={routeHref(createBenchmarkRoute(routeBenchmarkSurface(route)))}
             onClick={(event) => {
               event.preventDefault();
-              onNavigate(createBenchmarkRoute());
+              onNavigate(createBenchmarkRoute(routeBenchmarkSurface(route)));
             }}
           >
             Benchmark
@@ -1796,6 +1850,10 @@ function ObjectPaneBadges({
     return snapshot ? <Badge variant="outline">{formatCount(evaluationCount, "evaluation")}</Badge> : null;
   }
 
+  if (route.kind === "evaluation") {
+    return <Badge variant="outline">{shortId(route.evaluationId) ?? "evaluation"}</Badge>;
+  }
+
   if (route.kind === "benchmark") {
     return snapshot ? <Badge variant="outline">{formatCount(candidateCount, "candidate")}</Badge> : null;
   }
@@ -1913,8 +1971,8 @@ function BenchmarkSurface({
   loading,
   actions,
 }: {
-  activeTab: BenchmarkSurfaceTab;
-  onActiveTabChange: (tab: BenchmarkSurfaceTab) => void;
+  activeTab: BenchmarkView;
+  onActiveTabChange: (tab: BenchmarkView) => void;
   selectedBenchmarkFingerprint: string | null;
   currentBenchmarkFingerprint: string | null;
   benchmarkFingerprintOptions: BenchmarkFingerprintOption[];
@@ -2000,14 +2058,14 @@ function BenchmarkSurface({
 
       <Tabs
         value={activeTab}
-        onValueChange={(value) => onActiveTabChange(value as BenchmarkSurfaceTab)}
+        onValueChange={(value) => onActiveTabChange(value as BenchmarkView)}
         className={cn(
           "min-w-0 gap-5",
           activeTab === "files" ? "min-h-0 flex-1" : undefined,
         )}
       >
         <TabsList variant="line" aria-label="Benchmark views">
-          <TabsTrigger value="processed">
+          <TabsTrigger value="overview">
             <InfoIcon data-icon="inline-start" />
             Overview
           </TabsTrigger>
@@ -2021,10 +2079,10 @@ function BenchmarkSurface({
           </TabsTrigger>
         </TabsList>
         <TabsContent
-          value="processed"
+          value="overview"
           className={cn(
             "min-w-0",
-            activeTab === "processed" ? undefined : "min-h-0 overflow-y-auto",
+            activeTab === "overview" ? undefined : "min-h-0 overflow-y-auto",
           )}
         >
           <div className="grid min-w-0 gap-6">
@@ -2439,8 +2497,8 @@ function BenchmarkFingerprintSelector({
             {options.map((option) => (
               <SelectItem key={option.fingerprint} value={option.fingerprint}>
                 {shortDigest(option.fingerprint)}
-                {option.fingerprint === currentBenchmarkFingerprint ? " · current" : ""}
-                {" · "}
+                {option.fingerprint === currentBenchmarkFingerprint ? " - current" : ""}
+                {" - "}
                 {formatCount(option.candidateCount, "candidate")}
               </SelectItem>
             ))}
@@ -2691,11 +2749,13 @@ function CandidatesLineageSurface({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <LineageGraph
-        snapshot={snapshot}
-        selectedCandidateId={selectedCandidateId}
-        onSelectCandidate={onSelectCandidate}
-      />
+      <Suspense fallback={<LineageSurfaceSkeleton />}>
+        <LineageGraph
+          snapshot={snapshot}
+          selectedCandidateId={selectedCandidateId}
+          onSelectCandidate={onSelectCandidate}
+        />
+      </Suspense>
     </div>
   );
 }
@@ -2732,17 +2792,18 @@ function CandidateYamlSurface({
   selectedCandidateSummary: CandidateSummary | null;
   recordState: CandidateRecordState;
 }) {
+  const hasCandidateRequest = recordState.loading || recordState.record || recordState.error;
   if (snapshotError) {
     return (
       <PaneErrorState message={snapshotError} />
     );
   }
 
-  if (snapshotLoading) {
+  if (snapshotLoading && !hasCandidateRequest) {
     return <CandidateManifestSkeleton />;
   }
 
-  if (!selectedCandidateSummary) {
+  if (!selectedCandidateSummary && !hasCandidateRequest) {
     return (
       <EmptyState
         icon={FileCode2Icon}
@@ -2792,6 +2853,13 @@ function CandidateFilesSurface({
   onCandidatePreviewModeChange: (mode: CandidatePreviewMode) => void;
 }) {
   const prefersStackedFilesLayout = useMediaQuery("(max-width: 900px)");
+  const hasCandidateFileRequest =
+    candidateFilesState.loading ||
+    candidateFilesState.files.length > 0 ||
+    Boolean(candidateFilesState.error) ||
+    candidatePreviewState.loading ||
+    Boolean(candidatePreviewState.preview) ||
+    Boolean(candidatePreviewState.error);
 
   if (snapshotError) {
     return (
@@ -2799,11 +2867,11 @@ function CandidateFilesSurface({
     );
   }
 
-  if (snapshotLoading) {
+  if (snapshotLoading && !hasCandidateFileRequest) {
     return <CandidateFilesSurfaceSkeleton />;
   }
 
-  if (!selectedCandidateSummary) {
+  if (!selectedCandidateSummary && !hasCandidateFileRequest) {
     return (
       <EmptyState
         icon={FolderOpenIcon}
@@ -2824,10 +2892,12 @@ function CandidateFilesSurface({
       description="Files that make up this candidate version."
       className="flex min-h-0 flex-1 flex-col"
     >
-      <div className="flex flex-wrap gap-2">
-        <StatusBadge status={selectedCandidateSummary.status} active={false} />
-        <Badge variant="outline">digest {shortFingerprint(selectedCandidateSummary.candidateFingerprint)}</Badge>
-      </div>
+      {selectedCandidateSummary ? (
+        <div className="flex flex-wrap gap-2">
+          <StatusBadge status={selectedCandidateSummary.status} active={false} />
+          <Badge variant="outline">digest {shortFingerprint(selectedCandidateSummary.candidateFingerprint)}</Badge>
+        </div>
+      ) : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <FilesBrowser
           changes={orderCandidateFiles(candidateFilesState.files)}
@@ -2938,12 +3008,24 @@ function useCaseReview(
   candidateId: string | null,
   runId: string | null,
   caseId: string | null,
+  initialReview: WorkbenchWorkspaceInitialData["caseReview"] = null,
 ): CaseReviewDetailState {
-  const [state, setState] = useState<CaseReviewDetailState>({
-    loading: false,
-    error: null,
-    review: null,
-    requestKey: null,
+  const seededReview = useRef(initialReview);
+  const [state, setState] = useState<CaseReviewDetailState>(() => {
+    const seeded = seededReview.current;
+    return seeded
+      ? {
+          loading: false,
+          error: null,
+          review: seeded.review,
+          requestKey: caseReviewRequestKey(seeded.candidateId, seeded.runId, seeded.caseId),
+        }
+      : {
+          loading: false,
+          error: null,
+          review: null,
+          requestKey: null,
+        };
   });
 
   useEffect(() => {
@@ -2962,7 +3044,23 @@ function useCaseReview(
     const nextCandidateId = candidateId;
     const nextRunId = runId;
     const nextCaseId = caseId;
-    const nextRequestKey = `${nextCandidateId}\0${nextRunId}\0${nextCaseId}`;
+    const nextRequestKey = caseReviewRequestKey(nextCandidateId, nextRunId, nextCaseId);
+    const seeded = seededReview.current;
+    if (
+      seeded &&
+      seeded.candidateId === nextCandidateId &&
+      seeded.runId === nextRunId &&
+      seeded.caseId === nextCaseId
+    ) {
+      seededReview.current = null;
+      setState({
+        loading: false,
+        error: null,
+        review: seeded.review,
+        requestKey: nextRequestKey,
+      });
+      return;
+    }
     setState((current) => ({
       loading: true,
       error: null,
@@ -3010,6 +3108,10 @@ function useCaseReview(
   }, [apiPath, caseId, runId, candidateId]);
 
   return state;
+}
+
+function caseReviewRequestKey(candidateId: string, runId: string, caseId: string): string {
+  return `${candidateId}\0${runId}\0${caseId}`;
 }
 
 function CandidateOverviewSurface({
@@ -3373,7 +3475,9 @@ function TraceTimelineAccordionSection({
       contentClassName="h-auto pb-3"
       bordered
     >
-      <ExecutionTraceTimeline executionTimeline={timeline} layout="content" />
+      <Suspense fallback={<ExecutionTraceSkeleton />}>
+        <ExecutionTraceTimeline executionTimeline={timeline} layout="content" />
+      </Suspense>
     </DetailAccordionSection>
   );
 }
@@ -3382,84 +3486,25 @@ function isKeyboardActivation(event: KeyboardEvent): boolean {
   return event.key === "Enter" || event.key === " ";
 }
 
-function EvaluationDetailDialog({
-  open,
-  evaluationId,
-  evaluationSummary,
-  state,
-  selectedCaseId,
-  caseReviewState,
-  onClose,
-  onSelectCase,
-  apiPath,
-}: {
-  open: boolean;
-  evaluationId: string;
-  evaluationSummary: EvaluationSummary | null;
-  state: EvaluationRecordsState;
-  selectedCaseId: string | null;
-  caseReviewState: CaseReviewDetailState;
-  onClose: () => void;
-  onSelectCase: (caseId: string | null) => void;
-  apiPath: (pathname: string) => string;
-}) {
-  const scorecard = evaluationId
-    ? state.records.find((record) => record.id === evaluationId) ?? null
-    : null;
-  const summary = scorecard ?? evaluationSummary;
-  const score = summary ? readEvaluationScore(summary) : null;
-  const title = "Evaluation";
-  const description = summary
-    ? [
-        statusLabel(summary.status),
-        score !== null ? `score ${formatMetricValue(score)}` : null,
-        `${summary.completedSampleCount}/${summary.sampleCount} samples`,
-      ].filter((part): part is string => Boolean(part)).join(" · ")
-    : "Evaluation details";
-
-  return (
-    <InspectorDialogShell
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) {
-          onClose();
-        }
-      }}
-      title={title}
-      description={description}
-      className="h-[min(94vh,calc(100dvh-1rem))]"
-      bodyClassName="overflow-y-auto"
-      testId="context-evaluation-dialog"
-      bodyTestId="context-evaluation-dialog-body"
-    >
-      <EvaluationDetailSurface
-        evaluationId={evaluationId}
-        evaluationSummary={evaluationSummary}
-        state={state}
-        selectedCaseId={selectedCaseId}
-        caseReviewState={caseReviewState}
-        onSelectCase={onSelectCase}
-        apiPath={apiPath}
-      />
-    </InspectorDialogShell>
-  );
-}
-
 function EvaluationDetailSurface({
   evaluationId,
   evaluationSummary,
   state,
   selectedCaseId,
+  caseRoute,
   caseReviewState,
   onSelectCase,
+  onCaseRouteChange,
   apiPath,
 }: {
   evaluationId: string;
   evaluationSummary: EvaluationSummary | null;
   state: EvaluationRecordsState;
   selectedCaseId: string | null;
+  caseRoute: EvaluationCaseRoute;
   caseReviewState: CaseReviewDetailState;
   onSelectCase: (caseId: string | null) => void;
+  onCaseRouteChange: (caseRoute: Partial<EvaluationCaseRoute>, options?: { replace?: boolean }) => void;
   apiPath: (pathname: string) => string;
 }) {
   const scorecard = evaluationId
@@ -3525,7 +3570,9 @@ function EvaluationDetailSurface({
                 <EvaluationCaseDetailSurface
                   apiPath={apiPath}
                   caseId={selectedCaseId}
+                  caseRoute={caseRoute}
                   state={caseReviewState}
+                  onCaseRouteChange={onCaseRouteChange}
                 />
               ) : null
             }
@@ -3618,11 +3665,15 @@ function EvaluationCasesTable({
 function EvaluationCaseDetailSurface({
   apiPath,
   caseId,
+  caseRoute,
   state,
+  onCaseRouteChange,
 }: {
   apiPath: (pathname: string) => string;
   caseId: string;
+  caseRoute: EvaluationCaseRoute;
   state: CaseReviewDetailState;
+  onCaseRouteChange: (caseRoute: Partial<EvaluationCaseRoute>, options?: { replace?: boolean }) => void;
 }) {
   const review = state.review;
   const nowMs = Date.now();
@@ -3676,7 +3727,12 @@ function EvaluationCaseDetailSurface({
     <>
       {caseSummary}
 
-      <Tabs key={caseId} defaultValue="score" className="min-w-0">
+      <Tabs
+        key={caseId}
+        value={caseRoute.caseTab}
+        onValueChange={(value) => onCaseRouteChange({ caseTab: value as EvaluationCaseRoute["caseTab"] })}
+        className="min-w-0"
+      >
         <TabsList variant="line">
           <TabsTrigger value="score">Score</TabsTrigger>
           <TabsTrigger value="attempts">Attempts</TabsTrigger>
@@ -3751,7 +3807,12 @@ function EvaluationCaseDetailSurface({
           value="files"
           className="flex-none h-[clamp(28rem,calc(100dvh-28rem),42rem)] overflow-hidden pt-2"
         >
-          <ExecutionFilesSurface apiPath={apiPath} review={review} />
+          <ExecutionFilesSurface
+            apiPath={apiPath}
+            review={review}
+            caseRoute={caseRoute}
+            onCaseRouteChange={onCaseRouteChange}
+          />
         </TabsContent>
       </Tabs>
     </>
@@ -4044,35 +4105,41 @@ function formatLabelText(value: string): string {
 function ExecutionFilesSurface({
   apiPath,
   review,
+  caseRoute,
+  onCaseRouteChange,
 }: {
   apiPath: (pathname: string) => string;
   review: CandidateCaseReview;
+  caseRoute: EvaluationCaseRoute;
+  onCaseRouteChange: (caseRoute: Partial<EvaluationCaseRoute>, options?: { replace?: boolean }) => void;
 }) {
   const outputExecution = review.executions[0] ?? null;
   const outputJobId = outputExecution?.jobIds[0] ?? null;
+  const { caseFilePath, caseDirectoryPath, casePreviewMode } = caseRoute;
   const prefersStackedFilesLayout = useMediaQuery("(max-width: 900px)");
   const [executionFilesState, setExecutionFilesState] = useState<ExecutionFilesState>({
     loading: false,
     error: null,
     files: [],
   });
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  const [directoryPath, setDirectoryPath] = useState<string | null>(null);
-  const [previewMode, setPreviewMode] = useState<CandidatePreviewMode>("rendered");
   const [previewState, setPreviewState] = useState<ExecutionPreviewState>({
     loading: false,
     error: null,
     preview: null,
   });
+  const loadedSurfaceKey = useRef<string | null>(null);
   const orderedFiles = useMemo(
     () => orderCandidateFiles(executionFilesState.files),
     [executionFilesState.files],
   );
 
   useEffect(() => {
-    setSelectedFilePath(null);
-    setDirectoryPath(null);
-    setPreviewMode("rendered");
+    loadedSurfaceKey.current = null;
+    setExecutionFilesState({
+      loading: false,
+      error: null,
+      files: [],
+    });
     setPreviewState({
       loading: false,
       error: null,
@@ -4082,14 +4149,25 @@ function ExecutionFilesSurface({
 
   useEffect(() => {
     if (!outputExecution || !outputJobId) {
-      setExecutionFilesState({
-        loading: false,
-        error: null,
-        files: [],
-      });
+      loadedSurfaceKey.current = null;
+      setExecutionFilesState((current) =>
+        current.loading || current.error || current.files.length > 0
+          ? { loading: false, error: null, files: [] }
+          : current
+      );
+      setPreviewState((current) =>
+        current.loading || current.error || current.preview
+          ? { loading: false, error: null, preview: null }
+          : current
+      );
       return;
     }
 
+    const requestPath = caseFilePath;
+    const requestKey = fileSurfaceLoadKey(outputExecution.runId, outputJobId, requestPath, casePreviewMode);
+    if (loadedSurfaceKey.current === requestKey) {
+      return;
+    }
     const controller = new AbortController();
     let cancelled = false;
     setExecutionFilesState({
@@ -4097,65 +4175,6 @@ function ExecutionFilesSurface({
       error: null,
       files: [],
     });
-    const params = new URLSearchParams({
-      run: outputExecution.runId,
-      id: outputJobId,
-    });
-
-    void requestJson<CandidateWorkspaceFileSummary[]>(
-      apiPath(`/api/execution/files?${params.toString()}`),
-      { signal: controller.signal },
-    ).then((files) => {
-      if (cancelled) {
-        return;
-      }
-      startTransition(() => {
-        setExecutionFilesState({
-          loading: false,
-          error: null,
-          files,
-        });
-      });
-    }).catch((error: unknown) => {
-      if (cancelled || controller.signal.aborted) {
-        return;
-      }
-      setExecutionFilesState({
-        loading: false,
-        error: toMessage(error),
-        files: [],
-      });
-    });
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [apiPath, outputExecution?.runId, outputJobId]);
-
-  useEffect(() => {
-    const nextFilePath =
-      selectedFilePath && orderedFiles.some((file) => file.path === selectedFilePath)
-        ? selectedFilePath
-        : orderedFiles[0]?.path ?? null;
-    if (nextFilePath !== selectedFilePath) {
-      setSelectedFilePath(nextFilePath);
-      setDirectoryPath(directoryPathForFile(nextFilePath));
-    }
-  }, [orderedFiles, selectedFilePath]);
-
-  useEffect(() => {
-    if (!outputExecution || !outputJobId || !selectedFilePath) {
-      setPreviewState({
-        loading: false,
-        error: null,
-        preview: null,
-      });
-      return;
-    }
-
-    const controller = new AbortController();
-    let cancelled = false;
     setPreviewState({
       loading: true,
       error: null,
@@ -4164,28 +4183,60 @@ function ExecutionFilesSurface({
     const params = new URLSearchParams({
       run: outputExecution.runId,
       id: outputJobId,
-      path: selectedFilePath,
-      view: previewMode,
+      view: casePreviewMode,
     });
+    if (requestPath) {
+      params.set("path", requestPath);
+    }
 
-    void requestJson<CandidateWorkspaceFilePreview>(
-      apiPath(`/api/execution/preview?${params.toString()}`),
+    void requestJson<WorkbenchFileSurfaceResponse>(
+      apiPath(`/api/execution/files?${params.toString()}`),
       { signal: controller.signal },
-    ).then((preview) => {
+    ).then((surface) => {
       if (cancelled) {
         return;
       }
+      const nextFilePath =
+        surface.preview?.path ??
+        (requestPath && surface.files.some((file) => file.path === requestPath)
+          ? requestPath
+          : surface.files[0]?.path ?? null);
+      loadedSurfaceKey.current = fileSurfaceLoadKey(
+        outputExecution.runId,
+        outputJobId,
+        nextFilePath,
+        casePreviewMode,
+      );
       startTransition(() => {
+        setExecutionFilesState({
+          loading: false,
+          error: null,
+          files: surface.files,
+        });
         setPreviewState({
           loading: false,
           error: null,
-          preview,
+          preview: surface.preview,
         });
+        if (nextFilePath && nextFilePath !== caseFilePath) {
+          onCaseRouteChange({
+            caseTab: "files",
+            caseFilePath: nextFilePath,
+            caseDirectoryPath: directoryPathForFile(nextFilePath),
+            casePreviewMode,
+          }, { replace: true });
+        }
       });
     }).catch((error: unknown) => {
       if (cancelled || controller.signal.aborted) {
         return;
       }
+      loadedSurfaceKey.current = null;
+      setExecutionFilesState({
+        loading: false,
+        error: toMessage(error),
+        files: [],
+      });
       setPreviewState({
         loading: false,
         error: toMessage(error),
@@ -4197,16 +4248,16 @@ function ExecutionFilesSurface({
       cancelled = true;
       controller.abort();
     };
-  }, [apiPath, outputExecution?.runId, outputJobId, previewMode, selectedFilePath]);
+  }, [apiPath, caseFilePath, casePreviewMode, onCaseRouteChange, outputExecution, outputJobId]);
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       <FilesBrowser
         changes={orderedFiles}
-        selectedFilePath={selectedFilePath}
+        selectedFilePath={caseFilePath}
         browseMode="folders"
-        currentDirectory={directoryPath}
-        previewMode={previewMode}
+        currentDirectory={caseDirectoryPath}
+        previewMode={casePreviewMode}
         availablePreviewModes={supportedPreviewModes()}
         preview={previewState.preview}
         changesError={executionFilesState.error}
@@ -4218,12 +4269,24 @@ function ExecutionFilesSurface({
         emptySelectionMessage="Select a case file to preview."
         listErrorMessage="Couldn't load the case file list."
         previewErrorMessage="Couldn't load the case file preview."
-        onSelectFile={(filePath) => {
-          setSelectedFilePath(filePath);
-          setDirectoryPath(directoryPathForFile(filePath));
-        }}
-        onDirectoryChange={setDirectoryPath}
-        onPreviewModeChange={(mode) => setPreviewMode(mode as CandidatePreviewMode)}
+        onSelectFile={(filePath) => onCaseRouteChange({
+          caseTab: "files",
+          caseFilePath: filePath,
+          caseDirectoryPath: directoryPathForFile(filePath),
+          casePreviewMode,
+        })}
+        onDirectoryChange={(caseDirectoryPath) => onCaseRouteChange({
+          caseTab: "files",
+          caseFilePath,
+          caseDirectoryPath,
+          casePreviewMode,
+        })}
+        onPreviewModeChange={(mode) => onCaseRouteChange({
+          caseTab: "files",
+          caseFilePath,
+          caseDirectoryPath,
+          casePreviewMode: mode as CandidatePreviewMode,
+        })}
       />
     </div>
   );
@@ -4270,7 +4333,7 @@ function resolveSelectedCandidateId(args: {
 }): string | null {
   if (args.route.kind === "candidate") {
     const candidateId = args.route.candidateId;
-    if (candidateId && args.summaries.some((summary) => summary.id === candidateId)) {
+    if (candidateId) {
       return candidateId;
     }
   }
@@ -4278,6 +4341,19 @@ function resolveSelectedCandidateId(args: {
     return args.activeId;
   }
   return args.summaries[0]?.id ?? null;
+}
+
+function routeBenchmarkSurface(route: WorkbenchRoute): Partial<BenchmarkSurfaceRoute> {
+  if (route.kind === "not-found") {
+    return {};
+  }
+  return {
+    benchmarkFingerprint: route.benchmarkFingerprint,
+    benchmarkView: route.benchmarkView,
+    benchmarkFilePath: route.benchmarkFilePath,
+    benchmarkDirectoryPath: route.benchmarkDirectoryPath,
+    benchmarkPreviewMode: route.benchmarkPreviewMode,
+  };
 }
 
 function resolveSelectedCandidateFilePath(args: {
@@ -4288,6 +4364,10 @@ function resolveSelectedCandidateFilePath(args: {
     return args.routeFilePath;
   }
   return pickDefaultCandidateFile(args.files);
+}
+
+function fileSurfaceLoadKey(...parts: Array<string | null | undefined>): string {
+  return parts.map((part) => part ?? "").join("\0");
 }
 
 function resolvePreferredBenchmarkFilePath(

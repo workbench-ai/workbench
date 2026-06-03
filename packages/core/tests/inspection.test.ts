@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  createCandidateFilePreview,
   createWorkbenchInspection,
+  summarizeCandidateFiles,
   type CandidateRecord,
   type EvaluationScorecard,
   type RemoteWorkbenchJob,
@@ -167,9 +169,11 @@ function testBackend(): WorkbenchInspectionBackend {
       spec: null,
       cases: [],
     }),
-    sourceFiles: async () => files,
+    sourceFiles: async () => summarizeCandidateFiles(files, files.map((file) => file.path)),
+    sourceFileSurface: async (input) => testFileSurface(files, files.map((file) => file.path), input),
     candidate: async () => candidate,
-    candidateFiles: async () => ({ files, changedPaths: candidate.fileChanges }),
+    candidateFiles: async () => summarizeCandidateFiles(files, candidate.fileChanges),
+    candidateFileSurface: async (input) => testFileSurface(files, candidate.fileChanges, input),
     evaluation: async (input) =>
       input.id === failedEvaluation.id ? failedEvaluation : evaluation,
     run: async (input) => ({
@@ -177,13 +181,29 @@ function testBackend(): WorkbenchInspectionBackend {
       jobs: [job],
     }),
     jobInRun: async () => job,
-    executionFiles: async () => files,
+    executionFiles: async () => summarizeCandidateFiles(files, files.map((file) => file.path)),
+    executionFileSurface: async (input) => testFileSurface(files, files.map((file) => file.path), input),
     traceForJob: (traceJob): WorkbenchExecutionTrace => ({
       trace_id: traceJob.id,
       spans: [],
       events: [],
       summaries: [],
     }),
+  };
+}
+
+function testFileSurface(
+  files: readonly SurfaceSnapshotFile[],
+  changedPaths: readonly string[],
+  input: { path?: string | null; view?: "diff" | "raw" | "rendered" },
+) {
+  const summaries = summarizeCandidateFiles(files, changedPaths);
+  const path = input.path ?? summaries[0]?.path ?? null;
+  return {
+    files: summaries,
+    preview: path
+      ? createCandidateFilePreview({ files, path, view: input.view ?? "rendered" })
+      : null,
   };
 }
 

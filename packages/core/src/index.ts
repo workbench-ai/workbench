@@ -393,21 +393,23 @@ export {
 export {
   WorkbenchInspectionError,
   createWorkbenchInspection,
+  pickDefaultCandidateFilePath,
+  selectedFilePath,
   type WorkbenchFailureDetail,
   type WorkbenchFailureDiagnosis,
   type WorkbenchFailureKind,
   type WorkbenchInspection,
   type WorkbenchInspectionBackend,
+  type WorkbenchInspectionCandidateFileSurfaceInput,
   type WorkbenchInspectionCandidateInput,
-  type WorkbenchInspectionCandidatePreviewInput,
   type WorkbenchInspectionCaseReviewInput,
   type WorkbenchInspectionErrorOptions,
   type WorkbenchInspectionEvaluationInput,
+  type WorkbenchInspectionExecutionFileSurfaceInput,
   type WorkbenchInspectionExecutionInput,
-  type WorkbenchInspectionExecutionPreviewInput,
   type WorkbenchInspectionFileListInput,
-  type WorkbenchInspectionFilePreviewInput,
-  type WorkbenchInspectionPreviewInput,
+  type WorkbenchInspectionFileSurface,
+  type WorkbenchInspectionFileSurfaceInput,
   type WorkbenchInspectionRunDetail,
   type WorkbenchInspectionRunInput,
 } from "./inspection.ts";
@@ -677,7 +679,6 @@ export function workbenchRuntimeBundleFingerprint(
 ): string {
   const canonical = {
     schema: bundle.schema,
-    activeId: bundle.activeId,
     candidates: sortByStableKey(
       bundle.candidates.map(workbenchRuntimeCandidateIdentityForExchange),
       (candidate) => candidate.id,
@@ -732,48 +733,178 @@ export function workbenchRuntimeBundleStats(
   };
 }
 
-export function workbenchRuntimeExplicitActiveId(args: {
+export function workbenchRuntimeProjectedActiveId(args: {
   candidates: readonly CandidateRecord[];
+  evaluations?: readonly EvaluationScorecard[];
   runs: readonly RunSummary[];
-  preferredActiveId?: string | null;
   benchmarkFingerprint: string;
 }): string | null {
   const candidateById = new Map(args.candidates.map((candidate) => [
     candidate.id,
     candidate,
   ]));
-  const compatible = (candidateId: string | null | undefined): string | null => {
+  const candidate = (candidateId: string | null | undefined): CandidateRecord | null => {
     if (!candidateId) {
       return null;
     }
     const candidate = candidateById.get(candidateId) ?? null;
-    return candidate?.benchmarkFingerprint === args.benchmarkFingerprint
-      ? candidate.id
-      : null;
+    return candidate?.benchmarkFingerprint === args.benchmarkFingerprint ? candidate : null;
   };
-  return compatible(args.preferredActiveId) ??
-    latestExplicitRunActiveIdForBenchmark(args.runs, compatible, args.benchmarkFingerprint);
-}
-
-function latestExplicitRunActiveIdForBenchmark(
-  runs: readonly RunSummary[],
-  compatible: (candidateId: string | null | undefined) => string | null,
-  benchmarkFingerprint: string,
-): string | null {
-  return runs
+  let active: CandidateRecord | null = null;
+  for (const run of args.runs
     .slice()
     .sort((left, right) => {
       const leftAt = left.finishedAt ?? left.startedAt;
       const rightAt = right.finishedAt ?? right.startedAt;
       return leftAt.localeCompare(rightAt) || left.id.localeCompare(right.id);
-    })
-    .reverse()
-    .map((run) =>
-      run.benchmarkFingerprint === benchmarkFingerprint
-        ? compatible(run.activeCandidateId)
-        : null
+    })) {
+    if (run.status !== "finished" || run.benchmarkFingerprint !== args.benchmarkFingerprint) {
+      continue;
+    }
+    if (run.workflow === "eval") {
+      if (!active) {
+        const evaluated = candidate(run.outputCandidateId ?? run.candidateId);
+        if (evaluated && runtimeCandidateSelectionMean(evaluated, run, args.evaluations) !== null) {
+          active = evaluated;
+        }
+      }
+      continue;
+    }
+    const challenger = candidate(run.outputCandidateId ?? run.candidateId);
+    if (!challenger) {
+      continue;
+    }
+    if (!active) {
+      if (runtimeCandidateSelectionMean(challenger, run, args.evaluations) !== null) {
+        active = challenger;
+      }
+      continue;
+    }
+    if (hasHigherRuntimeSelectionMetric(challenger, active, run, args.evaluations)) {
+      active = challenger;
+    }
+  }
+  if (active) {
+    return active.id;
+  }
+  return null;
+}
+
+function hasHigherRuntimeSelectionMetric(
+  candidate: CandidateRecord,
+  incumbent: CandidateRecord,
+  run: RunSummary,
+  evaluations: readonly EvaluationScorecard[] | undefined,
+): boolean {
+  const candidateValue = runtimeCandidateSelectionMean(candidate, run, evaluations);
+  const incumbentValue = runtimeCandidateSelectionMean(incumbent, run, evaluations);
+  if (candidateValue == null) {
+    return false;
+  }
+  if (incumbentValue == null) {
+    return true;
+  }
+  return candidateValue > incumbentValue;
+}
+
+function runtimeCandidateSelectionMean(
+  candidate: CandidateRecord,
+  run: RunSummary,
+  evaluations: readonly EvaluationScorecard[] | undefined,
+): number | null {
+  const selection = runtimeRunSelection(run);
+  const runAt = run.finishedAt ?? run.startedAt;
+  const scorecards = (evaluations ?? [])
+    .filter((evaluation) =>
+      evaluation.candidateId === candidate.id &&
+      evaluation.benchmarkFingerprint === run.benchmarkFingerprint &&
+      (evaluation.runId === run.id || evaluation.updatedAt <= runAt)
     )
-    .find((candidateId): candidateId is string => candidateId !== null) ?? null;
+    .sort((left, right) =>
+      Number(right.runId === run.id) - Number(left.runId === run.id) ||
+      right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)
+    );
+  const selectedScorecard = scorecards.find((evaluation) =>
+    evaluation.selectionMetric === selection.metric &&
+    evaluation.selectionLabel === selection.label &&
+    evaluation.selectionScore &&
+    Number.isFinite(evaluation.selectionScore.mean)
+  );
+  if (selectedScorecard?.selectionScore) {
+    return selectedScorecard.selectionScore.mean;
+  }
+  for (const scorecard of scorecards) {
+    const evaluation = {
+      ...scorecard.evaluation,
+      metrics: scorecard.evaluation.metrics ?? scorecard.metrics,
+    };
+    const mean = readEvaluationSelectionMeanForRuntime(evaluation, selection);
+    if (mean !== null) {
+      return mean;
+    }
+  }
+  const embedded = readEvaluationSelectionMeanForRuntime(candidate.eval, selection);
+  if (embedded !== null) {
+    return embedded;
+  }
+  return null;
+}
+
+function runtimeRunSelection(run: RunSummary): {
+  metric: string;
+  label?: string;
+  split?: string;
+} {
+  const selectBy = run.selectBy?.trim();
+  if (!selectBy) {
+    return { metric: "score" };
+  }
+  const splitMatch = /^(.+?) on split=(.+)$/u.exec(selectBy);
+  if (splitMatch) {
+    return {
+      metric: splitMatch[1]!.trim() || "score",
+      label: selectBy,
+      split: splitMatch[2]!.trim(),
+    };
+  }
+  const allCasesMatch = /^(.+?) on all cases$/u.exec(selectBy);
+  return {
+    metric: allCasesMatch?.[1]?.trim() || "score",
+    label: selectBy,
+  };
+}
+
+function readEvaluationSelectionMeanForRuntime(
+  evaluation: EvaluationRecord | undefined,
+  selection: { metric: string; split?: string },
+): number | null {
+  if (!selection.split) {
+    return readEvaluationSelectionMean(evaluation, selection.metric);
+  }
+  const sampleValues =
+    (evaluation?.samples ?? []).flatMap((sample) =>
+      (sample.cases ?? []).flatMap((caseResult) => {
+        const value = caseResult.metrics[selection.metric];
+        return caseResult.split === selection.split &&
+          typeof value === "number" &&
+          Number.isFinite(value)
+          ? [value]
+          : [];
+      })
+    );
+  if (sampleValues.length > 0) {
+    return metricStats(sampleValues).mean;
+  }
+  const caseValues =
+    (evaluation?.cases ?? []).flatMap((caseStats) => {
+      const value = caseStats.metrics[selection.metric]?.mean;
+      return caseStats.split === selection.split &&
+        typeof value === "number" &&
+        Number.isFinite(value)
+        ? [value]
+        : [];
+    });
+  return caseValues.length > 0 ? metricStats(caseValues).mean : null;
 }
 
 function workbenchCandidateSourceYamlForFingerprint(sourceYaml: string): {
@@ -6067,8 +6198,14 @@ function selectCandidate(args: {
     caseIds?: readonly string[];
   };
 }): CandidateRecord | null {
-  let selected = args.previousCandidate;
+  let selected = args.previousCandidate &&
+    readEvaluationSelectionMean(args.previousCandidate.eval, args.selection?.metric ?? "score", args.selection?.caseIds) !== null
+    ? args.previousCandidate
+    : null;
   for (const candidate of args.candidates) {
+    if (readEvaluationSelectionMean(candidate.eval, args.selection?.metric ?? "score", args.selection?.caseIds) === null) {
+      continue;
+    }
     if (!selected || hasHigherEvaluationMetric(candidate, selected, args.selection)) {
       selected = candidate;
     }

@@ -2,368 +2,109 @@ import { describe, expect, test } from "vitest";
 
 import {
   buildWorkbenchLocationHref,
-  createEvaluationsRoute,
+  createBenchmarkRoute,
   createCandidateRoute,
   createCandidatesRoute,
-  createBenchmarkRoute,
+  createEvaluationCaseRoute,
+  createEvaluationRoute,
+  createEvaluationsRoute,
   parseWorkbenchLocation,
 } from "../src/lib/routes";
 
+const base = "/benchmarks/alice/demo";
+const route = (pathname: string, search = "") =>
+  parseWorkbenchLocation({ pathname: `${base}${pathname}`, search }, base);
+
 describe("workbench location routes", () => {
-  test("parses candidate routes under a remote benchmark mount", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/candidates/candidate_123",
-          search: "",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "candidate",
-      candidateId: "candidate_123",
-      view: "overview",
-      filePath: null,
-      directoryPath: null,
-      previewMode: "rendered",
-      dialog: null,
+  test("makes benchmark tabs directly addressable", () => {
+    expect(route("/manifest", "?benchmarkFingerprint=abc123")).toMatchObject({
+      kind: "benchmark",
+      benchmarkFingerprint: "abc123",
+      benchmarkView: "manifest",
+    });
+    expect(route("/files", "?file=tasks%2Fcase%2Ftask.yaml&dir=tasks%2Fcase&view=raw")).toMatchObject({
+      kind: "benchmark",
+      benchmarkView: "files",
+      benchmarkFilePath: "tasks/case/task.yaml",
+      benchmarkDirectoryPath: "tasks/case",
+      benchmarkPreviewMode: "raw",
     });
 
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "candidate_123",
-          view: "overview",
-        }),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates/candidate_123");
+    expect(buildWorkbenchLocationHref(createBenchmarkRoute({ benchmarkView: "manifest" }), base))
+      .toBe(`${base}/manifest`);
+    expect(buildWorkbenchLocationHref(createBenchmarkRoute({
+      benchmarkView: "files",
+      benchmarkFilePath: "tasks/case/task.yaml",
+      benchmarkDirectoryPath: "tasks/case",
+      benchmarkPreviewMode: "raw",
+      benchmarkFingerprint: "abc123",
+    }), base)).toBe(`${base}/files?benchmarkFingerprint=abc123&file=tasks%2Fcase%2Ftask.yaml&dir=tasks%2Fcase&view=raw`);
   });
 
-  test("parses and serializes candidate index views under a remote benchmark mount", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/candidates",
-          search: "",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "candidates",
-      view: "archive",
-    });
+  test("uses path segments for candidate index tabs and preserves benchmark context", () => {
+    const benchmark = {
+      benchmarkFingerprint: "abc123",
+      benchmarkView: "files" as const,
+      benchmarkFilePath: "tasks/case/task.yaml",
+      benchmarkDirectoryPath: null,
+      benchmarkPreviewMode: "raw" as const,
+    };
 
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/candidates",
-          search: "?view=lineage",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "candidates",
-      view: "lineage",
-    });
-
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidatesRoute({ view: "archive" }),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates");
-
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidatesRoute({ view: "lineage" }),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates?view=lineage");
-  });
-
-  test("keeps root-mounted package routes unchanged", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/candidates/candidate_456/files",
-          search: "?file=src%2Fprompt.md&dir=src&view=raw",
-        },
-        "/",
-      ),
-    ).toEqual({
-      kind: "candidate",
-      candidateId: "candidate_456",
+    expect(route("/candidates/lineage", "?benchmarkFingerprint=abc123&benchmark=files&benchmarkFile=tasks%2Fcase%2Ftask.yaml&benchmarkView=raw"))
+      .toMatchObject({ kind: "candidates", ...benchmark, view: "lineage" });
+    expect(buildWorkbenchLocationHref(createCandidatesRoute({ view: "lineage", benchmark }), base))
+      .toBe(`${base}/candidates/lineage?benchmarkFingerprint=abc123&benchmark=files&benchmarkFile=tasks%2Fcase%2Ftask.yaml&benchmarkView=raw`);
+    expect(buildWorkbenchLocationHref(createCandidateRoute({
+      candidateId: "candidate_files",
       view: "files",
       filePath: "src/prompt.md",
       directoryPath: "src",
       previewMode: "raw",
-      dialog: null,
-    });
+      benchmark,
+    }), base)).toBe(`${base}/candidates/candidate_files/files?benchmarkFingerprint=abc123&benchmark=files&benchmarkFile=tasks%2Fcase%2Ftask.yaml&benchmarkView=raw&file=src%2Fprompt.md&dir=src&view=raw`);
   });
 
-  test("decodes candidate ids after a URL round trip", () => {
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "Claude Opus A",
-          view: "overview",
-        }),
-        "/",
-      ),
-    ).toBe("/candidates/Claude%20Opus%20A");
+  test("uses first-class routes for evaluation details and cases", () => {
+    const benchmark = { benchmarkView: "manifest" as const };
 
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/candidates/Claude%20Opus%20A",
-          search: "",
-        },
-        "/",
-      ),
-    ).toEqual({
-      kind: "candidate",
-      candidateId: "Claude Opus A",
-      view: "overview",
-      filePath: null,
-      directoryPath: null,
-      previewMode: "rendered",
-      dialog: null,
-    });
-  });
-
-  test("parses and serializes candidate manifest routes", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/candidates/candidate_123/manifest",
-          search: "",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "candidate",
-      candidateId: "candidate_123",
-      view: "manifest",
-      filePath: null,
-      directoryPath: null,
-      previewMode: "rendered",
-      dialog: null,
-    });
-
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "candidate_123",
-          view: "manifest",
-        }),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates/candidate_123/manifest");
-  });
-
-  test("parses and serializes contextual candidate dialogs", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/candidates/candidate_123",
-          search: "?evaluation=eval_456",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "candidate",
-      candidateId: "candidate_123",
-      view: "overview",
-      filePath: null,
-      directoryPath: null,
-      previewMode: "rendered",
-      dialog: { kind: "evaluation", evaluationId: "eval_456" },
-    });
-
-  });
-
-  test("keeps candidate evaluation case state in the candidate route", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/candidates/candidate_123",
-          search: "?evaluation=eval_456&case=case-001",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "candidate",
-      candidateId: "candidate_123",
-      view: "overview",
-      filePath: null,
-      directoryPath: null,
-      previewMode: "rendered",
-      dialog: {
+    expect(route("/evaluations/eval_123", "?benchmark=manifest"))
+      .toMatchObject({
         kind: "evaluation",
-        evaluationId: "eval_456",
-        caseId: "case-001",
-      },
-    });
-
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "candidate_123",
-          view: "overview",
-          dialog: {
-            kind: "evaluation",
-            evaluationId: "eval_456",
-            caseId: "case-001",
-          },
-        }),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates/candidate_123?evaluation=eval_456&case=case-001");
-  });
-
-  test("parses and serializes evaluation index routes under a remote benchmark mount", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/evaluations",
-          search: "",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "evaluations",
-      dialog: null,
-    });
-
-    expect(
-      buildWorkbenchLocationHref(
-        createEvaluationsRoute(),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/evaluations");
-  });
-
-  test("parses and serializes evaluation index dialogs", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/evaluations",
-          search: "?evaluation=eval_123&case=case-001",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "evaluations",
-      dialog: {
+        benchmarkView: "manifest",
+        evaluationId: "eval_123",
+        caseId: null,
+        caseTab: "score",
+      });
+    expect(route("/evaluations/eval_123/cases/case-001/attempts", "?benchmark=manifest"))
+      .toMatchObject({
         kind: "evaluation",
         evaluationId: "eval_123",
         caseId: "case-001",
-      },
-    });
+        caseTab: "attempts",
+      });
+    expect(route("/evaluations/eval_123/cases/case-001/files", "?file=candidate-summary.md&view=raw"))
+      .toMatchObject({
+        kind: "evaluation",
+        evaluationId: "eval_123",
+        caseId: "case-001",
+        caseTab: "files",
+        caseFilePath: "candidate-summary.md",
+        casePreviewMode: "raw",
+      });
 
-    expect(
-      buildWorkbenchLocationHref(
-        createEvaluationsRoute({
-          dialog: {
-            kind: "evaluation",
-            evaluationId: "eval_123",
-            caseId: "case-001",
-          },
-        }),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/evaluations?evaluation=eval_123&case=case-001");
-  });
-
-  test("evaluation detail paths are explicit not-found routes", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/evaluations/eval_123",
-          search: "",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "not-found",
-      pathname: "/evaluations/eval_123",
-    });
-  });
-
-  test("unknown workspace paths are explicit not-found routes", () => {
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/not-a-route",
-          search: "",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "not-found",
-      pathname: "/not-a-route",
-    });
-
-    expect(
-      parseWorkbenchLocation(
-        {
-          pathname: "/benchmarks/alice/demo/candidates/candidate_123/unknown",
-          search: "",
-        },
-        "/benchmarks/alice/demo",
-      ),
-    ).toEqual({
-      kind: "not-found",
-      pathname: "/candidates/candidate_123/unknown",
-    });
-  });
-
-  test("serializes candidate files folder directory state", () => {
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "candidate_files",
-          view: "files",
-          filePath: "src/prompt.md",
-          directoryPath: "src",
-        }),
-        "/benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates/candidate_files/files?file=src%2Fprompt.md&dir=src");
-  });
-
-  test("builds hrefs with the configured mount path", () => {
-    expect(buildWorkbenchLocationHref(createBenchmarkRoute(), "/benchmarks/alice/demo")).toBe("/benchmarks/alice/demo");
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidatesRoute(),
-        "benchmarks/alice/demo",
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates");
-  });
-
-  test("preserves shell-owned query parameters while serializing workspace route state", () => {
-    expect(
-      buildWorkbenchLocationHref(
-        createBenchmarkRoute(),
-        "/benchmarks/alice/demo",
-        { source: "cli" },
-      ),
-    ).toBe("/benchmarks/alice/demo?source=cli");
-
-    expect(
-      buildWorkbenchLocationHref(
-        createCandidateRoute({
-          candidateId: "candidate_files",
-          view: "files",
-          filePath: "src/prompt.md",
-          directoryPath: "src",
-          previewMode: "raw",
-        }),
-        "/benchmarks/alice/demo",
-        { source: "cli" },
-      ),
-    ).toBe("/benchmarks/alice/demo/candidates/candidate_files/files?source=cli&file=src%2Fprompt.md&dir=src&view=raw");
+    expect(buildWorkbenchLocationHref(createEvaluationsRoute({ benchmark }), base))
+      .toBe(`${base}/evaluations?benchmark=manifest`);
+    expect(buildWorkbenchLocationHref(createEvaluationRoute({
+      evaluationId: "eval_123",
+      benchmark,
+    }), base)).toBe(`${base}/evaluations/eval_123?benchmark=manifest`);
+    expect(buildWorkbenchLocationHref(createEvaluationCaseRoute({
+      evaluationId: "eval_123",
+      caseId: "case-001",
+      caseTab: "files",
+      caseFilePath: "candidate-summary.md",
+      casePreviewMode: "raw",
+      benchmark,
+    }), base)).toBe(`${base}/evaluations/eval_123/cases/case-001/files?benchmark=manifest&file=candidate-summary.md&view=raw`);
   });
 });

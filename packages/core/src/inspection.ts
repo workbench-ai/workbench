@@ -16,7 +16,6 @@ import type {
   RemoteWorkbenchJobStatus,
   RunSummary,
   RuntimeSnapshot,
-  SurfaceSnapshotFile,
   WorkbenchExecutionEventRole,
   WorkbenchExecutionTrace,
   WorkbenchExecutionTraceDetail,
@@ -29,10 +28,7 @@ import {
 } from "./execution-evidence.ts";
 import {
   candidateRecordWithoutDerivedFields,
-  candidateSummaryFromRecord,
-  createCandidateFilePreview,
   createCaseReview,
-  summarizeCandidateFiles,
 } from "./index.ts";
 
 export interface WorkbenchInspectionErrorOptions {
@@ -55,18 +51,24 @@ export interface WorkbenchInspectionFileListInput {
   fingerprint?: string | null;
 }
 
-export interface WorkbenchInspectionPreviewInput {
-  path: string;
-  view: "diff" | "raw" | "rendered";
+export interface WorkbenchInspectionFileSurface {
+  files: CandidateFileSummary[];
+  preview: CandidateFilePreview | null;
 }
 
-export interface WorkbenchInspectionFilePreviewInput extends WorkbenchInspectionFileListInput, WorkbenchInspectionPreviewInput {}
+export interface WorkbenchInspectionFileSurfaceInput extends WorkbenchInspectionFileListInput {
+  path?: string | null;
+  view?: "diff" | "raw" | "rendered";
+}
 
 export interface WorkbenchInspectionCandidateInput {
   id: string;
 }
 
-export interface WorkbenchInspectionCandidatePreviewInput extends WorkbenchInspectionCandidateInput, WorkbenchInspectionPreviewInput {}
+export interface WorkbenchInspectionCandidateFileSurfaceInput extends WorkbenchInspectionCandidateInput {
+  path?: string | null;
+  view?: "diff" | "raw" | "rendered";
+}
 
 export interface WorkbenchInspectionEvaluationInput {
   id: string;
@@ -89,9 +91,9 @@ export interface WorkbenchInspectionExecutionInput {
   jobId: string;
 }
 
-export interface WorkbenchInspectionExecutionPreviewInput extends WorkbenchInspectionExecutionInput {
-  path: string;
-  view: "diff" | "raw" | "rendered";
+export interface WorkbenchInspectionExecutionFileSurfaceInput extends WorkbenchInspectionExecutionInput {
+  path?: string | null;
+  view?: "diff" | "raw" | "rendered";
 }
 
 export interface WorkbenchInspectionRunDetail {
@@ -127,16 +129,16 @@ export interface WorkbenchInspectionBackend {
   projectId: string;
   snapshot(): Promise<RuntimeSnapshot>;
   spec(input: WorkbenchInspectionFileListInput): Promise<AuthoredWorkbenchSourceDocument>;
-  sourceFiles(input: WorkbenchInspectionFileListInput): Promise<SurfaceSnapshotFile[]>;
+  sourceFiles(input: WorkbenchInspectionFileListInput): Promise<CandidateFileSummary[]>;
+  sourceFileSurface(input: WorkbenchInspectionFileSurfaceInput): Promise<WorkbenchInspectionFileSurface>;
   candidate(input: WorkbenchInspectionCandidateInput): Promise<CandidateRecord>;
-  candidateFiles(input: WorkbenchInspectionCandidateInput): Promise<{
-    files: SurfaceSnapshotFile[];
-    changedPaths: readonly string[];
-  }>;
+  candidateFiles(input: WorkbenchInspectionCandidateInput): Promise<CandidateFileSummary[]>;
+  candidateFileSurface(input: WorkbenchInspectionCandidateFileSurfaceInput): Promise<WorkbenchInspectionFileSurface>;
   evaluation(input: WorkbenchInspectionEvaluationInput): Promise<EvaluationScorecard>;
   run(input: WorkbenchInspectionRunInput): Promise<WorkbenchInspectionRunDetail>;
   jobInRun?(input: WorkbenchInspectionExecutionInput): Promise<RemoteWorkbenchJob>;
-  executionFiles(input: WorkbenchInspectionExecutionInput): Promise<SurfaceSnapshotFile[]>;
+  executionFiles(input: WorkbenchInspectionExecutionInput): Promise<CandidateFileSummary[]>;
+  executionFileSurface(input: WorkbenchInspectionExecutionFileSurfaceInput): Promise<WorkbenchInspectionFileSurface>;
   caseReview?(input: WorkbenchInspectionCaseReviewInput): Promise<CandidateCaseReview>;
   executionTrace?(input: WorkbenchInspectionExecutionInput): Promise<WorkbenchExecutionTraceDetail>;
   traceForJob?(
@@ -153,17 +155,17 @@ export interface WorkbenchInspection {
   snapshot(): Promise<RuntimeSnapshot>;
   spec(input?: WorkbenchInspectionFileListInput): Promise<AuthoredWorkbenchSourceDocument>;
   sourceFiles(input?: WorkbenchInspectionFileListInput): Promise<CandidateFileSummary[]>;
-  sourcePreview(input: WorkbenchInspectionFilePreviewInput): Promise<CandidateFilePreview>;
+  sourceFileSurface(input?: WorkbenchInspectionFileSurfaceInput): Promise<WorkbenchInspectionFileSurface>;
   candidate(input: WorkbenchInspectionCandidateInput): Promise<CandidateRecord>;
   candidateFiles(input: WorkbenchInspectionCandidateInput): Promise<CandidateFileSummary[]>;
-  candidatePreview(input: WorkbenchInspectionCandidatePreviewInput): Promise<CandidateFilePreview>;
+  candidateFileSurface(input: WorkbenchInspectionCandidateFileSurfaceInput): Promise<WorkbenchInspectionFileSurface>;
   evaluations(): Promise<WorkbenchEvaluationComparison>;
   evaluation(input: WorkbenchInspectionEvaluationInput): Promise<EvaluationScorecard>;
   caseReview(input: WorkbenchInspectionCaseReviewInput): Promise<CandidateCaseReview>;
   run(input: WorkbenchInspectionRunInput): Promise<WorkbenchInspectionRunDetail>;
   executionTrace(input: WorkbenchInspectionExecutionInput): Promise<WorkbenchExecutionTraceDetail>;
   executionFiles(input: WorkbenchInspectionExecutionInput): Promise<CandidateFileSummary[]>;
-  executionPreview(input: WorkbenchInspectionExecutionPreviewInput): Promise<CandidateFilePreview>;
+  executionFileSurface(input: WorkbenchInspectionExecutionFileSurfaceInput): Promise<WorkbenchInspectionFileSurface>;
   lineage(): Promise<CandidateLineageGraph>;
   diagnose(input?: { targetId?: string | null }): Promise<WorkbenchFailureDiagnosis>;
 }
@@ -174,28 +176,12 @@ export function createWorkbenchInspection(
   return {
     snapshot: () => backend.snapshot(),
     spec: (input = {}) => backend.spec(input),
-    sourceFiles: async (input = {}) => {
-      const files = await backend.sourceFiles(input);
-      return summarizeCandidateFiles(files, files.map((file) => file.path));
-    },
-    sourcePreview: async (input) =>
-      createCandidateFilePreview({
-        files: await backend.sourceFiles(input),
-        path: input.path,
-        view: input.view,
-      }),
+    sourceFiles: (input = {}) => backend.sourceFiles(input),
+    sourceFileSurface: (input = {}) => backend.sourceFileSurface(input),
     candidate: async (input) =>
       candidateRecordWithoutDerivedFields(await backend.candidate(input)),
-    candidateFiles: async (input) => {
-      const result = await backend.candidateFiles(input);
-      return summarizeCandidateFiles(result.files, result.changedPaths);
-    },
-    candidatePreview: async (input) =>
-      createCandidateFilePreview({
-        files: (await backend.candidateFiles(input)).files,
-        path: input.path,
-        view: input.view,
-      }),
+    candidateFiles: (input) => backend.candidateFiles(input),
+    candidateFileSurface: (input) => backend.candidateFileSurface(input),
     evaluations: async () => {
       const snapshot = await backend.snapshot();
       return buildWorkbenchEvaluationComparison(snapshot.evaluations);
@@ -241,16 +227,8 @@ export function createWorkbenchInspection(
         }),
       };
     },
-    executionFiles: async (input) => {
-      const files = await backend.executionFiles(input);
-      return summarizeCandidateFiles(files, files.map((file) => file.path));
-    },
-    executionPreview: async (input) =>
-      createCandidateFilePreview({
-        files: await backend.executionFiles(input),
-        path: input.path,
-        view: input.view,
-      }),
+    executionFiles: (input) => backend.executionFiles(input),
+    executionFileSurface: (input) => backend.executionFileSurface(input),
     lineage: async () => {
       const snapshot = await backend.snapshot();
       return buildCandidateLineage({
@@ -267,6 +245,43 @@ export function createWorkbenchInspection(
       });
     },
   };
+}
+
+export function selectedFilePath(
+  requestedPath: string | null | undefined,
+  files: readonly CandidateFileSummary[],
+): string | null {
+  const normalizedPath = requestedPath?.trim();
+  if (normalizedPath && files.some((file) => file.path === normalizedPath)) {
+    return normalizedPath;
+  }
+  return pickDefaultCandidateFilePath(files);
+}
+
+export function pickDefaultCandidateFilePath(
+  files: readonly CandidateFileSummary[],
+): string | null {
+  return files
+    .map((entry) => entry.path)
+    .sort(compareCandidateFilePreference)[0] ?? null;
+}
+
+function compareCandidateFilePreference(left: string, right: string): number {
+  const order = scoreCandidateFilePreference(left) - scoreCandidateFilePreference(right);
+  return order === 0 ? left.localeCompare(right) : order;
+}
+
+function scoreCandidateFilePreference(path: string): number {
+  if (path.endsWith("/SKILL.md") || path === "SKILL.md") {
+    return 0;
+  }
+  if (path.endsWith(".md")) {
+    return 1;
+  }
+  if (path.endsWith(".yaml") || path.endsWith(".yml")) {
+    return 2;
+  }
+  return 3;
 }
 
 async function diagnoseWorkbenchFailures(args: {

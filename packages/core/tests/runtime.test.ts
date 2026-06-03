@@ -12,6 +12,7 @@ import {
   createOptimizerTraceInputFiles,
   createWorkbenchRunWorkload,
   createWorkbenchExecutionCapability,
+  compactWorkbenchRuntimeJobForExchange,
   executeWorkbenchExecutionJob,
   executeRuntimeControlOperationSequenceInCurrentRuntime,
   expectedWorkbenchRunJobCount,
@@ -335,6 +336,9 @@ describe("Workbench runtime generic execution", () => {
         files: [{ path: "trace.json", content: "{}", encoding: "utf8" }],
         fileSet: { files: [] },
       },
+    });
+    expect(compactWorkbenchRuntimeJobForExchange(job).output).toEqual({
+      ok: true,
     });
   });
 

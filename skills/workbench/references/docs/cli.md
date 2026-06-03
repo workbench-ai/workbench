@@ -67,7 +67,7 @@ For remote eval, use `--candidate CANDIDATE_ID` when evaluating an existing remo
 
 Runtime candidates are versioned automatically. If the candidate manifest is named `Skill`, the initial snapshot is shown as `Skill v1`; each successful improvement produces the next version in that family. Candidate run configurations stay nested under the candidate version.
 
-Once an active candidate exists, eval records scores without moving that active pointer. Improve output distinguishes the candidate produced by that improve run from the active incumbent. `outputCandidateId` is the new version created by the run. `activeCandidateId` is the current best evaluated candidate after scoring, so it can remain on an older version when a new version scores lower.
+Once an active candidate exists, eval records scores without changing active. Improve output distinguishes the candidate produced by that improve run from the active incumbent. `outputCandidateId` is the new version created by the run. `activeCandidateId` is the current best evaluated candidate after scoring, so it can remain on an older version when a new version scores lower.
 
 Use `workbench retry TARGET_ID` to retry a failed local run or evaluation. Use `workbench retry --remote TARGET_ID` for remote records. Retry requires an explicit id and replays the recorded candidate, candidate run configuration, sample count, and improve budget. Reissuing the same retry reuses completed repair work when it already exists.
 
@@ -87,11 +87,11 @@ workbench push
 
 `workbench pull` refuses to overwrite local authored source if it has changed since the last clone, pull, or push. When local source still matches the remembered base, pull replaces authored source with the remote source, merges runtime history as immutable facts, and updates `.workbench/origin.json`.
 
-`workbench push` creates or updates the remote benchmark from local project state. If the remote source changed since the remembered base, push fails and asks you to pull first. `workbench push --dry-run` for a linked checkout first verifies that the signed-in account can read the remembered remote. Runtime history is merged idempotently; equal candidate facts are kept even when local and remote read-model fields such as timestamps, versions, status, usage, owner, or visibility differ. New ids are added, and same-id different candidate files or immutable fingerprints fail instead of choosing a winner. Project-state sync exchanges source, candidate files, evaluations, runs, jobs, events, and the explicit active pointer; execution output file payloads stay in the local archive or remote artifact store where they were produced. A successful push imports the accepted runtime state back into local, including the active candidate pointer.
+`workbench push` creates or updates the remote benchmark from local project state. If the remote source changed since the remembered base, push fails and asks you to pull first. `workbench push --dry-run` for a linked checkout first verifies that the signed-in account can read the remembered remote. Runtime history is merged idempotently; equal candidate facts are kept even when local and remote read-model fields such as timestamps, versions, status, usage, owner, or visibility differ. New ids are added, and same-id different candidate files or immutable fingerprints fail instead of choosing a winner. `workbench push --force` replaces the remembered remote with the local project state as one unit: authored source and runtime history together. Run `workbench push --dry-run --force` first when replacing shared remote state. Project-state sync exchanges source, candidate files, evaluations, runs, jobs, events, execution files, and projected active state. A successful push imports the accepted runtime state back into local, including the projected active candidate.
 
 Remote project reads used by clone, pull, push dry-runs, and post-watch sync retry transient read failures. Mutating requests are not retried automatically.
 
-The active candidate is explicit runtime state. Sync never chooses a replacement from the latest or best evaluated candidate. If the explicit active candidate belongs to a different benchmark fingerprint than the current source, active is `null`; when source returns to a fingerprint with explicit run active facts, that active candidate is restored.
+The active candidate is projected runtime state. Sync derives it by replaying finished promotion-capable runs for the current benchmark fingerprint: the first scored eval can establish active, later evals only record scores, and improves promote their output candidate only when it beats the current active candidate under the run selection rule. If no compatible scored promotion fact exists, active is `null`.
 
 `.workbench/origin.json` has one exact shape: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`. It is a remote pointer plus the last exchanged base, not a second project model.
 
@@ -156,7 +156,7 @@ workbench logout [--json]
 workbench whoami [--dir DIR] [--json]
 workbench clone OWNER/BENCHMARK [DIR] [--dry-run] [--json]
 workbench pull [--dir DIR] [--dry-run] [--json]
-workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--json]
+workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--force] [--json]
 workbench auth connect ADAPTER[/SLOT] [--dir DIR] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]
 workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--json]
 ```

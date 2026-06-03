@@ -72,7 +72,7 @@ const rootLines = [
   "  workbench whoami [--dir DIR] [--json]",
   "  workbench clone OWNER/BENCHMARK [DIR] [--dry-run] [--json]",
   "  workbench pull [--dir DIR] [--dry-run] [--json]",
-  "  workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--json]",
+  "  workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--force] [--json]",
   "",
   "Auth:",
   "  workbench auth connect ADAPTER[/SLOT] [--dir DIR] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]",
@@ -379,7 +379,7 @@ const commandHelp: Record<string, string> = Object.fromEntries(Object.entries({
   ]),
   push: withSourceDirectoryHelp([
     "Usage:",
-    "  workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--json]",
+    "  workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--force] [--json]",
     "",
     "Push local project source and runtime history to the remembered remote, or create one when the project has not been pushed before.",
     "",

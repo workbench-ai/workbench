@@ -100,7 +100,7 @@ pnpm cli candidates list --dir ../benchmarks/test/three-statement-bench --json
 pnpm cli open --dir ../benchmarks/test/three-statement-bench --no-open --json
 ```
 
-When validating in a browser, open the URL returned by `workbench open`. The candidate-centric flow should move from `/candidates` to a candidate, open an evaluation in place, select a case, and inspect the attempt traces directly under that case. Also verify the benchmark master pane, the one-way details-pane collapse button in the benchmark master pane on object routes, version selector, Manifest and Files tabs, route-backed `/candidates`, `/candidates?view=lineage`, and `/evaluations` index pages, candidate detail Manifest and Files tabs, and breadcrumbs that navigate to the matching index route. Run ids remain operational CLI/API resources, but they are not a browser navigation surface.
+When validating in a browser, open the URL returned by `workbench open`. The candidate-centric flow should move from `/candidates` to a candidate, open `/evaluations/:evaluationId`, select `/evaluations/:evaluationId/cases/:caseId`, and inspect attempt traces and files directly under that case. Also verify the benchmark master pane, the one-way details-pane collapse button in the benchmark master pane on object routes, version selector, Manifest and Files tabs, route-backed `/candidates`, `/candidates/lineage`, and `/evaluations` index pages, candidate detail Manifest and Files tabs, and breadcrumbs that navigate to the matching index route. Run ids remain operational CLI/API resources, but they are not a browser navigation surface.
 
 ## Release
 

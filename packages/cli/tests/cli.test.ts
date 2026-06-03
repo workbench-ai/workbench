@@ -167,6 +167,11 @@ function originFixture(input: {
   };
 }
 
+async function writeOriginFixture(root: string, origin = originFixture()): Promise<void> {
+  await mkdir(path.join(root, ".workbench"), { recursive: true });
+  await writeFile(path.join(root, ".workbench", "origin.json"), JSON.stringify(origin), "utf8");
+}
+
 function loginFetchForBaseUrl(baseUrl: string) {
   return async (url: string, init?: RequestInit) => {
     if (url === `${baseUrl}/api/oauth/device/code`) {
@@ -1272,6 +1277,33 @@ describe("workbench CLI", () => {
         },
       },
     });
+    const projectSource = await readLocalProjectSource(workspace);
+    const historicalBenchmarkFingerprint = "historical-benchmark";
+    const historicalRun = {
+      id: "run_historical_source",
+      workflow: "eval",
+      benchmarkFingerprint: historicalBenchmarkFingerprint,
+      status: "finished",
+      candidateId,
+      candidateRunId: projectSource.spec.candidate.selectedRunId,
+      candidateRunName: projectSource.spec.candidate.selectedRunName,
+      startedAt: "2026-04-28T00:02:00.000Z",
+      finishedAt: "2026-04-28T00:02:01.000Z",
+      improver: "none",
+      engineRun: projectSource.spec.engineRun.use,
+      strategy: "direct",
+      budget: 1,
+      repairBudget: 0,
+      attemptsRequested: 1,
+      attemptsExecuted: 1,
+      samples: 1,
+      outcome: "ok",
+      input: {
+        benchmarkFingerprint: historicalBenchmarkFingerprint,
+        sourceYaml: projectSource.specSource,
+        engineResolveFiles: [textFile("legacy/task.yaml", "legacy case\n")],
+      },
+    } as RunSummary & { input: unknown };
     const snapshotWithCandidate = await loadLocalArchive(workspace);
     await saveLocalArchive(workspace, {
       ...snapshotWithCandidate,
@@ -1292,9 +1324,10 @@ describe("workbench CLI", () => {
         },
       ],
       candidateFiles: {
-        ...snapshotWithCandidate.candidateFiles,
+          ...snapshotWithCandidate.candidateFiles,
         local_draft_001: [textFile("SKILL.md", "local draft\n")],
       },
+      runs: [historicalRun],
     });
     await writeFile(path.join(assetsRoot, "client.js"), "console.log('dev-open-test');\n");
     await writeFile(path.join(assetsRoot, "client.css"), "body { margin: 0; }\n");
@@ -1310,12 +1343,15 @@ describe("workbench CLI", () => {
         activeId: string | null;
         summaries: Array<{ id: string; metrics?: unknown }>;
         evaluations: unknown[];
+        runs: Array<{ id: string; input?: unknown }>;
       }>(`${server.url}api/snapshot`);
       expect(snapshot.workspaceRoot).toBe(path.resolve(workspace));
       expect(snapshot.activeId).toBeNull();
       expect(snapshot.summaries.map((summary) => summary.id)).toEqual([candidateId]);
       expect(snapshot.summaries[0]).not.toHaveProperty("metrics");
       expect(snapshot.evaluations).toEqual([]);
+      expect(snapshot.runs).toEqual([expect.objectContaining({ id: "run_historical_source" })]);
+      expect(snapshot.runs[0]).not.toHaveProperty("input");
 
       const spec = await fetchJson<{
         path: string;
@@ -1326,8 +1362,10 @@ describe("workbench CLI", () => {
       expect(spec.exists).toBe(true);
       expect(spec.spec?.benchmark.name).toBe("local-command-eval");
 
-      const sourceFiles = await fetchJson<Array<{ path: string }>>(`${server.url}api/source/files`);
-      const sourcePaths = sourceFiles.map((file) => file.path).sort();
+      const sourceSurface = await fetchJson<{ files: Array<{ path: string }> }>(
+        `${server.url}api/source/files`,
+      );
+      const sourcePaths = sourceSurface.files.map((file) => file.path).sort();
       expect(sourcePaths).toContain("task-001/tests/required-output.txt");
       expect(sourcePaths).toContain("task-001/task.yaml");
       expect(sourcePaths).not.toContain("benchmark.yaml");
@@ -1337,18 +1375,27 @@ describe("workbench CLI", () => {
       expect(sourcePaths).not.toContain("README.md");
       expect(sourcePaths).not.toContain("docs/notes.md");
 
-      const candidateFiles = await fetchJson<Array<{ path: string; status: string }>>(
+      const historicalSourceSurface = await fetchJson<{
+        files: Array<{ path: string }>;
+        preview: { path: string; source: { content: string } | null } | null;
+      }>(
+        `${server.url}api/source/files?fingerprint=${encodeURIComponent(historicalBenchmarkFingerprint)}&path=legacy%2Ftask.yaml&view=raw`,
+      );
+      expect(historicalSourceSurface.files.map((file) => file.path)).toEqual(["legacy/task.yaml"]);
+      expect(historicalSourceSurface.preview?.path).toBe("legacy/task.yaml");
+      expect(historicalSourceSurface.preview?.source?.content).toBe("legacy case\n");
+
+      const candidateSurface = await fetchJson<{
+        files: Array<{ path: string; status: string }>;
+        preview: { path: string; source: { content: string } | null } | null;
+      }>(
         `${server.url}api/candidate/files?id=${encodeURIComponent(candidateId)}`,
       );
-      expect(candidateFiles).toEqual([
+      expect(candidateSurface.files).toEqual([
         expect.objectContaining({ path: "prompt.md", status: "added" }),
       ]);
-
-      const preview = await fetchJson<{ path: string; source: { content: string } | null }>(
-        `${server.url}api/candidate/preview?id=${encodeURIComponent(candidateId)}&path=prompt.md`,
-      );
-      expect(preview.path).toBe("prompt.md");
-      expect(preview.source?.content).toBe("seeded candidate\n");
+      expect(candidateSurface.preview?.path).toBe("prompt.md");
+      expect(candidateSurface.preview?.source?.content).toBe("seeded candidate\n");
 
       const mutation = await fetch(`${server.url}api/spec`, { method: "PUT" });
       expect(mutation.status).toBe(405);
@@ -1476,6 +1523,26 @@ describe("workbench CLI", () => {
       const encodedCandidateView = await fetch(new URL("/candidates/candidate_123/%66iles", server.url));
       expect(encodedCandidateView.status).toBe(200);
       expect(encodedCandidateView.headers.get("content-type")).toContain("text/html");
+
+      const benchmarkManifest = await fetch(new URL("/manifest", server.url));
+      expect(benchmarkManifest.status).toBe(200);
+      expect(benchmarkManifest.headers.get("content-type")).toContain("text/html");
+
+      const benchmarkFiles = await fetch(new URL("/files?file=task-001/task.yaml&view=raw", server.url));
+      expect(benchmarkFiles.status).toBe(200);
+      expect(benchmarkFiles.headers.get("content-type")).toContain("text/html");
+
+      const lineage = await fetch(new URL("/candidates/lineage", server.url));
+      expect(lineage.status).toBe(200);
+      expect(lineage.headers.get("content-type")).toContain("text/html");
+
+      const evaluation = await fetch(new URL("/evaluations/eval_123", server.url));
+      expect(evaluation.status).toBe(200);
+      expect(evaluation.headers.get("content-type")).toContain("text/html");
+
+      const evaluationCaseFiles = await fetch(new URL("/evaluations/eval_123/cases/case-001/files?file=output.md&view=raw", server.url));
+      expect(evaluationCaseFiles.status).toBe(200);
+      expect(evaluationCaseFiles.headers.get("content-type")).toContain("text/html");
 
       const missingDocument = await fetch(new URL("/sdfsdfds", server.url));
       expect(missingDocument.status).toBe(404);
@@ -1812,10 +1879,10 @@ describe("workbench CLI", () => {
       expect(traces.executions[0]?.trace.spans.map((span) => span.stage_id)).toEqual(["attempt", "attempt", "attempt", "attempt"]);
       expect(traces.executions[0]?.trace.spans.map((span) => span.stage_run_index)).toEqual([null, null, null, null]);
 
-      const files = await fetchJson<Array<{ path: string }>>(
+      const files = await fetchJson<{ files: Array<{ path: string }> }>(
         `${server.url}api/execution/files?run=run_seeded&id=job_attempt`,
       );
-      expect(files.map((file) => file.path)).toEqual(["attempt-summary.md"]);
+      expect(files.files.map((file) => file.path)).toEqual(["attempt-summary.md"]);
     } finally {
       await server.close();
     }
@@ -4075,80 +4142,11 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
   });
 
-  test("runtime import restores active from explicit run state instead of latest candidate order", async () => {
-    const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-runtime-active-run-fact-"));
-    const incumbent: CandidateRecord = {
-      id: "candidate_incumbent",
-      name: "Skill",
-      version: 1,
-      ordinal: 1,
-      benchmarkFingerprint: "benchmark",
-      candidateFingerprint: "candidate-incumbent",
-      visibility: "private",
-      createdAt: "2026-05-28T00:00:00.000Z",
-      referenceIds: [],
-      status: "evaluated",
-      fileChanges: [],
-    };
-    const newerCandidate: CandidateRecord = {
-      ...incumbent,
-      id: "candidate_newer",
-      version: 2,
-      ordinal: 2,
-      candidateFingerprint: "candidate-newer",
-      createdAt: "2026-05-28T00:02:00.000Z",
-    };
-
-    const bundle: WorkbenchRuntimeBundle = {
-      schema: "workbench.runtime.bundle.v1",
-      activeId: null,
-      candidates: [incumbent, newerCandidate],
-      candidateFiles: [
-        { candidateId: incumbent.id, files: [textFile("prompt.md", "incumbent\n")] },
-        { candidateId: newerCandidate.id, files: [textFile("prompt.md", "newer\n")] },
-      ],
-      evaluations: [],
-      runs: [
-        localRunSummary({
-          id: "run_incumbent_eval",
-          benchmarkFingerprint: "benchmark",
-          candidateId: incumbent.id,
-          outputCandidateId: incumbent.id,
-          activeCandidateId: incumbent.id,
-          finishedAt: "2026-05-28T00:01:00.000Z",
-          outcome: "ok",
-        }),
-        localRunSummary({
-          id: "run_newer_improve",
-          workflow: "improve",
-          benchmarkFingerprint: "benchmark",
-          candidateId: newerCandidate.id,
-          outputCandidateId: newerCandidate.id,
-          activeCandidateId: incumbent.id,
-          finishedAt: "2026-05-28T00:03:00.000Z",
-          outcome: "ok",
-        }),
-      ],
-      jobs: [],
-      executionFiles: [],
-      events: [],
-    };
-
-    await expect(importLocalRuntimeBundle(workspace, bundle, "benchmark")).resolves.toMatchObject({
-      stats: { activeId: incumbent.id },
-    });
-    const archive = await loadLocalArchive(workspace);
-    expect(archive.activeId).toBe(incumbent.id);
-  });
-
-  test("pull dry-run reports the same explicit active normalization that pull applies", async () => {
+  test("pull dry-run reports the same projected active state that pull applies", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-pull-dry-run-active-"));
     expect(await runCli(["init", workspace, "--command", "dry-run-active", "--json"], createIo())).toBe(0);
     const source = await readLocalProjectSource(workspace);
-    await writeFile(
-      path.join(workspace, ".workbench", "origin.json"),
-      JSON.stringify(originFixture(), null, 2),
-    );
+    await writeOriginFixture(workspace);
     const state = projectStateFixture({
       id: "wb_123456789abc",
       owner: "alice",
@@ -4183,6 +4181,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       referenceIds: [],
       status: "evaluated",
       fileChanges: [],
+      eval: candidateEvaluation({ score: 1 }),
     };
     const newer: CandidateRecord = {
       ...incumbent,
@@ -4191,6 +4190,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       ordinal: 2,
       candidateFingerprint: "candidate-newer",
       createdAt: "2026-05-28T00:01:00.000Z",
+      eval: candidateEvaluation({ score: 0.5 }),
     };
     state.runtime = {
       schema: "workbench.runtime.bundle.v1",
@@ -4200,12 +4200,23 @@ await fs.writeFile(resultPath, JSON.stringify({
       evaluations: [],
       runs: [
         localRunSummary({
+          id: "run_incumbent_eval",
+          workflow: "eval",
+          benchmarkFingerprint,
+          candidateId: incumbent.id,
+          outputCandidateId: incumbent.id,
+          activeCandidateId: incumbent.id,
+          finishedAt: "2026-05-28T00:01:00.000Z",
+          outcome: "ok",
+        }),
+        localRunSummary({
           id: "run_newer_improve",
           workflow: "improve",
           benchmarkFingerprint,
-          candidateId: newer.id,
+          candidateId: incumbent.id,
           outputCandidateId: newer.id,
           activeCandidateId: incumbent.id,
+          selectBy: "score on all cases",
           finishedAt: "2026-05-28T00:02:00.000Z",
           outcome: "ok",
         }),
@@ -4294,15 +4305,7 @@ await fs.writeFile(resultPath, JSON.stringify({
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-readonly-push-"));
     vi.stubEnv("HOME", home);
     expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_123456789abc",
-        remote: "alice/demo",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root);
     const requests: Array<{ url: string; method: string; body?: unknown }> = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       requests.push({
@@ -4343,15 +4346,10 @@ await fs.writeFile(resultPath, JSON.stringify({
       accessToken: "test-token",
     }));
     expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_officialdemo",
-        remote: "official/demo",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_officialdemo",
+      remote: "official/demo",
+    }));
     const requests: Array<{ url: string; method: string; body?: unknown }> = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       requests.push({
@@ -4403,19 +4401,175 @@ await fs.writeFile(resultPath, JSON.stringify({
     ]);
   });
 
+  test("push force resolves the linked remote by slug for dry-run and replace", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "workbench-force-dry-run-"));
+    expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_stale",
+      remote: "alice/demo",
+    }));
+    const requests: Array<{ url: string; method: string; body?: WorkbenchProjectState }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      requests.push({
+        url,
+        method: init?.method ?? "GET",
+        ...(init?.body ? { body: JSON.parse(String(init.body)) as WorkbenchProjectState } : {}),
+      });
+      if (url === "http://workbench.test/api/workbench/public/benchmarks/alice/demo") {
+        return Response.json({ benchmark: { id: "wb_resolved", ownerUsername: "alice", name: "demo", visibility: "private" } });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_resolved/state?force=true" && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as WorkbenchProjectState;
+        return Response.json(projectStateImportFixture({
+          id: "wb_resolved",
+          owner: "alice",
+          name: "demo",
+          visibility: "private",
+          revisionId: "spec_force",
+          sourceFingerprint: body.source.fingerprint,
+          runtime: body.runtime,
+          changed: true,
+          sourceChanged: true,
+          runtimeChanged: true,
+        }));
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const dryRunIo = createIo();
+    expect(await runCli(["push", "--dir", root, "--dry-run", "--force", "--json"], dryRunIo)).toBe(0);
+    expect(JSON.parse(dryRunIo.stdoutText())).toMatchObject({
+      ok: true,
+      dryRun: true,
+      action: "replace",
+      benchmarkId: "wb_resolved",
+    });
+
+    const replaceIo = createIo();
+    expect(await runCli(["push", "--dir", root, "--force", "--json"], replaceIo)).toBe(0);
+    const replaceOutput = JSON.parse(replaceIo.stdoutText());
+    expect(replaceOutput).toMatchObject({
+      ok: true,
+      action: "replace",
+      origin: {
+        projectId: "wb_resolved",
+        remote: "alice/demo",
+        sourceRevisionId: "spec_force",
+      },
+    });
+    expect(replaceOutput.origin.sourceFingerprint).toBe(requests[2]?.body?.source.fingerprint);
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET http://workbench.test/api/workbench/public/benchmarks/alice/demo",
+      "GET http://workbench.test/api/workbench/public/benchmarks/alice/demo",
+      "PUT http://workbench.test/api/workbench/benchmarks/wb_resolved/state?force=true",
+    ]);
+  });
+
+  test("push force rejects a backend response that did not replace runtime state", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "workbench-force-stale-response-"));
+    expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_stale",
+      remote: "alice/demo",
+    }));
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url === "http://workbench.test/api/workbench/public/benchmarks/alice/demo") {
+        return Response.json({ benchmark: { id: "wb_resolved", ownerUsername: "alice", name: "demo", visibility: "private" } });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/wb_resolved/state?force=true" && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as WorkbenchProjectState;
+        return Response.json(projectStateImportFixture({
+          id: "wb_resolved",
+          owner: "alice",
+          name: "demo",
+          visibility: "private",
+          revisionId: "spec_force",
+          sourceFingerprint: body.source.fingerprint,
+          runtime: remoteRuntimeBundleFixture({ candidateId: "candidate_stale" }),
+          changed: true,
+          sourceChanged: true,
+          runtimeChanged: true,
+        }));
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    expect(await runCli(["push", "--dir", root, "--force", "--json"], io)).toBe(1);
+    expect(JSON.parse(io.stdoutText()).error).toContain("Workbench force push did not replace remote runtime.");
+    const origin = JSON.parse(await readFile(path.join(root, ".workbench", "origin.json"), "utf8"));
+    expect(origin.projectId).toBe("wb_stale");
+  });
+
+  test("push force creates when the linked slug is absent", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "workbench-force-create-home-"));
+    const root = await mkdtemp(path.join(os.tmpdir(), "workbench-force-create-"));
+    vi.stubEnv("HOME", home);
+    await mkdir(path.join(home, ".workbench"), { recursive: true });
+    await writeFile(path.join(home, ".workbench", "workbench.json"), JSON.stringify({
+      baseUrl: "http://workbench.test",
+      accessToken: "test-token",
+    }));
+    expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_missing",
+      remote: "alice/demo",
+    }));
+    const requests: Array<{ url: string; method: string; body?: WorkbenchProjectState }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      requests.push({
+        url,
+        method: init?.method ?? "GET",
+        ...(init?.body ? { body: JSON.parse(String(init.body)) as WorkbenchProjectState } : {}),
+      });
+      if (url === "http://workbench.test/api/workbench/public/benchmarks/alice/demo") {
+        return Response.json({ message: "Workbench benchmark not found: alice/demo" }, { status: 404 });
+      }
+      if (url === "http://workbench.test/api/workbench/profile") {
+        return Response.json({ profile: { username: "alice" } });
+      }
+      if (url === "http://workbench.test/api/workbench/benchmarks/state" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as WorkbenchProjectState;
+        return Response.json(projectStateImportFixture({
+          id: "wb_created",
+          owner: "alice",
+          name: "demo",
+          runtime: body.runtime,
+          changed: true,
+          sourceChanged: true,
+          runtimeChanged: true,
+        }), { status: 201 });
+      }
+      return Response.json({ error: `unexpected ${url}` }, { status: 500 });
+    });
+
+    const io = createIo();
+    expect(await runCli(["push", "--dir", root, "--force", "--json"], io)).toBe(0);
+
+    expect(JSON.parse(io.stdoutText())).toMatchObject({
+      ok: true,
+      action: "create",
+      benchmark: { id: "wb_created" },
+      origin: {
+        projectId: "wb_created",
+        remote: "alice/demo",
+      },
+    });
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET http://workbench.test/api/workbench/public/benchmarks/alice/demo",
+      "GET http://workbench.test/api/workbench/profile",
+      "POST http://workbench.test/api/workbench/benchmarks/state",
+    ]);
+  });
+
   test("push lets remote benchmark identity enforce name conflicts", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-push-name-conflict-"));
     expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "demo",
-        remote: "alice/demo",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      projectId: "demo",
+      remote: "alice/demo",
+    }));
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       requests.push(`${init?.method ?? "GET"} ${url}`);
@@ -4443,15 +4597,10 @@ await fs.writeFile(resultPath, JSON.stringify({
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-push-rename-conflict-"));
     expect(await runCli(["init", root, "--command", "renamed-benchmark", "--json"], createIo())).toBe(0);
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_123456789abc",
-        remote: "alice/original-benchmark",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_123456789abc",
+      remote: "alice/original-benchmark",
+    }));
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       requests.push(`${init?.method ?? "GET"} ${url}`);
@@ -4531,18 +4680,13 @@ await fs.writeFile(resultPath, JSON.stringify({
       sourceFingerprint: string;
       runtimeFingerprint: string;
     };
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_123456789abc",
-        remote: "alice/demo",
-        sourceRevisionId: "spec_previous",
-        sourceFingerprint: baseFingerprint.sourceFingerprint,
-        runtimeFingerprint: baseFingerprint.runtimeFingerprint,
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_123456789abc",
+      remote: "alice/demo",
+      sourceRevisionId: "spec_previous",
+      sourceFingerprint: baseFingerprint.sourceFingerprint,
+      runtimeFingerprint: baseFingerprint.runtimeFingerprint,
+    }));
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -4609,22 +4753,17 @@ await fs.writeFile(resultPath, JSON.stringify({
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-origin-base-url-"));
     expect(await runCli(["init", root, "--command", "demo", "--json"], createIo())).toBe(0);
     const sourceFingerprint = await currentSourceFingerprint(root);
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_123456789abc",
-        remote: "alice/demo",
-        baseUrl: "http://vpc.workbench.test",
-        sourceFingerprint,
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_123456789abc",
+      remote: "alice/demo",
+      baseUrl: "http://vpc.workbench.test",
+      sourceFingerprint,
+    }));
     vi.stubEnv("WORKBENCH_API_URL", "http://managed.workbench.test");
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       requests.push(`${init?.method ?? "GET"} ${url}`);
-      if (url === "http://vpc.workbench.test/api/workbench/benchmarks/wb_123456789abc") {
+      if (url === "http://vpc.workbench.test/api/workbench/public/benchmarks/alice/demo") {
         return Response.json({
           benchmark: {
             id: "wb_123456789abc",
@@ -4649,7 +4788,7 @@ await fs.writeFile(resultPath, JSON.stringify({
     ).toBe(0);
 
     expect(requests).toEqual([
-      "GET http://vpc.workbench.test/api/workbench/benchmarks/wb_123456789abc",
+      "GET http://vpc.workbench.test/api/workbench/public/benchmarks/alice/demo",
     ]);
     expect(JSON.parse(evalIo.stdoutText())).toMatchObject({
       ok: true,
@@ -4664,6 +4803,15 @@ await fs.writeFile(resultPath, JSON.stringify({
     const requests: string[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       requests.push(`${init?.method ?? "GET"} ${url}`);
+      if (url === "http://workbench.test/api/workbench/public/benchmarks/alice/demo") {
+        return Response.json({
+          benchmark: {
+            id: "wb_123456789abc",
+            ownerUsername: "alice",
+            name: "demo",
+          },
+        });
+      }
       if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc") {
         return Response.json({
           benchmark: {
@@ -4686,14 +4834,20 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
 
     const projectIo = createIo();
-    expect(await runCli(["open", "--remote", "--benchmark", "wb_123456789abc", "--json", "--no-open"], projectIo)).toBe(0);
+    expect(
+      await runCli(["open", "--remote", "--benchmark", "wb_123456789abc", "--json", "--no-open"], projectIo),
+      projectIo.stderrText() || projectIo.stdoutText(),
+    ).toBe(0);
     expect(JSON.parse(projectIo.stdoutText())).toMatchObject({
       ok: true,
       url: "http://workbench.test/benchmarks/alice/demo",
     });
 
     const candidateIo = createIo();
-    expect(await runCli(["open", "--remote", "candidate_abc123", "--benchmark", "wb_123456789abc", "--json", "--no-open"], candidateIo)).toBe(0);
+    expect(
+      await runCli(["open", "--remote", "candidate_abc123", "--benchmark", "wb_123456789abc", "--json", "--no-open"], candidateIo),
+      candidateIo.stderrText() || candidateIo.stdoutText(),
+    ).toBe(0);
     expect(JSON.parse(candidateIo.stdoutText())).toMatchObject({
       ok: true,
       url: "http://workbench.test/benchmarks/alice/demo/candidates/candidate_abc123",
@@ -4707,15 +4861,10 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
 
     const originRoot = await mkdtemp(path.join(os.tmpdir(), "workbench-open-origin-"));
-    await mkdir(path.join(originRoot, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(originRoot, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_aaaaaaaaaaaa",
-        remote: "alice/origin-project",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(originRoot, originFixture({
+      projectId: "wb_aaaaaaaaaaaa",
+      remote: "alice/origin-project",
+    }));
     const explicitIdIo = createIo();
     expect(await runCli([
       "open",
@@ -5344,16 +5493,11 @@ await fs.writeFile(resultPath, JSON.stringify({
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-remote-improve-parent-import-"));
     expect(await runCli(["init", workspace, "--command", "remote-improve-parent-import", "--json"], createIo())).toBe(0);
     const sourceFingerprint = await currentSourceFingerprint(workspace);
-    await mkdir(path.join(workspace, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(workspace, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        remote: "alice/remote-improve-parent-import",
-        sourceFingerprint,
-        runtimeFingerprint: "rt_old",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(workspace, originFixture({
+      remote: "alice/remote-improve-parent-import",
+      sourceFingerprint,
+      runtimeFingerprint: "rt_old",
+    }));
     const state = await projectStateFixtureForWorkspace(workspace, {
       id: "wb_123456789abc",
       owner: "alice",
@@ -5697,15 +5841,10 @@ await fs.writeFile(resultPath, JSON.stringify({
     await mkdir(path.join(root, "candidates", "current", "files", "__pycache__"));
     await writeFile(path.join(root, "candidates", "current", "files", "__pycache__", "run.cpython-314.pyc"), "bytecode\n");
     await writeFile(path.join(root, "candidates", "current", "files", ".DS_Store"), "finder metadata\n");
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_123456789abc",
-        remote: "alice/push-command-eval",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_123456789abc",
+      remote: "alice/push-command-eval",
+    }));
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
     const bodies: Record<string, unknown> = {};
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -5778,19 +5917,27 @@ await fs.writeFile(resultPath, JSON.stringify({
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-push-dry-run-runtime-fp-"));
     expect(await runCli(["init", root, "--command", "push-command-eval", "--json"], createIo())).toBe(0);
     const sourceFingerprint = await currentSourceFingerprint(root);
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        sourceFingerprint,
-        runtimeFingerprint: "rt_remote_base",
-      }), null, 2),
-      "utf8",
-    );
-    const candidateId = await seedLocalCandidate(root);
+    await writeOriginFixture(root, originFixture({
+      sourceFingerprint,
+      runtimeFingerprint: "rt_remote_base",
+    }));
     const source = await readLocalProjectSource(root);
+    const benchmarkFingerprint = localBenchmarkFingerprint(source);
+    const candidateId = await seedLocalCandidate(root, {
+      eval: candidateEvaluation({ score: 1 }),
+      runs: [localRunSummary({
+        id: "run_seeded_eval",
+        workflow: "eval",
+        benchmarkFingerprint,
+        candidateId: "candidate_seeded_001",
+        outputCandidateId: "candidate_seeded_001",
+        activeCandidateId: "candidate_seeded_001",
+        finishedAt: "2026-05-28T00:01:00.000Z",
+        outcome: "ok",
+      })],
+    });
     const runtime = await exportLocalRuntimeBundle(root, {
-      currentBenchmarkFingerprint: localBenchmarkFingerprint(source),
+      currentBenchmarkFingerprint: benchmarkFingerprint,
     });
     const expectedRuntimeFingerprint = workbenchRuntimeBundleFingerprint(runtime);
     expect(expectedRuntimeFingerprint).not.toBe("rt_remote_base");
@@ -5803,7 +5950,7 @@ await fs.writeFile(resultPath, JSON.stringify({
       if (fetchAttempts === 1) {
         throw new TypeError("fetch failed: socket hang up");
       }
-      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc") {
+      if (url === "http://workbench.test/api/workbench/public/benchmarks/alice/demo") {
         return Response.json({
           benchmark: {
             id: "wb_123456789abc",
@@ -5820,7 +5967,10 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
 
     const io = createIo();
-    expect(await runCli(["push", "--dir", root, "--dry-run", "--json"], io)).toBe(0);
+    expect(
+      await runCli(["push", "--dir", root, "--dry-run", "--json"], io),
+      io.stderrText() || io.stdoutText(),
+    ).toBe(0);
     const output = JSON.parse(io.stdoutText());
     expect(output).toMatchObject({
       ok: true,
@@ -5839,8 +5989,8 @@ await fs.writeFile(resultPath, JSON.stringify({
     });
     expect(output.benchmark).not.toHaveProperty("snapshots");
     expect(requests).toEqual([
-      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
-      "GET http://workbench.test/api/workbench/benchmarks/wb_123456789abc",
+      "GET http://workbench.test/api/workbench/public/benchmarks/alice/demo",
+      "GET http://workbench.test/api/workbench/public/benchmarks/alice/demo",
     ]);
   });
 
@@ -5848,19 +5998,14 @@ await fs.writeFile(resultPath, JSON.stringify({
     const root = await mkdtemp(path.join(os.tmpdir(), "workbench-push-dry-run-auth-"));
     expect(await runCli(["init", root, "--command", "push-command-eval", "--json"], createIo())).toBe(0);
     const sourceFingerprint = await currentSourceFingerprint(root);
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        remote: "test/demo",
-        sourceFingerprint,
-      }), null, 2),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      remote: "test/demo",
+      sourceFingerprint,
+    }));
     vi.stubGlobal("fetch", async (url: string) => {
-      if (url === "http://workbench.test/api/workbench/benchmarks/wb_123456789abc") {
+      if (url === "http://workbench.test/api/workbench/public/benchmarks/test/demo") {
         return Response.json(
-          { error: "Workbench benchmark not found: wb_123456789abc" },
+          { error: "Workbench benchmark not found: test/demo" },
           { status: 404 },
         );
       }
@@ -5869,7 +6014,7 @@ await fs.writeFile(resultPath, JSON.stringify({
 
     const io = createIo();
     expect(await runCli(["push", "--dir", root, "--dry-run"], io)).toBe(1);
-    expect(io.stderrText()).toContain("Workbench benchmark not found: wb_123456789abc");
+    expect(io.stderrText()).toContain("Workbench benchmark not found: test/demo");
   });
 
   test("push uploads binary snapshots without utf8 corruption", async () => {
@@ -5877,15 +6022,10 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(await runCli(["init", root, "--command", "binary-command-eval", "--json"], createIo())).toBe(0);
     const fileBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]);
     await writeFile(path.join(root, "tasks", "task-001", "tests", "golden.docx"), fileBytes);
-    await mkdir(path.join(root, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(root, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        projectId: "wb_123456789abc",
-        remote: "alice/binary-command-eval",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(root, originFixture({
+      projectId: "wb_123456789abc",
+      remote: "alice/binary-command-eval",
+    }));
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
     const bodies: Record<string, { source?: { engineResolveFiles?: unknown[] } }> = {};
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -5984,23 +6124,18 @@ await fs.writeFile(resultPath, JSON.stringify({
     expect(exitCode).toBe(0);
     expect(polls).toBe(2);
     expect(io.stdoutText()).toContain("Run run_123 reached finished; candidate candidate_123");
-    expect(io.stdoutText()).toContain("Open evaluation: http://workbench.test/benchmarks/alice/demo/candidates/candidate_123?evaluation=eval_run_123_candidate_123");
+    expect(io.stdoutText()).toContain("Open evaluation: http://workbench.test/benchmarks/alice/demo/evaluations/eval_run_123_candidate_123");
   });
 
   test("imports terminal remote project state into the linked local project after watch", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-remote-state-import-"));
     expect(await runCli(["init", workspace, "--command", "remote-state-import", "--json"], createIo())).toBe(0);
     const sourceFingerprint = await currentSourceFingerprint(workspace);
-    await mkdir(path.join(workspace, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(workspace, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        remote: "alice/remote-state-import",
-        sourceFingerprint,
-        runtimeFingerprint: "rt_old",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(workspace, originFixture({
+      remote: "alice/remote-state-import",
+      sourceFingerprint,
+      runtimeFingerprint: "rt_old",
+    }));
     const state = await projectStateFixtureForWorkspace(workspace, {
       id: "wb_123456789abc",
       owner: "alice",
@@ -6082,16 +6217,11 @@ await fs.writeFile(resultPath, JSON.stringify({
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-remote-reuse-state-import-"));
     expect(await runCli(["init", workspace, "--command", "remote-reuse-state-import", "--json"], createIo())).toBe(0);
     const sourceFingerprint = await currentSourceFingerprint(workspace);
-    await mkdir(path.join(workspace, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(workspace, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        remote: "alice/remote-reuse-state-import",
-        sourceFingerprint,
-        runtimeFingerprint: "rt_old",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(workspace, originFixture({
+      remote: "alice/remote-reuse-state-import",
+      sourceFingerprint,
+      runtimeFingerprint: "rt_old",
+    }));
     const state = await projectStateFixtureForWorkspace(workspace, {
       id: "wb_123456789abc",
       owner: "alice",
@@ -6145,16 +6275,11 @@ await fs.writeFile(resultPath, JSON.stringify({
   test("leaves local state untouched when terminal remote import would overwrite dirty source", async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-remote-state-dirty-"));
     expect(await runCli(["init", workspace, "--command", "remote-state-dirty", "--json"], createIo())).toBe(0);
-    await mkdir(path.join(workspace, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(workspace, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        remote: "alice/remote-state-dirty",
-        sourceFingerprint: "fp_previous",
-        runtimeFingerprint: "rt_old",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(workspace, originFixture({
+      remote: "alice/remote-state-dirty",
+      sourceFingerprint: "fp_previous",
+      runtimeFingerprint: "rt_old",
+    }));
     const state = await projectStateFixtureForWorkspace(workspace, {
       id: "wb_123456789abc",
       owner: "alice",
@@ -6218,16 +6343,11 @@ await fs.writeFile(resultPath, JSON.stringify({
     const workspace = await mkdtemp(path.join(os.tmpdir(), "workbench-remote-state-other-"));
     expect(await runCli(["init", workspace, "--command", "remote-state-other", "--json"], createIo())).toBe(0);
     const sourceFingerprint = await currentSourceFingerprint(workspace);
-    await mkdir(path.join(workspace, ".workbench"), { recursive: true });
-    await writeFile(
-      path.join(workspace, ".workbench", "origin.json"),
-      JSON.stringify(originFixture({
-        remote: "alice/remote-state-other",
-        sourceFingerprint,
-        runtimeFingerprint: "rt_old",
-      })),
-      "utf8",
-    );
+    await writeOriginFixture(workspace, originFixture({
+      remote: "alice/remote-state-other",
+      sourceFingerprint,
+      runtimeFingerprint: "rt_old",
+    }));
     vi.stubEnv("WORKBENCH_API_URL", "http://workbench.test");
     let stateRequestCount = 0;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {

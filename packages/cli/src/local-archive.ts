@@ -13,9 +13,9 @@ import {
   jsonRecord,
   normalizeRelativePath,
   readSurfaceFiles,
-  workbenchRuntimeExplicitActiveId,
   workbenchRuntimeBundleStats,
   workbenchRuntimeCandidateIdentityForExchange,
+  workbenchRuntimeProjectedActiveId,
   workbenchSurfaceFilesEqualForExchange,
   writeSurfaceFiles,
   type CandidateRecord,
@@ -152,12 +152,17 @@ export async function exportLocalRuntimeBundle(
   options: { currentBenchmarkFingerprint?: string } = {},
 ): Promise<WorkbenchRuntimeBundle> {
   const snapshot = await loadLocalArchive(workspace);
-  const jobs = (await readLocalJobs(workspace)).map(compactWorkbenchRuntimeJobForExchange);
+  const archivedJobs = await readLocalJobs(workspace);
+  const jobs = archivedJobs.map(compactWorkbenchRuntimeJobForExchange);
+  const executionFiles = (await Promise.all(archivedJobs.map(async (job) => ({
+    jobId: job.id,
+    files: await readLocalExecutionFiles(workspace, job.id),
+  })))).filter((group) => group.files.length > 0);
   const activeId = options.currentBenchmarkFingerprint
-    ? workbenchRuntimeExplicitActiveId({
+    ? workbenchRuntimeProjectedActiveId({
         candidates: snapshot.candidates,
+        evaluations: snapshot.evaluations,
         runs: snapshot.runs,
-        preferredActiveId: snapshot.activeId,
         benchmarkFingerprint: options.currentBenchmarkFingerprint,
       })
     : snapshot.activeId;
@@ -172,7 +177,7 @@ export async function exportLocalRuntimeBundle(
     evaluations: snapshot.evaluations.map((evaluation) => ({ ...evaluation })),
     runs: snapshot.runs.map((run) => ({ ...run })),
     jobs,
-    executionFiles: [],
+    executionFiles,
     events: snapshot.events.map((event) => ({ ...event })),
   };
 }
@@ -257,10 +262,10 @@ export async function importLocalRuntimeBundle(
     (left.startedAt ?? left.createdAt).localeCompare(right.startedAt ?? right.createdAt) ||
     left.id.localeCompare(right.id)
   );
-  const activeId = workbenchRuntimeExplicitActiveId({
+  const activeId = workbenchRuntimeProjectedActiveId({
     candidates,
+    evaluations,
     runs,
-    preferredActiveId: bundle.activeId ?? null,
     benchmarkFingerprint: currentBenchmarkFingerprint,
   });
   if (activeId !== snapshot.activeId) {

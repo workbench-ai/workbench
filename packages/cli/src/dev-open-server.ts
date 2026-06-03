@@ -149,13 +149,26 @@ function isKnownWorkbenchDocumentPath(pathname: string): boolean {
   if (segments.length === 0) {
     return true;
   }
+  if (segments.length === 1 && (segments[0] === "manifest" || segments[0] === "files")) {
+    return true;
+  }
   if (segments[0] === "evaluations") {
-    return segments.length === 1;
+    if (segments.length === 1 || segments.length === 2) {
+      return true;
+    }
+    if (segments.length < 4 || segments[2] !== "cases") {
+      return false;
+    }
+    return segments.length === 4 ||
+      (segments.length === 5 && (segments[4] === "attempts" || segments[4] === "files"));
   }
   if (segments[0] !== "candidates") {
     return false;
   }
-  if (segments.length === 1 || segments.length === 2) {
+  if (segments.length === 1 || (segments.length === 2 && segments[1] === "lineage")) {
+    return true;
+  }
+  if (segments.length === 2) {
     return true;
   }
   return segments.length === 3 && (segments[2] === "files" || segments[2] === "manifest");
@@ -193,19 +206,9 @@ async function handleApiRequest(
     case "/api/source/files":
       sendJson(
         response,
-        await inspection.sourceFiles({
+        await inspection.sourceFileSurface({
           fingerprint: readOptionalSearchString(url.searchParams, "fingerprint"),
-        }),
-        200,
-        request.method,
-      );
-      return;
-    case "/api/source/preview":
-      sendJson(
-        response,
-        await inspection.sourcePreview({
-          fingerprint: readOptionalSearchString(url.searchParams, "fingerprint"),
-          path: readSearchString(url.searchParams, "path"),
+          path: readOptionalSearchString(url.searchParams, "path"),
           view: readPreviewMode(url.searchParams),
         }),
         200,
@@ -232,19 +235,9 @@ async function handleApiRequest(
       const candidateId = readSearchString(url.searchParams, "id");
       sendJson(
         response,
-        await inspection.candidateFiles({ id: candidateId }),
-        200,
-        request.method,
-      );
-      return;
-    }
-    case "/api/candidate/preview": {
-      const candidateId = readSearchString(url.searchParams, "id");
-      sendJson(
-        response,
-        await inspection.candidatePreview({
+        await inspection.candidateFileSurface({
           id: candidateId,
-          path: readSearchString(url.searchParams, "path"),
+          path: readOptionalSearchString(url.searchParams, "path"),
           view: readPreviewMode(url.searchParams),
         }),
         200,
@@ -287,25 +280,10 @@ async function handleApiRequest(
       const execJobId = readSearchString(url.searchParams, "id");
       sendJson(
         response,
-        await inspection.executionFiles({
+        await inspection.executionFileSurface({
           runId: execRunId,
           jobId: execJobId,
-        }),
-        200,
-        request.method,
-      );
-      return;
-    }
-    case "/api/execution/preview": {
-      const previewRunId = readSearchString(url.searchParams, "run");
-      const previewJobId = readSearchString(url.searchParams, "id");
-      const previewFilePath = readSearchString(url.searchParams, "path");
-      sendJson(
-        response,
-        await inspection.executionPreview({
-          runId: previewRunId,
-          jobId: previewJobId,
-          path: previewFilePath,
+          path: readOptionalSearchString(url.searchParams, "path"),
           view: readPreviewMode(url.searchParams),
         }),
         200,
