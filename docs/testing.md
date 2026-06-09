@@ -1,112 +1,55 @@
 # Testing
 
-Use the repository root.
+Run checks from the repository root unless a command includes `--dir`.
+Use [../CONTRIBUTING.md](../CONTRIBUTING.md) for repository commands. The exported Workbench skill lives at [../skills/workbench/SKILL.md](../skills/workbench/SKILL.md).
 
-Root workspace commands live in [`../CONTRIBUTING.md`](../CONTRIBUTING.md). The exported Workbench skill lives at [`../skills/workbench/SKILL.md`](../skills/workbench/SKILL.md).
-
-## CLI Validation
-
-The standard product validation surface is:
-
-- `pnpm build`
-- `pnpm lint`
-- `pnpm test`
-- `pnpm test:e2e`
-- `pnpm cli-skill-evals:validate`
-
-These commands exercise the open Workbench packages: `workbench-contract`, `workbench-protocol`, `workbench-core`, `workbench-built-in-adapters`, `workbench-ui`, and `workbench`.
-
-Run `pnpm workbench:public-source:validate` from the monorepo root when package, docs, UI, adapter, or skill changes should be proven against the source-backed public repository layout.
-
-Core tests cover split YAML parsing, benchmark fingerprints, execution graph planning, scoped sandbox execution, same-environment attempts, Docker local execution, candidate materialization, runs, lineage, traces, and the public sandbox adapter runner.
-
-Useful manual spot checks:
-
-- `pnpm cli --help`
-- `tmpdir=$(mktemp -d); pnpm cli init "$tmpdir" --command smoke-command --json`
-- `pnpm cli check --dir "$tmpdir" --json`
-- `pnpm cli eval "$tmpdir/candidates/command" --samples 1 --json`
-- `pnpm cli eval "$tmpdir/candidates/command" --runs all --samples 1 --json`
-- `pnpm cli improve "$tmpdir/candidates/command" --budget 1 --samples 1 --json`
-- `pnpm cli runs list --dir "$tmpdir" --json`
-- `pnpm cli candidates list --dir "$tmpdir" --json`
-- `pnpm cli open --dir "$tmpdir" --no-open --json`
-- `pnpm cli push --help`
-- `pnpm cli clone --help`
-- `pnpm cli pull --help`
-- `pnpm cli eval --help`
-- `pnpm cli --version`
-
-## External Harbor Engine Smoke
-
-The open Workbench product does not bundle Harbor. To validate Harbor interop, first provide a Harbor engine adapter from a benchmark-contained path, npm package, or git ref. Then create or select a tiny Harbor task directory containing `instruction.md`, `task.toml`, `environment/Dockerfile`, and `tests/test.sh`. This smoke proves the external `harbor` engine adapter bridges Workbench to Harbor while Harbor itself owns source parsing, artifact handoff, verifier sandbox mode, MCP server config, health checks, and result semantics.
-
-```yaml
-adapters:
-  - npm:@acme/workbench-harbor-engine@1.0.0
-engine:
-  use: harbor
-  with:
-    path: harbor-tasks
-```
-
-Run:
+## Builds
 
 ```bash
-pnpm cli check --dir "$tmpdir" --json
-pnpm cli eval "$tmpdir/candidates/command" --samples 1 --json
+pnpm build
 ```
 
-The score should come from Harbor's normalized result through the adapter. Harbor-specific reward conventions, artifact copying rules, verifier sandboxing, and health-check semantics stay in Harbor `task.toml` and the Harbor runtime. If no Harbor engine adapter source is declared, this smoke is expected to fail adapter resolution rather than fall back to a hidden built-in.
-
-## Workbench Cloud Remote Checks
-
-The open CLI includes Cloud remote commands, but remote implementation is owned by `products/workbench-cloud`. With a local Workbench Cloud server running, source and state commands can be checked with:
+Package-level builds are also valid when iterating:
 
 ```bash
-WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli push --json
-WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli pull --json
-WORKBENCH_API_URL=http://127.0.0.1:3000 pnpm cli eval --remote --samples 1 --dry-run --json
+pnpm --dir packages/core build
+pnpm --dir packages/built-in-adapters build
+pnpm --dir packages/cli build
 ```
 
-Remote execution checks should use the Workbench Cloud smoke command:
+## Tests
 
 ```bash
-AUTH_SECRET=test-secret \
-NEXTAUTH_SECRET=test-secret \
-WORKBENCH_WORKER_TOKEN=local-worker-token \
-WORKBENCH_BUILDER_TOKEN=local-builder-token \
-WORKBENCH_RUNTIME_REGISTRY=127.0.0.1:5050 \
-WORKBENCH_BACKEND=aws \
-WORKBENCH_SANDBOX_BACKEND=docker \
-WORKBENCH_TABLE=local-workbench \
-WORKBENCH_BLOB_BUCKET=local-workbench-blobs \
-WORKBENCH_JOB_QUEUE_URL=http://127.0.0.1:4566/000000000000/workbench-jobs \
-WORKBENCH_AWS_ENDPOINT_URL=http://127.0.0.1:4566 \
-AWS_REGION=us-east-1 \
-pnpm --dir ../workbench-cloud smoke:local
+pnpm test
 ```
 
-That smoke command expects a LocalStack-provisioned Workbench table, blob bucket, and SQS queue, then starts the cloud-owned builder, host supervisor, and sandbox host. The CLI docs intentionally do not describe worker internals or sandbox backend implementation details.
+The tests assert the skill-first command surface, local runtime lifecycle, read-only UI helpers, minimal adapter protocol, automatic source versions, and Workbench object remote layout.
 
-## Three-Statement Bench
-
-Use the real benchmark package as a local regression target for version-4 benchmark/candidate source:
+## Local E2E
 
 ```bash
-pnpm cli check --dir ../benchmarks/test/three-statement-bench --json
-pnpm cli runs list --dir ../benchmarks/test/three-statement-bench --json
-pnpm cli candidates list --dir ../benchmarks/test/three-statement-bench --json
-pnpm cli open --dir ../benchmarks/test/three-statement-bench --no-open --json
+tmpdir=$(mktemp -d)
+workbench init "$tmpdir/earnings-prep"
+workbench check --dir "$tmpdir/earnings-prep"
+workbench eval --dir "$tmpdir/earnings-prep" --agent default --samples 1 --json
+workbench versions --dir "$tmpdir/earnings-prep"
+workbench compare --dir "$tmpdir/earnings-prep" --versions all --skills all --agents all
+workbench open --dir "$tmpdir/earnings-prep"
+workbench open --dir "$tmpdir/earnings-prep" --json
 ```
 
-When validating in a browser, open the URL returned by `workbench open`. The candidate-centric flow should move from `/candidates` to a candidate, open `/evaluations/:evaluationId`, select `/evaluations/:evaluationId/cases/:caseId`, and inspect attempt traces and files directly under that case. Also verify the benchmark master pane, the one-way details-pane collapse button in the benchmark master pane on object routes, version selector, Manifest and Files tabs, route-backed `/candidates`, `/candidates/lineage`, and `/evaluations` index pages, candidate detail Manifest and Files tabs, and breadcrumbs that navigate to the matching index route. Run ids remain operational CLI/API resources, but they are not a browser navigation surface.
+The init eval is a smoke check. Run `workbench improve` only after a workflow-specific eval has produced failed or reviewed trace evidence.
 
-## Release
+## Object Remote E2E
 
-The guarded release path is:
+```bash
+tmpdir=$(mktemp -d)
+workbench init "$tmpdir/earnings-prep"
+workbench eval --dir "$tmpdir/earnings-prep" --agent default --samples 1 --json
+workbench remote add origin "file://$tmpdir/remote" --dir "$tmpdir/earnings-prep"
+workbench sync --dir "$tmpdir/earnings-prep"
+workbench publish --dir "$tmpdir/earnings-prep" --visibility private
+find "$tmpdir/remote" -maxdepth 3 -type f | sort
+```
 
-- `pnpm release:check`
-- `pnpm release:publish`
-
-`pnpm release:prepare <version>` rewrites the publishable Workbench package manifests. `pnpm release:check` compares the shared package version against public npm. `pnpm release:publish` requires `NPM_TOKEN`, reruns the configured build and test steps, and publishes pending public Workbench packages to `https://registry.npmjs.org/`.
+The remote should contain `workbench.object-pack.v1` objects, refs, `source/`, and pinned `releases/<version>/` source. Workbench must not create or mutate Git refs.

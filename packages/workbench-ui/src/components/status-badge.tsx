@@ -2,33 +2,34 @@ import { Badge } from "@workbench-ai/cli-web-ui/components/ui/badge";
 import { badgeToneProps } from "@workbench-ai/cli-web-ui/lib/badge";
 import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
-import { badgeToneForStatus, statusLabel } from "../lib/format";
-import type {
-  RemoteWorkbenchJob,
-  CandidateSummary,
-} from "../types";
+import { formatStatus } from "../lib/format";
+
+type Tone = "outline" | "success" | "warning" | "destructive" | "accent";
+
+const TONE_BY_STATUS: Record<string, Tone> = {
+  automate: "success",
+  canceled: "destructive",
+  cancelled: "destructive",
+  failed: "destructive",
+  insufficient: "warning",
+  review: "warning",
+  running: "warning",
+  queued: "warning",
+  succeeded: "success",
+  assist: "accent",
+};
 
 export function StatusBadge({
   status,
-  active = false,
   className,
 }: {
-  status:
-    | CandidateSummary["status"]
-    | RemoteWorkbenchJob["status"]
-    | null
-    | undefined;
-  active?: boolean;
+  status: string | null | undefined;
   className?: string;
 }) {
-  const statusTone = badgeToneForStatus(status);
-  const tone = badgeToneProps(
-    active && statusTone !== "destructive" ? "accent" : statusTone,
-  );
-
+  const tone = badgeToneProps(TONE_BY_STATUS[status ?? ""] ?? "outline");
   return (
     <Badge variant={tone.variant} className={cn(tone.className, className)}>
-      {statusLabel(status)}
+      {formatStatus(status)}
     </Badge>
   );
 }

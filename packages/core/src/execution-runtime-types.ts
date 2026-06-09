@@ -50,7 +50,7 @@ export interface WorkbenchExecutionRuntimeInput {
 }
 
 export interface WorkbenchWorkloadStepCommand {
-  kind: "improver" | "candidate" | "engine";
+  kind: "improver" | "skill" | "engine";
   label: string;
   operation: WorkbenchAdapterOperation;
   executor: WorkbenchAdapterOperationExecutor;

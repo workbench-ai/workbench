@@ -10,7 +10,7 @@ export interface WorkbenchRuntimeAdapterInstallerFile {
 export interface WorkbenchRuntimeAdapterInstaller {
   id: string;
   source: string;
-  setup: readonly string[];
+  install: readonly string[];
   files?: readonly WorkbenchRuntimeAdapterInstallerFile[];
 }
 
@@ -19,7 +19,7 @@ export function composeRuntimeDockerfileWithAdapterInstallers(
   adapters: readonly WorkbenchRuntimeAdapterInstaller[],
 ): string {
   const installAdapters = adapters.filter((adapter) =>
-    adapter.setup.length > 0 || (adapter.files?.length ?? 0) > 0
+    adapter.install.length > 0 || (adapter.files?.length ?? 0) > 0
   );
   if (installAdapters.length === 0) {
     return dockerfile;
@@ -28,7 +28,7 @@ export function composeRuntimeDockerfileWithAdapterInstallers(
   const lines = [
     dockerfile.trimEnd(),
     "",
-    "# Workbench adapter setup. The benchmark Dockerfile owns task dependencies;",
+    "# Workbench adapter install commands. The eval Dockerfile owns case dependencies;",
     "# adapter manifests own adapter runtime dependencies.",
     "USER root",
   ];
@@ -39,13 +39,13 @@ export function composeRuntimeDockerfileWithAdapterInstallers(
       lines.push(...adapterSourceDockerfileLines(adapter));
       lines.push(`WORKDIR /opt/workbench-adapters/${adapter.id}`);
     }
-    for (const command of adapter.setup) {
+    for (const command of adapter.install) {
       lines.push(`RUN ${command}`);
     }
   }
   if (finalUser) {
     lines.push("");
-    lines.push(`# Restore benchmark runtime user.`);
+    lines.push(`# Restore eval runtime user.`);
     lines.push(`USER ${finalUser}`);
   }
   lines.push("WORKDIR /workspace", "");

@@ -1,229 +1,144 @@
-# CLI
+# Workbench CLI
 
-`workbench` treats a benchmark directory as one repo-like project. The authored source lives in the working tree, local run history lives under `.workbench/`, and a configured Workbench remote backend can store the same project source, runtime history, and remote execution.
+The CLI is the action surface for skill management. The web UI is read-only inspection.
 
-The public project model is intentionally small:
-
-- engine: the benchmark runtime selected by `benchmark.yaml`; the built-in `workbench` engine owns native tasks, environment, scoring, and result normalization
-- candidate: `candidates/<name>/candidate.yaml` plus optional files at `candidates/<name>/files/`; the manifest owns prepare, runnable variants, the default run, and optional improve settings
-- remote: the configured backend project used by `clone`, `pull`, `push`, and `--remote` execution
-
-## Public Demo Flow
-
-Use this path for the public three-statement demo. The public benchmark can be cloned and validated without a remote account. Sign in only when you are ready to push your checkout and run remote auto-improvement.
+## Create
 
 ```bash
-workbench clone official/three-statement-demo
-cd three-statement-demo
+workbench init ./earnings-prep
+cd ./earnings-prep
 workbench check
-workbench login
-workbench push
-workbench improve --remote candidates/current --budget 1 --samples 1 --watch
+workbench status
+workbench versions
 ```
 
-The cloned public demo uses `candidates/current` and `candidates/current/candidate.yaml`. If a local or remote run reports missing adapter auth, run `workbench whoami --json` and connect the preferred provider, usually Codex.
+`init` writes `SKILL.md`, `.workbench/eval.yaml`, `.workbench/cases/case-001/case.yaml`, `.workbench/agents.yaml`, `.workbench/.gitignore`, and ignored runtime directories. The generated case is a smoke check for the harness; replace it with workflow-specific cases before treating scores as skill quality.
 
-## Provider Selection
+Simple projects do not need `.workbench/skills.yaml`; Workbench implicitly evaluates the root `SKILL.md` as `primary`. Add `.workbench/skills.yaml` only when comparing multiple measured skills or installing included skills beside the measured skill.
 
-When an agent creates a benchmark, first run `workbench whoami --json` and inspect `adapterStatuses` plus `remoteAuth.adapters`. Choose the adapter in this order:
-
-1. A connected `codex` profile.
-2. Any other connected provider that fits the requested workflow.
-3. `codex` as the default, then connect it with `workbench auth connect codex --method oauth` unless the user requested API-key billing.
-
-Use the selected adapter consistently in `workbench init --skill NAME --agent ADAPTER`, the candidate path `candidates/ADAPTER`, and the candidate manifest's `runs` and `improve` blocks.
-
-## Development Flow
+## Evaluate And Improve
 
 ```bash
-workbench whoami --json
-workbench init --skill smoke --agent codex
-workbench auth connect codex --method oauth
-workbench check
-workbench eval candidates/codex --samples 1
-workbench improve --budget 1 --samples 1
-workbench candidates list
-workbench runs list
+workbench eval --agent default --samples 1
+workbench eval --skill all --agent all --samples 1
+workbench eval --agent default --samples 1 --rerun
+workbench compare --skills all --agents all --versions all
+workbench retry RUN_ID
+workbench improve --agent patcher --budget 1 --samples 1
+```
+
+Workbench creates source versions automatically. If the folder changed since the current version, the next command creates the next `vNNN` before running.
+
+Use agents to compare runtime configurations. `local` and `command` agents run Docker-style case tests directly. `codex` and `claude` agents run the provider as the skill executor and score the same cases through the configured score adapter; connect adapter auth before using them locally or in Cloud.
+
+```bash
+workbench agent add default --adapter local
+workbench agent add strict --adapter command --with command='sh "$CASE_DIR/tests/test.sh"'
+workbench agent add networked --adapter command --with network=on
+workbench agent add codex --adapter codex --model gpt-5.4-mini --with auth=default
+workbench auth connect codex --method api-key
+workbench eval --agent all --samples 1
+```
+
+Local command agents use the same network vocabulary for eval and improve. `network=on`, `network=open`, and `network=true` mean open egress and run Docker with `bridge`; `network=off`, `network=none`, and `network=false` mean isolated egress and run Docker with `none`. Other non-empty strings are treated as custom Docker network names.
+
+Run `workbench improve` only after failed or reviewed trace evidence exists. Passing smoke traces are not enough for a meaningful improvement. Workbench records the proposed improved version and proof evidence every time, but it switches to that version only when the proof run succeeds and beats the latest scored incumbent for the same skill bundle, eval hash, and agent.
+
+Command-style agents can make improvement substantive by providing an `improveCommand`. Workbench runs it in Docker with the current skill mounted at `SKILL_DIR`, all installed skills under `SKILLS_DIR`, trace evidence mounted at `TRACE_DIR`, and output at `OUTPUT_DIR`. The command may edit files under `SKILL_DIR` directly or write a skill patch JSON to the protocol path in `WORKBENCH_SKILL_PATCH`. By default only `SKILL.md` is editable; pass `--with improveEdits=SKILL.md,assets` to allow supporting files.
+
+```bash
+workbench agent add patcher --adapter command --with 'improveCommand=printf "\nReview failure handling before final delivery.\n" >> "$SKILL_DIR/SKILL.md"'
+workbench improve --agent patcher --budget 1 --samples 1
+```
+
+Agents without `improveCommand` or a provider-backed skill-improvement adapter fail clearly.
+
+`workbench eval` reuses matching completed local evidence for the same version, skill bundle, agent, eval snapshot, and sample count. Pass `--rerun` to force new execution. `workbench retry RUN_ID` replays only failed jobs from the prior run, preserving the original version, skill, agent, case, and sample pairs. If a run has no failed jobs, use `workbench eval --rerun` to intentionally run it again.
+
+## Skill Composition
+
+Top-level entries in `.workbench/skills.yaml` are measured skills. Nested `includes` are installed beside one measured skill and are included in that bundle hash.
+
+```yaml
+skills:
+  primary:
+    path: .
+    includes:
+      - name: helper
+        path: skills/helper
+  upstream:
+    from: github:anthropics/skills//skills/frontend-design
+    ref: <commit-sha>
+```
+
+Local `path` values must stay inside the project root. Use remote refs or vendor a skill into the project instead of pointing at `../other-skill`.
+
+## Versions
+
+```bash
+workbench versions
+workbench show v002:SKILL.md
+workbench files v002
+workbench diff v001..v002
+workbench switch v001
+```
+
+`versions` lists source history. `switch` materializes the selected source version into the working folder and updates the current Workbench ref. It does not invoke Git; Git users see ordinary file changes if the project is inside a Git repository.
+
+## Remotes And Publish
+
+```bash
+workbench remote add origin file:///tmp/earnings-prep-remote
+workbench sync
+workbench publish --visibility private
+```
+
+Remotes are Workbench object endpoints, not Git remotes. `sync` merges versions, runs, jobs, traces, artifacts, lineage, and refs. File remotes are useful for local portability. Workbench Cloud remotes use HTTP and the same object pack schema after `workbench login`.
+
+`publish` makes a selected version installable from the remote and returns install URLs. Publication is explicit; normal sync shares evidence and source versions but does not change published visibility.
+
+## Inspect
+
+```bash
+workbench show trace_job_000002:stderr.log
+workbench show artifact_000002:output/result.json
+workbench trace RUN_ID
+workbench list runs
+workbench list jobs
+workbench list traces
+workbench list artifacts
+workbench list sessions
+workbench show codex:SESSION_ID --json
 workbench open
+workbench open --json
 ```
 
-Skip `workbench auth connect ...` when `workbench whoami --json` already reports the selected adapter profile as connected.
+`show REF:PATH` works for version files, trace files, and artifact files. `list sessions` is read-only evidence discovery for native Codex and Claude session JSONL files; set `CODEX_HOME` or `CLAUDE_HOME` to point at non-default homes.
 
-`workbench eval` ensures a candidate has an evaluation for the current benchmark. Omit `--runs` for the candidate's default run, pass a comma-separated list for specific runs, or pass `--runs all` to evaluate every run declared in the candidate manifest. Completed evaluations for the same candidate, run configuration, source, adapters, benchmark, and sample count are reused by default; pass `--rerun` only when you intentionally want another measurement.
-
-`workbench improve` ensures an improved candidate exists for the selected base candidate, run, budget, and sample count. It uses the evaluated active candidate by default when that candidate belongs to the current benchmark fingerprint; otherwise it evaluates and uses the authored current candidate. Improvement is anchored to one selected run; use `--runs RUN` to override the default and `--from CANDIDATE_ID` only when improving a specific local historical candidate snapshot. Completed improvements for the same base candidate, run configuration, source, adapters, benchmark, budget, and sample count are reused by default; pass `--rerun` only when you intentionally want another improvement attempt.
-
-Add `--remote` to run the same lifecycle against the configured remote or an explicit `--benchmark OWNER/BENCHMARK`:
+## Auth
 
 ```bash
-workbench login
-workbench push
-workbench eval --remote candidates/codex --samples 1 --watch --json
-workbench improve --remote candidates/codex --base CANDIDATE_ID --budget 1 --samples 1 --watch
-workbench open --remote --json --no-open
+workbench auth status
+workbench auth status codex
+workbench auth connect codex --method api-key
+workbench auth connect codex --method oauth --profile-root "$HOME"
+workbench auth connect claude --method api-key
+workbench auth connect claude --method bedrock
+workbench auth disconnect codex
+workbench login --base-url https://v2.workbench.ai
+workbench logout
 ```
 
-For remote eval, use `--candidate CANDIDATE_ID` when evaluating an existing remote candidate. For remote improve, use `--base CANDIDATE_ID` when choosing the candidate to improve.
+Auth uses the local Workbench adapter-auth store so adapter credentials can be checked, captured, and disconnected by adapter and profile. Codex supports `api-key` via `OPENAI_API_KEY` and `oauth` via `.codex/auth.json` under `--profile-root`. Claude supports `api-key` via `ANTHROPIC_API_KEY`, `oauth` via `.claude.json`, and `bedrock` via the Claude/AWS environment variables. When the CLI is logged in, `auth connect` and `auth disconnect` also update the matching Workbench Cloud adapter connection unless `--local-only` is passed.
 
-Runtime candidates are versioned automatically. If the candidate manifest is named `Skill`, the initial snapshot is shown as `Skill v1`; each successful improvement produces the next version in that family. Candidate run configurations stay nested under the candidate version.
-
-Once an active candidate exists, eval records scores without changing active. Improve output distinguishes the candidate produced by that improve run from the active incumbent. `outputCandidateId` is the new version created by the run. `activeCandidateId` is the current best evaluated candidate after scoring, so it can remain on an older version when a new version scores lower.
-
-Use `workbench retry TARGET_ID` to retry a failed local run or evaluation. Use `workbench retry --remote TARGET_ID` for remote records. Retry requires an explicit id and replays the recorded candidate, candidate run configuration, sample count, and improve budget. Reissuing the same retry reuses completed repair work when it already exists.
-
-When a watched or reused remote run reaches a terminal state from a checkout linked to the same remote project, Workbench imports the remote project state back into local if local authored source still matches the remembered base. Explicit `--benchmark` runs against a different project leave the current checkout untouched.
-
-`workbench open` starts a local read-only web server. Keep the command running while the page is open. `workbench open --remote` prints or opens the remote project URL. The browser UI is for inspection only: it supports navigating, filtering, selecting, expanding, and reviewing candidates, evaluations, cases, traces, scorecards, and files. Execution actions such as eval, improve, retry, push, and pull stay in the CLI.
-
-## Remote Flow
+## Cases
 
 ```bash
-workbench clone official/three-statement-demo
-workbench pull
-workbench push
+workbench case list
+workbench case add
+workbench case add --from TRACE_ID
+workbench case show case-001
+workbench case remove case-001
 ```
 
-`workbench clone` copies one remote project state into a local working tree and remembers that remote. The state contains authored source, durable runtime history, and the last seen source/runtime fingerprints.
-
-`workbench pull` refuses to overwrite local authored source if it has changed since the last clone, pull, or push. When local source still matches the remembered base, pull replaces authored source with the remote source, merges runtime history as immutable facts, and updates `.workbench/origin.json`.
-
-`workbench push` creates or updates the remote benchmark from local project state. If the remote source changed since the remembered base, push fails and asks you to pull first. `workbench push --dry-run` for a linked checkout first verifies that the signed-in account can read the remembered remote. Runtime history is merged idempotently; equal candidate facts are kept even when local and remote read-model fields such as timestamps, versions, status, usage, owner, or visibility differ. New ids are added, and same-id different candidate files or immutable fingerprints fail instead of choosing a winner. `workbench push --force` replaces the remembered remote with the local project state as one unit: authored source and runtime history together. Run `workbench push --dry-run --force` first when replacing shared remote state. Project-state sync exchanges source, candidate files, evaluations, runs, jobs, events, execution files, and projected active state. A successful push imports the accepted runtime state back into local, including the projected active candidate.
-
-Remote project reads used by clone, pull, push dry-runs, and post-watch sync retry transient read failures. Mutating requests are not retried automatically.
-
-The active candidate is projected runtime state. Sync derives it by replaying finished promotion-capable runs for the current benchmark fingerprint: the first scored eval can establish active, later evals only record scores, and improves promote their output candidate only when it beats the current active candidate under the run selection rule. If no compatible scored promotion fact exists, active is `null`.
-
-`.workbench/origin.json` has one exact shape: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`. It is a remote pointer plus the last exchanged base, not a second project model.
-
-Remote benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so remote references use only `OWNER/BENCHMARK`.
-
-## Adapter Auth
-
-`workbench login` authenticates the configured Workbench remote account. It does not connect the agent adapter that will run Codex, Claude Code, or another candidate.
-
-Use OAuth when you want Workbench to reuse a local subscription sign-in:
-
-```bash
-workbench auth connect codex --method oauth
-workbench auth connect claude --method oauth
-```
-
-File-based OAuth profiles are mutable runtime auth. Local runs serialize jobs that share the same OAuth profile, and remote runs hold a per-profile lease while forwarding refreshed auth files back to the remote backend before the next job can claim that profile.
-
-If a provider reports that an OAuth refresh token can no longer be refreshed, remote execution marks that adapter connection `reauth_required` and finishes the run instead of reusing stale credentials for the remaining jobs. Reconnect the adapter with `workbench auth connect ADAPTER --method oauth` before retrying remote work.
-
-Use API-key auth when you want provider API-key billing instead:
-
-```bash
-OPENAI_API_KEY=... workbench auth connect codex --method api-key --local-only
-ANTHROPIC_API_KEY=... workbench auth connect claude --method api-key --local-only
-```
-
-For other adapters, inspect supported methods with `workbench adapters inspect ADAPTER`, then run `workbench auth connect ADAPTER --method METHOD`. `workbench whoami` reports remote login state and required adapter-auth state for the current benchmark.
-
-## CLI Surface
-
-```bash
-workbench init [DIR] --skill NAME --agent ADAPTER [--from PATH] [--example] [--json]
-workbench init [DIR] --command NAME [--from PATH] [--example] [--json]
-workbench check [SOURCE] [--dir DIR] [--json]
-workbench adapters create PATH [--dir DIR] [--json]
-workbench adapters list [--dir DIR] [--json]
-workbench adapters inspect ID [--dir DIR] [--json]
-workbench adapters test ID|SOURCE [--dir DIR] [--request PATH] [--output DIR] [--json]
-workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--json]
-workbench eval --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
-workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]
-workbench improve --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
-workbench retry TARGET_ID [--dir DIR] [--remote] [--benchmark OWNER/BENCHMARK] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
-workbench open [SOURCE|OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID] [--dir DIR] [--remote] [--benchmark OWNER/BENCHMARK] [--run RUN_ID] [--host HOST] [--port N] [--no-open] [--json]
-workbench restore [--dir DIR] [--candidate CANDIDATE_ID] [--dry-run] [--yes] [--json]
-workbench runs list [--dir DIR] [--json]
-workbench runs show RUN_ID [--dir DIR] [--jobs] [--failures] [--json]
-workbench evaluations list [--dir DIR] [--json]
-workbench evaluations show EVALUATION_ID [--dir DIR] [--json]
-workbench executions trace --run RUN_ID --job JOB_ID [--dir DIR] [--json]
-workbench diagnose [RUN_OR_EVALUATION_ID] [--dir DIR] [--json]
-workbench candidates list [--dir DIR] [--json]
-workbench candidates show CANDIDATE_ID [--dir DIR] [--json]
-workbench candidates files [--dir DIR] [--candidate CANDIDATE_ID] [--json]
-workbench candidates preview --path PATH [--dir DIR] [--candidate CANDIDATE_ID] [--output PATH|-] [--json]
-workbench traces collect [--providers codex,claude] [--since 30d] [--workspace DIR] [--limit N] [--json]
-workbench traces list [--providers codex,claude] [--since 30d] [--workspace DIR] [--limit N] [--json]
-workbench traces show TRACE_ID [--providers codex,claude] [--since 30d] [--workspace DIR] [--json]
-workbench login [--base-url URL] [--no-open] [--json]
-workbench logout [--json]
-workbench whoami [--dir DIR] [--json]
-workbench clone OWNER/BENCHMARK [DIR] [--dry-run] [--json]
-workbench pull [--dir DIR] [--dry-run] [--json]
-workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--force] [--json]
-workbench auth connect ADAPTER[/SLOT] [--dir DIR] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]
-workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--json]
-```
-
-The local inspection commands, the local `workbench open` server, and remote browser inspection routes use the same generic Workbench read interface for candidates, evaluations, runs, files, execution traces, lineage, and failure diagnosis. CLI commands render local runtime history from that interface, while remote browser routes resolve the same interface through backend storage and visibility checks. `workbench evaluations list` prints the same comparison facts that power the browser evaluation view. `workbench executions trace` reads runtime traces for a specific Workbench run job. `workbench diagnose` summarizes generic failure modes across runs, evaluations, samples, cases, and jobs.
-
-The `workbench traces` commands are read-only and stateless against installed agent homes. They currently inspect Codex and Claude Code local sessions, not Workbench run execution traces. Use `workbench executions trace` for runtime traces tied to a Workbench run and job. `workbench traces list` and `workbench traces collect` default to the latest three traces per provider and report when more matching traces exist than the requested per-provider limit. Use `workbench traces list` to choose trace ids, `workbench traces show TRACE_ID --json` to print one full standardized digest by exact id, and `workbench traces collect --json` when a caller needs the full batch payload. JSON outputs for list and collect include `limitPerProvider` and `limitedProviders` when relevant.
-
-## Source Shape
-
-This is the native Workbench source shape for the built-in `workbench` engine. Omitted `engine.with.tasks` makes the engine read `tasks/`; use `engine.with.tasks.path` only when the native task directory is not `tasks/`. Top-level `environment`, `tasks`, and `score` are not core source primitives.
-
-```text
-benchmark.yaml
-candidates/
-  codex/
-    candidate.yaml
-    files/
-      SKILL.md
-tasks/
-  task-001/
-    task.yaml
-    files/
-    tests/
-environment/
-  Dockerfile
-```
-
-`candidate.yaml` does not declare a benchmark. The project benchmark is `benchmark.yaml`, and candidate files are declared explicitly with `files: { path: files }`.
-
-`benchmark.yaml` selects the engine:
-
-```yaml
-version: 4
-name: invoice-review
-description: Evaluate invoice review candidates.
-engine:
-  use: workbench
-  with:
-    environment:
-      dockerfile: environment/Dockerfile
-      network:
-        egress: none
-    score:
-      use: rubric
-      with:
-        instructions: Score the final workspace against the task.
-        parallelism: 2
-```
-
-`engine.with.environment.network.egress` accepts `open` or `none`; omitted `network` defaults to `open`. Use `egress: none` for benchmarks that must prevent internet access.
-
-Adapter sources can be benchmark-contained paths, `npm:` package specifiers, or `git:` refs. Unversioned npm and branch-like git refs float; exact npm versions and git commits are pinned by the adapter resolver. The CLI's default adapter catalog includes `workbench`, `codex`, `claude`, and `command`; score helpers such as `tests` and `rubric` are selected through the `workbench` engine's `score` slot. Rubric scoring runs one judge turn per criterion and uses `score.with.parallelism` as its only configurable throttle. Each judge trace is recorded as a trace session under the parent attempt job instead of creating core grader jobs. A declared source whose manifest id matches a default catalog id overrides that default for the project. Use `workbench adapters test` to validate a manifest, or add `--request` to replay an adapter operation locally against a `workbench.adapter.v3` fixture.
-
-At runtime, attempt jobs expose candidate source files at `/workspace/input/candidate`, public case files at `/workspace/input/case`, a mutable working directory at `/workspace`, verifier-private files under `/workspace/private/engine` only for engine-owned scoring operations, and durable results, artifacts, and traces under `/workspace/output`. Use candidate `prepare.command` when an attempt needs files copied into `/workspace`. Improve jobs instead start with candidate files in the mutable working directory and expose planner-selected prior attempt evidence under `/workspace/input/traces`. Adapter commands must discover operation-specific locations from `WORKBENCH_ADAPTER_REQUEST`; candidate adapters receive `paths.case` but not `paths.enginePrivate`.
-
-## Harbor Engine
-
-Harbor interop is engine-adapter based:
-
-```yaml
-adapters:
-  - npm:@acme/workbench-harbor-engine@1.0.0
-engine:
-  use: harbor
-  with:
-    path: terminal-bench-subset
-```
-
-The Harbor engine adapter should stay a thin bridge to Harbor. Harbor `task.toml` and the Harbor runtime own task parsing, MCP server config, health checks, environment interpretation, candidate invocation, artifact handoff, verifier/reward behavior, and same-sandbox versus separate-sandbox verifier topology. Workbench core does not parse Harbor directories or embed Harbor-specific runtime behavior. The adapter calls Harbor inspect/export and run APIs, exposes Workbench runtime-control as a sandbox backend when Harbor asks for sandboxes, and normalizes Harbor's final result for Workbench.
+Cases live under `.workbench/cases`. `case add --from TRACE_ID` records trace evidence and creates a draft that fails until expert acceptance criteria and tests are added.

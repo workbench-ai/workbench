@@ -59,7 +59,7 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  candidateId: string;
+  versionId: string;
   attemptIndex: number;
   samples: number;
   caseIds?: readonly string[];
@@ -72,8 +72,11 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   engineCases: readonly WorkbenchEngineCase[];
   traceFiles?: readonly SurfaceSnapshotFile[];
   environmentRef?: string;
+  skillRef?: string;
+  caseRef?: string;
   environmentRefsByCase?: ReadonlyMap<string, string>;
   baseId?: string | null;
+  metadata?: Record<string, Json>;
 }): RemoteWorkbenchJob[] {
   const jobs: RemoteWorkbenchJob[] = [];
   const engineCases = args.engineCases;
@@ -95,13 +98,16 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
         ownerUserId: args.ownerUserId,
         projectId: args.projectId,
         runId: args.runId,
-        candidateId: args.candidateId,
+        versionId: args.versionId,
         attemptIndex: args.attemptIndex,
         sampleIndex,
         caseId,
         spec: args.spec,
         engineCase: engineCase.case,
         environmentRef: args.environmentRefsByCase?.get(caseId) ?? args.environmentRef,
+        skillRef: args.skillRef,
+        caseRef: args.caseRef,
+        metadata: args.metadata,
         workflow: args.workflow === "improve" ? "improve" : "eval",
       });
       for (const node of graph.nodes) {
@@ -111,7 +117,7 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
         jobs.push(createWorkbenchExecutionJob({
           projectId: args.projectId,
           runId: args.runId,
-          candidateId: args.candidateId,
+          versionId: args.versionId,
           execution: node.execution,
           dependsOn: node.dependsOn,
           now: args.now,
@@ -160,7 +166,7 @@ export function engineCaseForCase(
 export function createWorkbenchExecutionJob(args: {
   projectId: string;
   runId: string;
-  candidateId: string;
+  versionId: string;
   execution: WorkbenchExecutionSpec;
   dependsOn: readonly string[];
   now: string;
@@ -175,7 +181,7 @@ export function createWorkbenchExecutionJob(args: {
     id: workbenchExecutionJobId(args.execution.id),
     projectId: args.projectId,
     runId: args.runId,
-    candidateId: args.candidateId,
+    versionId: args.versionId,
     kind: "execute",
     status: "queued",
     attempt: 0,
@@ -184,118 +190,13 @@ export function createWorkbenchExecutionJob(args: {
     input: {
       execution: args.execution,
       dependsOn: args.dependsOn.map(workbenchExecutionJobId),
-      candidateId: args.candidateId,
+      versionId: args.versionId,
       attemptIndex,
       sampleIndex,
       caseId,
       ...(args.baseFiles ? { baseFiles: args.baseFiles.map((file) => ({ ...file })) } : {}),
       ...(args.traceFiles ? { traceFiles: args.traceFiles.map((file) => ({ ...file })) } : {}),
       ...(args.baseId ? { baseId: args.baseId } : {}),
-    } as unknown as Json,
-  };
-}
-
-export function createBaselineCandidateExecution(args: {
-  ownerUserId: string;
-  projectId: string;
-  runId: string;
-  candidateId: string;
-  attemptIndex: number;
-}): WorkbenchExecutionSpec {
-  return {
-    id: `exec_${args.runId.replace(/[^a-z0-9_]/giu, "_")}_attempt_${String(args.attemptIndex).padStart(3, "0")}_case_current_sample_000_improve`,
-    projectId: args.projectId,
-    runId: args.runId,
-    candidateId: args.candidateId,
-    purpose: "improve",
-    adapter: {
-      use: "baseline",
-      with: {},
-    },
-    sandbox: {
-      kind: "snapshot",
-      ref: "workbench/baseline-candidate",
-    },
-    inputs: [],
-    outputs: [{
-      name: "candidate_patch",
-      schema: "workbench.candidate_patch.v1",
-      required: true,
-    }],
-    policy: {
-      tenantId: args.ownerUserId,
-      resources: {
-        cpu: 1,
-        memoryGb: 1,
-        diskGb: 1,
-        timeoutMinutes: 1,
-      },
-      network: {
-        egress: "none",
-      },
-    },
-    metadata: {
-      attemptIndex: args.attemptIndex,
-      sampleIndex: 0,
-      caseId: "current",
-      baseline: true,
-    },
-  };
-}
-
-export function createBaselineCandidateJob(args: {
-  ownerUserId: string;
-  projectId: string;
-  runId: string;
-  candidateId: string;
-  files: readonly SurfaceSnapshotFile[];
-  now: string;
-  baseId: string | null;
-  attemptIndex: number;
-  fileSet?: Json;
-}): RemoteWorkbenchJob {
-  const execution = createBaselineCandidateExecution({
-    ownerUserId: args.ownerUserId,
-    projectId: args.projectId,
-    runId: args.runId,
-    candidateId: args.candidateId,
-    attemptIndex: args.attemptIndex,
-  });
-  const files = args.files.map((file) => ({ ...file }));
-  return {
-    id: workbenchExecutionJobId(execution.id),
-    projectId: args.projectId,
-    runId: args.runId,
-    candidateId: args.candidateId,
-    kind: "execute",
-    status: "succeeded",
-    attempt: 1,
-    createdAt: args.now,
-    startedAt: args.now,
-    finishedAt: args.now,
-    updatedAt: args.now,
-    input: {
-      execution,
-      dependsOn: [],
-      candidateId: args.candidateId,
-      attemptIndex: args.attemptIndex,
-      baseline: true,
-    } as unknown as Json,
-    output: {
-      ok: true,
-      executionId: execution.id,
-      purpose: "improve",
-      candidateId: args.candidateId,
-      attemptIndex: args.attemptIndex,
-      baseId: args.baseId,
-      candidatePatch: {
-        files,
-        fileChanges: [],
-      },
-      fileChanges: [],
-      files,
-      ...(args.fileSet ? { fileSet: args.fileSet } : {}),
-      traces: [],
     } as unknown as Json,
   };
 }
@@ -308,9 +209,9 @@ export function workbenchExecutionJobPurpose(job: RemoteWorkbenchJob): Workbench
   if (job.kind !== "execute") {
     return null;
   }
-	  const execution = asRecord(asRecord(job.input).execution);
-	  const purpose = execution.purpose;
-	  return purpose === "improve" || purpose === "attempt" ? purpose : null;
+  const execution = asRecord(asRecord(job.input).execution);
+  const purpose = execution.purpose;
+  return purpose === "improve" || purpose === "attempt" ? purpose : null;
 }
 
 function readExecutionMetadataNumber(

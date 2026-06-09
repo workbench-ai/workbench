@@ -15,8 +15,8 @@ import type {
 } from "@workbench-ai/workbench-protocol";
 import YAML from "yaml";
 
-export const BENCHMARK_SPEC_FILE = "benchmark.yaml";
-export const CANDIDATE_SPEC_FILE = "candidate.yaml";
+export const EVAL_SPEC_FILE = "eval.yaml";
+export const SKILL_SPEC_FILE = "skill.yaml";
 
 export interface WorkbenchRuntimeSpec {
   dockerfile: string;
@@ -34,11 +34,11 @@ export interface WorkbenchPathRef {
   path: string;
 }
 
-export interface WorkbenchCandidatePrepareSpec {
+export interface WorkbenchSkillPrepareSpec {
   command: string;
 }
 
-export interface AuthoredBenchmarkSpec {
+export interface AuthoredEvalSpec {
   version: 4;
   name: string;
   description: string;
@@ -46,7 +46,7 @@ export interface AuthoredBenchmarkSpec {
   engine: WorkbenchAdapterInvocation;
 }
 
-export interface WorkbenchCandidateRunSpec extends WorkbenchAdapterInvocation {
+export interface WorkbenchSkillAgentSpec extends WorkbenchAdapterInvocation {
   name: string;
 }
 
@@ -60,52 +60,52 @@ export interface WorkbenchSelectionSpec {
   cases?: WorkbenchCaseSelector;
 }
 
-export interface WorkbenchCandidateImproveSpec extends WorkbenchAdapterInvocation {
+export interface WorkbenchSkillImproveSpec extends WorkbenchAdapterInvocation {
   edits: string[];
   optimizeOn?: WorkbenchCaseSelector;
   selectBy?: WorkbenchSelectionSpec;
 }
 
-export interface WorkbenchCandidateManifestSpec {
+export interface WorkbenchSkillManifestSpec {
   version: 4;
   name: string;
   description?: string;
   files: WorkbenchPathRef;
-  prepare?: WorkbenchCandidatePrepareSpec;
+  prepare?: WorkbenchSkillPrepareSpec;
   adapters: string[];
-  defaultRun?: string;
-  runs: Record<string, WorkbenchCandidateRunSpec>;
-  improve?: WorkbenchCandidateImproveSpec;
+  defaultAgent?: string;
+  agents: Record<string, WorkbenchSkillAgentSpec>;
+  improve?: WorkbenchSkillImproveSpec;
 }
 
-export interface ResolvedCandidateSpec extends WorkbenchCandidateManifestSpec {
-  selectedRunId: string;
+export interface ResolvedSkillSpec extends WorkbenchSkillManifestSpec {
+  selectedAgentId: string;
 }
 
 export interface WorkbenchResolvedSource {
   version: 4;
-  benchmark: AuthoredBenchmarkSpec;
-  candidate: ResolvedCandidateSpec;
+  eval: AuthoredEvalSpec;
+  skill: ResolvedSkillSpec;
 }
 
 export interface GenericRunSpec {
   version: 4;
   name: string;
   description: string;
-  benchmark: {
+  eval: {
     name: string;
     description: string;
     engine: WorkbenchAdapterInvocation;
   };
-  candidate: {
+  skill: {
     name: string;
     description?: string;
     files: WorkbenchPathRef;
-    prepare?: WorkbenchCandidatePrepareSpec;
-    defaultRun: string;
-    selectedRunId: string;
-    selectedRunName: string;
-    runs: Record<string, WorkbenchCandidateRunSpec>;
+    prepare?: WorkbenchSkillPrepareSpec;
+    defaultAgent: string;
+    selectedAgentId: string;
+    selectedAgentName: string;
+    agents: Record<string, WorkbenchSkillAgentSpec>;
     improve?: {
       edits: string[];
       optimizeOn?: WorkbenchCaseSelector;
@@ -150,7 +150,7 @@ export function validateWorkbenchResolvedSourceYaml(
   const warnings: string[] = [];
   const trimmed = source.trim();
   if (!trimmed) {
-    errors.push("Resolved Workbench source cannot be empty.");
+    errors.push("Resolved Workbench spec cannot be empty.");
   }
   if (trimmed) {
     try {
@@ -169,24 +169,26 @@ export function validateWorkbenchResolvedSourceYaml(
 export function resolveWorkbenchResolvedSourceYaml(
   source: string,
 ): GenericRunSpec {
-  const parsed = parseYamlRecord(source, "resolved Workbench source");
+  const parsed = parseYamlRecord(source, "resolved Workbench spec");
   const errors: string[] = [];
-  rejectUnknownKeys(parsed, "resolved Workbench source", [
+  rejectUnknownKeys(parsed, "resolved Workbench spec", [
     "version",
-    "benchmark",
-    "candidate",
+    "eval",
+    "skill",
   ], errors);
   if (parsed.version !== 4) {
-    throw new Error("Resolved Workbench source version must be 4.");
+    throw new Error("Resolved Workbench spec version must be 4.");
   }
-  const benchmark = normalizeBenchmarkRecord(
-    readRequiredRecord(parsed.benchmark, "resolved Workbench source.benchmark", errors),
-    "benchmark.yaml",
+  const evalSpec = normalizeEvalRecord(
+    readRequiredRecord(parsed.eval, EVAL_SPEC_FILE, errors),
+    EVAL_SPEC_FILE,
+    "resolved",
     errors,
   );
-  const candidate = normalizeCandidateRecord(
-    readRequiredRecord(parsed.candidate, "resolved Workbench source.candidate", errors),
-    "resolved Workbench source.candidate",
+  const skill = normalizeSkillRecord(
+    readRequiredRecord(parsed.skill, "resolved Workbench spec.skill", errors),
+    "resolved Workbench spec.skill",
+    "resolved",
     errors,
   );
   if (errors.length > 0) {
@@ -194,8 +196,8 @@ export function resolveWorkbenchResolvedSourceYaml(
   }
   return genericSpecFromAuthoredBundle({
     version: 4,
-    benchmark: benchmark!,
-    candidate: candidate!,
+    eval: evalSpec!,
+    skill: skill!,
   });
 }
 
@@ -210,7 +212,7 @@ export function engineResolveBindingForSpec(
 ): EngineResolveBinding {
   const resolver = engineResolveInvocationForSpec(spec);
   return {
-    engine: spec.benchmark.engine.use,
+    engine: spec.eval.engine.use,
     resolver: {
       use: resolver.use,
       withFingerprint: fingerprintJson(resolver.with ?? {}),
@@ -219,41 +221,43 @@ export function engineResolveBindingForSpec(
 }
 
 export function resolveWorkbenchSourceFiles(args: {
-  benchmarkSource: string;
-  candidateSource: string;
-  runId?: string | null;
+  evalSource: string;
+  skillSource: string;
+  selectedAgentId?: string | null;
 }): GenericRunSpec {
   return genericSpecFromAuthoredBundle(parseWorkbenchSourceFiles({
-    benchmarkSource: args.benchmarkSource,
-    candidateSource: args.candidateSource,
-    runId: args.runId,
+    evalSource: args.evalSource,
+    skillSource: args.skillSource,
+    selectedAgentId: args.selectedAgentId,
   }));
 }
 
 export function parseWorkbenchSourceFiles(args: {
-  benchmarkSource: string;
-  candidateSource?: string;
-  runId?: string | null;
+  evalSource: string;
+  skillSource?: string;
+  selectedAgentId?: string | null;
 }): WorkbenchResolvedSource {
   const errors: string[] = [];
-  const benchmark = normalizeBenchmarkRecord(
-    parseYamlRecord(args.benchmarkSource, BENCHMARK_SPEC_FILE),
-    BENCHMARK_SPEC_FILE,
+  const evalSpec = normalizeEvalRecord(
+    parseYamlRecord(args.evalSource, EVAL_SPEC_FILE),
+    EVAL_SPEC_FILE,
+    "authored",
     errors,
   );
-  const candidate = normalizeCandidateRecord(
-    parseYamlRecord(args.candidateSource ?? "", "candidate YAML"),
-    "candidate YAML",
+  const skill = normalizeSkillRecord(
+    parseYamlRecord(args.skillSource ?? "", "skill YAML"),
+    "skill YAML",
+    "authored",
     errors,
-    args.runId ?? undefined,
+    args.selectedAgentId ?? undefined,
   );
   if (errors.length > 0) {
     throw new Error(errors.join("\n"));
   }
   return {
     version: 4,
-    benchmark: benchmark!,
-    candidate: candidate!,
+    eval: evalSpec!,
+    skill: skill!,
   };
 }
 
@@ -263,8 +267,8 @@ export function serializeWorkbenchResolvedSourceYaml(
   return YAML.stringify(source).trimEnd() + "\n";
 }
 
-export function isWorkbenchCandidateManifestPath(filePath: string): boolean {
-  return /^candidates\/[^/]+\/candidate\.ya?ml$/iu.test(
+export function isWorkbenchSkillManifestPath(filePath: string): boolean {
+  return /^skills\/[^/]+\/skill\.ya?ml$/iu.test(
     filePath.replace(/\\/gu, "/").replace(/^\/+/u, "").replace(/^(?:\.\/)+/u, ""),
   );
 }
@@ -342,38 +346,38 @@ export function runtimeSandboxRef(runtime: WorkbenchRuntimeSpec): string {
 function genericSpecFromAuthoredBundle(
   source: WorkbenchResolvedSource,
 ): GenericRunSpec {
-  const engineRuntime = engineRuntimeFromConfig(source.benchmark.engine);
-  const engineRun = cloneEngineInvocation(source.benchmark.engine);
-  const engineResolve = cloneEngineInvocation(source.benchmark.engine);
-  const candidate = source.candidate;
-  const selectedRun = candidate.runs[candidate.selectedRunId];
-  if (!selectedRun) {
-    throw new Error(`Candidate run not found: ${candidate.selectedRunId}`);
+  const engineRuntime = engineRuntimeFromConfig(source.eval.engine);
+  const engineRun = cloneEngineInvocation(source.eval.engine);
+  const engineResolve = cloneEngineInvocation(source.eval.engine);
+  const skill = source.skill;
+  const selectedAgent = skill.agents[skill.selectedAgentId];
+  if (!selectedAgent) {
+    throw new Error(`Skill agent not found: ${skill.selectedAgentId}`);
   }
   return {
     version: 4,
-    name: source.benchmark.name,
-    description: source.benchmark.description,
-    benchmark: {
-      name: source.benchmark.name,
-      description: source.benchmark.description,
-      engine: cloneJson(source.benchmark.engine),
+    name: source.eval.name,
+    description: source.eval.description,
+    eval: {
+      name: source.eval.name,
+      description: source.eval.description,
+      engine: cloneJson(source.eval.engine),
     },
-    candidate: {
-      name: candidate.name,
-      ...(candidate.description ? { description: candidate.description } : {}),
-      files: cloneJson(candidate.files),
-      ...(candidate.prepare ? { prepare: cloneJson(candidate.prepare) } : {}),
-      defaultRun: candidate.defaultRun ?? candidate.selectedRunId,
-      selectedRunId: candidate.selectedRunId,
-      selectedRunName: selectedRun.name,
-      runs: cloneJson(candidate.runs),
-      ...(candidate.improve
+    skill: {
+      name: skill.name,
+      ...(skill.description ? { description: skill.description } : {}),
+      files: cloneJson(skill.files),
+      ...(skill.prepare ? { prepare: cloneJson(skill.prepare) } : {}),
+      defaultAgent: skill.defaultAgent ?? skill.selectedAgentId,
+      selectedAgentId: skill.selectedAgentId,
+      selectedAgentName: selectedAgent.name,
+      agents: cloneJson(skill.agents),
+      ...(skill.improve
         ? {
             improve: {
-              edits: [...candidate.improve.edits],
-              ...(candidate.improve.optimizeOn ? { optimizeOn: cloneJson(candidate.improve.optimizeOn) } : {}),
-              ...(candidate.improve.selectBy ? { selectBy: cloneJson(candidate.improve.selectBy) } : {}),
+              edits: [...skill.improve.edits],
+              ...(skill.improve.optimizeOn ? { optimizeOn: cloneJson(skill.improve.optimizeOn) } : {}),
+              ...(skill.improve.selectBy ? { selectBy: cloneJson(skill.improve.selectBy) } : {}),
             },
           }
         : {}),
@@ -381,23 +385,24 @@ function genericSpecFromAuthoredBundle(
     environment: cloneJson(engineRuntime),
     adapters: [
       ...new Set([
-        ...source.benchmark.adapters,
-        ...candidate.adapters,
+        ...source.eval.adapters,
+        ...skill.adapters,
       ]),
     ],
-    engine: cloneJson(source.benchmark.engine),
+    engine: cloneJson(source.eval.engine),
     engineResolve: cloneJson(engineResolve),
-    ...(candidate.improve ? { improve: clonePhaseAdapter(candidate.improve) } : {}),
-    run: clonePhaseAdapter(selectedRun),
+    ...(skill.improve ? { improve: clonePhaseAdapter(skill.improve) } : {}),
+    run: clonePhaseAdapter(selectedAgent),
     engineRun: cloneJson(engineRun),
   };
 }
 
-function normalizeBenchmarkRecord(
+function normalizeEvalRecord(
   record: Record<string, unknown> | null,
   label: string,
+  mode: "authored" | "resolved",
   errors: string[],
-): AuthoredBenchmarkSpec | null {
+): AuthoredEvalSpec | null {
   if (!record) {
     return null;
   }
@@ -408,7 +413,7 @@ function normalizeBenchmarkRecord(
     "adapters",
     "engine",
   ], errors);
-  requireVersionFour(record.version, label, errors);
+  requireSpecVersion(record.version, label, mode === "authored" ? 1 : 4, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readRequiredString(record.description, `${label}.description`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
@@ -444,12 +449,13 @@ function normalizeEngineRuntimeConfig(
   }
 }
 
-function normalizeCandidateRecord(
+function normalizeSkillRecord(
   record: Record<string, unknown> | null,
   label: string,
+  mode: "authored" | "resolved",
   errors: string[],
-  selectedRunId?: string,
-): ResolvedCandidateSpec | null {
+  selectedAgentId?: string,
+): ResolvedSkillSpec | null {
   if (!record) {
     return null;
   }
@@ -460,26 +466,36 @@ function normalizeCandidateRecord(
     "files",
     "prepare",
     "adapters",
-    "defaultRun",
-    "runs",
+    "defaultAgent",
+    "agents",
+    ...(mode === "resolved" ? ["selectedAgentId"] : []),
     "improve",
-    "selectedRunId",
   ], errors);
-  requireVersionFour(record.version, label, errors);
+  requireSpecVersion(record.version, label, mode === "authored" ? 1 : 4, errors);
   const name = readRequiredString(record.name, `${label}.name`, errors);
   const description = readOptionalString(record.description, `${label}.description`, errors);
   const files = normalizePathRef(record.files, `${label}.files`, errors);
-  const prepare = normalizeCandidatePrepare(record.prepare, `${label}.prepare`, errors);
+  const prepare = normalizeSkillPrepare(record.prepare, `${label}.prepare`, errors);
   const adapters = normalizeAdapterSources(record.adapters, `${label}.adapters`, errors);
-  const runs = normalizeCandidateRuns(record.runs, `${label}.runs`, errors);
-  const defaultRun = readOptionalString(record.defaultRun, `${label}.defaultRun`, errors);
-  const embeddedSelectedRun = readOptionalString(record.selectedRunId, `${label}.selectedRunId`, errors);
-  const selected = selectedRunId ?? embeddedSelectedRun ?? defaultRun ?? Object.keys(runs).sort()[0];
-  if (selected && !runs[selected]) {
-    errors.push(`${label}.selectedRunId references unknown run ${selected}.`);
+  const agents = normalizeSkillAgents(
+    record.agents,
+    `${label}.agents`,
+    errors,
+  );
+  const defaultAgent = readOptionalString(
+    record.defaultAgent,
+    `${label}.defaultAgent`,
+    errors,
+  );
+  const embeddedSelectedAgent = mode === "resolved"
+    ? readOptionalString(record.selectedAgentId, `${label}.selectedAgentId`, errors)
+    : undefined;
+  const selected = selectedAgentId ?? embeddedSelectedAgent ?? defaultAgent ?? Object.keys(agents).sort()[0];
+  if (selected && !agents[selected]) {
+    errors.push(`${label}.${mode === "authored" ? "defaultAgent" : "selectedAgentId"} references unknown agent ${selected}.`);
   }
-  const improve = normalizeCandidateImprove(record.improve, `${label}.improve`, errors);
-  return name && files && selected && Object.keys(runs).length > 0
+  const improve = normalizeSkillImprove(record.improve, `${label}.improve`, errors);
+  return name && files && selected && Object.keys(agents).length > 0
     ? {
         version: 4,
         name,
@@ -487,19 +503,19 @@ function normalizeCandidateRecord(
         files,
         ...(prepare ? { prepare } : {}),
         adapters,
-        ...(defaultRun ? { defaultRun } : {}),
-        runs,
+        ...(defaultAgent ? { defaultAgent } : {}),
+        agents,
         ...(improve ? { improve } : {}),
-        selectedRunId: selected,
+        selectedAgentId: selected,
       }
     : null;
 }
 
-function normalizeCandidatePrepare(
+function normalizeSkillPrepare(
   value: unknown,
   label: string,
   errors: string[],
-): WorkbenchCandidatePrepareSpec | undefined {
+): WorkbenchSkillPrepareSpec | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -512,46 +528,46 @@ function normalizeCandidatePrepare(
   return command ? { command } : undefined;
 }
 
-function normalizeCandidateRuns(
+function normalizeSkillAgents(
   value: unknown,
   label: string,
   errors: string[],
-): Record<string, WorkbenchCandidateRunSpec> {
+): Record<string, WorkbenchSkillAgentSpec> {
   const record = readRequiredRecord(value, label, errors);
   if (!record) {
     return {};
   }
-  const runs: Record<string, WorkbenchCandidateRunSpec> = {};
-  for (const [runId, runValue] of Object.entries(record).sort(([left], [right]) => left.localeCompare(right))) {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(runId)) {
-      errors.push(`${label}.${runId} must use letters, numbers, dots, underscores, or dashes.`);
+  const agents: Record<string, WorkbenchSkillAgentSpec> = {};
+  for (const [agentId, agentValue] of Object.entries(record).sort(([left], [right]) => left.localeCompare(right))) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(agentId)) {
+      errors.push(`${label}.${agentId} must use letters, numbers, dots, underscores, or dashes.`);
       continue;
     }
-    const runRecord = readRequiredRecord(runValue, `${label}.${runId}`, errors);
-    if (!runRecord) {
+    const agentRecord = readRequiredRecord(agentValue, `${label}.${agentId}`, errors);
+    if (!agentRecord) {
       continue;
     }
-    rejectUnknownKeys(runRecord, `${label}.${runId}`, ["name", "use", "with", "auth"], errors);
-    const name = readRequiredString(runRecord.name, `${label}.${runId}.name`, errors);
-    const invocation = normalizePhaseAdapter(adapterRecordFrom(runRecord), `${label}.${runId}`, errors);
+    rejectUnknownKeys(agentRecord, `${label}.${agentId}`, ["name", "use", "with", "auth"], errors);
+    const name = readRequiredString(agentRecord.name, `${label}.${agentId}.name`, errors);
+    const invocation = normalizePhaseAdapter(adapterRecordFrom(agentRecord), `${label}.${agentId}`, errors);
     if (name && invocation) {
-      runs[runId] = {
+      agents[agentId] = {
         name,
         ...invocation,
       };
     }
   }
-  if (Object.keys(runs).length === 0) {
-    errors.push(`${label} must declare at least one run.`);
+  if (Object.keys(agents).length === 0) {
+    errors.push(`${label} must declare at least one agent.`);
   }
-  return runs;
+  return agents;
 }
 
-function normalizeCandidateImprove(
+function normalizeSkillImprove(
   value: unknown,
   label: string,
   errors: string[],
-): WorkbenchCandidateImproveSpec | undefined {
+): WorkbenchSkillImproveSpec | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -639,9 +655,9 @@ function adapterRecordFrom(record: Record<string, unknown>): Record<string, unkn
   };
 }
 
-function requireVersionFour(value: unknown, label: string, errors: string[]): void {
-  if (value !== 4) {
-    errors.push(`${label}.version must be 4.`);
+function requireSpecVersion(value: unknown, label: string, version: 1 | 4, errors: string[]): void {
+  if (value !== version) {
+    errors.push(`${label}.version must be ${version}.`);
   }
 }
 

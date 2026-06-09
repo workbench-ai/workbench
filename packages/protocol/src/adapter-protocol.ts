@@ -5,7 +5,7 @@ import type {
   Json,
   UsageSummary,
   WorkbenchResult,
-  WorkbenchCandidatePatch,
+  WorkbenchSkillPatch,
 } from "@workbench-ai/workbench-contract";
 
 import {
@@ -38,11 +38,11 @@ export interface WorkbenchAdapterOperationRequest {
   };
   auth?: Json;
   context?: {
-    benchmark?: {
+    eval?: {
       name?: string;
       description?: string;
     };
-    candidate?: {
+    skill?: {
       id?: string;
       path?: string;
       prepare?: {
@@ -74,7 +74,8 @@ export interface WorkbenchAdapterOperationRequest {
     result: string;
     case?: string;
     traces?: string;
-    candidate?: string;
+    skill?: string;
+    skills?: string;
     enginePrivate?: string;
   };
 }
@@ -82,7 +83,7 @@ export interface WorkbenchAdapterOperationRequest {
 export type WorkbenchAdapterOperationResultValue =
   | WorkbenchEngineResolveResult
   | WorkbenchResult
-  | WorkbenchCandidatePatch
+  | WorkbenchSkillPatch
   | Json
   | null;
 
@@ -120,7 +121,8 @@ export function normalizeWorkbenchAdapterOperationRequest(
     "workspace",
     "output",
     "result",
-    "candidate",
+    "skill",
+    "skills",
     "case",
     "traces",
     "enginePrivate",
@@ -145,7 +147,8 @@ export function normalizeWorkbenchAdapterOperationRequest(
       result: requiredString(paths.result, "adapter request paths.result"),
       ...(typeof paths.case === "string" ? { case: paths.case } : {}),
       ...(typeof paths.traces === "string" ? { traces: paths.traces } : {}),
-      ...(typeof paths.candidate === "string" ? { candidate: paths.candidate } : {}),
+      ...(typeof paths.skill === "string" ? { skill: paths.skill } : {}),
+      ...(typeof paths.skills === "string" ? { skills: paths.skills } : {}),
       ...(typeof paths.enginePrivate === "string" ? { enginePrivate: paths.enginePrivate } : {}),
     },
   };
@@ -231,8 +234,8 @@ function normalizeOperationResultValue(
   if (operation === "engine.run") {
     return normalizeResult(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
   }
-  if (operation === "candidate.improve") {
-    return normalizeCandidatePatch(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
+  if (operation === "skill.improve") {
+    return normalizeSkillPatch(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
   }
   if (value === undefined || value === null) {
     return null;
@@ -245,45 +248,45 @@ function normalizeAdapterRequestContext(
 ): NonNullable<WorkbenchAdapterOperationRequest["context"]> {
   const record = requiredJsonRecord(value, "adapter request context");
   return {
-    ...(record.benchmark !== undefined ? { benchmark: normalizeBenchmarkContext(record.benchmark) } : {}),
-    ...(record.candidate !== undefined ? { candidate: normalizeCandidateContext(record.candidate) } : {}),
+    ...(record.eval !== undefined ? { eval: normalizeEvalContext(record.eval) } : {}),
+    ...(record.skill !== undefined ? { skill: normalizeSkillContext(record.skill) } : {}),
     ...(record.improve !== undefined ? { improve: normalizeImproveContext(record.improve) } : {}),
     ...(record.attempt !== undefined ? { attempt: normalizeAttemptContext(record.attempt) } : {}),
     ...(record.case !== undefined ? { case: normalizeCaseContext(record.case) } : {}),
   };
 }
 
-function normalizeBenchmarkContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["benchmark"]> {
-  const record = requiredJsonRecord(value, "adapter request context.benchmark");
+function normalizeEvalContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["eval"]> {
+  const record = requiredJsonRecord(value, "adapter request context.eval");
   return {
     ...(typeof record.name === "string" ? { name: record.name } : {}),
     ...(typeof record.description === "string" ? { description: record.description } : {}),
   };
 }
 
-function normalizeCandidateContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["candidate"]> {
-  const record = requiredJsonRecord(value, "adapter request context.candidate");
+function normalizeSkillContext(value: unknown): NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["skill"]> {
+  const record = requiredJsonRecord(value, "adapter request context.skill");
   return {
     ...(typeof record.id === "string" ? { id: record.id } : {}),
     ...(typeof record.path === "string" ? { path: record.path } : {}),
-    ...(record.prepare !== undefined ? { prepare: normalizeCandidatePrepareContext(record.prepare) } : {}),
-    ...(record.run !== undefined ? { run: normalizeContextInvocation(record.run, "adapter request context.candidate.run") } : {}),
+    ...(record.prepare !== undefined ? { prepare: normalizeSkillPrepareContext(record.prepare) } : {}),
+    ...(record.run !== undefined ? { run: normalizeContextInvocation(record.run, "adapter request context.skill.run") } : {}),
   };
 }
 
-function normalizeCandidatePrepareContext(
+function normalizeSkillPrepareContext(
   value: unknown,
-): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["candidate"]>["prepare"]> {
-  const record = requiredJsonRecord(value, "adapter request context.candidate.prepare");
+): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["skill"]>["prepare"]> {
+  const record = requiredJsonRecord(value, "adapter request context.skill.prepare");
   return {
-    command: requiredString(record.command, "adapter request context.candidate.prepare.command"),
+    command: requiredString(record.command, "adapter request context.skill.prepare.command"),
   };
 }
 
 function normalizeContextInvocation(
   value: unknown,
   label: string,
-): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["candidate"]>["run"]> {
+): NonNullable<NonNullable<NonNullable<WorkbenchAdapterOperationRequest["context"]>["skill"]>["run"]> {
   const record = requiredJsonRecord(value, label);
   const use = requiredString(record.use, `${label}.use`);
   return {
@@ -335,7 +338,7 @@ function normalizeResult(value: unknown, label: string): WorkbenchResult {
   };
 }
 
-function normalizeCandidatePatch(value: unknown, label: string): WorkbenchCandidatePatch {
+function normalizeSkillPatch(value: unknown, label: string): WorkbenchSkillPatch {
   const record = requiredJsonRecord(value, label);
   if (!Array.isArray(record.fileChanges) || !record.fileChanges.every((entry) => typeof entry === "string")) {
     throw new Error(`${label}.fileChanges must be a string array.`);

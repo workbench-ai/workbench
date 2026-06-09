@@ -239,7 +239,10 @@ export function workbenchJobDependencies(job: RemoteWorkbenchJob): string[] {
 export function workbenchJobResources(
   job: RemoteWorkbenchJob,
 ): SandboxBackendRequestedResources {
-  const resources = jsonRecord(jsonRecord(jsonRecord(job.input).execution).policy).resources;
+  const input = jsonRecord(job.input);
+  const resources = input.kind === "workbench.skill.eval.job.v1"
+    ? input.resources
+    : jsonRecord(jsonRecord(input.execution).policy).resources;
   const record = jsonRecord(resources);
   return {
     cpu: readPositiveResource(record.cpu, job.id, "resources.cpu"),

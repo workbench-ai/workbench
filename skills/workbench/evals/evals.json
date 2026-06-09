@@ -1,19 +1,19 @@
 {
   "owner_id": "workbench",
-  "suite_name": "workbench-remote",
+  "suite_name": "workbench-skill-first",
   "suite_scope": "product-local",
   "submission_schema_version": 1,
   "suite_latency_expectation": {
     "minimum_significant_improvement_ratio": 0.2,
-    "notes": "Eval cases measure whether an agent can drive the repo-like CLI, Workbench Cloud remotes, remote --remote execution, and eval authoring without relying on private remote implementation state."
+    "notes": "Eval cases measure whether an agent uses Workbench as a skill management runtime with the hard-cut CLI and source vocabulary."
   },
   "evals": [
     {
-      "id": "install-or-verify-cli",
-      "title": "Verify or install Workbench",
-      "category": "cli_install",
-      "prompt": "Prepare Workbench access for this repo from scratch. Assume the `workbench` binary is not installed. Install the published package, verify the binary, authenticate to `https://v2.workbench.ai`, and report whether Workbench Cloud access is ready.",
-      "expected_output": "The response uses the Workbench skill, installs the published package only because the binary is missing, verifies the binary, starts the Workbench login flow, and explains that npm registry or auth failures should stop the cloud access flow cleanly.",
+      "id": "author-minimal-skill-eval",
+      "title": "Author a minimal skill eval",
+      "category": "skill_authoring",
+      "prompt": "Create a Workbench-managed skill for earnings prep, validate it, run the local smoke loop, and explain how source versions are created.",
+      "expected_output": "The response uses the Workbench skill, writes or scaffolds SKILL.md, .workbench/eval.yaml, .workbench/cases/case-001/case.yaml, and .workbench/agents.yaml, validates with workbench check, runs or proposes workbench eval --agent default --samples 1, and explains that Workbench versions are automatic.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -31,313 +31,31 @@
           "value": "workbench"
         },
         {
-          "text": "installs the published Workbench package",
+          "text": "uses skill-first source shape",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "npm\\s+(?:install|i)\\s+-g\\s+@workbench-ai/workbench\\b"
+          "value": "(?:^|\\s)workbench\\s+init\\b|SKILL\\.md|\\.workbench/eval\\.yaml"
         },
         {
-          "text": "verifies the workbench binary",
+          "text": "validates source",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench\\s+--version|command\\s+-v\\s+workbench)\\b"
+          "value": "(?:^|\\s)workbench\\s+check\\b"
         },
         {
-          "text": "starts remote Workbench login",
+          "text": "runs eval",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+login(?:\\s+--base-url\\s+https://v2\\.workbench\\.ai)?\\b"
-        },
-        {
-          "text": "reports install is conditional on a missing binary",
-          "kind": "equals",
-          "path": "answer.installs_only_when_missing",
-          "value": true
-        },
-        {
-          "text": "reports registry or auth failures stop the cloud access flow cleanly",
-          "kind": "equals",
-          "path": "answer.registry_or_auth_failure_stops_setup",
-          "value": true
+          "value": "(?:^|\\s)workbench\\s+eval\\b"
         }
       ]
     },
     {
-      "id": "remote-benchmark-and-spec",
-      "title": "Create a remote benchmark and apply a spec",
-      "category": "remote_spec",
-      "prompt": "Create a remote Workbench benchmark named `invoice-parser`, push local source and runtime history idempotently, and report the benchmark id plus the push result.",
-      "expected_output": "The response targets a remote Workbench server, creates or selects a benchmark with the repo-like CLI, pushes local source plus runtime history, opens or returns the Workbench Cloud benchmark URL for an embedded browser, and reports remote benchmark metadata.",
-      "files": [],
-      "required_skills": [
-        "workbench"
-      ],
-      "latency": {
-        "baseline_ms": 150000,
-        "target_ms": 75000,
-        "significant_improvement_ratio": 0.2
-      },
-      "assertions": [
-        {
-          "text": "uses the Workbench skill",
-          "kind": "includes",
-          "path": "skills_used",
-          "value": "workbench"
-        },
-        {
-          "text": "creates or updates a remote benchmark",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+push\\b"
-        },
-        {
-          "text": "checks local source before push",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+check\\b"
-        },
-        {
-          "text": "reports that remote benchmark state is durable",
-          "kind": "equals",
-          "path": "answer.uses_remote_benchmark_state",
-          "value": true
-        },
-        {
-          "text": "opens or returns the Workbench Cloud benchmark URL",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
-        }
-      ]
-    },
-    {
-      "id": "existing-workflow-eval-authoring",
-      "title": "Author an eval from an existing workflow",
-      "category": "eval_authoring",
-      "prompt": "Create a Workbench eval around an existing command `python scripts/check_report.py --tasks tasks --out result.json`. Write the source-shaped files, adapt the benchmark/candidate contract, validate `benchmark.yaml` and a candidate directory, and explain how to push and start one smoke run.",
-      "expected_output": "The response uses the Workbench skill eval-authoring docs, starts from the existing-workflow guide, writes version-4 `benchmark.yaml`, a candidate manifest such as `candidates/codex/candidate.yaml`, candidate files declared with `files: { path: files }` under `candidates/codex/files`, and optional candidate-owned `improve` settings with required benchmark `name`, `description`, and `engine`, uses `engine.use: workbench` with `engine.with.environment`, `engine.with.tasks.path` only when the native task directory is not `tasks/`, and `engine.with.score`, requires candidate `name`, `files`, and `runs`, and `candidate.improve.edits` plus an improve adapter when improve is needed, uses task `files/` for public fixtures staged at `paths.case` and task `tests/` for private verifier material staged at `paths.enginePrivate`, writes native task manifests with `version: 3` for the built-in Workbench engine, wraps the existing workflow with a candidate run adapter such as `codex`, uses the Workbench engine's `tests` scoring helper whose verifier writes `$WORKBENCH_TESTS_VERIFIER_DIR/reward.json` or `$WORKBENCH_TESTS_VERIFIER_DIR/reward.txt` with a finite reward, avoids hard-coded `/tests` or invented log roots, and uses `workbench check`, `workbench push`, and a smoke eval with an explicit candidate directory.",
-      "files": [],
-      "required_skills": [
-        "workbench"
-      ],
-      "latency": {
-        "baseline_ms": 210000,
-        "target_ms": 105000,
-        "significant_improvement_ratio": 0.2
-      },
-      "assertions": [
-        {
-          "text": "uses the Workbench skill",
-          "kind": "includes",
-          "path": "skills_used",
-          "value": "workbench"
-        },
-        {
-          "text": "routes through the existing-workflow authoring guide",
-          "kind": "equals",
-          "path": "answer.uses_existing_workflow_guide",
-          "value": true
-        },
-        {
-          "text": "writes remote benchmark and candidate YAML",
-          "kind": "equals",
-          "path": "answer.writes_split_yaml",
-          "value": true
-        },
-        {
-          "text": "requires verifier reward output",
-          "kind": "equals",
-          "path": "answer.requires_verifier_reward_output",
-          "value": true
-        },
-        {
-          "text": "validates the local spec",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+check\\b"
-        }
-      ]
-    },
-    {
-      "id": "file-output-case-eval-authoring",
-      "title": "Author an eval from file outputs",
-      "category": "eval_authoring",
-      "prompt": "Create a remote Workbench eval for a workflow that produces Office files from uploaded materials: a source DOCX, golden DOCX, and reference XLSX. Build tasks, choose an Office-capable runtime, keep the candidate as the mutable workflow, validate the spec, and describe the first smoke run.",
-      "expected_output": "The response uses the Workbench skill file-output task docs, chooses focused file recipes, keeps the candidate as the mutable workflow being improved, creates version-4 benchmark/candidate source plus version-3 task files with a candidate manifest declaring `files: { path: files }` and `runs`, uses `engine.use: workbench`, omits `engine.with.tasks` for the default `tasks/` directory or uses `engine.with.tasks.path` only for explicit native task selection, and writes native task manifests with `version: 3`, puts only supporting public file inputs under task `files/` for staging at `paths.case`, puts non-empty private verifier files under task `tests/` for staging at `paths.enginePrivate`, uses engine-owned rubric scoring for qualitative scoring by default, treats rubric scoring as one judge turn per criterion with `score.with.parallelism` as the throttle, uses engine-owned tests scoring only for deterministic checks or an existing scoring workflow, uses an Office-capable Dockerfile runtime through `engine.with.environment.dockerfile`, writes durable artifacts to `/workspace/output`, and validates the source before push/run commands.",
-      "files": [],
-      "required_skills": [
-        "workbench"
-      ],
-      "latency": {
-        "baseline_ms": 240000,
-        "target_ms": 120000,
-        "significant_improvement_ratio": 0.2
-      },
-      "assertions": [
-        {
-          "text": "uses the Workbench skill",
-          "kind": "includes",
-          "path": "skills_used",
-          "value": "workbench"
-        },
-        {
-          "text": "routes through the file-output authoring guide",
-          "kind": "equals",
-          "path": "answer.uses_file_output_authoring_guide",
-          "value": true
-        },
-        {
-          "text": "loads only the relevant file recipes",
-          "kind": "includes",
-          "path": "answer.loaded_file_recipes",
-          "value": "docx"
-        },
-        {
-          "text": "requires non-empty verifier files",
-          "kind": "equals",
-          "path": "answer.requires_non_empty_tests_files",
-          "value": true
-        },
-        {
-          "text": "uses rubric scoring by default for qualitative file scoring",
-          "kind": "equals",
-          "path": "answer.uses_rubric_scoring_by_default",
-          "value": true
-        },
-        {
-          "text": "uses the source-shaped template layout",
-          "kind": "equals",
-          "path": "answer.template_layout",
-          "value": "source-shaped"
-        },
-        {
-          "text": "uses an Office-capable Dockerfile environment",
-          "kind": "equals",
-          "path": "answer.uses_dockerfile_environment",
-          "value": true
-        },
-        {
-          "text": "validates the local spec",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+check\\b"
-        }
-      ]
-    },
-    {
-      "id": "remote-upload-and-run",
-      "title": "Push source and start a remote run",
-      "category": "remote_run",
-      "prompt": "From an existing Workbench project with `candidates/codex` and `tasks`, push source and runtime history to a remote benchmark, start one remote improve run from base candidate id `candidate_123`, budget 1, and samples 1, watch it to terminal status, and report the run id and candidate id.",
-      "expected_output": "The response treats local directories as Workbench project source, pushes benchmark source plus runtime history, starts a remote improve run with `workbench improve --remote` and explicit `--base candidate_123`, watches the remote run, uses the returned URLs or `workbench open --remote` when browser navigation is needed, and reports the resulting run and candidate id.",
-      "files": [],
-      "required_skills": [
-        "workbench"
-      ],
-      "latency": {
-        "baseline_ms": 180000,
-        "target_ms": 90000,
-        "significant_improvement_ratio": 0.2
-      },
-      "assertions": [
-        {
-          "text": "uses the Workbench skill",
-          "kind": "includes",
-          "path": "skills_used",
-          "value": "workbench"
-        },
-        {
-          "text": "pushes local source and runtime history",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+push\\b"
-        },
-        {
-          "text": "starts a remote run",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--remote\\b[^\\n]*--base\\s+candidate_123|(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--base\\s+candidate_123[^\\n]*--remote\\b"
-        },
-        {
-          "text": "watches the remote run",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--remote\\b[^\\n]*--watch|(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+improve\\b[^\\n]*--watch[^\\n]*--remote\\b"
-        },
-        {
-          "text": "reports the requested budget",
-          "kind": "equals",
-          "path": "answer.budget",
-          "value": 1
-        },
-        {
-          "text": "opens or returns the resulting candidate URL after the run when needed",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*--remote\\b[^\\n]*(?:candidate_|<candidate>)[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)|(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*(?:candidate_|<candidate>)[^\\n]*--remote\\b[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
-        }
-      ]
-    },
-    {
-      "id": "local-candidate-inspection",
-      "title": "Inspect a local candidate snapshot",
-      "category": "candidate_inspection",
-      "prompt": "List local candidate snapshots for a benchmark, list files for the selected candidate id, preview `SKILL.md`, and open the local Workbench UI without starting any remote mutation.",
-      "expected_output": "The response uses local `workbench candidates ...` inspection commands, opens or returns the read-only local Workbench URL with `workbench open --json --no-open`, and does not mutate remote state.",
-      "files": [],
-      "required_skills": [
-        "workbench"
-      ],
-      "latency": {
-        "baseline_ms": 120000,
-        "target_ms": 60000,
-        "significant_improvement_ratio": 0.2
-      },
-      "assertions": [
-        {
-          "text": "uses the Workbench skill",
-          "kind": "includes",
-          "path": "skills_used",
-          "value": "workbench"
-        },
-        {
-          "text": "lists local candidate snapshots",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+candidates\\s+list\\b"
-        },
-        {
-          "text": "lists local candidate files",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+candidates\\s+files\\b"
-        },
-        {
-          "text": "previews a local candidate file",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+candidates\\s+preview\\b"
-        },
-        {
-          "text": "opens or returns the local Workbench URL",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+open\\b[^\\n]*(?:--json[^\\n]*--no-open|--no-open[^\\n]*--json)"
-        },
-        {
-          "text": "reports inspection as non-mutating",
-          "kind": "equals",
-          "path": "answer.inspection_mutates_remote_state",
-          "value": false
-        }
-      ]
-    },
-    {
-      "id": "remote-api-targeting",
-      "title": "Configure the remote API target",
-      "category": "configuration",
-      "prompt": "Configure the CLI to target `https://v2.workbench.ai`, explain the environment-variable override for a one-off command, and state whether the user needs a git repository or preexisting local Workbench state.",
-      "expected_output": "The response uses workbench login or WORKBENCH_API_URL for remote API targeting and makes clear that git and preexisting local Workbench state are not required.",
+      "id": "agent-comparison-loop",
+      "title": "Compare eval runtime configurations",
+      "category": "agent_comparison",
+      "prompt": "Evaluate a skill across two runtime configurations and explain how to compare performance, cost, and latency.",
+      "expected_output": "The response uses workbench agent add for named agents, workbench eval --agent all --samples 1, and workbench compare --versions all --agents all. It explains that local/command agents run Docker-style tests and Codex/Claude agents require adapter auth for provider-backed execution.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -349,34 +67,94 @@
       },
       "assertions": [
         {
-          "text": "uses the Workbench skill",
-          "kind": "includes",
-          "path": "skills_used",
-          "value": "workbench"
-        },
-        {
-          "text": "records login command output",
+          "text": "adds an agent",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)(?:workbench|\\./bin/workbench)\\s+login\\s+--base-url\\s+https://v2\\.workbench\\.ai\\b"
+          "value": "(?:^|\\s)workbench\\s+agent\\s+add\\b"
         },
         {
-          "text": "mentions environment override",
-          "kind": "equals",
-          "path": "answer.env_override",
-          "value": "WORKBENCH_API_URL"
+          "text": "evaluates all agents",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+eval\\b[^\\n]*--agent\\s+all\\b"
         },
         {
-          "text": "reports git is not required",
-          "kind": "equals",
-          "path": "answer.requires_git_repo",
-          "value": false
+          "text": "compares agents",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+compare\\b[^\\n]*--agents\\s+all\\b"
+        }
+      ]
+    },
+    {
+      "id": "inspect-and-switch-version",
+      "title": "Inspect and switch improved version",
+      "category": "version_inspection",
+      "prompt": "An improved Workbench skill version `v002` exists. Inspect SKILL.md, compare it to `v001`, and accept that version locally.",
+      "expected_output": "The response uses workbench show v002:SKILL.md, workbench diff v001..v002, and workbench switch v002.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 90000,
+        "target_ms": 45000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "shows skill file",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+show\\s+v002:SKILL\\.md\\b"
         },
         {
-          "text": "reports preexisting local Workbench state is not required",
+          "text": "diffs versions",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+diff\\s+v001\\.\\.v002\\b"
+        },
+        {
+          "text": "switches version",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+switch\\s+v002\\b"
+        }
+      ]
+    },
+    {
+      "id": "object-remote-sync-shape",
+      "title": "Use Workbench object remotes",
+      "category": "sync",
+      "prompt": "Share a Workbench-managed skill through a Workbench remote and explain what gets written to the remote.",
+      "expected_output": "The response uses workbench remote add origin URL and workbench sync. It explains that the remote stores Workbench object packs with source versions, evidence, refs, traces, and artifacts, and that workbench publish is the explicit command for installable source.",
+      "files": [],
+      "required_skills": [
+        "workbench"
+      ],
+      "latency": {
+        "baseline_ms": 90000,
+        "target_ms": 45000,
+        "significant_improvement_ratio": 0.2
+      },
+      "assertions": [
+        {
+          "text": "adds remote",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+remote\\s+add\\s+origin\\b"
+        },
+        {
+          "text": "syncs object remote",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+sync\\b"
+        },
+        {
+          "text": "describes object remote",
           "kind": "equals",
-          "path": "answer.requires_local_state",
-          "value": false
+          "path": "answer.describes_workbench_object_remote",
+          "value": true
         }
       ]
     }

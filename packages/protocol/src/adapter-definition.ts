@@ -31,11 +31,11 @@ import {
 
 export interface WorkbenchAdapterDefinition<TContext = unknown> {
   id: string;
-  setup?: string[];
+  install?: string[];
   auth?: WorkbenchAdapterAuthManifest;
   engineResolve?: WorkbenchAdapterOperationDefinition<TContext>;
   engineRun?: WorkbenchAdapterOperationDefinition<TContext>;
-  candidate?: WorkbenchAdapterOperationDefinition<TContext>;
+  skillRun?: WorkbenchAdapterOperationDefinition<TContext>;
   improve?: WorkbenchAdapterOperationDefinition<TContext>;
   slots?: Record<string, WorkbenchAdapterSlotManifest>;
 }
@@ -88,7 +88,7 @@ export function defineEngineResolver<TContext = unknown>(
   return definition;
 }
 
-export function defineCandidate<TContext = unknown>(
+export function defineSkillRunner<TContext = unknown>(
   definition: WorkbenchAdapterOperationDefinition<TContext> = {},
 ): WorkbenchAdapterOperationDefinition<TContext> {
   return definition;
@@ -119,8 +119,8 @@ export function workbenchAdapterManifestFromDefinition(
   const operations: WorkbenchAdapterManifest["operations"] = {};
   addOperation(operations, definition.id, "engine.resolve", definition.engineResolve);
   addOperation(operations, definition.id, "engine.run", definition.engineRun);
-  addOperation(operations, definition.id, "candidate.run", definition.candidate);
-  addOperation(operations, definition.id, "candidate.improve", definition.improve);
+  addOperation(operations, definition.id, "skill.run", definition.skillRun);
+  addOperation(operations, definition.id, "skill.improve", definition.improve);
   if (Object.keys(operations).length === 0) {
     throw new Error(`Adapter ${definition.id} must define at least one operation.`);
   }
@@ -128,7 +128,7 @@ export function workbenchAdapterManifestFromDefinition(
     id: definition.id,
     protocol: WORKBENCH_ADAPTER_MANIFEST_PROTOCOL,
     operations,
-    setup: definition.setup ? [...definition.setup] : [],
+    install: definition.install ? [...definition.install] : [],
     ...(definition.auth ? { auth: cloneJson(definition.auth) } : {}),
     ...(definition.slots ? { slots: cloneJson(definition.slots) } : {}),
   };
@@ -183,10 +183,10 @@ export function operationDefinitionForRequest<TContext = unknown>(
   if (operation === "engine.run") {
     return definition.engineRun;
   }
-  if (operation === "candidate.run") {
-    return definition.candidate;
+  if (operation === "skill.run") {
+    return definition.skillRun;
   }
-  if (operation === "candidate.improve") {
+  if (operation === "skill.improve") {
     return definition.improve;
   }
   return undefined;

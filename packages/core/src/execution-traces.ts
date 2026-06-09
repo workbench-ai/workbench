@@ -187,7 +187,7 @@ export function traceSessionLabel(
 ): string {
   const innerPath = traceSessionInnerPath(filePath);
   if (innerPath === "runner/session") {
-    return "Candidate run";
+    return "Skill run";
   }
   if (innerPath === "improver/session") {
     return "Improver";

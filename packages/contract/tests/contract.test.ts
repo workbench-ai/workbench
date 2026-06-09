@@ -1,172 +1,114 @@
 import { describe, expect, test } from "vitest";
 
-import type {
-  RemoteWorkbenchJob,
-  RuntimeSnapshot,
-  WorkbenchExecutionSpec,
-  WorkbenchRemoteCapabilities,
-  WorkbenchRemoteJobClaim,
-  WorkbenchRemoteJobClaimRequest,
-  WorkbenchRemoteJobRenewal,
-  WorkbenchRemoteJobRetry,
-  WorkbenchRemoteRunRequest,
+import {
+  assertWorkbenchAdapterAuthEnvNameAllowed,
+  isReservedWorkbenchAdapterAuthEnvName,
+  workbenchInspectionFileContent,
+  workbenchInspectionFileContentUnavailableReason,
+  workbenchInspectionFileManifest,
+  type WorkbenchInspectionFileContent,
+  type WorkbenchInspectionSnapshot,
+  type WorkbenchProjectState,
 } from "../src/index";
 
 describe("workbench contract", () => {
-  test("keeps remote jobs and browser snapshots as plain serializable DTOs", () => {
-    const job = {
-      id: "job_1",
-      projectId: "wb_1",
-      runId: "run_1",
-      kind: "execute",
-      status: "queued",
-      attempt: 0,
-      createdAt: "2026-04-23T00:00:00.000Z",
-      updatedAt: "2026-04-23T00:00:00.000Z",
-      input: { sample: 1 },
-    } satisfies RemoteWorkbenchJob;
-    const snapshot = {
-      workspaceRoot: "remote:wb_1",
-      activeId: null,
-      currentBenchmarkFingerprint: null,
-      summaries: [],
-      evaluations: [],
+  test("keeps skill state and inspection snapshots as plain serializable DTOs", () => {
+    const state = {
+      schema: "workbench.skill.state.v1",
+      root: "/tmp/skill",
+      currentVersionId: "v001",
+      refs: { current: "v001" },
+      remotes: {
+        origin: { name: "origin", url: "https://workbench.example/skills/acme/skill", type: "workbench" },
+      },
+      versions: [{
+        id: "v001",
+        hash: "hash",
+        message: "initial",
+        parentIds: [],
+        createdAt: "2026-06-06T00:00:00.000Z",
+        files: [{ path: "SKILL.md", content: "# Skill\n" }],
+      }],
+      skillSources: [{ name: "primary", kind: "local", path: "." }],
+      skillBundles: [],
+      evals: [],
+      agents: [{ name: "default", adapter: "local", config: {} }],
       runs: [],
-    } satisfies RuntimeSnapshot;
+      jobs: [],
+      traces: [],
+      artifacts: [],
+      lineage: [],
+    } satisfies WorkbenchProjectState;
+    const snapshot = {
+      root: state.root,
+      status: {
+        root: state.root,
+        initialized: true,
+        currentVersionId: "v001",
+        hasUnversionedChanges: false,
+        defaultSkill: "primary",
+        defaultAgent: "default",
+        versionCount: 1,
+        skillCount: 1,
+        agentCount: 1,
+        runCount: 0,
+        remoteCount: 1,
+      },
+      versions: state.versions,
+      skillSources: state.skillSources,
+      skillBundles: state.skillBundles,
+      agents: state.agents,
+      runs: state.runs,
+      jobs: state.jobs,
+      traces: state.traces,
+      artifacts: state.artifacts,
+      lineage: state.lineage,
+      remotes: Object.values(state.remotes),
+      refs: state.refs,
+    } satisfies WorkbenchInspectionSnapshot;
+    const fileContent = {
+      path: "output/blob.bin",
+      kind: "binary",
+      encoding: "base64",
+      unavailableReason: "Binary file content is not rendered.",
+    } satisfies WorkbenchInspectionFileContent;
 
-    expect(JSON.parse(JSON.stringify({ job, snapshot }))).toMatchObject({
-      job: { kind: "execute", status: "queued" },
-      snapshot: { workspaceRoot: "remote:wb_1" },
+    expect(JSON.parse(JSON.stringify({ state, snapshot, fileContent }))).toMatchObject({
+      state: { schema: "workbench.skill.state.v1", currentVersionId: "v001" },
+      snapshot: { status: { initialized: true }, refs: { current: "v001" } },
+      fileContent: { path: "output/blob.bin", unavailableReason: "Binary file content is not rendered." },
     });
   });
 
-  test("uses fingerprint-only candidate comparability and typed execution specs", () => {
-    const execution = {
-      id: "exec_1",
-      projectId: "wb_1",
-      runId: "run_1",
-      purpose: "attempt",
-      adapter: { use: "command", with: {} },
-      sandbox: { kind: "oci", ref: "dockerfile://environment/Dockerfile" },
-      inputs: [],
-      outputs: [],
-      policy: {
-        tenantId: "user_1",
-        resources: { cpu: 1, memoryGb: 1, diskGb: 1, timeoutMinutes: 1 },
-        network: { egress: "none" },
-      },
-      metadata: {},
-    } satisfies WorkbenchExecutionSpec;
-
-    expect(execution.purpose).toBe("attempt");
+  test("keeps dangerous adapter auth env names reserved", () => {
+    expect(isReservedWorkbenchAdapterAuthEnvName("WORKBENCH_TOKEN")).toBe(true);
+    expect(() => assertWorkbenchAdapterAuthEnvNameAllowed("PATH")).toThrow("reserved");
+    expect(() => assertWorkbenchAdapterAuthEnvNameAllowed("OPENAI_API_KEY")).not.toThrow();
   });
 
-  test("keeps remote backend capabilities infrastructure independent", () => {
-    const capabilities = {
-      schema: "workbench.remote.capabilities.v1",
-      contractVersion: 1,
-      projectState: {
-        schema: "workbench.project.state.v1",
-        guardedSourceWrites: true,
-        immutableRuntimeFacts: true,
-      },
-      execution: {
-        fencedJobLeases: true,
-        idempotentCompletion: true,
-        progressIsBestEffort: true,
-        maxJobsPerRun: 80,
-      },
-      sandbox: {
-        production: "firecracker",
-        local: "docker",
-        networkPolicies: ["open", "none"],
-      },
-      blobs: {
-        contentAddressed: true,
-        maxUploadBytes: 104857600,
-      },
-    } satisfies WorkbenchRemoteCapabilities;
+  test("shapes inspection files consistently for manifests and explicit content reads", () => {
+    const text = { path: "SKILL.md", kind: "text", encoding: "utf8", content: "# Skill\n" } as const;
+    const binary = { path: "asset.bin", kind: "binary", encoding: "base64", content: "QUJD" } as const;
 
-    expect(JSON.stringify(capabilities)).not.toMatch(/DynamoDB|SQS|S3|EC2/u);
-    expect(capabilities.sandbox.production).toBe("firecracker");
-  });
-
-  test("models remote run starts as a path-scoped request DTO", () => {
-    const request = {
-      schema: "workbench.remote.run.request.v1",
-      workflow: "eval",
-      samples: 1,
-      candidateId: "candidate_1",
-      sourceYaml: "version: 4\nname: demo\n",
-      candidateFiles: [{
-        path: "run.js",
-        content: "console.log('ok')\n",
-      }],
-      adapterFiles: [],
-      rerun: true,
-    } satisfies WorkbenchRemoteRunRequest;
-
-    expect(JSON.stringify(request)).not.toMatch(/DynamoDB|SQS|S3|EC2/u);
-    expect(request).not.toHaveProperty("projectId");
-    expect(request).not.toHaveProperty("sourceRevisionId");
-  });
-
-  test("models remote job claims as fenced leases without naming wake-up infrastructure", () => {
-    const request = {
-      schema: "workbench.remote.job.claim_request.v1",
-      ownerUserId: "user_1",
-      projectId: "wb_1",
-      runId: "run_1",
-      jobId: "job_1",
-      hostId: "host_1",
-      workerId: "worker_1",
-    } satisfies WorkbenchRemoteJobClaimRequest;
-    const job = {
-      id: "job_1",
-      projectId: "wb_1",
-      runId: "run_1",
-      kind: "execute",
-      status: "running",
-      attempt: 1,
-      createdAt: "2026-04-23T00:00:00.000Z",
-      updatedAt: "2026-04-23T00:00:01.000Z",
-      input: { execution: { id: "exec_1" } },
-    } satisfies RemoteWorkbenchJob;
-    const claim = {
-      schema: "workbench.remote.job.claim.v1",
-      claimed: true,
-      disposition: "claimed",
-      reason: "claimed",
-      ownerUserId: "user_1",
-      projectId: "wb_1",
-      runId: "run_1",
-      jobId: "job_1",
-      leaseToken: "lease-secret",
-      leaseUntil: "2026-04-23T00:05:01.000Z",
-      job,
-      input: { job },
-    } satisfies WorkbenchRemoteJobClaim;
-    const renewal = {
-      schema: "workbench.remote.job.renewal.v1",
-      ownerUserId: "user_1",
-      projectId: "wb_1",
-      runId: "run_1",
-      jobId: "job_1",
-      leaseToken: "lease-secret",
-    } satisfies WorkbenchRemoteJobRenewal;
-    const retry = {
-      schema: "workbench.remote.job.retry.v1",
-      ownerUserId: "user_1",
-      projectId: "wb_1",
-      runId: "run_1",
-      jobId: "job_1",
-      leaseToken: "lease-secret",
-      reason: "transient sandbox host failure",
-    } satisfies WorkbenchRemoteJobRetry;
-
-    expect(JSON.stringify({ request, claim, renewal, retry })).not.toMatch(
-      /queue|poll|wake|sqs|dynamo|s3|ec2/iu,
-    );
-    expect(claim.leaseToken).toBe("lease-secret");
+    expect(workbenchInspectionFileManifest(text)).toEqual({
+      path: "SKILL.md",
+      kind: "text",
+      encoding: "utf8",
+      content: "",
+    });
+    expect(workbenchInspectionFileContent(text)).toEqual({
+      path: "SKILL.md",
+      kind: "text",
+      encoding: "utf8",
+      content: "# Skill\n",
+    });
+    expect(workbenchInspectionFileContent(binary)).toEqual({
+      path: "asset.bin",
+      kind: "binary",
+      encoding: "base64",
+      unavailableReason: "Binary file content is not rendered.",
+    });
+    expect(workbenchInspectionFileContentUnavailableReason({ encoding: "base64" }))
+      .toBe("Base64 file content is not rendered.");
   });
 });

@@ -1,49 +1,30 @@
 # Skills
 
-This document owns the skill layout for the Workbench product tree.
+The public Workbench source ships one authored skill at `skills/workbench/`. It should stay thin and point agents at the canonical docs copied through the source export.
 
-## Source Of Truth
+## Ownership
 
-The canonical general public skill source lives under `skills/workbench/`. Keep that authored tree thin:
+The Workbench skill owns agent ergonomics: deciding what skill to create or edit, turning conversations and traces into eval cases, drafting rubrics, choosing local command agents, configuring skill composition, running eval/improve loops, and explaining the evidence.
 
-- `SKILL.md` is the agent-facing wrapper.
-- `agents/openai.yaml` is the install metadata.
-- `evals/` is the product-local ergonomics catalog.
-- `skill.assets.json` declares which canonical docs are copied into the installed skill.
+Workbench core owns durable substrate behavior: automatic source versions, skill bundle snapshots, eval snapshots, agent records, runs, traces, artifacts, lineage, object remotes, source publication, and shared read-only inspection.
 
-`docs/cli.md` owns the command and operator flow, `SPEC.md` owns the remote CLI contract, `docs/evals/` owns eval authoring and file-output task guidance, and `docs/testing.md` owns validation and remote e2e guidance. The authored skill should point to those canonical files instead of carrying its own product guide.
+Do not add core features for flows that can be encoded in a skill.
 
-When the authored docs or skill mention tasks, preserve the engine boundary: `version: 4` `benchmark.yaml` selects an engine, the built-in `workbench` engine owns native task directories through its own `engine.with.tasks` path setting, native task manifests remain `version: 3`, and Harbor directories are parsed by the external `harbor` engine adapter.
+## Layout
 
-Keep this ownership at the Workbench product root. The `packages/cli` package should not own product docs or skills; it owns the binary implementation and command tests. Workbench Cloud renders the product docs through its remote shell, but it should not duplicate the public docs content.
+- `SKILL.md`: agent-facing workflow.
+- `agents/openai.yaml`: install metadata.
+- `products/sample_skills/`: repo-local Workbench sample skills.
+- `skill.assets.json`: docs copied into installed skill references.
 
-## Installable Skill Assembly
+## Validation
 
-The installable Workbench skill is assembled from `skills/workbench/` by the shared skill asset sync helper. Product-local `skill.assets.json` keeps the authored skill thin while copying canonical docs into the published or installed skill tree.
+After changing the authored skill or copied docs, run:
 
-The exported public source repository already contains the installable skill at `skills/workbench`. Private monorepo maintainers may use `pnpm skills:sync` before publishing to debug the same installed skill layout.
+```bash
+pnpm --dir packages/cli test
+pnpm build
+pnpm test
+```
 
-## Validation Boundary
-
-This public source repository contains the exported `skills/workbench/` tree and the product-local eval catalog. The skill stays nested at `skills/workbench/SKILL.md` so `npx skills add workbench-ai/workbench` installs only the skill directory, not the source packages.
-
-The local proof loop for the authored Workbench skill surface is:
-
-- `pnpm cli-skill-evals:validate`
-- `pnpm test`
-- private maintainer source-export validation before publication
-
-The `skills/workbench/evals/` directory is only the skill-ergonomics catalog used to test the public skill. It is not the public guide for Workbench benchmark eval authoring; that guide lives under `docs/evals/`.
-
-## Installed Copies
-
-Do not edit installed user-home skills directly. After changing authored source in the private monorepo, maintainers validate and republish this source snapshot, then refresh installed copies through the normal skill installer path, such as `npx skills add workbench-ai/workbench`.
-
-## Public Source Export
-
-Maintainers run these commands from the private monorepo root after changing Workbench source, shared `cli-web-ui`, first-party agent driver packages, or the authored Workbench skill:
-
-- `pnpm workbench:public-source:build`
-- `pnpm workbench:public-source:validate`
-
-The generated source snapshot lives under `out/public-source/workbench`. It includes Workbench packages, `packages/cli-web-ui`, first-party agent driver packages, docs, environments, and `skills/workbench`. It intentionally excludes Workbench Cloud, remote auth, Terraform, generated output, `node_modules`, and root `SKILL.md`.
+Do not edit installed user-home skills directly. Refresh installed copies through the normal skill installer path after the source-backed export is updated.

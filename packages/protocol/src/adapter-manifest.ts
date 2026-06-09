@@ -1,12 +1,12 @@
 import YAML from "yaml";
 
-export const WORKBENCH_ADAPTER_MANIFEST_PROTOCOL = "workbench.adapter.v3";
+export const WORKBENCH_ADAPTER_MANIFEST_PROTOCOL = "workbench.adapter-manifest.v1";
 
 export interface WorkbenchAdapterManifest {
   id: string;
   protocol: typeof WORKBENCH_ADAPTER_MANIFEST_PROTOCOL;
   operations: Partial<Record<WorkbenchAdapterOperation, WorkbenchAdapterOperationManifest>>;
-  setup: string[];
+  install: string[];
   auth?: WorkbenchAdapterAuthManifest;
   slots?: Record<string, WorkbenchAdapterSlotManifest>;
 }
@@ -14,8 +14,8 @@ export interface WorkbenchAdapterManifest {
 export type WorkbenchPrimitiveAdapterOperation =
   | "engine.resolve"
   | "engine.run"
-  | "candidate.run"
-  | "candidate.improve";
+  | "skill.run"
+  | "skill.improve";
 
 export type WorkbenchAdapterOperation = WorkbenchPrimitiveAdapterOperation;
 export type WorkbenchAdapterOperationExecutor = "sandbox" | "host";
@@ -111,7 +111,7 @@ export function cloneWorkbenchAdapterManifest(
   return {
     ...manifest,
     operations: cloneJson(manifest.operations),
-    setup: [...manifest.setup],
+    install: [...manifest.install],
     ...(manifest.auth ? { auth: cloneJson(manifest.auth) as WorkbenchAdapterAuthManifest } : {}),
     ...(manifest.slots ? { slots: cloneJson(manifest.slots) as Record<string, WorkbenchAdapterSlotManifest> } : {}),
   };
@@ -126,14 +126,14 @@ export function parseWorkbenchAdapterManifest(
     throw new Error(`${label} must be a YAML object.`);
   }
   const record = parsed as Record<string, unknown>;
-  rejectUnknownManifestKeys(record, label, ["id", "protocol", "operations", "setup", "auth", "slots"]);
+  rejectUnknownManifestKeys(record, label, ["id", "protocol", "operations", "install", "auth", "slots"]);
   const id = readAdapterId(record.id, `${label}.id`);
   if (record.protocol !== WORKBENCH_ADAPTER_MANIFEST_PROTOCOL) {
     throw new Error(`${label}.protocol must be ${WORKBENCH_ADAPTER_MANIFEST_PROTOCOL}.`);
   }
-  const setup = record.setup === undefined
+  const install = record.install === undefined
     ? []
-    : readStringArray(record.setup, `${label}.setup`);
+    : readStringArray(record.install, `${label}.install`);
   const operations = readAdapterOperations(record.operations, `${label}.operations`, id);
   const slots = record.slots === undefined
     ? undefined
@@ -143,7 +143,7 @@ export function parseWorkbenchAdapterManifest(
     id,
     protocol: WORKBENCH_ADAPTER_MANIFEST_PROTOCOL,
     operations,
-    setup,
+    install,
     ...(auth ? { auth } : {}),
     ...(slots ? { slots } : {}),
   };
@@ -625,12 +625,12 @@ export function normalizeWorkbenchAdapterOperation(
   if (
     value === "engine.resolve" ||
     value === "engine.run" ||
-    value === "candidate.run" ||
-    value === "candidate.improve"
+    value === "skill.run" ||
+    value === "skill.improve"
   ) {
     return value;
   }
-  throw new Error(`${label} must be engine.resolve, engine.run, candidate.run, or candidate.improve.`);
+  throw new Error(`${label} must be engine.resolve, engine.run, skill.run, or skill.improve.`);
 }
 
 function readJsonPointer(value: unknown, label: string): string {

@@ -17,14 +17,14 @@ export function SurfaceSection({
   className?: string;
   children: ReactNode;
 }) {
-  const HeadingTag = headingLevel === 4 ? "h4" : headingLevel === 3 ? "h3" : "h2";
+  const Heading = headingLevel === 4 ? "h4" : headingLevel === 3 ? "h3" : "h2";
 
   return (
     <section className={cn("grid min-w-0 gap-3", className)}>
       <div className="grid min-w-0 gap-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          {Icon ? <Icon className="size-4 text-muted-foreground" /> : null}
-          <HeadingTag className="text-base font-semibold text-foreground">{title}</HeadingTag>
+          {Icon ? <Icon aria-hidden="true" className="size-4 text-muted-foreground" /> : null}
+          <Heading className="text-base font-semibold text-foreground">{title}</Heading>
         </div>
         {description ? (
           <p className="text-sm leading-6 text-muted-foreground">{description}</p>

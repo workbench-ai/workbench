@@ -295,6 +295,8 @@ async function runDockerSandboxExecution(
     "--env",
     "USER=workbench",
     "--env",
+    `PATH=${DOCKER_RUNTIME_MOUNT}/node_modules/.bin:/usr/local/bin:/usr/bin:/bin`,
+    "--env",
     `WORKBENCH_WORKSPACE_ROOT=${workspaceRoot}`,
     "--env",
     `WORKBENCH_RUNTIME_IMPORT=${runtimeImport}`,
@@ -706,19 +708,19 @@ function findDockerSourceRoot(): string | null {
   }
   const cwd = process.cwd();
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
+  const skills = [
     cwd,
     path.resolve(cwd, ".."),
     path.resolve(cwd, "../.."),
     path.resolve(cwd, "../../.."),
     path.resolve(moduleDir, "../../../../../.."),
   ];
-  for (const candidate of candidates) {
+  for (const skill of skills) {
     if (
-      existsSync(path.join(candidate, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
-      existsSync(path.join(candidate, "products/workbench/packages/core/src/index.ts"))
+      existsSync(path.join(skill, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
+      existsSync(path.join(skill, "products/workbench/packages/core/src/index.ts"))
     ) {
-      return candidate;
+      return skill;
     }
   }
   return null;

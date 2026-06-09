@@ -101,6 +101,8 @@ export interface ValidatedSandboxExecutionResult {
   payloads: WorkbenchExecutionOutputPayloads;
 }
 
+const SANDBOX_SETUP_TTL_BUFFER_MS = 15 * 60_000;
+
 export async function executeValidatedSandboxExecution(
   plane: SandboxPlane,
   execution: WorkbenchExecutionSpec,
@@ -269,7 +271,7 @@ export function createWorkbenchSandboxExecutionMetadata(args: WorkbenchSandboxEx
     },
     capability: {
       ...args.capability,
-      candidate: { ...args.capability.candidate },
+      skill: { ...args.capability.skill },
       inputs: args.capability.inputs.map((input) => ({ ...input })),
       network: { ...args.capability.network },
     },
@@ -310,7 +312,7 @@ export function createWorkbenchSandboxAllocation(
   options: WorkbenchSandboxAllocationOptions,
 ): WorkbenchSandboxAllocation {
   const nowMs = options.now ? Date.parse(options.now) : Date.now();
-  const ttlMs = options.ttlMs ?? Math.max(60_000, execution.policy.resources.timeoutMinutes * 60_000 + 60_000);
+  const ttlMs = options.ttlMs ?? workbenchSandboxLifetimeTtlMs(execution);
   const safeExecutionId = execution.id.replace(/[^a-z0-9_]+/giu, "_");
   const nonce = allocationNonce();
   return {
@@ -348,20 +350,27 @@ export function createWorkbenchExecutionCapability(
   } = {},
 ): WorkbenchExecutionCapability {
   const nowMs = options.now ? Date.parse(options.now) : Date.now();
-  const ttlMs = options.ttlMs ?? Math.max(60_000, execution.policy.resources.timeoutMinutes * 60_000 + 60_000);
+  const ttlMs = options.ttlMs ?? workbenchSandboxLifetimeTtlMs(execution);
   return {
     executionId: execution.id,
-    candidate: {
+    skill: {
       tenantId: execution.policy.tenantId,
       projectId: execution.projectId,
       runId: execution.runId,
-      ...(execution.candidateId ? { candidateId: execution.candidateId } : {}),
+      ...(execution.versionId ? { versionId: execution.versionId } : {}),
     },
     inputs: execution.inputs.map((input) => ({ ...input })),
     outputPrefix: options.outputPrefix ?? `executions/${execution.id}/outputs/`,
     network: { ...execution.policy.network },
     expiresAt: new Date(nowMs + ttlMs).toISOString(),
   };
+}
+
+function workbenchSandboxLifetimeTtlMs(execution: WorkbenchExecutionSpec): number {
+  return Math.max(
+    60_000,
+    execution.policy.resources.timeoutMinutes * 60_000 + SANDBOX_SETUP_TTL_BUFFER_MS,
+  );
 }
 
 export function collectExecutionCapabilityScopeIssues(
@@ -373,14 +382,14 @@ export function collectExecutionCapabilityScopeIssues(
   if (capability.executionId !== execution.id) {
     issues.push(`Capability execution id ${capability.executionId} does not match ${execution.id}.`);
   }
-  if (capability.candidate.tenantId !== execution.policy.tenantId) {
+  if (capability.skill.tenantId !== execution.policy.tenantId) {
     issues.push(`Capability tenant id does not match execution ${execution.id}.`);
   }
-  if (capability.candidate.projectId !== execution.projectId || capability.candidate.runId !== execution.runId) {
+  if (capability.skill.projectId !== execution.projectId || capability.skill.runId !== execution.runId) {
     issues.push(`Capability project/run scope does not match execution ${execution.id}.`);
   }
-  if ((capability.candidate.candidateId ?? null) !== (execution.candidateId ?? null)) {
-    issues.push(`Capability candidate scope does not match execution ${execution.id}.`);
+  if ((capability.skill.versionId ?? null) !== (execution.versionId ?? null)) {
+    issues.push(`Capability skill version scope does not match execution ${execution.id}.`);
   }
   if (!capability.outputPrefix.startsWith(`executions/${execution.id}/`)) {
     issues.push(`Capability output prefix must be scoped under executions/${execution.id}/.`);

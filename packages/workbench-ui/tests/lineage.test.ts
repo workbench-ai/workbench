@@ -1,123 +1,70 @@
 import { describe, expect, test } from "vitest";
 
-import { buildLineageFlow } from "../src/lib/lineage";
-import { formatCandidateSelectionLabel } from "../src/lib/format";
-import type { EvaluationSummary, CandidateSummary, BenchmarkSnapshot } from "../src/types";
+import { buildVersionLineageGraph } from "../src/lib/lineage";
+import type {
+  WorkbenchLineageEdge,
+  WorkbenchVersion,
+} from "@workbench-ai/workbench-contract";
 
-function candidate(id: string, overrides: Partial<CandidateSummary> = {}): CandidateSummary {
+describe("version lineage", () => {
+  test("keeps parent-child edges in version order", () => {
+    const graph = buildVersionLineageGraph({
+      currentVersionId: "v002",
+      versions: [
+        version("v002", { parentIds: ["v001"], createdAt: "2026-01-01T00:01:00.000Z" }),
+        version("v001"),
+      ],
+      lineage: [edge("v001", "v002")],
+    });
+
+    expect(graph.edgeCount).toBe(1);
+    expect(graph.roots).toEqual(["v001"]);
+    expect(graph.nodes.find((node) => node.version.id === "v001")?.childCount).toBe(1);
+    expect(graph.nodes.find((node) => node.version.id === "v002")?.active).toBe(true);
+  });
+
+  test("ignores self references and missing versions", () => {
+    const graph = buildVersionLineageGraph({
+      versions: [version("v001")],
+      lineage: [
+        edge("v001", "v001"),
+        edge("missing", "v001"),
+        edge("v001", "missing"),
+      ],
+    });
+
+    expect(graph.edgeCount).toBe(0);
+    expect(graph.roots).toHaveLength(1);
+    expect(graph.nodes[0]?.childCount).toBe(0);
+  });
+
+  test("keeps disconnected versions inspectable", () => {
+    const graph = buildVersionLineageGraph({
+      versions: [version("v002"), version("v001")],
+      lineage: [],
+    });
+
+    expect(graph.roots).toEqual(["v001", "v002"]);
+  });
+});
+
+function version(id: string, overrides: Partial<WorkbenchVersion> = {}): WorkbenchVersion {
   return {
     id,
-    version: 1,
-    ordinal: 1,
-    benchmarkFingerprint: "benchmark",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    referenceIds: [],
-    status: "evaluated",
-    fileChanges: [],
+    hash: `${id}_hash`,
+    message: id,
+    parentIds: [],
+    createdAt: id === "v001" ? "2026-01-01T00:00:00.000Z" : "2026-01-01T00:02:00.000Z",
+    files: [],
     ...overrides,
   };
 }
 
-function evaluation(
-  id: string,
-  candidateId: string,
-  updatedAt: string,
-  score: number,
-): EvaluationSummary {
+function edge(parentId: string, childId: string): WorkbenchLineageEdge {
   return {
-    id,
-    runId: `run_${id}`,
-    benchmarkFingerprint: "benchmark",
-    candidateFingerprint: `fingerprint_${candidateId}`,
-    candidateId,
-    candidateVersion: 1,
-    createdAt: updatedAt,
-    updatedAt,
-    status: "completed",
-    sampleCount: 1,
-    completedSampleCount: 1,
-    errorSampleCount: 0,
-    metrics: {
-      score: {
-        count: 1,
-        mean: score,
-        variance: 0,
-        stddev: 0,
-        min: score,
-        max: score,
-      },
-    },
+    parentId,
+    childId,
+    reason: "version",
+    createdAt: "2026-01-01T00:00:00.000Z",
   };
 }
-
-function snapshot(
-  summaries: CandidateSummary[],
-  evaluations: EvaluationSummary[] = [],
-): BenchmarkSnapshot {
-  return {
-    workspaceRoot: "/workspace",
-    activeId: summaries[0]?.id ?? null,
-    currentBenchmarkFingerprint: "benchmark",
-    summaries,
-    evaluations,
-    runs: [],
-  };
-}
-
-describe("candidate lineage", () => {
-  test("ignores self references instead of rendering a self edge", async () => {
-    const summary = candidate("candidate_self", {
-      baseId: "candidate_self",
-      referenceIds: ["candidate_self"],
-    });
-
-    const flow = await buildLineageFlow(snapshot([summary]));
-
-    expect(flow.nodes).toHaveLength(1);
-    expect(flow.edges).toEqual([]);
-    expect(formatCandidateSelectionLabel({ summary })).toContain("Initial");
-  });
-
-  test("keeps explicit improve parent edges", async () => {
-    const flow = await buildLineageFlow(snapshot([
-      candidate("candidate_parent"),
-      candidate("candidate_child", { baseId: "candidate_parent" }),
-    ]));
-
-    expect(flow.edges.map((edge) => ({
-      source: edge.source,
-      target: edge.target,
-    }))).toEqual([
-      {
-        source: "candidate:candidate_parent",
-        target: "candidate:candidate_child",
-      },
-    ]);
-  });
-
-  test("ignores benchmark references when building lineage", async () => {
-    const flow = await buildLineageFlow(snapshot([
-      candidate("candidate_reference"),
-      candidate("candidate_child", { referenceIds: ["candidate_reference"] }),
-    ]));
-
-    expect(flow.edges).toEqual([]);
-  });
-
-  test("shows best evaluation rollup instead of candidate metric dumps", async () => {
-    const flow = await buildLineageFlow(snapshot(
-      [
-        candidate("candidate_latest"),
-      ],
-      [
-        evaluation("eval_old", "candidate_latest", "2026-01-01T00:00:00.000Z", 0.2),
-        evaluation("eval_new", "candidate_latest", "2026-01-02T00:00:00.000Z", 0.88),
-      ],
-    ));
-
-    expect(flow.nodes[0]?.data.scoreText).toBe("Best score 0.88");
-    expect(flow.nodes[0]?.data.sourceText).toBeUndefined();
-    expect(flow.nodes[0]?.data.metricText).toBeUndefined();
-    expect(flow.nodes[0]?.ariaLabel).toContain("Best score 0.88");
-  });
-});

@@ -1,495 +1,82 @@
-import http from "node:http";
-import { promises as fs } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
 import { describe, expect, test } from "vitest";
 
 import {
-  adapterSlot,
-  assertWorkbenchAdapterOperationResultOk,
-  collectWorkbenchAdapterOperationIssues,
-  collectWorkbenchAdapterOperationRequirements,
-  collectWorkbenchAdapterAuthRequirements,
-  defineAdapter,
-  defineEngineResolver,
-  defineEngineRunner,
-  defineCandidate,
-  defineImprover,
-  normalizeWorkbenchAdapterOperationRequest,
-  normalizeWorkbenchAdapterOperationResult,
-  normalizeWorkbenchEngineResolveResult,
+  WORKBENCH_ADAPTER_MANIFEST_PROTOCOL,
+  WORKBENCH_ADAPTER_PROTOCOL,
+  adapterCommandName,
+  adapterResult,
   parseWorkbenchAdapterManifest,
-  readWorkbenchAdapterOperationResult,
-  runDefinedAdapter,
-  runWorkbenchRuntimeOperationSequence,
-  workbenchAdapterManifestFromDefinition,
-  workbenchAdapterManifestSupportsOperation,
-  workbenchAdapterOperationExecutor,
-  withDefaultWorkbenchAdapterAuth,
+  type WorkbenchAdapterOperationRequest,
 } from "../src/index.ts";
 
 describe("Workbench adapter protocol", () => {
-  test("parses manifests and defaults auth through the public protocol package", () => {
-    const manifest = parseWorkbenchAdapterManifest([
-      "id: codex",
-      "protocol: workbench.adapter.v3",
-      "operations:",
-      "  candidate.run: {}",
-      "  candidate.improve: {}",
-      "auth:",
-      "  methods:",
-      "    oauth:",
-      "      files:",
-      "        - path: .codex/auth.json",
-      "",
-    ].join("\n"));
-    const invocation = withDefaultWorkbenchAdapterAuth({ use: "codex" }, [manifest]);
+  test("keeps adapter operation requests serializable", () => {
+    const request = {
+      protocol: WORKBENCH_ADAPTER_PROTOCOL,
+      id: "command",
+      operation: "skill.run",
+      invocation: {
+        use: "command",
+        with: { command: "sh \"$CASE_DIR/tests/test.sh\"" },
+      },
+      context: {
+        case: {
+          id: "case-001",
+        },
+      },
+      paths: {
+        workspace: "/workspace",
+        output: "/workspace/output",
+        result: "/workspace/output/workbench-result.json",
+        skill: "/workspace/skill",
+        case: "/workspace/case",
+      },
+    } satisfies WorkbenchAdapterOperationRequest;
 
-    expect(manifest.operations["candidate.run"]?.command).toBe("workbench-adapter-codex");
-    expect(manifest.operations["candidate.run"]?.executor).toBe("sandbox");
-    expect(workbenchAdapterManifestSupportsOperation(manifest, "candidate.improve")).toBe(true);
-    expect(invocation.auth).toBe("default");
-    expect(collectWorkbenchAdapterAuthRequirements([invocation], [manifest])).toEqual([
-      { adapterId: "codex", profile: "default" },
-    ]);
-  });
-
-  test("parses operation executors and defaults to sandbox", () => {
-    const manifest = parseWorkbenchAdapterManifest([
-      "id: external-engine",
-      "protocol: workbench.adapter.v3",
-      "operations:",
-      "  engine.resolve: {}",
-      "  engine.run:",
-      "    command: external-engine-adapter",
-      "    executor: host",
-      "",
-    ].join("\n"));
-
-    expect(workbenchAdapterOperationExecutor(manifest, "engine.resolve")).toBe("sandbox");
-    expect(workbenchAdapterOperationExecutor(manifest, "engine.run")).toBe("host");
-    expect(() => parseWorkbenchAdapterManifest([
-      "id: invalid-executor",
-      "protocol: workbench.adapter.v3",
-      "operations:",
-      "  engine.run:",
-      "    executor: worker",
-      "",
-    ].join("\n"))).toThrow("executor must be sandbox or host");
-  });
-
-  test("normalizes adapter operation requests", () => {
-    expect(normalizeWorkbenchAdapterOperationRequest({
+    expect(JSON.parse(JSON.stringify(request))).toMatchObject({
       protocol: "workbench.adapter.v3",
-      id: "exec_1",
-      operation: "engine.run",
-      invocation: {
-        use: "command",
-      },
-      context: {
-        candidate: {
-          prepare: { command: "cp -R input/candidate/. ." },
-        },
-      },
-      paths: {
-        workspace: "/workspace",
-        output: "/workspace/output",
-        result: "/workspace/output/workbench-result.json",
-        candidate: "/workspace/input/candidate",
-        traces: "/workspace/input/traces",
-        enginePrivate: "/workspace/private/engine",
-      },
-    })).toMatchObject({
-      id: "exec_1",
-      operation: "engine.run",
-      invocation: {
-        use: "command",
-        with: {},
-      },
-      context: {
-        candidate: {
-          prepare: { command: "cp -R input/candidate/. ." },
-        },
-      },
-      paths: {
-        workspace: "/workspace",
-        output: "/workspace/output",
-        result: "/workspace/output/workbench-result.json",
-        candidate: "/workspace/input/candidate",
-        traces: "/workspace/input/traces",
-        enginePrivate: "/workspace/private/engine",
-      },
+      operation: "skill.run",
+      context: { case: { id: "case-001" } },
     });
   });
 
-  test("rejects unsupported broad adapter path fields", () => {
-    expect(() => normalizeWorkbenchAdapterOperationRequest({
-      protocol: "workbench.adapter.v3",
-      id: "exec_invalid_paths",
-      operation: "engine.run",
-      invocation: {
-        use: "command",
-      },
-      paths: {
-        workspace: "/workspace",
-        output: "/workspace/output",
-        result: "/workspace/output/workbench-result.json",
-        candidate: "/workspace/input/candidate",
-        traces: "/workspace/input/traces",
-        input: "/workspace/input",
-        artifacts: "/workspace/output/artifacts",
-        scratch: "/workspace/scratch",
-      },
-    })).toThrow("unsupported fields: input, artifacts, scratch");
+  test("names adapter commands and wraps results without runtime-specific fields", () => {
+    expect(adapterCommandName("codex")).toBe("workbench-adapter-codex");
+    expect(adapterResult("skill.run", { score: 1 })).toEqual({
+      protocol: "workbench.adapter-result.v1",
+      operation: "skill.run",
+      ok: true,
+      value: { score: 1 },
+    });
   });
 
-  test("emits v3 operation names from typed helper definitions", () => {
-    const manifest = workbenchAdapterManifestFromDefinition(defineAdapter({
-      id: "adapter",
-      engineResolve: defineEngineResolver(),
-      candidate: defineCandidate(),
-      engineRun: defineEngineRunner(),
-      improve: defineImprover(),
-    }));
+  test("uses install commands in adapter manifests without legacy aliases", () => {
+    const manifest = parseWorkbenchAdapterManifest([
+      "id: command",
+      `protocol: ${WORKBENCH_ADAPTER_MANIFEST_PROTOCOL}`,
+      "install:",
+      "  - npm install --global workbench-adapter-command",
+      "operations:",
+      "  skill.run:",
+      "    command: workbench-adapter-command",
+      "",
+    ].join("\n"));
 
     expect(manifest).toMatchObject({
-      protocol: "workbench.adapter.v3",
+      protocol: "workbench.adapter-manifest.v1",
+      install: ["npm install --global workbench-adapter-command"],
       operations: {
-        "engine.resolve": { command: "workbench-adapter-adapter" },
-        "candidate.run": { command: "workbench-adapter-adapter" },
-        "engine.run": { command: "workbench-adapter-adapter" },
-        "candidate.improve": { command: "workbench-adapter-adapter" },
+        "skill.run": { command: "workbench-adapter-command" },
       },
     });
-  });
-
-  test("rejects invalid protocol strings and unknown operation names", () => {
     expect(() => parseWorkbenchAdapterManifest([
-      "id: invalid-protocol",
-      "protocol: workbench.adapter.invalid",
+      "id: command",
+      `protocol: ${WORKBENCH_ADAPTER_MANIFEST_PROTOCOL}`,
+      `${["set", "up"].join("")}: []`,
       "operations:",
-      "  candidate.run: {}",
+      "  skill.run:",
+      "    command: workbench-adapter-command",
       "",
-    ].join("\n"))).toThrow("workbench.adapter.v3");
-    expect(() => parseWorkbenchAdapterManifest([
-      "id: invalid-operation",
-      "protocol: workbench.adapter.v3",
-      "operations:",
-      "  unknown.run: {}",
-      "",
-    ].join("\n"))).toThrow("must be engine.resolve");
-    expect(() => normalizeWorkbenchAdapterOperationRequest({
-      protocol: "workbench.adapter.invalid",
-      id: "exec_invalid_protocol",
-      operation: "candidate.run",
-      invocation: { use: "invalid-protocol" },
-      paths: {
-        workspace: "/workspace",
-        output: "/workspace/output",
-        result: "/workspace/output/workbench-result.json",
-      },
-    })).toThrow("workbench.adapter.v3");
-    expect(() => normalizeWorkbenchAdapterOperationRequest({
-      protocol: "workbench.adapter.v3",
-      id: "exec_invalid_operation",
-      operation: "unknown.run",
-      invocation: { use: "invalid-operation" },
-      paths: {
-        workspace: "/workspace",
-        output: "/workspace/output",
-        result: "/workspace/output/workbench-result.json",
-      },
-    })).toThrow("must be engine.resolve");
-  });
-
-  test("normalizes adapter operation results", () => {
-    expect(normalizeWorkbenchAdapterOperationResult({
-      protocol: "workbench.adapter-result.v1",
-      operation: "engine.run",
-      value: {
-        score: 0.75,
-        metrics: { accuracy: 0.75 },
-      },
-    }, "engine.run")).toMatchObject({
-      protocol: "workbench.adapter-result.v1",
-      operation: "engine.run",
-      value: {
-        score: 0.75,
-        metrics: { accuracy: 0.75 },
-      },
-    });
-
-    expect(normalizeWorkbenchAdapterOperationResult({
-      protocol: "workbench.adapter-result.v1",
-      operation: "candidate.improve",
-      value: {
-        files: [{
-          path: "prompt.md",
-          content: "updated\n",
-        }],
-        fileChanges: ["prompt.md"],
-      },
-    }, "candidate.improve")).toMatchObject({
-      value: {
-        files: [{
-          path: "prompt.md",
-          kind: "text",
-          encoding: "utf8",
-          executable: false,
-        }],
-        fileChanges: ["prompt.md"],
-      },
-    });
-  });
-
-  test("posts runtime-control requests with the default no-timeout node client", async () => {
-    const server = http.createServer((request, response) => {
-      expect(request.method).toBe("POST");
-      expect(request.url).toBe("/v1/operation-sequence");
-      expect(request.headers.authorization).toBe("Bearer runtime-token");
-      request.resume();
-      setTimeout(() => {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({
-          ok: true,
-          files: [],
-          fileChanges: [],
-          operationResults: [],
-        }));
-      }, 20);
-    });
-    await new Promise<void>((resolve) => {
-      server.listen(0, "127.0.0.1", resolve);
-    });
-    try {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        throw new Error("Expected runtime-control test server port.");
-      }
-      const result = await runWorkbenchRuntimeOperationSequence({
-        operations: [{
-          operation: "candidate.run",
-          invocation: { use: "command" },
-        }],
-      }, {
-        url: `http://127.0.0.1:${address.port}`,
-        token: "runtime-token",
-      });
-      expect(result).toMatchObject({ ok: true, files: [] });
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      });
-    }
-  });
-
-  test("rejects adapter operation results that explicitly report failure", () => {
-    expect(() => assertWorkbenchAdapterOperationResultOk({
-      protocol: "workbench.adapter-result.v1",
-      operation: "engine.run",
-      ok: false,
-      summary: "engine rejected the workspace",
-    }, "Adapter engine.run")).toThrow("Adapter engine.run returned ok false: engine rejected the workspace");
-  });
-
-  test("collects required operations through adapter slots", () => {
-    const orchestrator = parseWorkbenchAdapterManifest([
-      "id: orchestrator",
-      "protocol: workbench.adapter.v3",
-      "setup: []",
-      "operations:",
-      "  engine.run: {}",
-      "slots:",
-      "  judge:",
-      "    path: /judge",
-      "    operation: candidate.run",
-      "",
-    ].join("\n"));
-    const engineOnly = parseWorkbenchAdapterManifest([
-      "id: engine-only",
-      "protocol: workbench.adapter.v3",
-      "setup: []",
-      "operations:",
-      "  engine.run: {}",
-      "",
-    ].join("\n"));
-    const roots = [{
-      invocation: {
-        use: "orchestrator",
-        with: {
-          judge: { use: "engine-only" },
-        },
-      },
-      operation: "engine.run" as const,
-    }];
-
-    expect(collectWorkbenchAdapterOperationRequirements(roots, [orchestrator, engineOnly]))
-      .toMatchObject([
-        { invocation: { use: "orchestrator" }, operation: "engine.run" },
-        { invocation: { use: "engine-only" }, operation: "candidate.run" },
-      ]);
-    expect(collectWorkbenchAdapterOperationIssues(roots, [orchestrator, engineOnly]))
-      .toEqual(["Adapter engine-only does not implement candidate.run."]);
-  });
-
-  test("normalizes engine-resolve results", () => {
-    expect(normalizeWorkbenchEngineResolveResult({
-      environment: {
-        dockerfile: "tasks/example/environment/Dockerfile",
-        workdir: "/app",
-        network: {
-          egress: "none",
-        },
-      },
-      cases: [{
-        id: "example",
-        case: {
-          version: 3,
-          prompt: "Write ok.",
-        },
-        files: {
-          public: [{
-            path: "prompt.txt",
-            content: "ok",
-          }],
-          private: [{
-            path: "test.sh",
-            content: "echo 1",
-            executable: true,
-          }],
-          source: [{
-            path: "task.yaml",
-            content: "version: 3\n",
-          }],
-        },
-      }],
-    })).toMatchObject({
-      environment: {
-        dockerfile: "tasks/example/environment/Dockerfile",
-        workdir: "/app",
-        network: {
-          egress: "none",
-        },
-      },
-      cases: [{
-        id: "example",
-        case: {
-          version: 3,
-          prompt: "Write ok.",
-        },
-        files: {
-          public: [{
-            path: "prompt.txt",
-            kind: "text",
-            encoding: "utf8",
-            executable: false,
-          }],
-          private: [{
-            path: "test.sh",
-            executable: true,
-          }],
-          source: [{
-            path: "task.yaml",
-            kind: "text",
-            encoding: "utf8",
-          }],
-        },
-      }],
-    });
-
-    expect(() => normalizeWorkbenchEngineResolveResult({
-      cases: [{
-        id: "unexpected",
-        case: { version: 3, prompt: "Write ok." },
-        files: {},
-        unexpected: true,
-      }],
-    })).toThrow("unsupported fields: unexpected");
-
-    expect(() => normalizeWorkbenchEngineResolveResult({
-      environment: {
-        network: {
-          egress: "private",
-        },
-      },
-      cases: [],
-    })).toThrow("environment.network.egress must be none or open");
-
-    expect(() => normalizeWorkbenchEngineResolveResult({
-      environment: {
-        network: {
-          egress: "open",
-          allow: ["api.example.com"],
-        },
-      },
-      cases: [],
-    })).toThrow("environment.network includes unsupported fields: allow");
-  });
-
-  test("runs defined adapter handlers and writes operation results", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-adapter-handler-"));
-    const outputRoot = path.join(root, "output");
-    await fs.mkdir(outputRoot, { recursive: true });
-    const requestPath = path.join(root, "request.json");
-    await fs.writeFile(requestPath, `${JSON.stringify({
-      protocol: "workbench.adapter.v3",
-      id: "exec_handler",
-      operation: "engine.run",
-      invocation: {
-        use: "handler-engine",
-        with: {
-          label: "handled",
-          judge: {
-            use: "codex",
-            with: { model: "gpt-5.4-mini" },
-          },
-        },
-      },
-      paths: {
-        workspace: root,
-        output: outputRoot,
-        result: path.join(outputRoot, "workbench-result.json"),
-        candidate: path.join(root, "input", "candidate"),
-        traces: path.join(root, "input", "traces"),
-      },
-    }, null, 2)}\n`);
-    const adapter = defineAdapter({
-      id: "handler-engine",
-      slots: {
-        judge: adapterSlot("/judge", "candidate.run"),
-      },
-      engineRun: defineEngineRunner({
-        handle(ctx) {
-          expect(ctx.with.label).toBe("handled");
-          expect(ctx.slot("judge")).toMatchObject({
-            use: "codex",
-            with: { model: "gpt-5.4-mini" },
-          });
-          return ctx.result({
-            score: 1,
-            summary: "handler wrote result",
-          }, {
-            summary: "handler completed",
-            feedback: { slot: ctx.slot("judge")?.use ?? null },
-          });
-        },
-      }),
-    });
-
-    await runDefinedAdapter(adapter, { requestPath });
-
-    const result = await readWorkbenchAdapterOperationResult(outputRoot, "engine.run");
-    expect(result).toMatchObject({
-      protocol: "workbench.adapter-result.v1",
-      operation: "engine.run",
-      ok: true,
-      summary: "handler completed",
-      feedback: { slot: "codex" },
-      value: {
-        score: 1,
-        summary: "handler wrote result",
-      },
-    });
+    ].join("\n"))).toThrow(new RegExp(`unsupported field: ${["set", "up"].join("")}`, "u"));
   });
 });

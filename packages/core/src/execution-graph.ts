@@ -20,16 +20,17 @@ export interface CompileExecutionGraphInput {
   ownerUserId: string;
   projectId: string;
   runId: string;
-  candidateId: string;
+  versionId: string;
   attemptIndex: number;
   sampleIndex?: number;
   caseId?: string;
   engineCase?: GenericEngineCaseSpec;
   spec: GenericRunSpec;
   workflow?: "eval" | "improve";
-  candidateRef?: string;
+  skillRef?: string;
   caseRef?: string;
   environmentRef?: string;
+  metadata?: Record<string, Json>;
 }
 
 export interface WorkbenchExecutionGraph {
@@ -46,8 +47,8 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const workflow = input.workflow ?? "improve";
   const sampleIndex = input.sampleIndex ?? 0;
   const caseId = input.caseId ?? "current";
-  const candidateRef = input.candidateRef ?? `workbench://benchmarks/${input.projectId}/candidates/${input.candidateId}`;
-  const caseRef = input.caseRef ?? `workbench://benchmarks/${input.projectId}/engine-cases/${caseId}`;
+  const skillRef = input.skillRef ?? `workbench://skills/${input.projectId}/versions/${input.versionId}`;
+  const caseRef = input.caseRef ?? `workbench://skills/${input.projectId}/cases/${caseId}`;
   if (!input.engineCase) {
     throw new Error("Execution graph compilation requires an engine case.");
   }
@@ -60,45 +61,46 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const nodes: WorkbenchExecutionGraphNode[] = [];
   const executions: WorkbenchExecutionSpec[] = [];
   const improveExecutionId = executionId(input, "improve", "current", 0);
-  const improveOutputRef = `execution://${improveExecutionId}/candidate_patch`;
   const engineAdapter = input.spec.engineRun;
   if (workflow === "improve") {
-    if (!input.spec.candidate.improve || !input.spec.improve) {
-      throw new Error("Candidate improve configuration is required for improve execution graphs.");
+    if (!input.spec.skill.improve || !input.spec.improve) {
+      throw new Error("Skill improve configuration is required for improve execution graphs.");
     }
     pushExecution(nodes, executions, createExecution({
       input,
       purpose: "improve",
       adapter: input.spec.improve,
       inputs: [
-        inputRef("candidate", candidateRef, "/workspace", true),
-        inputRef("traces", `workbench://benchmarks/${input.projectId}/runs/${input.runId}/traces`, "/workspace/input/traces", false),
+        inputRef("skill", skillRef, "/workspace", true),
+        inputRef("traces", `workbench://skills/${input.projectId}/runs/${input.runId}/traces`, "/workspace/input/traces", false),
       ],
-      outputs: [outputContract("candidate_patch", "workbench.candidate_patch.v1")],
+      outputs: [outputContract("skill_patch", "workbench.skill_patch.v1")],
       metadata: {
+        ...(input.metadata ?? {}),
         attemptIndex: input.attemptIndex,
         sampleIndex: 0,
         caseId: "current",
-        benchmark: input.spec.benchmark.name,
-        edits: input.spec.candidate.improve.edits,
+        eval: input.spec.eval.name,
+        edits: input.spec.skill.improve.edits,
       },
       runtime: input.spec.environment,
       idOverride: improveExecutionId,
     }), []);
+    return { nodes, executions };
   }
 
-  const runCandidateRef = workflow === "improve" ? improveOutputRef : candidateRef;
   const attemptExecutionId = executionId(input, "attempt", caseId, sampleIndex);
   pushExecution(nodes, executions, createExecution({
     input,
     purpose: "attempt",
     adapter: engineAdapter,
     inputs: [
-      inputRef("candidate", runCandidateRef, "/workspace/input/candidate", false),
+      inputRef("skills", skillRef, "/workspace/input/skills", false),
       inputRef("case", caseRef, "/workspace/input/case", false),
     ],
     outputs: [outputContract("result", "workbench.result.v1")],
     metadata: {
+      ...(input.metadata ?? {}),
       attemptIndex: input.attemptIndex,
       sampleIndex,
       caseId,
@@ -107,7 +109,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
     },
     runtime: executionConfig.environment,
     idOverride: attemptExecutionId,
-  }), workflow === "improve" ? [improveExecutionId] : []);
+  }), []);
 
   return { nodes, executions };
 }
@@ -144,7 +146,7 @@ function createExecution(args: {
     ),
     projectId: args.input.projectId,
     runId: args.input.runId,
-    candidateId: args.input.candidateId,
+    versionId: args.input.versionId,
     purpose: args.purpose,
     adapter: args.adapter,
     sandbox: args.input.environmentRef

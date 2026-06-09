@@ -1,170 +1,139 @@
 # Workbench Spec
 
-Workbench is a repo-like benchmark workbench built on `version: 4` benchmark/candidate source and two public authored primitives:
+Workbench is a skill management runtime. It runs skills on evals with agents, records trace evidence, improves skills from failed or reviewed traces, versions source automatically, and syncs the full evidence graph through Workbench remotes.
 
-- Engine: the benchmark runtime and measurement contract. An engine owns tasks, environments, scoring, verifier visibility, and result normalization for its benchmark style.
-- Candidate: the thing being evaluated or improved. A candidate can be files, a command wrapper, or agent/model configuration.
+The CLI is the canonical action surface. The local and hosted web UX is read-only inspection over the same `WorkbenchInspectionSnapshot` used by CLI formatters. Workbench Cloud is the hosted Workbench remote, runner provider, registry, and hosted source provider.
 
-Candidate manifests own every choice about how that candidate runs and improves: files, prepare commands, runnable agent/model variants, the default run, and optional improve settings. The core benchmark stays focused on what is measured.
+## Vocabulary
 
-The built-in `workbench` engine is the native engine for task directories, Docker environments, rubric scoring, and test scoring. Its `engine.with` config owns `environment`, optional `tasks` path selection, and the `score` adapter slot. Score helpers such as `tests` and `rubric` are slot targets, not core adapter categories. Rubric scoring runs one judge agent turn per criterion and uses `score.with.parallelism` as the single configurable throttle for those criterion turns; the helper publishes each criterion judge as a trace session plus scorecard/result files under the parent attempt job. The core runtime records only the generic engine job result, trace sessions, trace files, and artifacts. Harbor interop is supplied by an external engine adapter declared from a benchmark-contained path, npm package, or git ref and selected with `engine.use: harbor`. Top-level `environment`, `tasks`, and `score` are not Workbench source primitives.
+- Skill: a measured agent skill. The implicit local skill is `primary`.
+- Included skill: a skill installed beside a measured skill for one run. It is hashed into the measured skill bundle but is not a comparison row.
+- Skill bundle: one measured entry skill plus its included skills and files.
+- Version: an immutable source snapshot created automatically at command boundaries.
+- Eval: the rubric and cases that measure skill performance.
+- Case: one representative workflow input.
+- Agent: one runtime configuration, such as adapter, model label, auth profile, and adapter config.
+- Run: an eval, improve, or retry attempt.
+- Trace: evidence produced by a run.
+- Lineage: parent-child relationships between source versions.
+- Remote: a Workbench object endpoint used for versions, runs, traces, artifacts, refs, and published source.
+- Published source: an immutable source version exposed by Workbench Cloud as an installable skill.
 
 ## Source Shape
 
+Simple skill projects need no `.workbench/skills.yaml`:
+
 ```text
-benchmark.yaml
-candidates/<name>/candidate.yaml
-candidates/<name>/files/        # optional
-tasks/<case>/task.yaml
-tasks/<case>/files/           # public case files staged at /workspace/input/case
-tasks/<case>/tests/           # verifier-private files staged at /workspace/private/engine
-tasks/<case>/solution/        # optional oracle-only material
+SKILL.md
+.workbench/eval.yaml
+.workbench/cases/case-001/case.yaml
+.workbench/agents.yaml
+.workbench/.gitignore
+.workbench/objects/      # ignored runtime object database
+.workbench/refs/         # ignored Workbench refs
+.workbench/queue/        # ignored pending sync queue
+.workbench/tmp/          # ignored temporary files
+.workbench/logs/         # ignored runtime logs
 ```
 
-`benchmark.yaml`:
+When `.workbench/skills.yaml` is absent and `SKILL.md` exists, Workbench behaves as if this were configured:
 
 ```yaml
-version: 4
-name: tiny-terminal
-description: Evaluate terminal candidates.
-engine:
-  use: workbench
-  with:
-    environment:
-      dockerfile: environment/Dockerfile
-      network:
-        egress: none
-    score:
-      use: tests
+skills:
+  primary:
+    path: .
 ```
 
-`engine.with.environment.network.egress` is binary: `open` allows normal internet egress and `none` disables egress from the benchmark sandbox. Omitted `network` defaults to `open`; benchmarks that need contamination protection should use `egress: none`, which may also block model and API clients.
-
-Omitting `engine.with.tasks` is the canonical native task-package shape; the built-in `workbench` engine reads `tasks/`. Use `engine.with.tasks.path` only when the native task directory is not `tasks/`:
+Advanced projects may add `.workbench/skills.yaml`:
 
 ```yaml
-engine:
-  use: workbench
-  with:
-    environment:
-      dockerfile: environment/Dockerfile
-    tasks:
-      path: alternate-tasks
-    score:
-      use: tests
+defaults:
+  skills: all
+skills:
+  primary:
+    path: .
+    includes:
+      - name: helper
+        path: skills/helper
+  upstream:
+    from: github:anthropics/skills//skills/frontend-design
+    ref: <commit-sha>
+  hosted:
+    from: https://workbench.ai/api/workbench/public/skills/acme/earnings-prep/source
+    ref: v019
 ```
 
-`candidates/<name>/candidate.yaml`:
+Top-level `skills` entries are measured skills. `includes` are dependencies for that measured skill. Local `path` values must stay inside the project root after realpath resolution; absolute paths, `..` escapes, and symlink escapes are invalid. External skills must use explicit remote refs or be vendored into the project.
+
+Agents live in `.workbench/agents.yaml`:
 
 ```yaml
-version: 4
-name: command candidate
-files:
-  path: files
-defaultRun: main
-runs:
-  main:
-    name: Command
-    use: command
-    with:
-      command: "printf '42\n' > answer.txt"
-improve:
-  edits:
-    - prompt.md
-  use: codex
-  with:
-    model: gpt-5.4-mini
-  optimizeOn:
-    split: train
-  selectBy:
-    metric: score
-    cases:
-      split: validation
+default: default
+agents:
+  default:
+    adapter: local
+    model: docker
+    with: {}
 ```
 
-`tasks/<case>/task.yaml` for the built-in `workbench` engine:
+Authored Workbench source files are part of versions: `SKILL.md`, support files, `.workbench/eval.yaml`, `.workbench/cases/`, `.workbench/agents.yaml`, optional `.workbench/skills.yaml`, optional `.workbench/environment/`, and optional `.workbench/remotes.yaml`. Runtime directories under `.workbench` are ignored and are not installable source.
 
-```yaml
-version: 3
-task: Write the answer to answer.txt.
-split: train
-files:
-  path: files
-tests:
-  path: tests
-solution:
-  path: solution
+## CLI Contract
+
+```text
+workbench init [DIR] [--json]
+workbench status [--dir DIR] [--json]
+workbench check [--dir DIR] [--json]
+workbench versions [--dir DIR] [--json]
+workbench switch VERSION [--dir DIR] [--json]
+workbench diff [A..B] [--dir DIR] [--json]
+workbench sync [REMOTE] [--dir DIR] [--json]
+workbench eval [VERSION] [--skill SKILL|all] [--agent AGENT|all] [--samples N] [--rerun] [--json]
+workbench improve [VERSION] [--skill primary] [--agent AGENT] [--budget N] [--samples N] [--json]
+workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]
+workbench retry RUN_ID [--json]
+workbench show REF[:PATH] [--json]
+workbench files REF [--json]
+workbench list runs|jobs|traces|artifacts|sessions|remotes [--json]
+workbench trace RUN_ID|JOB_ID|TRACE_ID [--json]
+workbench remote add NAME URL [--dir DIR] [--json]
+workbench remote list [--dir DIR] [--json]
+workbench agent list|add|show|default|remove ...
+workbench skills list
+workbench case list|add|show|remove ...
+workbench publish [VERSION] [--visibility private|public] [--dir DIR] [--json]
+workbench auth status|connect|disconnect ...
+workbench login [--base-url URL] [--no-open] [--json]
+workbench logout [--json]
+workbench open [--host HOST] [--port PORT] [--no-open] [--json]
 ```
 
-`split` is optional case metadata. Workbench does not assign meaning to split names. Candidate `improve.optimizeOn` can explicitly choose which cases provide optimizer evidence, and `improve.selectBy` can explicitly choose the metric and cases used to select the active candidate. If `selectBy` is present, `metric` is required. Omitted policy preserves the default behavior: optimize on all cases and select by all-case `score`. There are no named case-set files or separate optimizer manifests.
+This is a hard cut. There are no compatibility aliases for older source-management commands or hosted command flags.
 
-Explicit Harbor engine adapter:
+## Runtime Behavior
 
-```yaml
-version: 4
-name: harbor-terminal
-description: Run candidates on a local Harbor dataset.
-adapters:
-  - npm:@acme/workbench-harbor-engine@1.0.0
-engine:
-  use: harbor
-  with:
-    path: harbor-dataset
-```
+Every command that reads or writes project state first reconciles the current folder into a source version. If the source hash already exists, Workbench reuses that version. If the source changed, Workbench creates the next sequential version as a child of the current version. Editing an older switched version and running a command naturally creates a new lineage.
 
-The Harbor engine adapter is a thin Workbench bridge to Harbor. Harbor itself owns `instruction.md`, `task.toml`, `environment/`, `tests/`, MCP server config, health checks, `solution/`, candidate invocation, verifier/reward behavior, artifact handoff, and same-sandbox versus separate-sandbox verifier topology. Workbench YAML does not duplicate Harbor verifier, artifact, environment, or step configuration. Workbench core does not call `harbor run` directly or expose Harbor as a special core runtime mode. A Harbor adapter normally declares `operations.engine.run.executor: host`, calls Harbor's inspect/export or run entrypoint, offers Workbench runtime-control as a sandbox backend when Harbor asks for sandboxes, and normalizes Harbor's final result into the same `workbench.adapter.v3` request and `workbench.adapter-result.v1` result used by every engine. Core records metrics and criteria as separate normalized fields and does not infer one from the other. Use benchmark-contained paths for portable Cloud runs; if an engine reads outside the benchmark tree, its `engine.resolve` operation must emit inspectable resolved files.
+`eval` resolves selected skills and agents, records runs, jobs, traces, artifacts, eval snapshots, skill sources, and skill bundles. Matching completed local eval evidence is reused unless `--rerun` is passed. Runs are identified by version, eval hash, skill name, skill bundle hash, agent name, and agent hash.
 
-## Cloud Source Boundary
+Eval jobs mount all resolved skills at `/workspace/input/skills`. `SKILL_DIR` points at the selected entry skill directory, `SKILLS_DIR` points at `/workspace/input/skills`, `CASE_DIR` points at the case files, and `OUTPUT_DIR` points at output files.
 
-The CLI resolves benchmark source locally, runs the selected resolver through `engine.resolve`, and uploads `candidateFiles`, `engineResolveFiles`, `engineResolveBinding`, adapter files, and Dockerfile source. Workbench Cloud validates that the binding matches the selected engine resolver in the uploaded source YAML, stores it beside the `engineResolve` snapshot, and plans runs only from the uploaded resolved cases. Cloud does not call `engine.resolve` itself and does not know Harbor, Workbench-native task layout, MCP servers, health checks, or grading internals.
+`improve` edits only the mutable `primary` project skill. It requires failed or reviewed trace evidence for the selected skill and agent. Command agents must define `improveCommand`; provider-backed Codex and Claude agents use adapter auth. Passing smoke traces are not improvement evidence. Workbench records the proposed improved version and proof-run evidence, and switches to the improved version only when the proof run succeeds and beats the incumbent.
 
-## Native Workbench Engine Lifecycle
+`switch` is the explicit command that materializes an older or alternate version into the working folder. It does not invoke Git.
 
-For each candidate/task/sample, the built-in `workbench` engine is a host-side controller. Core schedules one generic `engine.run` attempt job, starts the trusted Workbench engine adapter, and exposes the same runtime-control endpoint available to external host engines. The adapter then chooses its child sandbox topology:
+`compare` defaults to the current eval snapshot and never mixes measurements across eval hashes. It renders version, skill, and agent axes. Included skills affect bundle hashes but do not appear as rows unless also defined as top-level measured skills.
 
-1. It reads the immutable candidate source package, public task files, engine-private verifier files, and traces from the generic adapter request paths.
-2. With default `engine.with.grading.isolation: shared`, it asks runtime-control to run one child sandbox sequence: optional candidate `prepare.command`, the configured `candidate.run` adapter, then the configured scoring helper `engine.run`.
-3. With `engine.with.grading.isolation: separate`, it asks runtime-control for a runner child sandbox that runs prepare plus `candidate.run`, collects the mutable workspace snapshot and output artifacts, then asks runtime-control for a grader child sandbox that receives those runner outputs plus engine-private files and runs the scoring helper.
-4. It writes one normal `workbench.adapter-result.v1` `engine.run` result from the scoring helper and copies selected child artifacts/traces into the parent attempt output.
-5. Core records one generic attempt job containing the normalized score, metrics, feedback, trace sessions, trace files, and artifacts emitted by the engine.
+## Remotes And Publish
 
-Verifier files are not present during candidate prepare or in the candidate adapter request. In shared mode they are staged only when the scoring operation starts. In separate mode they are never included in the runner child sandbox. For attempt jobs, core does not copy candidate files into the mutable workspace root; candidates that need a root working copy should declare `prepare.command` and copy from `/workspace/input/candidate`. For improve jobs, the candidate files are the mutable workspace root and planner-selected prior attempt evidence is staged under `/workspace/input/traces`. Runtime adapters must discover staged paths from `WORKBENCH_ADAPTER_REQUEST`; authored YAML and source paths are resolved before staging and are not a runtime mount contract.
+Raw Workbench runtime state is not a Git repository. Git users keep using Git normally; Workbench does not call Git, write Git branches, create tags, commit, push, pull, or mutate Git refs. Workbench storage is repo-local and ignored, similar in spirit to `.git` but independent of Git.
 
-## CLI Surface
+`workbench remote add NAME URL` records a non-secret Workbench remote URL in `.workbench/remotes.yaml`. `workbench sync` merges immutable object packs between local `.workbench/objects` and the remote. File remotes are supported for local portability tests. Workbench Cloud remotes use the same object pack schema over HTTP.
 
-```bash
-workbench init [DIR] --command NAME
-workbench check [SOURCE] [--dir DIR] [--json]
-workbench eval [SOURCE] [--dir DIR] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--json]
-workbench eval --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--candidate CANDIDATE_ID] [--runs RUNS|all] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
-workbench improve [SOURCE] [--dir DIR] [--from CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--json]
-workbench improve --remote [SOURCE] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--base CANDIDATE_ID] [--runs RUN] [--budget N] [--samples N] [--rerun] [--watch] [--dry-run] [--json]
-workbench retry TARGET_ID [--dir DIR] [--json]
-workbench retry --remote TARGET_ID [--dir DIR] [--benchmark OWNER/BENCHMARK] [--watch] [--interval-ms N] [--timeout-ms N] [--json]
-workbench runs list|show ...
-workbench evaluations list|show ...
-workbench executions trace --run RUN_ID --job JOB_ID ...
-workbench diagnose [RUN_OR_EVALUATION_ID] ...
-workbench candidates list|show|files|preview ...
-workbench traces collect|list [--providers codex,claude] [--since 30d] [--workspace DIR] [--limit N] [--json]
-workbench traces show TRACE_ID [--providers codex,claude] [--since 30d] [--workspace DIR] [--json]
-workbench open [SOURCE] [--dir DIR] [--run RUN_ID] [--host HOST] [--port N] [--no-open] [--json]
-workbench open --remote [OWNER/BENCHMARK|RUN_ID|CANDIDATE_ID] [--dir DIR] [--benchmark OWNER/BENCHMARK] [--no-open] [--json]
-workbench clone OWNER/BENCHMARK [DIR] [--dry-run] [--json]
-workbench pull [--dir DIR] [--dry-run] [--json]
-workbench push [SOURCE] [--dir DIR] [--visibility public|private] [--dry-run] [--force] [--json]
-```
+When a remote exists, write commands perform best-effort post-sync and read commands may perform best-effort pre-sync. If a remote is unavailable, local objects remain usable and explicit `workbench sync` is the repair command.
 
-`clone`, `pull`, and `push` exchange one project-state envelope. Source files are the authored benchmark and candidate tree. Runtime history is the durable set of candidates, evaluations, runs, jobs, events, candidate files, execution files, and the active candidate projection. Source changes are guarded by the last exchanged revision/fingerprint; local pull refuses to overwrite changed local source, remote push refuses to overwrite changed remote source, and runtime history merges idempotently as immutable facts. `push --force` is the intentional hard reset: it replaces the remembered remote with local source and runtime state together, with no separate source/runtime mode. Workbench derives active state by replaying finished promotion-capable runs for the current benchmark fingerprint: the first scored eval can establish active, later evals only record scores, and improves promote their output candidate only when it beats the current active candidate under the run selection rule. If no compatible scored promotion fact exists, active state is `null`.
+`workbench publish [VERSION]` syncs the selected version, marks it as the published source version, and asks the remote to expose installable source. Workbench Cloud returns an install URL and a pinned install URL. Publication is explicit; ordinary sync shares evidence and source versions but does not change published visibility.
 
-`.workbench/origin.json` is an exact remote pointer and base record: `baseUrl`, `remote`, `projectId`, `sourceRevisionId`, `sourceFingerprint`, `runtimeFingerprint`, and `linkedAt`.
+## Web UX
 
-Remote benchmark names cannot contain `/`, `?`, `#`, `@`, or `\`, so `OWNER/BENCHMARK` is the only public benchmark reference shape.
-
-`workbench eval` and `workbench improve` reuse completed work only when the candidate, run configuration, source, adapters, benchmark, and requested samples/budget match; `--rerun` is the explicit duplicate-spend escape hatch. Local and remote improve default to the evaluated active candidate when that candidate belongs to the current benchmark fingerprint; otherwise they evaluate and use the authored current candidate. Runtime candidates are automatically versioned display snapshots such as `Skill v1`, `Skill v2`, and `Skill v3`; authored YAML owns the candidate family and run configurations, not version labels.
-
-When watched or reused remote lifecycle work reaches a terminal state from a checkout linked to the same remote project, the CLI imports the remote project-state envelope back into local under the same local-source guard used by `pull`. Successful `push` also imports the accepted runtime state so local and remote active projections stay aligned. Explicit `--benchmark` targets for a different project do not mutate the current checkout.
-
-Once an active candidate exists, eval records scores without changing active. Improve output uses `outputCandidateId` for the produced version and `activeCandidateId` for the current best evaluated candidate after scoring. They can differ when a newer version scores below the incumbent.
-
-`workbench open`, local CLI inspection commands, and remote browser routes are read-only inspection surfaces over the same generic Workbench read interface. They expose candidates, evaluations, cases, traces, scorecards, files, lineage, and failure state for review; execution actions such as eval, improve, retry, cancellation, push, and pull stay in lifecycle APIs and CLI commands.
+`workbench open` serves the local read-only inspection UI. `workbench open --json` prints the same inspection snapshot without starting a browser server. Hosted skill pages use the same snapshot shape. The web UI may navigate, filter, and inspect, but write actions stay in the CLI.

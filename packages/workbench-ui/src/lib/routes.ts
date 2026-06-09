@@ -1,518 +1,448 @@
-import { isSnapshotPreviewMode } from "@workbench-ai/cli-web-ui/lib/file-preview";
+import {
+  isSnapshotPreviewMode,
+  type PreviewMode,
+} from "@workbench-ai/cli-web-ui/lib/file-preview";
 
-import type { CandidatePreviewMode } from "../types";
+export type SkillSurfaceView = "overview" | "manifest" | "files";
+export type VersionsIndexView = "archive" | "lineage";
+export type VersionView = "overview" | "files" | "runs";
+export type ExecutionIndexView = "runs" | "jobs" | "traces" | "artifacts";
+export type RunView = "overview" | "jobs" | "traces" | "artifacts";
+export type JobView = "overview" | "trace" | "artifacts";
+export type TraceView = "overview" | "files" | "payload";
+export type ArtifactView = "overview" | "files";
+export type ConfigurationView = "skills" | "agents";
+export type SyncView = "refs" | "remotes";
+export type WorkbenchFileOwnerKind = "version" | "trace" | "artifact";
 
-export type CandidateView = "overview" | "manifest" | "files";
-export type BenchmarkView = "overview" | "manifest" | "files";
-export type CandidatesIndexView = "archive" | "lineage";
-export type EvaluationCaseTab = "score" | "attempts" | "files";
-export type WorkbenchPersistentSearchParams = Record<string, string | null | undefined>;
-
-export interface BenchmarkSurfaceRoute {
-  benchmarkFingerprint: string | null;
-  benchmarkView: BenchmarkView;
-  benchmarkFilePath: string | null;
-  benchmarkDirectoryPath: string | null;
-  benchmarkPreviewMode: CandidatePreviewMode;
+export interface WorkbenchFileRouteState {
+  filePath: string | null;
+  directoryPath: string | null;
+  previewMode: PreviewMode;
 }
 
-export interface EvaluationCaseRoute {
-  caseTab: EvaluationCaseTab;
-  caseFilePath: string | null;
-  caseDirectoryPath: string | null;
-  casePreviewMode: CandidatePreviewMode;
+export interface WorkbenchSkillSurfaceRouteState {
+  skillView?: SkillSurfaceView;
+  skillFile?: WorkbenchFileRouteState;
 }
 
 export type WorkbenchRoute =
-  | ({
-      kind: "benchmark";
-    } & BenchmarkSurfaceRoute)
-  | {
-      kind: "not-found";
-      pathname: string;
-    }
-  | ({
-      kind: "candidates";
-      view: CandidatesIndexView;
-    } & BenchmarkSurfaceRoute)
-  | ({
-      kind: "evaluations";
-    } & BenchmarkSurfaceRoute)
-  | ({
-      kind: "evaluation";
-      evaluationId: string;
-      caseId: string | null;
-    } & BenchmarkSurfaceRoute & EvaluationCaseRoute)
-  | ({
-      kind: "candidate";
-      candidateId: string | null;
-      view: CandidateView;
-      filePath: string | null;
-      directoryPath: string | null;
-      previewMode: CandidatePreviewMode;
-    } & BenchmarkSurfaceRoute);
+  | { kind: "skill"; view: SkillSurfaceView; file: WorkbenchFileRouteState }
+  | ({ kind: "versions"; view: VersionsIndexView } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "version"; versionId: string; view: VersionView; file: WorkbenchFileRouteState } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "execution"; view: ExecutionIndexView } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "run"; runId: string; view: RunView } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "job"; jobId: string; view: JobView } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "trace"; traceId: string; view: TraceView; file: WorkbenchFileRouteState } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "artifact"; artifactId: string; view: ArtifactView; file: WorkbenchFileRouteState } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "configuration"; view: ConfigurationView } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "skill-source"; skillName: string } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "agent"; agentName: string } & WorkbenchSkillSurfaceRouteState)
+  | ({ kind: "sync"; view: SyncView } & WorkbenchSkillSurfaceRouteState);
 
-export function parseWorkbenchRoute(locationLike: {
-  pathname: string;
-  search: string;
-}): WorkbenchRoute {
-  const normalizedPath = normalizePathname(locationLike.pathname);
-  const segments = normalizedPath.split("/").filter(Boolean).map(decodePathSegment);
-  const searchParams = new URLSearchParams(locationLike.search);
-  const benchmarkSurface = parseBenchmarkSurface(searchParams);
+export function parseWorkbenchRoute(
+  pathname = "/",
+  routeBasePath = "/",
+  search = "",
+): WorkbenchRoute {
+  const [pathOnly, inlineSearch = ""] = pathname.split("?", 2);
+  const searchParams = new URLSearchParams(search || inlineSearch);
+  const file = parseFileRouteState(searchParams);
+  const skillSurface = parseSkillSurfaceRouteState(searchParams);
+  const segments = routeSegments(pathOnly ?? "/", routeBasePath);
+  const [section, id, child, ...rest] = segments;
 
-  if (segments.length === 0) {
-    return createBenchmarkRoute(benchmarkSurface);
+  if (!section) {
+    return { kind: "skill", view: "overview", file: emptyFileRouteState() };
   }
-
-  if (segments.length === 1 && (segments[0] === "manifest" || segments[0] === "files")) {
-    return createBenchmarkRoute({
-      benchmarkFingerprint: benchmarkSurface.benchmarkFingerprint,
-      benchmarkView: segments[0],
-      benchmarkFilePath: segments[0] === "files" ? searchParams.get("file") : null,
-      benchmarkDirectoryPath: segments[0] === "files" ? normalizeDirectoryPath(searchParams.get("dir")) : null,
-      benchmarkPreviewMode: segments[0] === "files" ? normalizeCandidatePreviewMode(searchParams.get("view")) : "rendered",
-    });
+  if (section === "files") {
+    return { kind: "skill", view: "files", file };
   }
-
-  if (segments[0] === "evaluations") {
-    if (segments.length === 1) {
-      return createEvaluationsRoute({ benchmark: benchmarkSurface });
-    }
-    const evaluationId = normalizeRouteSelection(segments[1] ?? null);
-    if (!evaluationId) {
-      return createWorkbenchNotFoundRoute(normalizedPath);
-    }
-    if (segments.length === 2) {
-      return createEvaluationRoute({ evaluationId, benchmark: benchmarkSurface });
-    }
-    if (segments[2] !== "cases") {
-      return createWorkbenchNotFoundRoute(normalizedPath);
-    }
-    const caseId = normalizeRouteSelection(segments[3] ?? null);
-    if (!caseId) {
-      return createWorkbenchNotFoundRoute(normalizedPath);
-    }
-    if (segments.length === 4) {
-      return createEvaluationCaseRoute({ evaluationId, caseId, benchmark: benchmarkSurface });
-    }
-    if (segments.length === 5 && (segments[4] === "attempts" || segments[4] === "files")) {
-      return createEvaluationCaseRoute({
-        evaluationId,
-        caseId,
-        caseTab: segments[4],
-        caseFilePath: segments[4] === "files" ? searchParams.get("file") : null,
-        caseDirectoryPath: segments[4] === "files" ? normalizeDirectoryPath(searchParams.get("dir")) : null,
-        casePreviewMode: segments[4] === "files" ? normalizeCandidatePreviewMode(searchParams.get("view")) : "rendered",
-        benchmark: benchmarkSurface,
-      });
-    }
-    return createWorkbenchNotFoundRoute(normalizedPath);
+  if (section === "manifest") {
+    return { kind: "skill", view: "manifest", file: emptyFileRouteState() };
   }
-
-  if (segments[0] === "candidates") {
-    if (segments.length === 1) {
-      return createCandidatesRoute({ benchmark: benchmarkSurface });
+  if (section === "versions") {
+    if (!id) {
+      return { kind: "versions", view: "archive", ...skillSurface };
     }
-    if (segments.length === 2 && segments[1] === "lineage") {
-      return createCandidatesRoute({ view: "lineage", benchmark: benchmarkSurface });
+    if (id === "lineage") {
+      return { kind: "versions", view: "lineage", ...skillSurface };
     }
-    const candidateId = normalizeRouteSelection(segments[1] ?? null);
-    const requestedView = segments[2];
-    if (!candidateId || segments.length > 3) {
-      return createWorkbenchNotFoundRoute(normalizedPath);
+    if (child === "files") {
+      return {
+        kind: "version",
+        versionId: id,
+        view: "files",
+        file: fileWithLegacyPath(file, rest),
+        ...skillSurface,
+      };
     }
-    if (
-      requestedView !== undefined &&
-      requestedView !== "files" &&
-      requestedView !== "manifest"
-    ) {
-      return createWorkbenchNotFoundRoute(normalizedPath);
+    if (child === "runs") {
+      return { kind: "version", versionId: id, view: "runs", file: emptyFileRouteState(), ...skillSurface };
     }
-    const view =
-      requestedView === "files"
-        ? "files"
-        : requestedView === "manifest"
-          ? "manifest"
-          : "overview";
-    return createCandidateRoute({
-      candidateId,
-      view,
-      filePath: view === "files" ? searchParams.get("file") : null,
-      directoryPath: view === "files" ? normalizeDirectoryPath(searchParams.get("dir")) : null,
-      previewMode: view === "files" ? normalizeCandidatePreviewMode(searchParams.get("view")) : "rendered",
-      benchmark: benchmarkSurface,
-    });
+    return { kind: "version", versionId: id, view: "overview", file: emptyFileRouteState(), ...skillSurface };
   }
-
-  return createWorkbenchNotFoundRoute(normalizedPath);
+  if (section === "execution") {
+    return { kind: "execution", view: executionViewFromSegment(id), ...skillSurface };
+  }
+  if (section === "runs") {
+    if (!id) {
+      return { kind: "execution", view: "runs", ...skillSurface };
+    }
+    return { kind: "run", runId: id, view: runViewFromSegment(child), ...skillSurface };
+  }
+  if (section === "jobs") {
+    if (!id) {
+      return { kind: "execution", view: "jobs", ...skillSurface };
+    }
+    return { kind: "job", jobId: id, view: jobViewFromSegment(child), ...skillSurface };
+  }
+  if (section === "traces") {
+    if (!id) {
+      return { kind: "execution", view: "traces", ...skillSurface };
+    }
+    if (child === "files") {
+      return {
+        kind: "trace",
+        traceId: id,
+        view: "files",
+        file: fileWithLegacyPath(file, rest),
+        ...skillSurface,
+      };
+    }
+    return { kind: "trace", traceId: id, view: traceViewFromSegment(child), file: emptyFileRouteState(), ...skillSurface };
+  }
+  if (section === "artifacts") {
+    if (!id) {
+      return { kind: "execution", view: "artifacts", ...skillSurface };
+    }
+    if (child === "files") {
+      return {
+        kind: "artifact",
+        artifactId: id,
+        view: "files",
+        file: fileWithLegacyPath(file, rest),
+        ...skillSurface,
+      };
+    }
+    return { kind: "artifact", artifactId: id, view: "overview", file: emptyFileRouteState(), ...skillSurface };
+  }
+  if (section === "configuration") {
+    return { kind: "configuration", view: id === "agents" ? "agents" : "skills", ...skillSurface };
+  }
+  if (section === "skills" && id) {
+    return { kind: "skill-source", skillName: id, ...skillSurface };
+  }
+  if (section === "agents" && id) {
+    return { kind: "agent", agentName: id, ...skillSurface };
+  }
+  if (section === "sync") {
+    return { kind: "sync", view: id === "remotes" ? "remotes" : "refs", ...skillSurface };
+  }
+  if (section === "refs") {
+    return { kind: "sync", view: "refs", ...skillSurface };
+  }
+  if (section === "remotes") {
+    return { kind: "sync", view: "remotes", ...skillSurface };
+  }
+  return { kind: "skill", view: "overview", file: emptyFileRouteState() };
 }
 
 export function parseWorkbenchLocation(
-  locationLike: {
-    pathname: string;
-    search: string;
+  location: { pathname: string; search?: string } | string | undefined = typeof window === "undefined" ? "/" : window.location,
+  routeBasePath = "/",
+): WorkbenchRoute {
+  return parseWorkbenchRoute(
+    typeof location === "string" ? location : location.pathname,
+    routeBasePath,
+    typeof location === "string" ? "" : location.search ?? "",
+  );
+}
+
+export function buildWorkbenchLocationHref(route: WorkbenchRoute = createSkillRoute(), routeBasePath = "/"): string {
+  const base = normalizedBasePath(routeBasePath);
+  const path = routeParts(route).map(encodeURIComponent);
+  const pathname = path.length === 0
+    ? base
+    : `${base === "/" ? "" : base}/${path.join("/")}`;
+  const query = routeQuery(route).toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
+export function createSkillRoute(args: {
+  view?: SkillSurfaceView;
+  file?: Partial<WorkbenchFileRouteState>;
+} = {}): WorkbenchRoute {
+  return {
+    kind: "skill",
+    view: args.view ?? "overview",
+    file: normalizeFileRouteState(args.file),
+  };
+}
+
+export function routeHasDetail(route: WorkbenchRoute): boolean {
+  return route.kind !== "skill";
+}
+
+export function routeSkillSurfaceView(route: WorkbenchRoute): SkillSurfaceView {
+  if (route.kind === "skill") {
+    return route.view;
+  }
+  return route.skillView ?? "overview";
+}
+
+export function routeSkillSurfaceFile(route: WorkbenchRoute): WorkbenchFileRouteState {
+  if (route.kind === "skill") {
+    return route.view === "files" ? route.file : emptyFileRouteState();
+  }
+  return route.skillView === "files" ? normalizeFileRouteState(route.skillFile) : emptyFileRouteState();
+}
+
+export function withSkillSurface(
+  route: WorkbenchRoute,
+  skillSurface: {
+    skillView?: SkillSurfaceView;
+    skillFile?: Partial<WorkbenchFileRouteState>;
   },
-  routeBasePath: string,
 ): WorkbenchRoute {
-  return parseWorkbenchRoute({
-    pathname: stripRouteBasePath(locationLike.pathname, routeBasePath),
-    search: locationLike.search,
-  });
+  const skillView = skillSurface.skillView ?? routeSkillSurfaceView(route);
+  const skillFile = skillView === "files"
+    ? normalizeFileRouteState(skillSurface.skillFile ?? routeSkillSurfaceFile(route))
+    : emptyFileRouteState();
+  if (route.kind === "skill") {
+    return createSkillRoute({ view: skillView, file: skillFile });
+  }
+  return {
+    ...route,
+    skillView,
+    skillFile: skillView === "files" ? skillFile : undefined,
+  };
 }
 
-export function buildWorkbenchHref(
-  route: WorkbenchRoute,
-  persistentSearchParams: WorkbenchPersistentSearchParams = {},
-): string {
+export function fileOwnerForRoute(route: WorkbenchRoute): { ownerKind: WorkbenchFileOwnerKind; ownerId: string; file: WorkbenchFileRouteState } | null {
+  if (route.kind === "version" && route.view === "files") {
+    return { ownerKind: "version", ownerId: route.versionId, file: route.file };
+  }
+  if (route.kind === "trace" && route.view === "files") {
+    return { ownerKind: "trace", ownerId: route.traceId, file: route.file };
+  }
+  if (route.kind === "artifact" && route.view === "files") {
+    return { ownerKind: "artifact", ownerId: route.artifactId, file: route.file };
+  }
+  return null;
+}
+
+export function withFileRouteState(route: WorkbenchRoute, file: Partial<WorkbenchFileRouteState>): WorkbenchRoute {
+  const nextFile = normalizeFileRouteState(file);
+  if (route.kind === "skill" && route.view === "files") {
+    return { ...route, file: nextFile };
+  }
+  if (route.kind === "version" && route.view === "files") {
+    return { ...route, file: nextFile };
+  }
+  if (route.kind === "trace" && route.view === "files") {
+    return { ...route, file: nextFile };
+  }
+  if (route.kind === "artifact" && route.view === "files") {
+    return { ...route, file: nextFile };
+  }
+  return route;
+}
+
+function routeParts(route: WorkbenchRoute): string[] {
+  switch (route.kind) {
+    case "skill":
+      return route.view === "files" ? ["files"] : route.view === "manifest" ? ["manifest"] : [];
+    case "versions":
+      return route.view === "lineage" ? ["versions", "lineage"] : ["versions"];
+    case "version":
+      return route.view === "files"
+        ? ["versions", route.versionId, "files"]
+        : route.view === "runs"
+          ? ["versions", route.versionId, "runs"]
+          : ["versions", route.versionId];
+    case "execution":
+      return route.view === "runs" ? ["runs"] : [route.view];
+    case "run":
+      return route.view === "overview" ? ["runs", route.runId] : ["runs", route.runId, route.view];
+    case "job":
+      return route.view === "overview" ? ["jobs", route.jobId] : ["jobs", route.jobId, route.view];
+    case "trace":
+      return route.view === "overview" ? ["traces", route.traceId] : ["traces", route.traceId, route.view];
+    case "artifact":
+      return route.view === "overview" ? ["artifacts", route.artifactId] : ["artifacts", route.artifactId, route.view];
+    case "configuration":
+      return route.view === "agents" ? ["configuration", "agents"] : ["configuration"];
+    case "skill-source":
+      return ["skills", route.skillName];
+    case "agent":
+      return ["agents", route.agentName];
+    case "sync":
+      return route.view === "remotes" ? ["sync", "remotes"] : ["sync"];
+  }
+}
+
+function routeQuery(route: WorkbenchRoute): URLSearchParams {
   const params = new URLSearchParams();
-  appendPersistentSearchParams(params, persistentSearchParams);
-
-  if (route.kind === "benchmark") {
-    appendBenchmarkFingerprintParam(params, route.benchmarkFingerprint);
-    if (route.benchmarkView === "manifest") {
-      return withQuery("/manifest", params);
-    }
-    if (route.benchmarkView === "files") {
-      appendFileSurfaceParams(params, {
-        filePath: route.benchmarkFilePath,
-        directoryPath: route.benchmarkDirectoryPath,
-        previewMode: route.benchmarkPreviewMode,
-      });
-      return withQuery("/files", params);
-    }
-    return withQuery("/", params);
+  if (route.kind === "skill" && route.view === "files") {
+    appendFileRouteParams(params, route.file);
+  } else {
+    appendSkillSurfaceRouteParams(params, route);
   }
-
-  if (route.kind === "not-found") {
-    return withQuery(route.pathname, params);
+  if (route.kind === "version" && route.view === "files") {
+    appendFileRouteParams(params, route.file);
+  } else if (route.kind === "trace" && route.view === "files") {
+    appendFileRouteParams(params, route.file);
+  } else if (route.kind === "artifact" && route.view === "files") {
+    appendFileRouteParams(params, route.file);
   }
+  return params;
+}
 
-  if (route.kind === "candidates") {
-    appendBenchmarkSurfaceSearchParams(params, route);
-    return withQuery(route.view === "lineage" ? "/candidates/lineage" : "/candidates", params);
+function appendFileRouteParams(params: URLSearchParams, file: WorkbenchFileRouteState): void {
+  if (file.filePath) {
+    params.set("file", file.filePath);
   }
-
-  if (route.kind === "evaluations") {
-    appendBenchmarkSurfaceSearchParams(params, route);
-    return withQuery("/evaluations", params);
+  if (file.directoryPath) {
+    params.set("dir", file.directoryPath);
   }
-
-  if (route.kind === "evaluation") {
-    appendBenchmarkSurfaceSearchParams(params, route);
-    let pathname = `/evaluations/${encodeURIComponent(route.evaluationId)}`;
-    if (route.caseId) {
-      pathname += `/cases/${encodeURIComponent(route.caseId)}`;
-      if (route.caseTab === "attempts") {
-        pathname += "/attempts";
-      } else if (route.caseTab === "files") {
-        pathname += "/files";
-        appendFileSurfaceParams(params, {
-          filePath: route.caseFilePath,
-          directoryPath: route.caseDirectoryPath,
-          previewMode: route.casePreviewMode,
-        });
-      }
-    }
-    return withQuery(pathname, params);
+  if (file.previewMode !== "rendered") {
+    params.set("view", file.previewMode);
   }
-
-  const candidateId = route.candidateId ? encodeURIComponent(route.candidateId) : "";
-  appendBenchmarkSurfaceSearchParams(params, route);
-  if (route.view === "overview") {
-    return withQuery(`/candidates/${candidateId}`, params);
-  }
-  if (route.view === "files") {
-    appendFileSurfaceParams(params, route);
-  }
-  const query = params.toString();
-  return `/candidates/${candidateId}/${route.view}${query ? `?${query}` : ""}`;
 }
 
-export function buildWorkbenchLocationHref(
-  route: WorkbenchRoute,
-  routeBasePath: string,
-  persistentSearchParams: WorkbenchPersistentSearchParams = {},
-): string {
-  return joinRouteBasePath(routeBasePath, buildWorkbenchHref(route, persistentSearchParams));
-}
-
-export function createBenchmarkRoute(args: Partial<BenchmarkSurfaceRoute> = {}): WorkbenchRoute {
-  return {
-    kind: "benchmark",
-    ...normalizeBenchmarkSurface(args),
-  };
-}
-
-export function createWorkbenchNotFoundRoute(pathname: string): WorkbenchRoute {
-  return {
-    kind: "not-found",
-    pathname: normalizePathname(pathname),
-  };
-}
-
-export function createCandidatesRoute(args: {
-  view?: CandidatesIndexView;
-  benchmark?: Partial<BenchmarkSurfaceRoute>;
-} = {}): WorkbenchRoute {
-  return {
-    kind: "candidates",
-    ...normalizeBenchmarkSurface(args.benchmark),
-    view: args.view ?? "archive",
-  };
-}
-
-export function createEvaluationsRoute(args: {
-  benchmark?: Partial<BenchmarkSurfaceRoute>;
-} = {}): WorkbenchRoute {
-  return {
-    kind: "evaluations",
-    ...normalizeBenchmarkSurface(args.benchmark),
-  };
-}
-
-export function createEvaluationRoute(args: {
-  evaluationId: string;
-  benchmark?: Partial<BenchmarkSurfaceRoute>;
-}): WorkbenchRoute {
-  return {
-    kind: "evaluation",
-    ...normalizeBenchmarkSurface(args.benchmark),
-    evaluationId: args.evaluationId,
-    caseId: null,
-    ...normalizeEvaluationCaseRoute(null),
-  };
-}
-
-export function createEvaluationCaseRoute(args: {
-  evaluationId: string;
-  caseId: string;
-  caseTab?: EvaluationCaseTab;
-  caseFilePath?: string | null;
-  caseDirectoryPath?: string | null;
-  casePreviewMode?: CandidatePreviewMode;
-  benchmark?: Partial<BenchmarkSurfaceRoute>;
-}): WorkbenchRoute {
-  return {
-    kind: "evaluation",
-    ...normalizeBenchmarkSurface(args.benchmark),
-    evaluationId: args.evaluationId,
-    caseId: args.caseId,
-    ...normalizeEvaluationCaseRoute(args),
-  };
-}
-
-export function createCandidateRoute(args: {
-  candidateId: string | null;
-  view: CandidateView;
-  filePath?: string | null;
-  directoryPath?: string | null;
-  previewMode?: CandidatePreviewMode;
-  benchmark?: Partial<BenchmarkSurfaceRoute>;
-}): WorkbenchRoute {
-  const view = args.view;
-  return {
-    kind: "candidate",
-    ...normalizeBenchmarkSurface(args.benchmark),
-    candidateId: args.candidateId,
-    view,
-    filePath: view === "files" ? args.filePath ?? null : null,
-    directoryPath: view === "files" ? normalizeDirectoryPath(args.directoryPath ?? null) : null,
-    previewMode: view === "files" ? args.previewMode ?? "rendered" : "rendered",
-  };
-}
-
-export function withBenchmarkSurface(
-  route: WorkbenchRoute,
-  benchmark: Partial<BenchmarkSurfaceRoute>,
-): WorkbenchRoute {
-  if (route.kind === "not-found") {
-    return route;
-  }
-  return { ...route, ...normalizeBenchmarkSurface({ ...route, ...benchmark }) };
-}
-
-export function withEvaluationCaseSurface(
-  route: WorkbenchRoute,
-  caseRoute: Partial<EvaluationCaseRoute>,
-): WorkbenchRoute {
-  if (route.kind !== "evaluation" || !route.caseId) {
-    return route;
-  }
-  return { ...route, ...normalizeEvaluationCaseRoute({ ...route, ...caseRoute }) };
-}
-
-function parseBenchmarkSurface(params: URLSearchParams): BenchmarkSurfaceRoute {
-  const view = normalizeBenchmarkView(params.get("benchmark"));
-  return normalizeBenchmarkSurface({
-    benchmarkFingerprint: normalizeBenchmarkFingerprint(params.get("benchmarkFingerprint")),
-    benchmarkView: view,
-    benchmarkFilePath: view === "files" ? params.get("benchmarkFile") : null,
-    benchmarkDirectoryPath: view === "files" ? normalizeDirectoryPath(params.get("benchmarkDir")) : null,
-    benchmarkPreviewMode: view === "files" ? normalizeCandidatePreviewMode(params.get("benchmarkView")) : "rendered",
-  });
-}
-
-function normalizeBenchmarkSurface(value: Partial<BenchmarkSurfaceRoute> | null | undefined): BenchmarkSurfaceRoute {
-  const benchmarkView = normalizeBenchmarkView(value?.benchmarkView ?? null);
-  return {
-    benchmarkFingerprint: normalizeBenchmarkFingerprint(value?.benchmarkFingerprint ?? null),
-    benchmarkView,
-    benchmarkFilePath: benchmarkView === "files" ? value?.benchmarkFilePath ?? null : null,
-    benchmarkDirectoryPath: benchmarkView === "files"
-      ? normalizeDirectoryPath(value?.benchmarkDirectoryPath ?? null)
-      : null,
-    benchmarkPreviewMode: benchmarkView === "files" ? value?.benchmarkPreviewMode ?? "rendered" : "rendered",
-  };
-}
-
-function normalizeEvaluationCaseRoute(value: Partial<EvaluationCaseRoute> | null | undefined): EvaluationCaseRoute {
-  const caseTab = normalizeEvaluationCaseTab(value?.caseTab ?? null);
-  return {
-    caseTab,
-    caseFilePath: caseTab === "files" ? value?.caseFilePath ?? null : null,
-    caseDirectoryPath: caseTab === "files"
-      ? normalizeDirectoryPath(value?.caseDirectoryPath ?? null)
-      : null,
-    casePreviewMode: caseTab === "files" ? value?.casePreviewMode ?? "rendered" : "rendered",
-  };
-}
-
-function appendBenchmarkSurfaceSearchParams(
-  params: URLSearchParams,
-  route: BenchmarkSurfaceRoute,
-): void {
-  appendBenchmarkFingerprintParam(params, route.benchmarkFingerprint);
-  if (route.benchmarkView === "overview") {
+function appendSkillSurfaceRouteParams(params: URLSearchParams, route: WorkbenchRoute): void {
+  if (route.kind === "skill") {
     return;
   }
-  params.set("benchmark", route.benchmarkView);
-  if (route.benchmarkView === "files") {
-    appendFileSurfaceParams(params, {
-      filePath: route.benchmarkFilePath,
-      directoryPath: route.benchmarkDirectoryPath,
-      previewMode: route.benchmarkPreviewMode,
-    }, "benchmark");
+  const skillView = route.skillView ?? "overview";
+  if (skillView === "overview") {
+    return;
+  }
+  params.set("skill", skillView);
+  if (skillView === "files") {
+    appendPrefixedFileRouteParams(params, "skill", normalizeFileRouteState(route.skillFile));
   }
 }
 
-function appendBenchmarkFingerprintParam(
+function appendPrefixedFileRouteParams(
   params: URLSearchParams,
-  fingerprint: string | null,
+  prefix: string,
+  file: WorkbenchFileRouteState,
 ): void {
-  if (fingerprint) {
-    params.set("benchmarkFingerprint", fingerprint);
+  if (file.filePath) {
+    params.set(`${prefix}File`, file.filePath);
+  }
+  if (file.directoryPath) {
+    params.set(`${prefix}Dir`, file.directoryPath);
+  }
+  if (file.previewMode !== "rendered") {
+    params.set(`${prefix}Preview`, file.previewMode);
   }
 }
 
-function appendFileSurfaceParams(
-  params: URLSearchParams,
-  surface: {
-    filePath?: string | null;
-    directoryPath?: string | null;
-    previewMode?: CandidatePreviewMode;
-  },
-  prefix = "",
-): void {
-  const key = (name: string) => prefix ? `${prefix}${name[0]!.toUpperCase()}${name.slice(1)}` : name;
-  if (surface.filePath) {
-    params.set(key("file"), surface.filePath);
+function parseFileRouteState(searchParams: URLSearchParams): WorkbenchFileRouteState {
+  const previewMode = searchParams.get("view");
+  return {
+    filePath: normalizeRouteSelection(searchParams.get("file")),
+    directoryPath: normalizeRouteSelection(searchParams.get("dir")),
+    previewMode: isSnapshotPreviewMode(previewMode) ? previewMode : "rendered",
+  };
+}
+
+function parseSkillSurfaceRouteState(searchParams: URLSearchParams): WorkbenchSkillSurfaceRouteState {
+  const rawView = searchParams.get("skill");
+  if (!rawView) {
+    return {};
   }
-  if (surface.directoryPath) {
-    params.set(key("dir"), surface.directoryPath);
+  const skillView = rawView === "manifest" ? "manifest" : rawView === "files" ? "files" : "overview";
+  return {
+    skillView,
+    skillFile: skillView === "files" ? parsePrefixedFileRouteState(searchParams, "skill") : undefined,
+  };
+}
+
+function parsePrefixedFileRouteState(
+  searchParams: URLSearchParams,
+  prefix: string,
+): WorkbenchFileRouteState {
+  const previewMode = searchParams.get(`${prefix}Preview`);
+  return {
+    filePath: normalizeRouteSelection(searchParams.get(`${prefix}File`)),
+    directoryPath: normalizeRouteSelection(searchParams.get(`${prefix}Dir`)),
+    previewMode: isSnapshotPreviewMode(previewMode) ? previewMode : "rendered",
+  };
+}
+
+function normalizeFileRouteState(file: Partial<WorkbenchFileRouteState> | undefined): WorkbenchFileRouteState {
+  return {
+    filePath: file?.filePath ?? null,
+    directoryPath: file?.directoryPath ?? null,
+    previewMode: file?.previewMode ?? "rendered",
+  };
+}
+
+function emptyFileRouteState(): WorkbenchFileRouteState {
+  return { filePath: null, directoryPath: null, previewMode: "rendered" };
+}
+
+function fileWithLegacyPath(file: WorkbenchFileRouteState, rest: readonly string[]): WorkbenchFileRouteState {
+  if (file.filePath || rest.length === 0) {
+    return file;
   }
-  if (surface.previewMode && surface.previewMode !== "rendered") {
-    params.set(key("view"), surface.previewMode);
+  return { ...file, filePath: rest.join("/") };
+}
+
+function executionViewFromSegment(segment: string | undefined): ExecutionIndexView {
+  if (segment === "jobs" || segment === "traces" || segment === "artifacts") {
+    return segment;
   }
+  return "runs";
 }
 
-function normalizeDirectoryPath(value: string | null): string | null {
-  const normalized = (value ?? "").replace(/^\/+/u, "").replace(/\/+$/u, "");
-  return normalized || null;
+function runViewFromSegment(segment: string | undefined): RunView {
+  if (segment === "jobs" || segment === "traces" || segment === "artifacts") {
+    return segment;
+  }
+  return "overview";
 }
 
-function normalizeBenchmarkView(value: string | null): BenchmarkView {
-  return value === "files" || value === "manifest" ? value : "overview";
+function jobViewFromSegment(segment: string | undefined): JobView {
+  if (segment === "trace" || segment === "artifacts") {
+    return segment;
+  }
+  return "overview";
 }
 
-function normalizeBenchmarkFingerprint(value: string | null): string | null {
-  const normalized = value?.trim() ?? "";
-  return normalized || null;
+function traceViewFromSegment(segment: string | undefined): TraceView {
+  if (segment === "files" || segment === "payload") {
+    return segment;
+  }
+  return "overview";
 }
 
-function normalizeEvaluationCaseTab(value: string | null): EvaluationCaseTab {
-  return value === "attempts" || value === "files" ? value : "score";
+function routeSegments(pathname: string, routeBasePath: string): string[] {
+  const normalizedPath = normalizePath(pathname);
+  const base = normalizedBasePath(routeBasePath);
+  const relative = base !== "/" && (normalizedPath === base || normalizedPath.startsWith(`${base}/`))
+    ? normalizedPath.slice(base.length)
+    : normalizedPath;
+  return relative.split("/")
+    .filter(Boolean)
+    .map((segment) => decodeURIComponent(segment));
 }
 
 function normalizeRouteSelection(value: string | null): string | null {
-  const normalized = value?.trim() ?? "";
-  return normalized || null;
+  return value && value.trim().length > 0 ? value : null;
 }
 
-function appendPersistentSearchParams(
-  params: URLSearchParams,
-  persistentSearchParams: WorkbenchPersistentSearchParams,
-): void {
-  for (const [key, value] of Object.entries(persistentSearchParams)) {
-    if (value != null && value !== "") {
-      params.set(key, value);
-    }
-  }
+function normalizedBasePath(routeBasePath: string): string {
+  const normalized = normalizePath(routeBasePath);
+  return normalized === "" ? "/" : normalized;
 }
 
-function withQuery(pathname: string, params: URLSearchParams): string {
-  const query = params.toString();
-  return `${pathname}${query ? `?${query}` : ""}`;
-}
-
-function normalizePathname(pathname: string): string {
-  if (!pathname || pathname === "/") {
-    return "/";
-  }
-  return pathname.startsWith("/") ? pathname : `/${pathname}`;
-}
-
-function decodePathSegment(segment: string): string {
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return segment;
-  }
-}
-
-function stripRouteBasePath(pathname: string, routeBasePath: string): string {
-  const base = normalizeRouteBasePath(routeBasePath);
-  if (base === "/") {
-    return pathname;
-  }
-  if (pathname === base) {
-    return "/";
-  }
-  if (pathname.startsWith(`${base}/`)) {
-    return pathname.slice(base.length) || "/";
-  }
-  return pathname;
-}
-
-function joinRouteBasePath(routeBasePath: string, href: string): string {
-  const base = normalizeRouteBasePath(routeBasePath);
-  if (base === "/") {
-    return href;
-  }
-  if (href.startsWith("/?")) {
-    return `${base}${href.slice(1)}`;
-  }
-  return `${base}${href === "/" ? "" : href}`;
-}
-
-function normalizeRouteBasePath(routeBasePath: string): string {
-  const trimmed = routeBasePath.trim();
-  if (!trimmed || trimmed === "/") {
-    return "/";
-  }
-  return `/${trimmed.replace(/^\/+|\/+$/gu, "")}`;
-}
-
-function normalizeCandidatePreviewMode(value: string | null): CandidatePreviewMode {
-  return value && isSnapshotPreviewMode(value) ? value : "rendered";
+function normalizePath(value: string): string {
+  const withoutQuery = value.split(/[?#]/u)[0] ?? "/";
+  const withLeadingSlash = withoutQuery.startsWith("/") ? withoutQuery : `/${withoutQuery}`;
+  return withLeadingSlash.length > 1 ? withLeadingSlash.replace(/\/+$/u, "") : withLeadingSlash;
 }

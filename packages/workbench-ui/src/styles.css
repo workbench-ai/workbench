@@ -1,6 +1,7 @@
 @import "@workbench-ai/cli-web-ui/styles.css";
 @import "@workbench-ai/cli-web-ui/spreadsheet-viewer.css";
 @import "@xyflow/react/dist/style.css";
+
 @source "./app.tsx";
 @source "./components/**/*.{ts,tsx}";
 @source "./lib/**/*.{ts,tsx}";

@@ -32,7 +32,7 @@ export interface WorkbenchRuntimeControlOperation {
 }
 
 export interface WorkbenchRuntimeControlOperationInputs {
-  candidate?: readonly SurfaceSnapshotFile[];
+  skill?: readonly SurfaceSnapshotFile[];
   case?: readonly SurfaceSnapshotFile[];
   enginePrivate?: readonly SurfaceSnapshotFile[];
   traces?: readonly SurfaceSnapshotFile[];

@@ -67,7 +67,7 @@ export function materializeWorkbenchSandboxInput(
   execution: WorkbenchExecutionSpec,
   input: WorkbenchExecutionSpec["inputs"][number],
 ): SandboxMaterializedInput {
-  if (input.name === "candidate") {
+  if (input.name === "skill" || input.name === "skills") {
     return materializedFileInput(input, args.baseFiles);
   }
   if (input.name === "case") {
@@ -231,8 +231,8 @@ export async function executionResultFromCompletedSandboxJob(args: {
 }
 
 export function outputPayloadForContract(output: Record<string, unknown>, outputName: string): Json | undefined {
-  if (outputName === "candidate_patch") {
-    return isJsonPayload(output.candidatePatch) ? output.candidatePatch : undefined;
+  if (outputName === "skill_patch") {
+    return isJsonPayload(output.skillPatch) ? output.skillPatch : undefined;
   }
   if (outputName === "result") {
     return isJsonPayload(output.result) ? output.result : undefined;

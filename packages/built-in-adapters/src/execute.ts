@@ -9,7 +9,7 @@ import type {
   SurfaceSnapshotFile,
   UsageSummary,
   WorkbenchResult,
-  WorkbenchCandidatePatch,
+  WorkbenchSkillPatch,
 } from "@workbench-ai/workbench-contract";
 import {
   jsonRecord,
@@ -83,22 +83,23 @@ interface RubricCriterionSpec {
   weight?: number;
 }
 
-const TASK_CONTROL_FILE = "task.yaml";
+const CASE_CONTROL_FILE = "case.yaml";
+const COMMAND_SKILL_PATCH_FILE = "skill-patch.json";
 const DEFAULT_RUBRIC_PARALLELISM = 4;
 
 interface AdapterWorkload {
   job: { id: string };
-  benchmark: {
+  eval: {
     name: string;
     description: string;
   };
-  candidate: {
+  skill: {
     path: string;
   };
   improve: {
     edits: string[];
   };
-  candidateId: string;
+  versionId: string;
   attemptIndex: number;
   sampleIndex: number;
   caseId: string;
@@ -148,12 +149,12 @@ export async function executeWorkbenchBuiltInAdapterCommand(
   if (isBuiltInAgentAdapterId(adapterId)) {
     const workload = workloadFromAdapterOperationRequest(request);
     const agent = builtInAgentSpecFromRequest(request);
-    if (request.operation === "candidate.improve") {
-      await writeAgentCandidateRevisionOutput(request, workload, agent, agentOptions);
+    if (request.operation === "skill.improve") {
+      await writeAgentSkillRevisionOutput(request, workload, agent, agentOptions);
       return;
     }
-    if (request.operation === "candidate.run") {
-      await writeAgentCandidateOutput(request, workload, agent, agentOptions);
+    if (request.operation === "skill.run") {
+      await writeAgentSkillOutput(request, workload, agent, agentOptions);
       return;
     }
     throw new Error(`Agent adapter ${adapterId} cannot handle ${request.operation}.`);
@@ -177,13 +178,13 @@ async function executeWorkbenchEngineRequest(
 async function executeWorkbenchEngineResolveRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
-  const configuredPath = workbenchEngineTasksPath(request);
+  const configuredPath = workbenchEngineCasesPath(request);
   const sourcePath = path.resolve(request.paths.workspace, configuredPath);
   const stat = await fs.stat(sourcePath).catch(() => null);
   if (!stat?.isDirectory()) {
-    throw new Error(`Workbench engine tasks path is not a directory: ${sourcePath}`);
+    throw new Error(`Workbench engine cases path is not a directory: ${sourcePath}`);
   }
-  const cases = await readEngineCasesFromWorkbenchTaskRoot(sourcePath);
+  const cases = await readEngineCasesFromWorkbenchCaseRoot(sourcePath);
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
     operation: "engine.resolve",
@@ -230,7 +231,7 @@ async function workbenchEngineOutcomeUsage(
     ? undefined
     : runtime.mergeUsageSummaries(
       outcome.operationResults.map((result) => {
-        if (result.operation === "candidate.run") {
+        if (result.operation === "skill.run") {
           return runtime.assignUsageRole("runner", result.usage);
         }
         if (result.operation === "engine.run") {
@@ -246,17 +247,17 @@ async function workbenchEngineOutcomeUsage(
   return runtime.mergeUsageSummaries([runtimeUsage, resultUsage]);
 }
 
-function workbenchEngineTasksPath(request: WorkbenchAdapterOperationRequest): string {
+function workbenchEngineCasesPath(request: WorkbenchAdapterOperationRequest): string {
   const config = adapterCommandConfigRecord(request);
-  const tasks = config.tasks;
-  if (tasks === undefined) {
-    return "tasks";
+  const cases = config.cases;
+  if (cases === undefined) {
+    return "cases";
   }
-  const taskConfig = jsonRecord(tasks);
-  if (typeof taskConfig.path === "string" && taskConfig.path.trim().length > 0) {
-    return taskConfig.path;
+  const caseConfig = jsonRecord(cases);
+  if (typeof caseConfig.path === "string" && caseConfig.path.trim().length > 0) {
+    return caseConfig.path;
   }
-  throw new Error("Workbench engine tasks must be an object with path.");
+  throw new Error("Workbench engine cases must be an object with path.");
 }
 
 interface NestedAdapterInvocation {
@@ -281,16 +282,16 @@ function workbenchEngineScoreInvocation(request: WorkbenchAdapterOperationReques
   };
 }
 
-function workbenchEngineCandidateInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
-  const candidate = request.context?.candidate?.run;
-  if (!candidate?.use || !candidate.command) {
-    throw new Error("Workbench engine requires context.candidate.run.use and context.candidate.run.command.");
+function workbenchEngineSkillInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
+  const skill = request.context?.skill?.run;
+  if (!skill?.use || !skill.command) {
+    throw new Error("Workbench engine requires context.skill.run.use and context.skill.run.command.");
   }
   return {
-    use: candidate.use,
-    with: (candidate.with ?? {}) as Json,
-    ...(candidate.auth !== undefined ? { auth: candidate.auth as Json } : {}),
-    command: candidate.command,
+    use: skill.use,
+    with: (skill.with ?? {}) as Json,
+    ...(skill.auth !== undefined ? { auth: skill.auth as Json } : {}),
+    command: skill.command,
   };
 }
 
@@ -328,13 +329,13 @@ async function runWorkbenchEngineSharedGrading(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
   const inputs = await workbenchEngineRuntimeInputs(request);
-  const candidate = workbenchEngineCandidateInvocation(request);
+  const skill = workbenchEngineSkillInvocation(request);
   const score = workbenchEngineScoreInvocation(request);
   const result = await runWorkbenchRuntimeOperationSequence({
     inputs,
     prepare: true,
     operations: [
-      { label: "candidate", operation: "candidate.run", invocation: candidate },
+      { label: "skill", operation: "skill.run", invocation: skill },
       { label: "score", operation: "engine.run", invocation: score },
     ],
   });
@@ -346,25 +347,25 @@ async function runWorkbenchEngineSeparateGrading(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
   const inputs = await workbenchEngineRuntimeInputs(request);
-  const candidate = workbenchEngineCandidateInvocation(request);
+  const skill = workbenchEngineSkillInvocation(request);
   const score = workbenchEngineScoreInvocation(request);
   const runtime = await importWorkbenchRuntime();
   const runner = await runWorkbenchRuntimeOperationSequence({
     inputs: {
-      candidate: inputs.candidate,
+      skill: inputs.skill,
       case: inputs.case,
       traces: inputs.traces,
     },
     prepare: true,
     collectWorkspace: true,
     operations: [
-      { label: "candidate", operation: "candidate.run", invocation: candidate },
+      { label: "skill", operation: "skill.run", invocation: skill },
     ],
   });
   assertRuntimeControlResultOk(runner, "Workbench separate runner");
   const grader = await runWorkbenchRuntimeOperationSequence({
     inputs: {
-      candidate: inputs.candidate,
+      skill: inputs.skill,
       case: inputs.case,
       enginePrivate: inputs.enginePrivate,
       traces: inputs.traces,
@@ -389,14 +390,14 @@ async function runWorkbenchEngineSeparateGrading(
 async function workbenchEngineRuntimeInputs(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<NonNullable<Parameters<typeof runWorkbenchRuntimeOperationSequence>[0]["inputs"]>> {
-  const [candidate, caseFiles, enginePrivate, traces] = await Promise.all([
-    readOptionalSurfaceFiles(request.paths.candidate),
+  const [skill, caseFiles, enginePrivate, traces] = await Promise.all([
+    readOptionalSurfaceFiles(request.paths.skills ?? request.paths.skill),
     readOptionalSurfaceFiles(request.paths.case),
     readOptionalSurfaceFiles(request.paths.enginePrivate),
     readOptionalSurfaceFiles(request.paths.traces),
   ]);
   return {
-    candidate,
+    skill,
     case: caseFiles,
     enginePrivate,
     traces,
@@ -469,11 +470,15 @@ async function executeCommandAdapterRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   const command = requiredAdapterCommandString(request, "command");
-  const before = request.operation === "candidate.improve"
-    ? await snapshotEditableCandidateWorkspace(request)
+  const before = request.operation === "skill.improve"
+    ? await snapshotEditableSkillWorkspace(request)
     : null;
   try {
-    await runAdapterShellCommand(command, request.paths.workspace);
+    await runAdapterShellCommand(
+      command,
+      commandAdapterWorkingDirectory(request),
+      commandAdapterEnvironment(request),
+    );
     if (request.operation === "engine.run") {
       await requireCommandScoreResult(request);
       return;
@@ -512,11 +517,17 @@ async function executeTestsEngineRequest(
   const script = await firstExistingFile([
     path.join(testsRoot, "test.sh"),
     path.join(testsRoot, "run.sh"),
+    path.join(testsRoot, "tests", "test.sh"),
+    path.join(testsRoot, "tests", "run.sh"),
   ]);
   if (!script) {
     throw new Error(`Tests engine requires ${path.join(testsRoot, "test.sh")}.`);
   }
   await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.workspace, {
+    SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "primary"),
+    SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
+    CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
+    OUTPUT_DIR: request.paths.output,
     WORKBENCH_TESTS_VERIFIER_DIR: verifierRoot,
   });
   const result = await readTestsResult({
@@ -564,6 +575,61 @@ async function runAdapterShellCommand(
   });
 }
 
+function commandAdapterWorkingDirectory(request: WorkbenchAdapterOperationRequest): string {
+  return request.operation === "skill.improve"
+    ? requiredRequestPath(request.paths.skill, "paths.skill")
+    : request.paths.workspace;
+}
+
+function commandAdapterEnvironment(request: WorkbenchAdapterOperationRequest): Record<string, string> {
+  return {
+    SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "primary"),
+    SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
+    CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
+    TRACE_DIR: request.paths.traces ?? path.join(request.paths.workspace, "input", "traces"),
+    OUTPUT_DIR: request.paths.output,
+    WORKBENCH_SKILL_PATCH: commandSkillPatchPath(request),
+  };
+}
+
+function commandSkillPatchPath(request: WorkbenchAdapterOperationRequest): string {
+  return path.join(request.paths.output, COMMAND_SKILL_PATCH_FILE);
+}
+
+async function readSkillPatchFile(filePath: string): Promise<WorkbenchSkillPatch | null> {
+  if (!await fileExists(filePath)) {
+    return null;
+  }
+  const record = jsonRecord(JSON.parse(await fs.readFile(filePath, "utf8")) as unknown);
+  const rawFiles: unknown[] = Array.isArray(record.files) ? record.files : [];
+  const files: SurfaceSnapshotFile[] = rawFiles.flatMap((entry) => {
+    if (!isPatchSurfaceSnapshotFile(entry)) {
+      return [];
+    }
+    return [{
+      ...entry,
+      path: normalizeRelativePath(entry.path),
+    }];
+  });
+  const fileChanges = Array.isArray(record.fileChanges)
+    ? record.fileChanges.flatMap((entry) => typeof entry === "string" ? [normalizeRelativePath(entry)] : [])
+    : files.map((file) => file.path);
+  return {
+    files,
+    fileChanges,
+    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+    ...(record.feedback !== undefined ? { feedback: record.feedback as Json } : {}),
+  };
+}
+
+function isPatchSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.path === "string" && typeof record.content === "string";
+}
+
 async function writeOperationOkUnlessPresent(
   request: WorkbenchAdapterOperationRequest,
   beforeRoot?: string,
@@ -571,12 +637,14 @@ async function writeOperationOkUnlessPresent(
   if (await fileExists(workbenchAdapterOperationResultPath(request.paths.output))) {
     return;
   }
-  if (request.operation === "candidate.improve") {
-    const patch = await createCandidatePatchFromWorkspace({
-      beforeRoot: beforeRoot ?? requiredRequestPath(request.paths.candidate, "paths.candidate"),
-      afterRoot: request.paths.workspace,
-      edits: request.context?.improve?.edits ?? [],
-    });
+  if (request.operation === "skill.improve") {
+    const skillRoot = requiredRequestPath(request.paths.skill, "paths.skill");
+    const patch = await readSkillPatchFile(commandSkillPatchPath(request)) ??
+      await createSkillPatchFromWorkspace({
+        beforeRoot: beforeRoot ?? skillRoot,
+        afterRoot: skillRoot,
+        edits: request.context?.improve?.edits ?? [],
+      });
     await writeWorkbenchAdapterOperationResult(request.paths.output, {
       protocol: "workbench.adapter-result.v1",
       operation: request.operation,
@@ -592,12 +660,15 @@ async function writeOperationOkUnlessPresent(
   });
 }
 
-async function snapshotEditableCandidateWorkspace(
+async function snapshotEditableSkillWorkspace(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<{ root: string; cleanup: () => Promise<void> }> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-candidate-before-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-skill-before-"));
   const edits = request.context?.improve?.edits ?? [];
-  const files = await readEditableCandidateWorkspaceFiles(request.paths.workspace, edits);
+  const files = await readEditableSkillWorkspaceFiles(
+    requiredRequestPath(request.paths.skill, "paths.skill"),
+    edits,
+  );
   await writeSurfaceFiles(root, files);
   return {
     root,
@@ -607,7 +678,7 @@ async function snapshotEditableCandidateWorkspace(
   };
 }
 
-async function readEditableCandidateWorkspaceFiles(
+async function readEditableSkillWorkspaceFiles(
   root: string,
   edits: readonly string[],
 ): Promise<SurfaceSnapshotFile[]> {
@@ -619,7 +690,7 @@ async function readEditableCandidateWorkspaceFiles(
   }
   const files = await readSurfaceFiles(root);
   return dedupeSurfaceFiles(files.filter((file) =>
-    isCandidateEditPath(file.path, editPaths) &&
+    isAllowedSkillEditPath(file.path, editPaths) &&
     !isRuntimeWorkspacePath(file.path)
   ));
 }
@@ -641,77 +712,76 @@ function requiredRequestPath(value: string | undefined, label: string): string {
   return value;
 }
 
-async function readEngineCasesFromWorkbenchTaskRoot(
-  tasksRoot: string,
+async function readEngineCasesFromWorkbenchCaseRoot(
+  casesRoot: string,
 ): Promise<WorkbenchEngineCase[]> {
-  const taskDirs = await listWorkbenchTaskDirectories(tasksRoot);
-  if (taskDirs.length === 0) {
-    throw new Error(`Engine resolve has no Workbench task packages: ${tasksRoot}`);
+  const caseDirs = await listWorkbenchCaseDirectories(casesRoot);
+  if (caseDirs.length === 0) {
+    throw new Error(`Engine resolve has no Workbench case packages: ${casesRoot}`);
   }
-  return await Promise.all(taskDirs.map(async (taskDir) =>
+  return await Promise.all(caseDirs.map(async (caseDir) =>
     readWorkbenchEngineCase({
-      taskDir,
-      id: path.basename(taskDir),
+      caseDir,
+      id: path.basename(caseDir),
     })
   ));
 }
 
-async function listWorkbenchTaskDirectories(root: string): Promise<string[]> {
-  if (await fileExists(path.join(root, TASK_CONTROL_FILE))) {
-    throw new Error(`Workbench engine tasks root must contain task directories, not a direct ${TASK_CONTROL_FILE}: ${root}`);
+async function listWorkbenchCaseDirectories(root: string): Promise<string[]> {
+  if (await fileExists(path.join(root, CASE_CONTROL_FILE))) {
+    throw new Error(`Workbench engine cases root must contain case directories, not a direct ${CASE_CONTROL_FILE}: ${root}`);
   }
   const entries = await fs.readdir(root, { withFileTypes: true });
-  const tasks: string[] = [];
+  const cases: string[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) {
       continue;
     }
-    const taskDir = path.join(root, entry.name);
-    if (await fileExists(path.join(taskDir, TASK_CONTROL_FILE))) {
-      tasks.push(taskDir);
+    const caseDir = path.join(root, entry.name);
+    if (await fileExists(path.join(caseDir, CASE_CONTROL_FILE))) {
+      cases.push(caseDir);
     }
   }
-  return tasks.sort((left, right) => left.localeCompare(right));
+  return cases.sort((left, right) => left.localeCompare(right));
 }
 
 async function readWorkbenchEngineCase(args: {
-  taskDir: string;
+  caseDir: string;
   id: string;
 }): Promise<WorkbenchEngineCase> {
-  const sourceFiles = await readSurfaceFiles(args.taskDir);
-  const taskFile = sourceFiles.find((file) =>
-    normalizeRelativePath(file.path) === TASK_CONTROL_FILE && file.encoding === "utf8"
+  const sourceFiles = await readSurfaceFiles(args.caseDir);
+  const caseFile = sourceFiles.find((file) =>
+    normalizeRelativePath(file.path) === CASE_CONTROL_FILE && file.encoding === "utf8"
   );
-  if (!taskFile) {
-    throw new Error(`Task ${args.id} is missing ${TASK_CONTROL_FILE}.`);
+  if (!caseFile) {
+    throw new Error(`Case ${args.id} is missing ${CASE_CONTROL_FILE}.`);
   }
-  const parsed = YAML.parse(taskFile.content) as unknown;
-  const taskRecord = jsonRecord(parsed);
-  if (taskRecord.version !== 3) {
-    throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} version must be 3.`);
+  const caseRecord = jsonRecord(YAML.parse(caseFile.content) as unknown);
+  if (caseRecord.version !== 1) {
+    throw new Error(`Case ${args.id} ${CASE_CONTROL_FILE} version must be 1.`);
   }
-  if (typeof taskRecord.task !== "string" || taskRecord.task.trim().length === 0) {
-    throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} must include a task string.`);
+  if (typeof caseRecord.case !== "string" || caseRecord.case.trim().length === 0) {
+    throw new Error(`Case ${args.id} ${CASE_CONTROL_FILE} must include a case string.`);
   }
-  const unsupportedTaskFields = Object.keys(taskRecord)
-    .filter((key) => !["version", "task", "split", "files", "tests", "solution", "environment"].includes(key));
-  if (unsupportedTaskFields.length > 0) {
+  const unsupportedCaseFields = Object.keys(caseRecord)
+    .filter((key) => !["version", "case", "split", "files", "tests", "solution", "environment"].includes(key));
+  if (unsupportedCaseFields.length > 0) {
     throw new Error(
-      `Task ${args.id} ${TASK_CONTROL_FILE} has unsupported field${unsupportedTaskFields.length === 1 ? "" : "s"}: ${unsupportedTaskFields.join(", ")}.`,
+      `Case ${args.id} ${CASE_CONTROL_FILE} has unsupported field${unsupportedCaseFields.length === 1 ? "" : "s"}: ${unsupportedCaseFields.join(", ")}.`,
     );
   }
-  if (taskRecord.split !== undefined && (typeof taskRecord.split !== "string" || taskRecord.split.trim().length === 0)) {
-    throw new Error(`Task ${args.id} ${TASK_CONTROL_FILE} split must be a non-empty string when provided.`);
+  if (caseRecord.split !== undefined && (typeof caseRecord.split !== "string" || caseRecord.split.trim().length === 0)) {
+    throw new Error(`Case ${args.id} ${CASE_CONTROL_FILE} split must be a non-empty string when provided.`);
   }
-  const publicPrefix = taskDirectoryPrefix(taskRecord.files, "files", args.id);
-  const testsPrefix = taskDirectoryPrefix(taskRecord.tests, "tests", args.id);
-  const solutionPrefix = taskDirectoryPrefix(taskRecord.solution, "solution", args.id);
-  const publicFiles = stripTaskDirectory(sourceFiles, publicPrefix);
+  const publicPrefix = caseDirectoryPrefix(caseRecord.files, "files", args.id);
+  const testsPrefix = caseDirectoryPrefix(caseRecord.tests, "tests", args.id);
+  const solutionPrefix = caseDirectoryPrefix(caseRecord.solution, "solution", args.id);
+  const publicFiles = stripCaseDirectory(sourceFiles, publicPrefix);
   const privateFiles = [
-    ...stripTaskDirectory(sourceFiles, testsPrefix),
-    ...stripTaskDirectory(sourceFiles, solutionPrefix),
+    ...stripCaseDirectory(sourceFiles, testsPrefix),
+    ...stripCaseDirectory(sourceFiles, solutionPrefix),
   ].sort((left, right) => left.path.localeCompare(right.path));
-  assertWorkbenchTaskPackageLayout(args.id, sourceFiles, [
+  assertWorkbenchCasePackageLayout(args.id, sourceFiles, [
     publicPrefix,
     testsPrefix,
     solutionPrefix,
@@ -721,10 +791,10 @@ async function readWorkbenchEngineCase(args: {
     id: normalizeRelativePath(args.id),
     case: {
       version: 3,
-      prompt: taskRecord.task,
-      ...(typeof taskRecord.split === "string" ? { split: taskRecord.split.trim() } : {}),
-      ...(taskRecord.environment !== undefined
-        ? { environment: taskRecord.environment as WorkbenchEngineCase["case"]["environment"] }
+      prompt: caseRecord.case,
+      ...(typeof caseRecord.split === "string" ? { split: caseRecord.split.trim() } : {}),
+      ...(caseRecord.environment !== undefined
+        ? { environment: caseRecord.environment as WorkbenchEngineCase["case"]["environment"] }
         : {}),
     },
     files: {
@@ -735,36 +805,36 @@ async function readWorkbenchEngineCase(args: {
   };
 }
 
-function taskDirectoryPrefix(value: unknown, fallback: string, taskId: string): string {
+function caseDirectoryPrefix(value: unknown, fallback: string, caseId: string): string {
   if (value === undefined) {
     return `${fallback}/`;
   }
   const record = jsonRecord(value);
   if (typeof record.path !== "string" || record.path.trim().length === 0) {
-    throw new Error(`Task ${taskId} ${TASK_CONTROL_FILE} path config must include a path string.`);
+    throw new Error(`Case ${caseId} ${CASE_CONTROL_FILE} path config must include a path string.`);
   }
   return `${normalizeRelativePath(record.path)}/`;
 }
 
-function assertWorkbenchTaskPackageLayout(
-  taskId: string,
+function assertWorkbenchCasePackageLayout(
+  caseId: string,
   files: readonly SurfaceSnapshotFile[],
   allowedPrefixes: readonly string[],
 ): void {
   const invalid = files
     .map((file) => normalizeRelativePath(file.path))
     .filter((filePath) =>
-      filePath !== TASK_CONTROL_FILE &&
+      filePath !== CASE_CONTROL_FILE &&
       !allowedPrefixes.some((prefix) => filePath.startsWith(prefix))
     );
   if (invalid.length > 0) {
     throw new Error(
-      `Task ${taskId} contains unsupported file${invalid.length === 1 ? "" : "s"} outside task.yaml or declared task directories: ${invalid.join(", ")}`,
+      `Case ${caseId} contains unsupported file${invalid.length === 1 ? "" : "s"} outside case.yaml or declared case directories: ${invalid.join(", ")}`,
     );
   }
 }
 
-function stripTaskDirectory(
+function stripCaseDirectory(
   files: readonly SurfaceSnapshotFile[],
   prefix: string,
 ): SurfaceSnapshotFile[] {
@@ -802,7 +872,10 @@ async function readTestsResult(args: {
     }
     return normalizeTestsResult({ reward: score }, args.caseId);
   }
-  throw new Error("Tests engine did not find reward.json or reward.txt under its verifier output directory.");
+  return normalizeTestsResult({
+    score: 1,
+    summary: "Tests passed.",
+  }, args.caseId);
 }
 
 function testsVerifierOutputDir(outputRoot: string): string {
@@ -878,17 +951,17 @@ function workloadFromAdapterOperationRequest(
   const attempt = context.attempt ?? {};
   return {
     job: { id: request.jobId ?? request.id },
-    benchmark: {
-      name: context.benchmark?.name ?? "",
-      description: context.benchmark?.description ?? "",
+    eval: {
+      name: context.eval?.name ?? "",
+      description: context.eval?.description ?? "",
     },
-    candidate: {
-      path: context.candidate?.path ?? "",
+    skill: {
+      path: context.skill?.path ?? "",
     },
     improve: {
       edits: context.improve?.edits ?? [],
     },
-    candidateId: context.candidate?.id ?? "",
+    versionId: context.skill?.id ?? "",
     attemptIndex: attempt.attemptIndex ?? 0,
     sampleIndex: attempt.sampleIndex ?? 0,
     caseId: attempt.caseId ?? "",
@@ -994,40 +1067,40 @@ async function executeBuiltInAgentTurn(
   return await executeWorkbenchAgentTurn(executor ?? defaultWorkbenchAgentTurnExecutor, request);
 }
 
-async function writeAgentCandidateOutput(
+async function writeAgentSkillOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
-  candidate: BuiltInAgentAdapterSpec,
+  adapter: BuiltInAgentAdapterSpec,
   options: AgentExecutionOptions = {},
 ): Promise<void> {
-  if (request.operation !== "candidate.run") {
-    throw new Error("Agent candidate results can only complete candidate.run operations.");
+  if (request.operation !== "skill.run") {
+    throw new Error("Agent skill execution results can only complete skill.run operations.");
   }
-  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-candidate");
+  const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-skill");
   const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
     role: "runner",
-    provider: candidate.agent,
+    provider: adapter.agent,
     adapterAuthRoot: options.adapterAuthRoot,
     adapterAuthRequest: options.adapterAuthRequest,
     adapterAuthEnv: options.adapterAuthEnv,
     workspaceRoot: request.paths.workspace,
     cwd: request.paths.workspace,
-    prompt: buildAgentCandidatePrompt(workload, candidate),
+    prompt: buildAgentSkillPrompt(workload, adapter),
     traceRoot,
     jobId: workload.job.id,
   });
-  const outputPath = path.join(request.paths.output, "candidate-summary.md");
+  const outputPath = path.join(request.paths.output, "skill-summary.md");
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, agentResult.output);
   const trace: SurfaceSnapshotFile = {
-    path: `.workbench/traces/${workload.job.id}/candidate.json`,
+    path: `.workbench/traces/${workload.job.id}/skill.json`,
     kind: "text",
     encoding: "utf8",
     executable: false,
     content: `${JSON.stringify({
-      kind: "agent_candidate",
-      provider: candidate.agent.use,
-      candidateId: workload.candidateId,
+      kind: "agent_skill",
+      provider: adapter.agent.use,
+      versionId: workload.versionId,
       attemptIndex: workload.attemptIndex,
       sampleIndex: workload.sampleIndex,
       summary: agentResult.output,
@@ -1039,47 +1112,47 @@ async function writeAgentCandidateOutput(
   const usage = runtime.assignUsageRole("runner", agentResult.usage);
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "candidate.run",
+    operation: "skill.run",
     ok: true,
     ...(agentResult.output ? { summary: agentResult.output } : {}),
     feedback: {
-      candidate: "agent",
-      agent: candidate.agent.use,
+      skill: "agent",
+      agent: adapter.agent.use,
       metadata: agentResult.metadata,
     },
     ...(usage ? { usage } : {}),
   });
 }
 
-function buildAgentCandidatePrompt(
+function buildAgentSkillPrompt(
   workload: AdapterWorkload,
-  candidate: BuiltInAgentAdapterSpec,
+  adapter: BuiltInAgentAdapterSpec,
 ): string {
   return [
-    ...(candidate.instructions ? ["Instructions:", candidate.instructions, ""] : []),
+    ...(adapter.instructions ? ["Instructions:", adapter.instructions, ""] : []),
     "Context:",
-    "- Candidate source files are mounted at /workspace/input/candidate.",
-    "- Follow any candidate guidance, skill files, scripts, or configuration under /workspace/input/candidate.",
+    "- The entry skill is mounted at /workspace/input/skills/primary unless another skill is selected.",
+    "- All skills installed for this run are mounted under /workspace/input/skills.",
     "- The mutable working directory is /workspace.",
-    "- If the candidate declares prepare.command, it has already run and may have copied files into /workspace.",
+    "- If the skill declares prepare.command, it has already run and may have copied files into /workspace.",
     ...(workload.case?.prompt ? ["Case:", workload.case.prompt, ""] : []),
     "- Public case files are mounted at /workspace/input/case.",
     "- Verifier tests are not present while you run.",
-    "- Mutate the current working directory to complete the task.",
+    "- Mutate the current working directory to complete the case.",
     "- You may write inspection artifacts under /workspace/output.",
   ].join("\n");
 }
 
-async function writeAgentCandidateRevisionOutput(
+async function writeAgentSkillRevisionOutput(
   request: WorkbenchAdapterOperationRequest,
   workload: AdapterWorkload,
   improver: BuiltInAgentAdapterSpec,
   options: AgentExecutionOptions,
 ): Promise<void> {
-  if (request.operation !== "candidate.improve") {
-    throw new Error("Agent improve results can only complete candidate.improve operations.");
+  if (request.operation !== "skill.improve") {
+    throw new Error("Agent skill improvement results can only complete skill.improve operations.");
   }
-  const before = await snapshotEditableCandidateWorkspace(request);
+  const before = await snapshotEditableSkillWorkspace(request);
   const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-improver");
   try {
     const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
@@ -1089,21 +1162,21 @@ async function writeAgentCandidateRevisionOutput(
       adapterAuthRequest: options.adapterAuthRequest,
       adapterAuthEnv: options.adapterAuthEnv,
       workspaceRoot: request.paths.workspace,
-      cwd: request.paths.workspace,
+      cwd: requiredRequestPath(request.paths.skill, "paths.skill"),
       prompt: buildAgentImproverPrompt(workload),
       traceRoot,
       jobId: workload.job.id,
     });
-    const candidatePatch = await createCandidatePatchFromWorkspace({
+    const skillPatch = await createSkillPatchFromWorkspace({
       beforeRoot: before.root,
-      afterRoot: request.paths.workspace,
+      afterRoot: requiredRequestPath(request.paths.skill, "paths.skill"),
       edits: workload.improve.edits,
     });
-    const changedCandidatePaths = candidatePatch.fileChanges.filter((filePath) =>
-      isCandidateEditPath(filePath, workload.improve.edits),
+    const changedSkillPaths = skillPatch.fileChanges.filter((filePath) =>
+      isAllowedSkillEditPath(filePath, workload.improve.edits),
     );
-    if (changedCandidatePaths.length === 0) {
-      throw new Error("Agent improve adapter completed without changing a candidate file covered by improve edits.");
+    if (changedSkillPaths.length === 0) {
+      throw new Error("Agent improve adapter completed without changing a skill file covered by improve edits.");
     }
     const trace: SurfaceSnapshotFile = {
       path: `.workbench/traces/${workload.job.id}/improver.json`,
@@ -1113,9 +1186,9 @@ async function writeAgentCandidateRevisionOutput(
       content: `${JSON.stringify({
         kind: "agent_improver",
         provider: improver.agent.use,
-        candidateId: workload.candidateId,
+        versionId: workload.versionId,
         attemptIndex: workload.attemptIndex,
-        changedPaths: changedCandidatePaths,
+        changedPaths: changedSkillPaths,
         summary: agentResult.output,
         metadata: agentResult.metadata,
       }, null, 2)}\n`,
@@ -1125,16 +1198,16 @@ async function writeAgentCandidateRevisionOutput(
     const usage = runtime.assignUsageRole("improver", agentResult.usage);
     await writeWorkbenchAdapterOperationResult(request.paths.output, {
       protocol: "workbench.adapter-result.v1",
-      operation: "candidate.improve",
+      operation: "skill.improve",
       ok: true,
       value: {
-        ...candidatePatch,
-        fileChanges: changedCandidatePaths,
+        ...skillPatch,
+        fileChanges: changedSkillPaths,
       },
       ...(agentResult.output ? { summary: agentResult.output } : {}),
       feedback: {
         improver: improver.agent.use,
-        changedPaths: changedCandidatePaths,
+        changedPaths: changedSkillPaths,
         metadata: agentResult.metadata,
       },
       ...(usage ? { usage } : {}),
@@ -1146,12 +1219,12 @@ async function writeAgentCandidateRevisionOutput(
 
 function buildAgentImproverPrompt(workload: AdapterWorkload): string {
   return [
-    "Benchmark:",
-    workload.benchmark.description || workload.benchmark.name,
+    "Eval:",
+    workload.eval.description || workload.eval.name,
     "",
-    "Improve the candidate for this benchmark.",
+    "Improve the skill for this eval.",
     "",
-    "Candidate files are in the current directory.",
+    "Skill files are in the current directory.",
     "Prior adapter executions are in /workspace/input/traces.",
     "",
     "Editable paths:",
@@ -1248,7 +1321,7 @@ async function writeRubricEvidenceFiles(args: {
     schema: "workbench.engine.rubric.evidence.v1",
     safeForImprover: true,
     jobId: args.workload.job.id,
-    candidateId: args.workload.candidateId,
+    versionId: args.workload.versionId,
     attemptIndex: args.workload.attemptIndex,
     sampleIndex: args.workload.sampleIndex,
     caseId: args.workload.caseId,
@@ -1416,7 +1489,7 @@ function buildRubricCriterionJudgePrompt(
   engine: BuiltInRubricAdapterSpec,
   criterion: RubricCriterionSpec,
 ): string {
-  requireWorkloadTask(workload, "Rubric judge");
+  requireWorkloadCase(workload, "Rubric judge");
   return [
     ...(engine.instructions ? ["Instructions:", engine.instructions, ""] : []),
     ...(workload.case?.prompt ? ["Case:", workload.case.prompt, ""] : []),
@@ -1424,10 +1497,10 @@ function buildRubricCriterionJudgePrompt(
     JSON.stringify(criterion, null, 2),
     "",
     "Context:",
-    "- The candidate already ran in this same working directory.",
-    "- Candidate outputs are available in the current working directory.",
+    "- The skill already ran in this same working directory.",
+    "- Skill outputs are available in the current working directory.",
     "- Public case files are mounted at /workspace/input/case.",
-    "- Verifier-private files are mounted at /workspace/private/engine when the task provides them.",
+    "- Verifier-private files are mounted at /workspace/private/engine when the case provides them.",
     "- Score only from the current working directory, public case files, verifier-private files, and the criterion above.",
     "",
     "Output:",
@@ -1650,17 +1723,17 @@ async function mapWithConcurrency<TInput, TOutput>(
   return results;
 }
 
-function requireWorkloadTask(workload: AdapterWorkload, label: string): void {
+function requireWorkloadCase(workload: AdapterWorkload, label: string): void {
   if (!workload.case) {
     throw new Error(`${label} workload is missing case text.`);
   }
 }
 
-async function createCandidatePatchFromWorkspace(args: {
+async function createSkillPatchFromWorkspace(args: {
   beforeRoot: string;
   afterRoot: string;
   edits: readonly string[];
-}): Promise<WorkbenchCandidatePatch> {
+}): Promise<WorkbenchSkillPatch> {
   const before = new Map(
     (await readSurfaceFiles(args.beforeRoot))
       .map((file) => [normalizeRelativePath(file.path), file]),
@@ -1668,7 +1741,7 @@ async function createCandidatePatchFromWorkspace(args: {
   const changedFiles = (await readSurfaceFiles(args.afterRoot))
     .map((file) => ({ ...file, path: normalizeRelativePath(file.path) }))
     .filter((file) =>
-      isCandidateEditPath(file.path, args.edits) &&
+      isAllowedSkillEditPath(file.path, args.edits) &&
       !isRuntimeWorkspacePath(file.path) &&
       !sameSurfaceFile(before.get(file.path), file)
     )
@@ -1702,7 +1775,7 @@ function isRuntimeWorkspacePath(filePath: string): boolean {
     normalized.startsWith("private/");
 }
 
-function isCandidateEditPath(filePath: string, edits: readonly string[]): boolean {
+function isAllowedSkillEditPath(filePath: string, edits: readonly string[]): boolean {
   const normalized = normalizeRelativePath(filePath);
   return edits.some((entry) => {
     const editPath = normalizeRelativePath(entry).replace(/\/+$/u, "");

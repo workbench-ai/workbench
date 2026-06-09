@@ -30,6 +30,14 @@ export {
   type WorkbenchAdapterOperationRequirement,
 } from "./adapter-manifest.ts";
 export {
+  builtinWorkbenchAdapterManifest,
+  builtinWorkbenchAdapterManifests,
+  isWorkbenchBuiltInAdapterId,
+  type WorkbenchBuiltInAdapterId,
+  type WorkbenchEngineHelperAdapterId,
+  type WorkbenchPublicBuiltInAdapterId,
+} from "./built-in-manifests.ts";
+export {
   WORKBENCH_ADAPTER_PROTOCOL,
   WORKBENCH_ADAPTER_RESULT_FILE,
   WORKBENCH_ADAPTER_RESULT_PROTOCOL,
@@ -62,7 +70,7 @@ export {
   adapterSlotInvocation,
   defineAdapter,
   defineEngineResolver,
-  defineCandidate,
+  defineSkillRunner,
   defineEngineRunner,
   defineImprover,
   operationDefinitionForRequest,
