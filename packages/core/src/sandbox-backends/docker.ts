@@ -59,6 +59,7 @@ const BUILT_IN_ENVIRONMENT_IMAGES: Record<string, string> = {
 
 const DOCKER_RUNTIME_MOUNT = "/workbench-runtime";
 const DOCKER_DEFAULT_WORKSPACE = "/workspace";
+const mutableDockerTemplateImageBuilds = new Map<string, Promise<string>>();
 
 type DockerRuntimePayload = {
   mounts: readonly DockerRuntimeMount[];
@@ -169,18 +170,32 @@ async function prepareDockerTemplateImage(
   ]);
   const sourceHash = args.environmentVersion?.sourceHash?.trim() || createHash("sha256").update(dockerfile).digest("hex");
   const image = `workbench/sandbox-${safeDockerImageSegment(args.environmentVersion?.id ?? "env")}:${sourceHash.slice(0, 16)}`;
-  const imageExists = await execFileAsync("docker", ["image", "inspect", image], { maxBuffer: 1024 * 1024 })
-    .then(() => true, () => false);
-  if (imageExists) {
-    return image;
+  const pending = mutableDockerTemplateImageBuilds.get(image);
+  if (pending) {
+    return await pending;
   }
-  const contextRoot = path.join(args.workdir ?? os.tmpdir(), "workbench-docker-environments", sourceHash.slice(0, 32));
-  const dockerfilePath = path.join(contextRoot, "Dockerfile");
-  await fs.rm(contextRoot, { recursive: true, force: true }).catch(() => undefined);
-  await fs.mkdir(contextRoot, { recursive: true });
-  await fs.writeFile(dockerfilePath, `${dockerfile}\n`, { mode: 0o600 });
-  await execFileAsync("docker", ["build", "-t", image, "-f", dockerfilePath, contextRoot], { maxBuffer: 20 * 1024 * 1024 });
-  return image;
+  const build = (async () => {
+    const imageExists = await execFileAsync("docker", ["image", "inspect", image], { maxBuffer: 1024 * 1024 })
+      .then(() => true, () => false);
+    if (imageExists) {
+      return image;
+    }
+    const contextRoot = path.join(args.workdir ?? os.tmpdir(), "workbench-docker-environments", sourceHash.slice(0, 32));
+    const dockerfilePath = path.join(contextRoot, "Dockerfile");
+    await fs.rm(contextRoot, { recursive: true, force: true }).catch(() => undefined);
+    await fs.mkdir(contextRoot, { recursive: true });
+    await fs.writeFile(dockerfilePath, `${dockerfile}\n`, { mode: 0o600 });
+    await execFileAsync("docker", ["build", "-t", image, "-f", dockerfilePath, contextRoot], { maxBuffer: 20 * 1024 * 1024 });
+    return image;
+  })();
+  mutableDockerTemplateImageBuilds.set(image, build);
+  try {
+    return await build;
+  } finally {
+    if (mutableDockerTemplateImageBuilds.get(image) === build) {
+      mutableDockerTemplateImageBuilds.delete(image);
+    }
+  }
 }
 
 async function prepareDockerSandboxWorkspace(
@@ -250,7 +265,7 @@ async function runDockerSandboxExecution(
   const runtimeImport = readRequiredMetadataString(metadata, "runtimeImport", DOCKER_SANDBOX_BACKEND);
   const sandboxUid = readRequiredMetadataNumber(metadata, "sandboxUid", DOCKER_SANDBOX_BACKEND);
   const sandboxGid = readRequiredMetadataNumber(metadata, "sandboxGid", DOCKER_SANDBOX_BACKEND);
-  const progressTarget = readOptionalProgressTarget(metadata.progressTarget);
+  const progressTarget = args.progress ?? readOptionalProgressTarget(metadata.progressTarget);
   const network = asRuntimeRecord(metadata.network);
   const resources = execution.policy.resources;
   const tmpfsSize = dockerSize(resources.diskGb);
@@ -708,19 +723,19 @@ function findDockerSourceRoot(): string | null {
   }
   const cwd = process.cwd();
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const skills = [
+  const roots = [
     cwd,
     path.resolve(cwd, ".."),
     path.resolve(cwd, "../.."),
     path.resolve(cwd, "../../.."),
     path.resolve(moduleDir, "../../../../../.."),
   ];
-  for (const skill of skills) {
+  for (const root of roots) {
     if (
-      existsSync(path.join(skill, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
-      existsSync(path.join(skill, "products/workbench/packages/core/src/index.ts"))
+      existsSync(path.join(root, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
+      existsSync(path.join(root, "products/workbench/packages/core/src/index.ts"))
     ) {
-      return skill;
+      return root;
     }
   }
   return null;

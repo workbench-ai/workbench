@@ -9,7 +9,6 @@ import {
   EmptyContent,
   EmptyDescription,
   EmptyHeader,
-  EmptyMedia,
   EmptyTitle,
 } from "../ui/empty";
 
@@ -72,9 +71,7 @@ export function ProblemState({
             {headerMeta}
           </div>
         ) : null}
-        <EmptyMedia variant="icon">
-          <Icon aria-hidden="true" />
-        </EmptyMedia>
+        <Icon aria-hidden="true" className="mb-2 size-4 shrink-0 text-foreground" />
         <EmptyTitle>{title}</EmptyTitle>
         {message ? <EmptyDescription>{message}</EmptyDescription> : null}
       </EmptyHeader>

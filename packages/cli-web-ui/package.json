@@ -30,13 +30,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
     "design:lint": "node ./scripts/lint-design-md.mjs",
-    "foundation:check": "node ./scripts/verify-shadcn-foundation.mjs",
-    "foundation:sync": "node ./scripts/sync-shadcn-foundation.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.8",
+    "@fontsource/ibm-plex-mono": "^5.2.7",
+    "@fontsource/libre-caslon-display": "^5.2.7",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-collapsible": "^1.1.12",
     "@radix-ui/react-dialog": "^1.1.15",

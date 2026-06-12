@@ -6,6 +6,7 @@ export function SurfaceSection({
   title,
   icon: Icon,
   description,
+  actions,
   headingLevel = 2,
   className,
   children,
@@ -13,6 +14,7 @@ export function SurfaceSection({
   title: string;
   icon?: ComponentType<{ className?: string }>;
   description?: string;
+  actions?: ReactNode;
   headingLevel?: 2 | 3 | 4;
   className?: string;
   children: ReactNode;
@@ -21,14 +23,17 @@ export function SurfaceSection({
 
   return (
     <section className={cn("grid min-w-0 gap-3", className)}>
-      <div className="grid min-w-0 gap-1.5">
-        <div className="flex min-w-0 items-center gap-2">
-          {Icon ? <Icon aria-hidden="true" className="size-4 text-muted-foreground" /> : null}
-          <Heading className="text-base font-semibold text-foreground">{title}</Heading>
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+        <div className="grid min-w-0 gap-1.5">
+          <div className="flex min-w-0 items-center gap-2">
+            {Icon ? <Icon aria-hidden="true" className="size-4 text-muted-foreground" /> : null}
+            <Heading className="text-base font-semibold text-foreground">{title}</Heading>
+          </div>
+          {description ? (
+            <p className="text-sm leading-6 text-muted-foreground">{description}</p>
+          ) : null}
         </div>
-        {description ? (
-          <p className="text-sm leading-6 text-muted-foreground">{description}</p>
-        ) : null}
+        {actions ? <div className="flex min-w-0 flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
       {children}
     </section>

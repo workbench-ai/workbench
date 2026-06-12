@@ -17,6 +17,8 @@ import type {
 
 export const WORKBENCH_RUNTIME_CONTROL_URL_ENV = "WORKBENCH_RUNTIME_CONTROL_URL";
 export const WORKBENCH_RUNTIME_CONTROL_TOKEN_ENV = "WORKBENCH_RUNTIME_CONTROL_TOKEN";
+export const WORKBENCH_RUNTIME_CONTROL_TIMEOUT_MS_ENV = "WORKBENCH_RUNTIME_CONTROL_TIMEOUT_MS";
+const DEFAULT_RUNTIME_CONTROL_TIMEOUT_MS = 30 * 60_000;
 
 export interface WorkbenchRuntimeControlInvocation {
   use: string;
@@ -63,6 +65,7 @@ export interface WorkbenchRuntimeControlOperationSequenceResult {
 export interface RunWorkbenchRuntimeControlOptions {
   url?: string;
   token?: string;
+  timeoutMs?: number;
   fetch?: typeof fetch;
 }
 
@@ -77,9 +80,10 @@ export async function runWorkbenchRuntimeOperationSequence(
   }
   const fetchImpl = options.fetch ?? fetch;
   const endpoint = new URL("/v1/operation-sequence", url);
+  const timeoutMs = runtimeControlRequestTimeoutMs(options.timeoutMs);
   const response = options.fetch
-    ? await postRuntimeControlJsonWithFetch(fetchImpl, endpoint, token, request)
-    : await postRuntimeControlJson(endpoint, token, request);
+    ? await postRuntimeControlJsonWithFetch(fetchImpl, endpoint, token, request, timeoutMs)
+    : await postRuntimeControlJson(endpoint, token, request, timeoutMs);
   if (response.status < 200 || response.status >= 300) {
     const message = readResponseError(response.payload) ?? `Workbench runtime-control request failed with status ${response.status}.`;
     throw new Error(message);
@@ -92,29 +96,59 @@ async function postRuntimeControlJsonWithFetch(
   url: URL,
   token: string,
   request: WorkbenchRuntimeControlOperationSequenceRequest,
+  timeoutMs: number,
 ): Promise<{ status: number; payload: unknown }> {
-  const response = await fetchImpl(url, {
-    method: "POST",
-    headers: {
-      "authorization": `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(request),
-  });
-  return {
-    status: response.status,
-    payload: await response.json().catch(() => null) as unknown,
-  };
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    return {
+      status: response.status,
+      payload: await response.json().catch(() => null) as unknown,
+    };
+  } catch (error) {
+    if (timedOut) {
+      throw runtimeControlTimeoutError(timeoutMs);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function postRuntimeControlJson(
   url: URL,
   token: string,
   request: WorkbenchRuntimeControlOperationSequenceRequest,
+  timeoutMs: number,
 ): Promise<{ status: number; payload: unknown }> {
   const body = JSON.stringify(request);
   const client = url.protocol === "https:" ? https : http;
   return await new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      callback();
+    };
     const outgoing = client.request(url, {
       method: "POST",
       headers: {
@@ -135,16 +169,37 @@ async function postRuntimeControlJson(
         } catch {
           payload = null;
         }
-        resolve({
+        settle(() => resolve({
           status: incoming.statusCode ?? 0,
           payload,
-        });
+        }));
       });
+      incoming.on("error", (error) => settle(() => reject(error)));
     });
-    outgoing.on("error", reject);
-    outgoing.setTimeout(0);
+    outgoing.on("error", (error) => settle(() => reject(error)));
+    timer = setTimeout(() => {
+      outgoing.destroy(runtimeControlTimeoutError(timeoutMs));
+    }, timeoutMs);
     outgoing.end(body);
   });
+}
+
+function runtimeControlRequestTimeoutMs(configured: number | undefined): number {
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+    return Math.floor(configured);
+  }
+  const raw = process.env[WORKBENCH_RUNTIME_CONTROL_TIMEOUT_MS_ENV];
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return DEFAULT_RUNTIME_CONTROL_TIMEOUT_MS;
+}
+
+function runtimeControlTimeoutError(timeoutMs: number): Error {
+  return new Error(`Workbench runtime-control request timed out after ${timeoutMs}ms.`);
 }
 
 function normalizeRuntimeControlOperationSequenceResult(

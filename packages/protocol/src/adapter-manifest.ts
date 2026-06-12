@@ -74,7 +74,7 @@ export function adapterCommandName(adapterId: string): string {
   return `workbench-adapter-${adapterId}`;
 }
 
-export function workbenchAdapterManifestSupportsOperation(
+function workbenchAdapterManifestSupportsOperation(
   manifest: WorkbenchAdapterManifest,
   operation: WorkbenchAdapterOperation,
 ): boolean {
@@ -244,7 +244,7 @@ export function collectWorkbenchAdapterInvocations(
   return collected;
 }
 
-export function collectWorkbenchAdapterOperationRequirements(
+function collectWorkbenchAdapterOperationRequirements(
   roots: readonly WorkbenchAdapterOperationRequirement[],
   manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
 ): WorkbenchAdapterOperationRequirement[] {
@@ -286,7 +286,7 @@ export function collectWorkbenchAdapterOperationRequirements(
   return collected;
 }
 
-export function collectWorkbenchAdapterOperationIssues(
+function collectWorkbenchAdapterOperationIssues(
   roots: readonly WorkbenchAdapterOperationRequirement[],
   manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
 ): string[] {
@@ -358,7 +358,7 @@ function applyInvocationDefault(
   }
 }
 
-export function withDefaultWorkbenchAdapterAuth<T extends WorkbenchAdapterInvocationLike>(
+function withDefaultWorkbenchAdapterAuth<T extends WorkbenchAdapterInvocationLike>(
   invocation: T,
   manifests: readonly WorkbenchAdapterManifest[] | Map<string, WorkbenchAdapterManifest>,
 ): T {

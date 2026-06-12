@@ -33,10 +33,6 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
     workbench: defineAdapter({
       id: "workbench",
       engineResolve: defineEngineResolver(),
-      engineRun: defineEngineRunner({ executor: "host" }),
-      slots: {
-        score: adapterSlot("/score", "engine.run"),
-      },
     }),
     codex: defineAdapter({
       id: "codex",

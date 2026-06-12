@@ -359,10 +359,10 @@ async function resolveAgentAuth(
   agentHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<Record<string, JsonValue>> {
-  const skill =
+  const authConfig =
     adapterAuthProviderOption(adapterAuth.request, providerSpec.use) ??
     ((provider.manifest.defaults.auth as Record<string, JsonValue> | undefined) ?? {});
-  const parsed = provider.schemas.auth.safeParse(skill);
+  const parsed = provider.schemas.auth.safeParse(authConfig);
   if (!parsed.success) {
     throw new Error(`Agent provider "${provider.manifest.id}" auth is invalid: ${formatValidationIssues(parsed.error.issues)}`);
   }

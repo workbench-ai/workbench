@@ -146,8 +146,18 @@ export function DesktopWorkspaceSplit({
   const secondaryMinSize = paneOpen ? 100 - maxPrimaryPercent : 0;
   const secondaryMaxSize = paneOpen ? 100 - minPrimaryPercent : 0;
 
+  const pendingLayoutRef = useRef<Layout | null>(null);
   useEffect(() => {
-    groupRef.current?.setLayout(layout);
+    // Constraint-prop updates make the panel group re-validate the previous
+    // layout first (e.g. coercing the just-closed 100/0 split to the open
+    // maximum). Defer the intended layout one frame so it lands after that
+    // re-validation, and ignore layout-change echoes until it does.
+    pendingLayoutRef.current = layout;
+    const frame = requestAnimationFrame(() => {
+      pendingLayoutRef.current = null;
+      groupRef.current?.setLayout(layout);
+    });
+    return () => cancelAnimationFrame(frame);
   }, [layout]);
 
   return (
@@ -162,12 +172,15 @@ export function DesktopWorkspaceSplit({
         "motion-reduce:[&_[data-workspace-split-panel]]:transition-none",
         className,
       )}
-      onLayoutChanged={(layout) => {
+      onLayoutChanged={(nextLayout) => {
         if (!paneOpen) {
           return;
         }
-        const nextPrimaryPercent = layout[PRIMARY_PANEL_ID];
+        const nextPrimaryPercent = nextLayout[PRIMARY_PANEL_ID];
         if (typeof nextPrimaryPercent !== "number") {
+          return;
+        }
+        if (pendingLayoutRef.current) {
           return;
         }
         const clampedPercent = clampPrimaryPercent(

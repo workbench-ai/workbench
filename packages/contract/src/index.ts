@@ -14,6 +14,56 @@ export interface SurfaceSnapshotFile {
   executable?: boolean;
 }
 
+const WORKBENCH_METADATA_DIRS = new Set([
+  "objects",
+  "refs",
+  "sync",
+  "tmp",
+  "logs",
+  "locks",
+]);
+
+const WORKBENCH_METADATA_FILES = new Set([
+  ".gitignore",
+  "remotes.yaml",
+]);
+
+export function normalizeWorkbenchSourcePath(filePath: string): string {
+  const normalized = filePath.replace(/\\/gu, "/");
+  if (!normalized || normalized.includes("\0")) {
+    throw new Error("Workbench source paths must be non-empty relative paths.");
+  }
+  if (normalized.startsWith("/")) {
+    throw new Error(`Unsafe Workbench source path: ${filePath}`);
+  }
+  const parts = normalized.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) {
+    throw new Error(`Unsafe Workbench source path: ${filePath}`);
+  }
+  return normalized;
+}
+
+export function normalizeWorkbenchSourceRequestPath(filePath: string): string {
+  return normalizeWorkbenchSourcePath(filePath.replace(/^\/+/u, ""));
+}
+
+export function normalizeWorkbenchSkillName(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 80);
+}
+
+export function isWorkbenchLocalMetadataPath(filePath: string): boolean {
+  const parts = normalizeWorkbenchSourcePath(filePath).split("/");
+  return parts[0] === ".workbench" && (
+    WORKBENCH_METADATA_DIRS.has(parts[1] ?? "") ||
+    WORKBENCH_METADATA_FILES.has(parts[1] ?? "")
+  );
+}
+
 export type WorkbenchInspectionFileOwnerKind = "version" | "trace" | "artifact";
 
 export interface WorkbenchInspectionFileContent {
@@ -72,11 +122,17 @@ export interface WorkbenchAgent {
   config: Record<string, Json>;
 }
 
-export type WorkbenchSkillSourceKind = "local" | "remote";
+export interface WorkbenchAgentSnapshot {
+  hash: string;
+  agent: WorkbenchAgent;
+}
+
+export type WorkbenchSkillSourceKind = "local" | "remote" | "none";
+export type WorkbenchSkillIncludeKind = Exclude<WorkbenchSkillSourceKind, "none">;
 
 export interface WorkbenchSkillInclude {
   name: string;
-  kind: WorkbenchSkillSourceKind;
+  kind: WorkbenchSkillIncludeKind;
   path?: string;
   from?: string;
   ref?: string;
@@ -119,9 +175,12 @@ export interface WorkbenchEvalSnapshot {
   hash: string;
   files: SurfaceSnapshotFile[];
   caseCount: number;
+  createdAt: string;
+  updatedAt: string;
+  scoreAdapter: string;
 }
 
-export type WorkbenchRunKind = "eval" | "improve" | "compare" | "retry";
+export type WorkbenchRunKind = "eval" | "improve" | "compare";
 export type WorkbenchRunStatus = "running" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type WorkbenchArtifactKind = "file" | "directory" | "log" | "scorecard";
@@ -146,18 +205,6 @@ export interface WorkbenchRun {
   parentRunId?: string;
   outputVersionId?: string;
   error?: string;
-}
-
-export type WorkbenchAutomationReadinessLevel = "insufficient" | "assist" | "review" | "automate";
-
-export interface WorkbenchAutomationReadiness {
-  level: WorkbenchAutomationReadinessLevel;
-  label: string;
-  reason: string;
-  runId?: string;
-  score?: number;
-  caseCount?: number;
-  jobCount?: number;
 }
 
 export interface WorkbenchJob {
@@ -203,7 +250,9 @@ export interface WorkbenchTrace {
   versionId: string;
   skillName: string;
   skillBundleHash: string;
+  evalHash?: string;
   agentName: string;
+  agentHash?: string;
   createdAt: string;
   request: Json;
   result: Json;
@@ -214,15 +263,17 @@ export interface WorkbenchLineageEdge {
   parentId: string;
   childId: string;
   runId?: string;
-  reason: "version" | "improve" | "switch" | "publish";
+  reason: "version" | "improve";
   createdAt: string;
   message?: string;
 }
 
+export type WorkbenchRemoteKind = "workbench-cloud" | "file";
+
 export interface WorkbenchRemote {
   name: string;
   url: string;
-  type: "workbench";
+  kind: WorkbenchRemoteKind;
 }
 
 export interface WorkbenchRefs {
@@ -233,11 +284,8 @@ export interface WorkbenchRefs {
 export interface WorkbenchProjectState {
   schema: "workbench.skill.state.v1";
   root: string;
-  currentVersionId?: string;
   refs: WorkbenchRefs;
   remotes: Record<string, WorkbenchRemote>;
-  defaultSkill?: string;
-  defaultAgent?: string;
   versions: WorkbenchVersion[];
   skillSources: WorkbenchSkillSource[];
   skillBundles: WorkbenchSkillBundleSnapshot[];
@@ -246,6 +294,7 @@ export interface WorkbenchProjectState {
   runs: WorkbenchRun[];
   jobs: WorkbenchJob[];
   traces: WorkbenchTrace[];
+  executionEvents: WorkbenchExecutionEventBatch[];
   artifacts: WorkbenchArtifact[];
   lineage: WorkbenchLineageEdge[];
 }
@@ -255,7 +304,6 @@ export interface WorkbenchStatus {
   initialized: boolean;
   currentSkillHash?: string;
   currentVersionId?: string;
-  hasUnversionedChanges: boolean;
   defaultSkill?: string;
   defaultAgent?: string;
   versionCount: number;
@@ -265,7 +313,81 @@ export interface WorkbenchStatus {
   remoteCount: number;
   pendingSyncCount?: number;
   lastScore?: number;
-  automationReadiness?: WorkbenchAutomationReadiness;
+}
+
+export interface WorkbenchRemoteSyncState {
+  schema: "workbench.remote-sync-state.v1";
+  remote: string;
+  url: string;
+  status: "synced" | "error";
+  lastSyncedAt?: string;
+  lastAttemptAt: string;
+  lastError?: {
+    code: string;
+    message: string;
+  } | null;
+  pushed?: number;
+  pulled?: number;
+}
+
+export interface WorkbenchStatusSnapshot {
+  schema: "workbench.status.v1";
+  ok: true;
+  project: {
+    root: string;
+    initialized: boolean;
+    currentVersionId?: string;
+    defaultSkill?: string;
+    defaultAgent?: string;
+  };
+  worktree: {
+    hasUnversionedChanges: boolean;
+    latestVersionId?: string;
+  };
+  runs: {
+    total: number;
+    lastRunId?: string;
+    lastStatus?: WorkbenchRunStatus;
+    lastScore?: number;
+  };
+  remotes: Array<{
+    name: string;
+    kind: WorkbenchRemoteKind;
+    url: string;
+    sync: {
+      status: "up_to_date" | "error" | "never";
+      lastSyncedAt?: string;
+      lastAttemptAt?: string;
+      lastError?: {
+        code: string;
+        message: string;
+      } | null;
+      nextCommand?: string;
+    };
+    publication: {
+      status: "published" | "unpublished";
+      visibility?: string;
+      versionId?: string;
+      installUrl?: string;
+      pinnedInstallUrl?: string;
+    };
+  }>;
+  auth?: {
+    workbenchCloud: {
+      status: "authenticated" | "not_authenticated";
+      baseUrl?: string;
+      username?: string;
+    };
+    adapters: Array<{
+      adapter: string;
+      slot?: string;
+      profile: string;
+      status: string;
+      method?: string;
+      updatedAt?: string;
+    }>;
+  };
+  next: string[];
 }
 
 export interface WorkbenchComparisonCell {
@@ -274,18 +396,20 @@ export interface WorkbenchComparisonCell {
   skillBundleHash: string;
   evalHash: string;
   agentName: string;
+  agentHash: string;
   runId?: string;
+  status?: WorkbenchRunStatus;
   score?: number;
   costUsd?: number;
   latencyMs?: number;
-  automationReadiness?: WorkbenchAutomationReadiness;
+  error?: string;
 }
 
 export interface WorkbenchComparison {
   evalHash?: string;
   versions: WorkbenchVersion[];
   skills: WorkbenchSkillBundleSnapshot[];
-  agents: WorkbenchAgent[];
+  agents: WorkbenchAgentSnapshot[];
   cells: WorkbenchComparisonCell[];
 }
 
@@ -295,10 +419,13 @@ export interface WorkbenchInspectionSnapshot {
   versions: WorkbenchVersion[];
   skillSources: WorkbenchSkillSource[];
   skillBundles: WorkbenchSkillBundleSnapshot[];
-  agents: WorkbenchAgent[];
+  evals: WorkbenchEvalSnapshot[];
+  agents: WorkbenchAgentSnapshot[];
+  comparison?: WorkbenchComparison;
   runs: WorkbenchRun[];
   jobs: WorkbenchJob[];
   traces: WorkbenchTrace[];
+  executionEvents: WorkbenchExecutionEventBatch[];
   artifacts: WorkbenchArtifact[];
   lineage: WorkbenchLineageEdge[];
   remotes: WorkbenchRemote[];
@@ -316,8 +443,6 @@ export interface WorkbenchObjectPack {
   schema: "workbench.object-pack.v1";
   createdAt: string;
   refs: WorkbenchRefs;
-  defaultSkill?: string;
-  defaultAgent?: string;
   versions: WorkbenchVersion[];
   skillSources: WorkbenchSkillSource[];
   skillBundles: WorkbenchSkillBundleSnapshot[];
@@ -326,6 +451,7 @@ export interface WorkbenchObjectPack {
   runs: WorkbenchRun[];
   jobs: WorkbenchJob[];
   traces: WorkbenchTrace[];
+  executionEvents: WorkbenchExecutionEventBatch[];
   artifacts: WorkbenchArtifact[];
   lineage: WorkbenchLineageEdge[];
 }

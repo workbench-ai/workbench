@@ -6,18 +6,19 @@ import {
   useReactFlow,
   type NodeProps,
 } from "@xyflow/react";
-import { GitBranchIcon } from "lucide-react";
+import { GitBranchIcon, SparklesIcon } from "lucide-react";
 import { memo, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 
 import type {
   WorkbenchLineageEdge,
+  WorkbenchRun,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
 import { Badge } from "@workbench-ai/cli-web-ui/components/ui/badge";
 import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
-import { formatCount, formatTimestamp, shortId } from "../lib/format";
+import { formatScore, formatTimestamp } from "../lib/format";
 import {
   buildVersionLineageFlow,
   createVersionLineageNodeDomAttributes,
@@ -31,8 +32,13 @@ interface FlowState {
   edges: VersionLineageEdge[];
 }
 
+// fitView clamps its computed zoom between these bounds. The minZoom floor
+// keeps nodes readable when the lineage grows large: instead of shrinking the
+// whole graph to fit, the view stays at a legible scale and the user pans.
+// (Manual zoom-out below the floor is still allowed via the viewport minZoom.)
 const FIT_VIEW_OPTIONS = {
   padding: 0.08,
+  minZoom: 0.75,
   maxZoom: 1.2,
 } as const;
 
@@ -47,40 +53,31 @@ const HIDDEN_HANDLE_STYLE = {
   pointerEvents: "none" as const,
 };
 
-export function LineageGraph({
-  currentVersionId,
-  lineage,
-  onVersionClick,
-  versions,
-}: {
+interface LineageGraphProps {
   currentVersionId?: string | null;
+  publishedVersionId?: string | null;
   lineage: readonly WorkbenchLineageEdge[];
   onVersionClick: (versionId: string) => void;
+  runs?: readonly WorkbenchRun[];
   versions: readonly WorkbenchVersion[];
-}) {
+}
+
+export function LineageGraph(props: LineageGraphProps) {
   return (
     <ReactFlowProvider>
-      <LineageGraphCanvas
-        currentVersionId={currentVersionId}
-        lineage={lineage}
-        onVersionClick={onVersionClick}
-        versions={versions}
-      />
+      <LineageGraphCanvas {...props} />
     </ReactFlowProvider>
   );
 }
 
 function LineageGraphCanvas({
   currentVersionId,
+  publishedVersionId,
   lineage,
   onVersionClick,
+  runs,
   versions,
-}: {
-  currentVersionId?: string | null;
-  lineage: readonly WorkbenchLineageEdge[];
-  onVersionClick: (versionId: string) => void;
-  versions: readonly WorkbenchVersion[];
-}) {
+}: LineageGraphProps) {
   const reactFlow = useReactFlow<VersionLineageNode, VersionLineageEdge>();
   const [flowState, setFlowState] = useState<FlowState>({
     loading: false,
@@ -108,7 +105,7 @@ function LineageGraphCanvas({
       return;
     }
     setFlowState((current) => ({ ...current, loading: true }));
-    void buildVersionLineageFlow({ versions, lineage, currentVersionId }).then((flow) => {
+    void buildVersionLineageFlow({ versions, lineage, currentVersionId, publishedVersionId, runs }).then((flow) => {
       if (!cancelled) {
         setFlowState({ loading: false, nodes: flow.nodes, edges: flow.edges });
       }
@@ -116,19 +113,24 @@ function LineageGraphCanvas({
     return () => {
       cancelled = true;
     };
-  }, [currentVersionId, lineage, versions]);
+  }, [currentVersionId, lineage, publishedVersionId, runs, versions]);
 
   useEffect(() => {
     if (flowState.nodes.length === 0) {
       return;
     }
+    // Center on the active version when there is one; large graphs then open
+    // focused on the node that matters instead of a zoomed-out overview.
+    const activeNode = flowState.nodes.find((node) => node.data.version.id === currentVersionId);
     const frameId = requestAnimationFrame(() => {
-      void reactFlow.fitView(FIT_VIEW_OPTIONS);
+      void reactFlow.fitView(activeNode
+        ? { ...FIT_VIEW_OPTIONS, maxZoom: 1, nodes: [{ id: activeNode.id }] }
+        : FIT_VIEW_OPTIONS);
     });
     return () => {
       cancelAnimationFrame(frameId);
     };
-  }, [flowState.nodes, reactFlow]);
+  }, [currentVersionId, flowState.nodes, reactFlow]);
 
   if (versions.length === 0) {
     return (
@@ -188,31 +190,28 @@ const VersionNode = memo(function VersionNode(props: NodeProps<VersionLineageNod
         aria-current={flowData.active ? "page" : undefined}
         className="grid min-w-0 gap-2 text-left text-sm text-foreground"
       >
-        <div className="flex min-w-0 items-start justify-between gap-3">
-          <div className="grid min-w-0 gap-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="break-words font-semibold [overflow-wrap:anywhere]">
-                {version.id}
-              </span>
-              {flowData.active ? <Badge variant="outline">current</Badge> : null}
-            </div>
-            <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">
-              {version.message}
+        <div className="grid min-w-0 gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="break-words font-semibold [overflow-wrap:anywhere]">
+              {flowData.label}
             </span>
+            {flowData.active ? <Badge variant="outline">current</Badge> : null}
+            {flowData.published ? <Badge variant="outline">published</Badge> : null}
           </div>
-          <GitBranchIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          {flowData.improvedFromLabel ? (
+            <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+              <SparklesIcon aria-hidden="true" className="size-3 shrink-0" />
+              improved from {flowData.improvedFromLabel}
+            </span>
+          ) : null}
+          <span className="line-clamp-2 break-words text-muted-foreground [overflow-wrap:anywhere]" title={version.message}>
+            {version.message}
+          </span>
         </div>
         <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span>{shortId(version.hash)}</span>
           <span>{formatTimestamp(version.createdAt)}</span>
-          <span>{formatCount(version.parentIds.length, "parent")}</span>
-          <span>{formatCount(flowData.childCount, "child")}</span>
+          {flowData.score !== null ? <span>score {formatScore(flowData.score)}</span> : null}
         </div>
-        {flowData.edgeReason ? (
-          <div className="text-xs text-muted-foreground">
-            {flowData.edgeReason}
-          </div>
-        ) : null}
       </div>
     </>
   );

@@ -3,16 +3,7 @@ import {
   type PreviewMode,
 } from "@workbench-ai/cli-web-ui/lib/file-preview";
 
-export type SkillSurfaceView = "overview" | "manifest" | "files";
-export type VersionsIndexView = "archive" | "lineage";
-export type VersionView = "overview" | "files" | "runs";
-export type ExecutionIndexView = "runs" | "jobs" | "traces" | "artifacts";
-export type RunView = "overview" | "jobs" | "traces" | "artifacts";
-export type JobView = "overview" | "trace" | "artifacts";
-export type TraceView = "overview" | "files" | "payload";
-export type ArtifactView = "overview" | "files";
-export type ConfigurationView = "skills" | "agents";
-export type SyncView = "refs" | "remotes";
+export type VersionsView = "list" | "graph";
 export type WorkbenchFileOwnerKind = "version" | "trace" | "artifact";
 
 export interface WorkbenchFileRouteState {
@@ -21,24 +12,31 @@ export interface WorkbenchFileRouteState {
   previewMode: PreviewMode;
 }
 
-export interface WorkbenchSkillSurfaceRouteState {
-  skillView?: SkillSurfaceView;
-  skillFile?: WorkbenchFileRouteState;
-}
+export type WorkbenchSurfaceRoute =
+  | { kind: "scorecard" }
+  | { kind: "versions"; view: VersionsView }
+  | { kind: "files"; file: WorkbenchFileRouteState };
 
-export type WorkbenchRoute =
-  | { kind: "skill"; view: SkillSurfaceView; file: WorkbenchFileRouteState }
-  | ({ kind: "versions"; view: VersionsIndexView } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "version"; versionId: string; view: VersionView; file: WorkbenchFileRouteState } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "execution"; view: ExecutionIndexView } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "run"; runId: string; view: RunView } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "job"; jobId: string; view: JobView } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "trace"; traceId: string; view: TraceView; file: WorkbenchFileRouteState } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "artifact"; artifactId: string; view: ArtifactView; file: WorkbenchFileRouteState } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "configuration"; view: ConfigurationView } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "skill-source"; skillName: string } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "agent"; agentName: string } & WorkbenchSkillSurfaceRouteState)
-  | ({ kind: "sync"; view: SyncView } & WorkbenchSkillSurfaceRouteState);
+export type WorkbenchCaseView = "output" | "timeline";
+
+// The detail pane shows one first-class object picked from a surface or
+// drilled into from another pane (run -> case). The case pane has tabbed
+// views; "output" is the default and is never stored on the route.
+export type WorkbenchInspectorRoute =
+  | { kind: "version"; versionId: string }
+  | { kind: "run"; runId: string }
+  | { kind: "job"; jobId: string; view?: Exclude<WorkbenchCaseView, "output"> }
+  | { kind: "skill-source"; skillName: string };
+
+// The single full-screen leaf modal: browsing a version's files from its
+// pane. Object details never open as modals; they render in the pane itself.
+export type WorkbenchOverlayRoute = { kind: "version-files" };
+
+export interface WorkbenchRoute {
+  surface: WorkbenchSurfaceRoute;
+  inspector: WorkbenchInspectorRoute | null;
+  overlay: WorkbenchOverlayRoute | null;
+}
 
 export function parseWorkbenchRoute(
   pathname = "/",
@@ -47,105 +45,10 @@ export function parseWorkbenchRoute(
 ): WorkbenchRoute {
   const [pathOnly, inlineSearch = ""] = pathname.split("?", 2);
   const searchParams = new URLSearchParams(search || inlineSearch);
-  const file = parseFileRouteState(searchParams);
-  const skillSurface = parseSkillSurfaceRouteState(searchParams);
   const segments = routeSegments(pathOnly ?? "/", routeBasePath);
-  const [section, id, child, ...rest] = segments;
-
-  if (!section) {
-    return { kind: "skill", view: "overview", file: emptyFileRouteState() };
-  }
-  if (section === "files") {
-    return { kind: "skill", view: "files", file };
-  }
-  if (section === "manifest") {
-    return { kind: "skill", view: "manifest", file: emptyFileRouteState() };
-  }
-  if (section === "versions") {
-    if (!id) {
-      return { kind: "versions", view: "archive", ...skillSurface };
-    }
-    if (id === "lineage") {
-      return { kind: "versions", view: "lineage", ...skillSurface };
-    }
-    if (child === "files") {
-      return {
-        kind: "version",
-        versionId: id,
-        view: "files",
-        file: fileWithLegacyPath(file, rest),
-        ...skillSurface,
-      };
-    }
-    if (child === "runs") {
-      return { kind: "version", versionId: id, view: "runs", file: emptyFileRouteState(), ...skillSurface };
-    }
-    return { kind: "version", versionId: id, view: "overview", file: emptyFileRouteState(), ...skillSurface };
-  }
-  if (section === "execution") {
-    return { kind: "execution", view: executionViewFromSegment(id), ...skillSurface };
-  }
-  if (section === "runs") {
-    if (!id) {
-      return { kind: "execution", view: "runs", ...skillSurface };
-    }
-    return { kind: "run", runId: id, view: runViewFromSegment(child), ...skillSurface };
-  }
-  if (section === "jobs") {
-    if (!id) {
-      return { kind: "execution", view: "jobs", ...skillSurface };
-    }
-    return { kind: "job", jobId: id, view: jobViewFromSegment(child), ...skillSurface };
-  }
-  if (section === "traces") {
-    if (!id) {
-      return { kind: "execution", view: "traces", ...skillSurface };
-    }
-    if (child === "files") {
-      return {
-        kind: "trace",
-        traceId: id,
-        view: "files",
-        file: fileWithLegacyPath(file, rest),
-        ...skillSurface,
-      };
-    }
-    return { kind: "trace", traceId: id, view: traceViewFromSegment(child), file: emptyFileRouteState(), ...skillSurface };
-  }
-  if (section === "artifacts") {
-    if (!id) {
-      return { kind: "execution", view: "artifacts", ...skillSurface };
-    }
-    if (child === "files") {
-      return {
-        kind: "artifact",
-        artifactId: id,
-        view: "files",
-        file: fileWithLegacyPath(file, rest),
-        ...skillSurface,
-      };
-    }
-    return { kind: "artifact", artifactId: id, view: "overview", file: emptyFileRouteState(), ...skillSurface };
-  }
-  if (section === "configuration") {
-    return { kind: "configuration", view: id === "agents" ? "agents" : "skills", ...skillSurface };
-  }
-  if (section === "skills" && id) {
-    return { kind: "skill-source", skillName: id, ...skillSurface };
-  }
-  if (section === "agents" && id) {
-    return { kind: "agent", agentName: id, ...skillSurface };
-  }
-  if (section === "sync") {
-    return { kind: "sync", view: id === "remotes" ? "remotes" : "refs", ...skillSurface };
-  }
-  if (section === "refs") {
-    return { kind: "sync", view: "refs", ...skillSurface };
-  }
-  if (section === "remotes") {
-    return { kind: "sync", view: "remotes", ...skillSurface };
-  }
-  return { kind: "skill", view: "overview", file: emptyFileRouteState() };
+  const { surface, inspectorSegments } = parseSurfaceSegments(segments, searchParams);
+  const { inspector, overlay } = parseInspectorSegments(inspectorSegments);
+  return createWorkbenchRoute(surface, inspector, overlay);
 }
 
 export function parseWorkbenchLocation(
@@ -159,7 +62,7 @@ export function parseWorkbenchLocation(
   );
 }
 
-export function buildWorkbenchLocationHref(route: WorkbenchRoute = createSkillRoute(), routeBasePath = "/"): string {
+export function buildWorkbenchLocationHref(route: WorkbenchRoute = createScorecardRoute(), routeBasePath = "/"): string {
   const base = normalizedBasePath(routeBasePath);
   const path = routeParts(route).map(encodeURIComponent);
   const pathname = path.length === 0
@@ -169,132 +72,214 @@ export function buildWorkbenchLocationHref(route: WorkbenchRoute = createSkillRo
   return query ? `${pathname}?${query}` : pathname;
 }
 
-export function createSkillRoute(args: {
-  view?: SkillSurfaceView;
-  file?: Partial<WorkbenchFileRouteState>;
-} = {}): WorkbenchRoute {
-  return {
-    kind: "skill",
-    view: args.view ?? "overview",
-    file: normalizeFileRouteState(args.file),
-  };
-}
-
-export function routeHasDetail(route: WorkbenchRoute): boolean {
-  return route.kind !== "skill";
-}
-
-export function routeSkillSurfaceView(route: WorkbenchRoute): SkillSurfaceView {
-  if (route.kind === "skill") {
-    return route.view;
-  }
-  return route.skillView ?? "overview";
-}
-
-export function routeSkillSurfaceFile(route: WorkbenchRoute): WorkbenchFileRouteState {
-  if (route.kind === "skill") {
-    return route.view === "files" ? route.file : emptyFileRouteState();
-  }
-  return route.skillView === "files" ? normalizeFileRouteState(route.skillFile) : emptyFileRouteState();
-}
-
-export function withSkillSurface(
-  route: WorkbenchRoute,
-  skillSurface: {
-    skillView?: SkillSurfaceView;
-    skillFile?: Partial<WorkbenchFileRouteState>;
-  },
+export function createWorkbenchRoute(
+  surface: WorkbenchSurfaceRoute = { kind: "scorecard" },
+  inspector: WorkbenchInspectorRoute | null = null,
+  overlay: WorkbenchOverlayRoute | null = null,
 ): WorkbenchRoute {
-  const skillView = skillSurface.skillView ?? routeSkillSurfaceView(route);
-  const skillFile = skillView === "files"
-    ? normalizeFileRouteState(skillSurface.skillFile ?? routeSkillSurfaceFile(route))
-    : emptyFileRouteState();
-  if (route.kind === "skill") {
-    return createSkillRoute({ view: skillView, file: skillFile });
-  }
+  const normalizedInspector = inspector ?? null;
   return {
-    ...route,
-    skillView,
-    skillFile: skillView === "files" ? skillFile : undefined,
+    surface: normalizeSurfaceRoute(surface),
+    inspector: normalizedInspector,
+    overlay: normalizeOverlayRoute(normalizedInspector, overlay),
   };
 }
 
-export function fileOwnerForRoute(route: WorkbenchRoute): { ownerKind: WorkbenchFileOwnerKind; ownerId: string; file: WorkbenchFileRouteState } | null {
-  if (route.kind === "version" && route.view === "files") {
-    return { ownerKind: "version", ownerId: route.versionId, file: route.file };
+export function createScorecardRoute(
+  inspector: WorkbenchInspectorRoute | null = null,
+  overlay: WorkbenchOverlayRoute | null = null,
+): WorkbenchRoute {
+  return createWorkbenchRoute({ kind: "scorecard" }, inspector, overlay);
+}
+
+export function createVersionsRoute(args: {
+  view?: VersionsView;
+  inspector?: WorkbenchInspectorRoute | null;
+  overlay?: WorkbenchOverlayRoute | null;
+} = {}): WorkbenchRoute {
+  return createWorkbenchRoute(
+    { kind: "versions", view: args.view ?? "list" },
+    args.inspector ?? null,
+    args.overlay ?? null,
+  );
+}
+
+export function createFilesRoute(args: {
+  file?: Partial<WorkbenchFileRouteState>;
+  inspector?: WorkbenchInspectorRoute | null;
+  overlay?: WorkbenchOverlayRoute | null;
+} = {}): WorkbenchRoute {
+  return createWorkbenchRoute(
+    { kind: "files", file: normalizeFileRouteState(args.file) },
+    args.inspector ?? null,
+    args.overlay ?? null,
+  );
+}
+
+export function routeSurface(route: WorkbenchRoute): WorkbenchSurfaceRoute {
+  return route.surface;
+}
+
+export function routeInspector(route: WorkbenchRoute): WorkbenchInspectorRoute | null {
+  return route.inspector;
+}
+
+export function routeOverlay(route: WorkbenchRoute): WorkbenchOverlayRoute | null {
+  return route.overlay;
+}
+
+export function withSurface(route: WorkbenchRoute, surface: WorkbenchSurfaceRoute): WorkbenchRoute {
+  return createWorkbenchRoute(surface, route.inspector, route.overlay);
+}
+
+export function withInspector(route: WorkbenchRoute, inspector: WorkbenchInspectorRoute | null): WorkbenchRoute {
+  return createWorkbenchRoute(route.surface, inspector);
+}
+
+export function withoutInspector(route: WorkbenchRoute): WorkbenchRoute {
+  return createWorkbenchRoute(route.surface);
+}
+
+export function withOverlay(route: WorkbenchRoute, overlay: WorkbenchOverlayRoute | null): WorkbenchRoute {
+  return createWorkbenchRoute(route.surface, route.inspector, overlay);
+}
+
+export function withCaseView(route: WorkbenchRoute, view: WorkbenchCaseView): WorkbenchRoute {
+  const inspector = route.inspector;
+  if (inspector?.kind !== "job") {
+    return route;
   }
-  if (route.kind === "trace" && route.view === "files") {
-    return { ownerKind: "trace", ownerId: route.traceId, file: route.file };
-  }
-  if (route.kind === "artifact" && route.view === "files") {
-    return { ownerKind: "artifact", ownerId: route.artifactId, file: route.file };
-  }
-  return null;
+  return withInspector(route, view === "output"
+    ? { kind: "job", jobId: inspector.jobId }
+    : { kind: "job", jobId: inspector.jobId, view });
+}
+
+export function routeCaseView(route: WorkbenchRoute): WorkbenchCaseView {
+  return route.inspector?.kind === "job" ? route.inspector.view ?? "output" : "output";
 }
 
 export function withFileRouteState(route: WorkbenchRoute, file: Partial<WorkbenchFileRouteState>): WorkbenchRoute {
-  const nextFile = normalizeFileRouteState(file);
-  if (route.kind === "skill" && route.view === "files") {
-    return { ...route, file: nextFile };
-  }
-  if (route.kind === "version" && route.view === "files") {
-    return { ...route, file: nextFile };
-  }
-  if (route.kind === "trace" && route.view === "files") {
-    return { ...route, file: nextFile };
-  }
-  if (route.kind === "artifact" && route.view === "files") {
-    return { ...route, file: nextFile };
+  if (route.surface.kind === "files") {
+    return withSurface(route, { kind: "files", file: normalizeFileRouteState(file) });
   }
   return route;
 }
 
+function parseSurfaceSegments(
+  segments: string[],
+  searchParams: URLSearchParams,
+): { surface: WorkbenchSurfaceRoute; inspectorSegments: string[] } {
+  const [section, id] = segments;
+  if (!section) {
+    return { surface: { kind: "scorecard" }, inspectorSegments: [] };
+  }
+  if (section === "versions") {
+    if (id === "graph") {
+      return { surface: { kind: "versions", view: "graph" }, inspectorSegments: segments.slice(2) };
+    }
+    // "/versions/<id>" inspects a version; "/versions/runs/<id>" etc. carry other inspectors.
+    const inspectorSegments = id === "runs" || id === "jobs" || id === "skills"
+      ? segments.slice(1)
+      : segments;
+    return { surface: { kind: "versions", view: "list" }, inspectorSegments };
+  }
+  if (section === "files") {
+    return {
+      surface: { kind: "files", file: parseFileRouteState(searchParams) },
+      inspectorSegments: segments.slice(1),
+    };
+  }
+  if (section === "runs" || section === "jobs" || section === "skills") {
+    return { surface: { kind: "scorecard" }, inspectorSegments: segments };
+  }
+  return { surface: { kind: "scorecard" }, inspectorSegments: [] };
+}
+
+function parseInspectorSegments(segments: string[]): {
+  inspector: WorkbenchInspectorRoute | null;
+  overlay: WorkbenchOverlayRoute | null;
+} {
+  const [section, id, ...rest] = segments;
+  if (!section || !id) {
+    return { inspector: null, overlay: null };
+  }
+  if (section === "versions") {
+    return {
+      inspector: { kind: "version", versionId: id },
+      overlay: rest.length === 1 && rest[0] === "files" ? { kind: "version-files" } : null,
+    };
+  }
+  if (section === "runs") {
+    return rest.length === 0
+      ? { inspector: { kind: "run", runId: id }, overlay: null }
+      : { inspector: null, overlay: null };
+  }
+  if (section === "jobs") {
+    if (rest.length === 0) {
+      return { inspector: { kind: "job", jobId: id }, overlay: null };
+    }
+    if (rest.length === 1 && rest[0] === "timeline") {
+      return { inspector: { kind: "job", jobId: id, view: "timeline" }, overlay: null };
+    }
+    return { inspector: null, overlay: null };
+  }
+  if (section === "skills") {
+    return rest.length === 0
+      ? { inspector: { kind: "skill-source", skillName: id }, overlay: null }
+      : { inspector: null, overlay: null };
+  }
+  return { inspector: null, overlay: null };
+}
+
 function routeParts(route: WorkbenchRoute): string[] {
-  switch (route.kind) {
-    case "skill":
-      return route.view === "files" ? ["files"] : route.view === "manifest" ? ["manifest"] : [];
-    case "versions":
-      return route.view === "lineage" ? ["versions", "lineage"] : ["versions"];
+  const surfaceParts = surfaceRouteParts(route.surface);
+  const inspector = route.inspector;
+  if (!inspector) {
+    return surfaceParts;
+  }
+  const inspectorParts = inspectorRouteParts(inspector);
+  const paneParts = surfaceParts.at(-1) === inspectorParts[0]
+    ? [...surfaceParts, ...inspectorParts.slice(1)]
+    : [...surfaceParts, ...inspectorParts];
+  return route.overlay ? [...paneParts, ...overlayRouteParts(route.overlay)] : paneParts;
+}
+
+function surfaceRouteParts(surface: WorkbenchSurfaceRoute): string[] {
+  if (surface.kind === "scorecard") {
+    return [];
+  }
+  if (surface.kind === "versions") {
+    return surface.view === "graph" ? ["versions", "graph"] : ["versions"];
+  }
+  return ["files"];
+}
+
+function inspectorRouteParts(inspector: WorkbenchInspectorRoute): string[] {
+  switch (inspector.kind) {
     case "version":
-      return route.view === "files"
-        ? ["versions", route.versionId, "files"]
-        : route.view === "runs"
-          ? ["versions", route.versionId, "runs"]
-          : ["versions", route.versionId];
-    case "execution":
-      return route.view === "runs" ? ["runs"] : [route.view];
+      return ["versions", inspector.versionId];
     case "run":
-      return route.view === "overview" ? ["runs", route.runId] : ["runs", route.runId, route.view];
+      return ["runs", inspector.runId];
     case "job":
-      return route.view === "overview" ? ["jobs", route.jobId] : ["jobs", route.jobId, route.view];
-    case "trace":
-      return route.view === "overview" ? ["traces", route.traceId] : ["traces", route.traceId, route.view];
-    case "artifact":
-      return route.view === "overview" ? ["artifacts", route.artifactId] : ["artifacts", route.artifactId, route.view];
-    case "configuration":
-      return route.view === "agents" ? ["configuration", "agents"] : ["configuration"];
+      return inspector.view
+        ? ["jobs", inspector.jobId, inspector.view]
+        : ["jobs", inspector.jobId];
     case "skill-source":
-      return ["skills", route.skillName];
-    case "agent":
-      return ["agents", route.agentName];
-    case "sync":
-      return route.view === "remotes" ? ["sync", "remotes"] : ["sync"];
+      return ["skills", inspector.skillName];
+  }
+}
+
+function overlayRouteParts(overlay: WorkbenchOverlayRoute): string[] {
+  switch (overlay.kind) {
+    case "version-files":
+      return ["files"];
   }
 }
 
 function routeQuery(route: WorkbenchRoute): URLSearchParams {
   const params = new URLSearchParams();
-  if (route.kind === "skill" && route.view === "files") {
-    appendFileRouteParams(params, route.file);
-  } else {
-    appendSkillSurfaceRouteParams(params, route);
-  }
-  if (route.kind === "version" && route.view === "files") {
-    appendFileRouteParams(params, route.file);
-  } else if (route.kind === "trace" && route.view === "files") {
-    appendFileRouteParams(params, route.file);
-  } else if (route.kind === "artifact" && route.view === "files") {
-    appendFileRouteParams(params, route.file);
+  if (route.surface.kind === "files") {
+    appendFileRouteParams(params, route.surface.file);
   }
   return params;
 }
@@ -311,36 +296,6 @@ function appendFileRouteParams(params: URLSearchParams, file: WorkbenchFileRoute
   }
 }
 
-function appendSkillSurfaceRouteParams(params: URLSearchParams, route: WorkbenchRoute): void {
-  if (route.kind === "skill") {
-    return;
-  }
-  const skillView = route.skillView ?? "overview";
-  if (skillView === "overview") {
-    return;
-  }
-  params.set("skill", skillView);
-  if (skillView === "files") {
-    appendPrefixedFileRouteParams(params, "skill", normalizeFileRouteState(route.skillFile));
-  }
-}
-
-function appendPrefixedFileRouteParams(
-  params: URLSearchParams,
-  prefix: string,
-  file: WorkbenchFileRouteState,
-): void {
-  if (file.filePath) {
-    params.set(`${prefix}File`, file.filePath);
-  }
-  if (file.directoryPath) {
-    params.set(`${prefix}Dir`, file.directoryPath);
-  }
-  if (file.previewMode !== "rendered") {
-    params.set(`${prefix}Preview`, file.previewMode);
-  }
-}
-
 function parseFileRouteState(searchParams: URLSearchParams): WorkbenchFileRouteState {
   const previewMode = searchParams.get("view");
   return {
@@ -350,28 +305,21 @@ function parseFileRouteState(searchParams: URLSearchParams): WorkbenchFileRouteS
   };
 }
 
-function parseSkillSurfaceRouteState(searchParams: URLSearchParams): WorkbenchSkillSurfaceRouteState {
-  const rawView = searchParams.get("skill");
-  if (!rawView) {
-    return {};
+function normalizeSurfaceRoute(surface: WorkbenchSurfaceRoute): WorkbenchSurfaceRoute {
+  if (surface.kind === "files") {
+    return { kind: "files", file: normalizeFileRouteState(surface.file) };
   }
-  const skillView = rawView === "manifest" ? "manifest" : rawView === "files" ? "files" : "overview";
-  return {
-    skillView,
-    skillFile: skillView === "files" ? parsePrefixedFileRouteState(searchParams, "skill") : undefined,
-  };
+  return surface;
 }
 
-function parsePrefixedFileRouteState(
-  searchParams: URLSearchParams,
-  prefix: string,
-): WorkbenchFileRouteState {
-  const previewMode = searchParams.get(`${prefix}Preview`);
-  return {
-    filePath: normalizeRouteSelection(searchParams.get(`${prefix}File`)),
-    directoryPath: normalizeRouteSelection(searchParams.get(`${prefix}Dir`)),
-    previewMode: isSnapshotPreviewMode(previewMode) ? previewMode : "rendered",
-  };
+function normalizeOverlayRoute(
+  inspector: WorkbenchInspectorRoute | null,
+  overlay: WorkbenchOverlayRoute | null | undefined,
+): WorkbenchOverlayRoute | null {
+  if (!inspector || !overlay) {
+    return null;
+  }
+  return inspector.kind === "version" ? overlay : null;
 }
 
 function normalizeFileRouteState(file: Partial<WorkbenchFileRouteState> | undefined): WorkbenchFileRouteState {
@@ -380,45 +328,6 @@ function normalizeFileRouteState(file: Partial<WorkbenchFileRouteState> | undefi
     directoryPath: file?.directoryPath ?? null,
     previewMode: file?.previewMode ?? "rendered",
   };
-}
-
-function emptyFileRouteState(): WorkbenchFileRouteState {
-  return { filePath: null, directoryPath: null, previewMode: "rendered" };
-}
-
-function fileWithLegacyPath(file: WorkbenchFileRouteState, rest: readonly string[]): WorkbenchFileRouteState {
-  if (file.filePath || rest.length === 0) {
-    return file;
-  }
-  return { ...file, filePath: rest.join("/") };
-}
-
-function executionViewFromSegment(segment: string | undefined): ExecutionIndexView {
-  if (segment === "jobs" || segment === "traces" || segment === "artifacts") {
-    return segment;
-  }
-  return "runs";
-}
-
-function runViewFromSegment(segment: string | undefined): RunView {
-  if (segment === "jobs" || segment === "traces" || segment === "artifacts") {
-    return segment;
-  }
-  return "overview";
-}
-
-function jobViewFromSegment(segment: string | undefined): JobView {
-  if (segment === "trace" || segment === "artifacts") {
-    return segment;
-  }
-  return "overview";
-}
-
-function traceViewFromSegment(segment: string | undefined): TraceView {
-  if (segment === "files" || segment === "payload") {
-    return segment;
-  }
-  return "overview";
 }
 
 function routeSegments(pathname: string, routeBasePath: string): string[] {

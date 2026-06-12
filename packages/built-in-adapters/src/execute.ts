@@ -12,20 +12,21 @@ import type {
   WorkbenchSkillPatch,
 } from "@workbench-ai/workbench-contract";
 import {
+  createWorkbenchExecutionEventPublisher,
   jsonRecord,
   normalizeRelativePath,
+  publishCommandStepEvent,
   readSurfaceFiles,
   writeSurfaceFiles,
+  type WorkbenchExecutionEventPublisher,
 } from "@workbench-ai/workbench-core";
 import {
   ensureWorkbenchAdapterOutputDir,
   readWorkbenchAdapterOperationResult,
   readWorkbenchAdapterOperationRequest,
-  runWorkbenchRuntimeOperationSequence,
   writeWorkbenchAdapterOperationResult,
   workbenchAdapterOperationResultPath,
   type WorkbenchAdapterOperationRequest,
-  type WorkbenchRuntimeControlOperationSequenceResult,
   type WorkbenchEngineCase,
 } from "@workbench-ai/workbench-protocol";
 import YAML from "yaml";
@@ -38,7 +39,6 @@ import type {
 } from "./agent-turn.ts";
 import {
   isWorkbenchBuiltInAdapterId,
-  adapterCommandName,
   type WorkbenchBuiltInAdapterId,
 } from "./manifests.ts";
 import { importWorkbenchRuntime } from "./runtime.ts";
@@ -56,7 +56,9 @@ export interface ExecuteWorkbenchBuiltInAdapterCommandOptions {
 type AgentExecutionOptions = Pick<
   ExecuteWorkbenchBuiltInAdapterCommandOptions,
   "agentExecutor" | "adapterAuthRoot" | "adapterAuthRequest" | "adapterAuthEnv"
->;
+> & {
+  eventPublisher?: WorkbenchExecutionEventPublisher;
+};
 type AdapterRequestHandler = (request: WorkbenchAdapterOperationRequest) => Promise<void>;
 
 const DIRECT_ADAPTER_HANDLERS: Partial<Record<WorkbenchBuiltInAdapterId, AdapterRequestHandler>> = {
@@ -128,10 +130,18 @@ export async function executeWorkbenchBuiltInAdapterCommand(
     adapterAuthRoot: args.adapterAuthRoot,
     adapterAuthRequest: args.adapterAuthRequest ?? request.auth,
     adapterAuthEnv: args.adapterAuthEnv,
+    eventPublisher: eventPublisherForAdapterRequest(request),
   };
   const directHandler = DIRECT_ADAPTER_HANDLERS[adapterId];
   if (directHandler) {
-    await directHandler(request);
+    await publishDirectAdapterStep(agentOptions.eventPublisher, adapterId, request, "started");
+    try {
+      await directHandler(request);
+      await publishDirectAdapterStep(agentOptions.eventPublisher, adapterId, request, "succeeded");
+    } catch (error) {
+      await publishDirectAdapterStep(agentOptions.eventPublisher, adapterId, request, "failed", error);
+      throw error;
+    }
     return;
   }
   if (adapterId === "rubric") {
@@ -159,6 +169,33 @@ export async function executeWorkbenchBuiltInAdapterCommand(
     }
     throw new Error(`Agent adapter ${adapterId} cannot handle ${request.operation}.`);
   }
+}
+
+async function publishDirectAdapterStep(
+  publisher: WorkbenchExecutionEventPublisher | undefined,
+  adapterId: WorkbenchBuiltInAdapterId,
+  request: WorkbenchAdapterOperationRequest,
+  status: "started" | "succeeded" | "failed",
+  error?: unknown,
+): Promise<void> {
+  await publishCommandStepEvent(publisher, {
+    step: `${adapterId}.${request.operation}`,
+    status,
+    role: directAdapterProgressRole(request.operation),
+    ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+  });
+}
+
+function directAdapterProgressRole(
+  operation: WorkbenchAdapterOperationRequest["operation"],
+): "runner" | "improver" | "engine" {
+  if (operation === "skill.run") {
+    return "runner";
+  }
+  if (operation === "skill.improve") {
+    return "improver";
+  }
+  return "engine";
 }
 
 async function executeWorkbenchEngineRequest(
@@ -201,50 +238,8 @@ async function executeWorkbenchEngineResolveRequest(
 async function executeWorkbenchEngineRunRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
-  const outcome = await workbenchEngineGradingIsolation(request) === "separate"
-    ? await runWorkbenchEngineSeparateGrading(request)
-    : await runWorkbenchEngineSharedGrading(request);
-  if (!outcome.result) {
-    throw new Error("Workbench engine scoring completed without an engine result.");
-  }
-  await writeSurfaceFiles(
-    request.paths.output,
-    outcome.files.map((file) => remapRuntimeControlTraceFile(request, file)),
-  );
-  const usage = await workbenchEngineOutcomeUsage(outcome);
-  await writeWorkbenchAdapterOperationResult(request.paths.output, {
-    protocol: "workbench.adapter-result.v1",
-    operation: "engine.run",
-    ok: true,
-    value: outcome.result,
-    ...(usage ? { usage } : {}),
-    ...(outcome.summary !== undefined ? { summary: outcome.summary } : {}),
-    ...(outcome.feedback !== undefined ? { feedback: outcome.feedback } : {}),
-  });
-}
-
-async function workbenchEngineOutcomeUsage(
-  outcome: WorkbenchRuntimeControlOperationSequenceResult,
-): Promise<UsageSummary | undefined> {
-  const runtime = await importWorkbenchRuntime();
-  const operationUsage = outcome.usage
-    ? undefined
-    : runtime.mergeUsageSummaries(
-      outcome.operationResults.map((result) => {
-        if (result.operation === "skill.run") {
-          return runtime.assignUsageRole("runner", result.usage);
-        }
-        if (result.operation === "engine.run") {
-          return runtime.assignUsageRole("engine", result.usage);
-        }
-        return result.usage;
-      }),
-    );
-  const runtimeUsage = runtime.mergeUsageSummaries([outcome.usage, operationUsage]);
-  const resultUsage = runtimeUsage?.engine
-    ? undefined
-    : runtime.assignUsageRole("engine", outcome.result?.usage);
-  return runtime.mergeUsageSummaries([runtimeUsage, resultUsage]);
+  void request;
+  throw new Error("Workbench engine.run is no longer an orchestration adapter. Run the selected skill in core and invoke the score adapter directly.");
 }
 
 function workbenchEngineCasesPath(request: WorkbenchAdapterOperationRequest): string {
@@ -260,172 +255,6 @@ function workbenchEngineCasesPath(request: WorkbenchAdapterOperationRequest): st
   throw new Error("Workbench engine cases must be an object with path.");
 }
 
-interface NestedAdapterInvocation {
-  use: string;
-  with: Json;
-  auth?: Json;
-  command: string;
-}
-
-function workbenchEngineScoreInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
-  const score = jsonRecord(adapterCommandConfigRecord(request).score);
-  if (!score || typeof score.use !== "string" || score.use.length === 0) {
-    throw new Error("Workbench engine requires invocation.with.score.use.");
-  }
-  return {
-    use: score.use,
-    with: (score.with ?? {}) as Json,
-    ...(score.auth !== undefined ? { auth: score.auth as Json } : {}),
-    command: typeof score.command === "string" && score.command.length > 0
-      ? score.command
-      : adapterCommandName(score.use),
-  };
-}
-
-function workbenchEngineSkillInvocation(request: WorkbenchAdapterOperationRequest): NestedAdapterInvocation {
-  const skill = request.context?.skill?.run;
-  if (!skill?.use || !skill.command) {
-    throw new Error("Workbench engine requires context.skill.run.use and context.skill.run.command.");
-  }
-  return {
-    use: skill.use,
-    with: (skill.with ?? {}) as Json,
-    ...(skill.auth !== undefined ? { auth: skill.auth as Json } : {}),
-    command: skill.command,
-  };
-}
-
-type WorkbenchEngineGradingIsolation = "shared" | "separate";
-
-async function workbenchEngineGradingIsolation(
-  request: WorkbenchAdapterOperationRequest,
-): Promise<WorkbenchEngineGradingIsolation> {
-  const grading = jsonRecord(adapterCommandConfigRecord(request).grading);
-  const isolation = grading?.isolation;
-  if (
-    isolation !== undefined &&
-    isolation !== "shared" &&
-    isolation !== "separate"
-  ) {
-    throw new Error("Workbench engine grading.isolation must be shared or separate.");
-  }
-  if (await workbenchEnginePrivateFilesPresent(request)) {
-    return "separate";
-  }
-  return isolation ?? "shared";
-}
-
-async function workbenchEnginePrivateFilesPresent(
-  request: WorkbenchAdapterOperationRequest,
-): Promise<boolean> {
-  if (!request.paths.enginePrivate) {
-    return false;
-  }
-  const files = await readOptionalSurfaceFiles(request.paths.enginePrivate);
-  return files.length > 0;
-}
-
-async function runWorkbenchEngineSharedGrading(
-  request: WorkbenchAdapterOperationRequest,
-): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
-  const inputs = await workbenchEngineRuntimeInputs(request);
-  const skill = workbenchEngineSkillInvocation(request);
-  const score = workbenchEngineScoreInvocation(request);
-  const result = await runWorkbenchRuntimeOperationSequence({
-    inputs,
-    prepare: true,
-    operations: [
-      { label: "skill", operation: "skill.run", invocation: skill },
-      { label: "score", operation: "engine.run", invocation: score },
-    ],
-  });
-  assertRuntimeControlResultOk(result, "Workbench shared grading");
-  return result;
-}
-
-async function runWorkbenchEngineSeparateGrading(
-  request: WorkbenchAdapterOperationRequest,
-): Promise<WorkbenchRuntimeControlOperationSequenceResult> {
-  const inputs = await workbenchEngineRuntimeInputs(request);
-  const skill = workbenchEngineSkillInvocation(request);
-  const score = workbenchEngineScoreInvocation(request);
-  const runtime = await importWorkbenchRuntime();
-  const runner = await runWorkbenchRuntimeOperationSequence({
-    inputs: {
-      skill: inputs.skill,
-      case: inputs.case,
-      traces: inputs.traces,
-    },
-    prepare: true,
-    collectWorkspace: true,
-    operations: [
-      { label: "skill", operation: "skill.run", invocation: skill },
-    ],
-  });
-  assertRuntimeControlResultOk(runner, "Workbench separate runner");
-  const grader = await runWorkbenchRuntimeOperationSequence({
-    inputs: {
-      skill: inputs.skill,
-      case: inputs.case,
-      enginePrivate: inputs.enginePrivate,
-      traces: inputs.traces,
-      workspace: runner.workspaceFiles ?? [],
-      output: runner.files.filter((file) => !runtime.isWorkbenchInternalOutputPath(file.path)),
-    },
-    prepare: false,
-    operations: [
-      { label: "score", operation: "engine.run", invocation: score },
-    ],
-  });
-  assertRuntimeControlResultOk(grader, "Workbench separate grader");
-  return {
-    ...grader,
-    files: dedupeSurfaceFiles([...runner.files, ...grader.files]),
-    fileChanges: [...new Set([...runner.fileChanges, ...grader.fileChanges])].sort(),
-    usage: runtime.mergeUsageSummaries([runner.usage, grader.usage]),
-    operationResults: [...runner.operationResults, ...grader.operationResults],
-  };
-}
-
-async function workbenchEngineRuntimeInputs(
-  request: WorkbenchAdapterOperationRequest,
-): Promise<NonNullable<Parameters<typeof runWorkbenchRuntimeOperationSequence>[0]["inputs"]>> {
-  const [skill, caseFiles, enginePrivate, traces] = await Promise.all([
-    readOptionalSurfaceFiles(request.paths.skills ?? request.paths.skill),
-    readOptionalSurfaceFiles(request.paths.case),
-    readOptionalSurfaceFiles(request.paths.enginePrivate),
-    readOptionalSurfaceFiles(request.paths.traces),
-  ]);
-  return {
-    skill,
-    case: caseFiles,
-    enginePrivate,
-    traces,
-  };
-}
-
-async function readOptionalSurfaceFiles(root: string | undefined): Promise<SurfaceSnapshotFile[]> {
-  if (!root) {
-    return [];
-  }
-  return await readSurfaceFiles(root).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  });
-}
-
-function assertRuntimeControlResultOk(
-  result: WorkbenchRuntimeControlOperationSequenceResult,
-  label: string,
-): void {
-  if (result.ok) {
-    return;
-  }
-  throw new Error(`${label} failed${result.error ? `: ${result.error}` : "."}`);
-}
-
 function dedupeSurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
   const byPath = new Map<string, SurfaceSnapshotFile>();
   for (const file of files) {
@@ -438,29 +267,6 @@ function dedupeSurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnaps
   return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function remapRuntimeControlTraceFile(
-  request: WorkbenchAdapterOperationRequest,
-  file: SurfaceSnapshotFile,
-): SurfaceSnapshotFile {
-  const normalized = normalizeRelativePath(file.path);
-  if (!normalized.startsWith(".workbench/traces/")) {
-    return { ...file, path: normalized };
-  }
-  const segments = normalized.split("/");
-  const rest = segments.length >= 6
-    ? segments.slice(5)
-    : segments.length >= 3
-      ? segments.slice(3)
-      : [];
-  if (rest.length === 0) {
-    return { ...file, path: normalized };
-  }
-  return {
-    ...file,
-    path: `.workbench/traces/${request.jobId ?? request.id}/${rest.join("/")}`,
-  };
-}
-
 function safeInternalPathSegment(value: string): string {
   const safe = value.replace(/[^a-z0-9._-]+/giu, "_").replace(/^_+|_+$/gu, "");
   return safe || "nested";
@@ -470,6 +276,7 @@ async function executeCommandAdapterRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   const command = requiredAdapterCommandString(request, "command");
+  await ensureRunSkillDirectories(request);
   const before = request.operation === "skill.improve"
     ? await snapshotEditableSkillWorkspace(request)
     : null;
@@ -510,6 +317,7 @@ async function executeTestsEngineRequest(
   if (request.operation !== "engine.run") {
     throw new Error(`Tests adapter cannot handle ${request.operation}.`);
   }
+  await ensureRunSkillDirectories(request);
   const testsRoot = requiredRequestPath(request.paths.enginePrivate, "paths.enginePrivate");
   const verifierRoot = testsVerifierOutputDir(request.paths.output);
   await fs.rm(verifierRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -517,8 +325,6 @@ async function executeTestsEngineRequest(
   const script = await firstExistingFile([
     path.join(testsRoot, "test.sh"),
     path.join(testsRoot, "run.sh"),
-    path.join(testsRoot, "tests", "test.sh"),
-    path.join(testsRoot, "tests", "run.sh"),
   ]);
   if (!script) {
     throw new Error(`Tests engine requires ${path.join(testsRoot, "test.sh")}.`);
@@ -529,6 +335,7 @@ async function executeTestsEngineRequest(
     CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
     OUTPUT_DIR: request.paths.output,
     WORKBENCH_TESTS_VERIFIER_DIR: verifierRoot,
+    WORKBENCH_CASE_ID: request.context?.attempt?.caseId ?? "current",
   });
   const result = await readTestsResult({
     verifierRoot,
@@ -589,7 +396,18 @@ function commandAdapterEnvironment(request: WorkbenchAdapterOperationRequest): R
     TRACE_DIR: request.paths.traces ?? path.join(request.paths.workspace, "input", "traces"),
     OUTPUT_DIR: request.paths.output,
     WORKBENCH_SKILL_PATCH: commandSkillPatchPath(request),
+    WORKBENCH_CASE_ID: request.context?.attempt?.caseId ?? "current",
   };
+}
+
+async function ensureRunSkillDirectories(request: WorkbenchAdapterOperationRequest): Promise<void> {
+  if (request.operation === "skill.improve") {
+    return;
+  }
+  await Promise.all([
+    request.paths.skills ? fs.mkdir(request.paths.skills, { recursive: true }) : Promise.resolve(),
+    request.paths.skill ? fs.mkdir(request.paths.skill, { recursive: true }) : Promise.resolve(),
+  ]);
 }
 
 function commandSkillPatchPath(request: WorkbenchAdapterOperationRequest): string {
@@ -602,17 +420,33 @@ async function readSkillPatchFile(filePath: string): Promise<WorkbenchSkillPatch
   }
   const record = jsonRecord(JSON.parse(await fs.readFile(filePath, "utf8")) as unknown);
   const rawFiles: unknown[] = Array.isArray(record.files) ? record.files : [];
-  const files: SurfaceSnapshotFile[] = rawFiles.flatMap((entry) => {
+  const files: SurfaceSnapshotFile[] = rawFiles.map((entry, index) => {
     if (!isPatchSurfaceSnapshotFile(entry)) {
-      return [];
+      throw new Error(
+        `Skill patch file ${filePath} files[${index}] must be an object with string path and content fields, got: ${
+          describePatchEntry(entry)
+        }.`,
+      );
     }
-    return [{
+    return {
       ...entry,
       path: normalizeRelativePath(entry.path),
-    }];
+    };
   });
+  if (record.fileChanges !== undefined && !Array.isArray(record.fileChanges)) {
+    throw new Error(`Skill patch file ${filePath} fileChanges must be an array of strings when provided.`);
+  }
   const fileChanges = Array.isArray(record.fileChanges)
-    ? record.fileChanges.flatMap((entry) => typeof entry === "string" ? [normalizeRelativePath(entry)] : [])
+    ? record.fileChanges.map((entry, index) => {
+        if (typeof entry !== "string") {
+          throw new Error(
+            `Skill patch file ${filePath} fileChanges[${index}] must be a string path, got: ${
+              describePatchEntry(entry)
+            }.`,
+          );
+        }
+        return normalizeRelativePath(entry);
+      })
     : files.map((file) => file.path);
   return {
     files,
@@ -620,6 +454,21 @@ async function readSkillPatchFile(filePath: string): Promise<WorkbenchSkillPatch
     ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
     ...(record.feedback !== undefined ? { feedback: record.feedback as Json } : {}),
   };
+}
+
+function describePatchEntry(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  if (Array.isArray(value)) {
+    return "an array";
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record);
+    return `an object with key${keys.length === 1 ? "" : "s"} [${keys.join(", ")}]`;
+  }
+  return `a ${typeof value}`;
 }
 
 function isPatchSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
@@ -872,10 +721,11 @@ async function readTestsResult(args: {
     }
     return normalizeTestsResult({ reward: score }, args.caseId);
   }
-  return normalizeTestsResult({
-    score: 1,
-    summary: "Tests passed.",
-  }, args.caseId);
+  throw new Error(
+    "Tests engine did not find reward.json or reward.txt under its verifier output directory " +
+      `(${args.verifierRoot}). The tests script must write a reward to ` +
+      "$WORKBENCH_TESTS_VERIFIER_DIR/reward.json or $WORKBENCH_TESTS_VERIFIER_DIR/reward.txt.",
+  );
 }
 
 function testsVerifierOutputDir(outputRoot: string): string {
@@ -1056,6 +906,22 @@ function requiredAdapterCommandString(
   return value;
 }
 
+function eventPublisherForAdapterRequest(
+  request: WorkbenchAdapterOperationRequest,
+): WorkbenchExecutionEventPublisher | undefined {
+  if (!request.progress) {
+    return undefined;
+  }
+  return createWorkbenchExecutionEventPublisher({
+    projectId: request.progress.projectId,
+    runId: request.progress.runId,
+    jobId: request.progress.jobId,
+    executionId: request.progress.executionId,
+    attempt: request.progress.attempt,
+    target: request.progress.target,
+  });
+}
+
 async function executeBuiltInAgentTurn(
   executor: WorkbenchAgentTurnExecutor | undefined,
   request: WorkbenchAgentTurnRequest,
@@ -1088,6 +954,7 @@ async function writeAgentSkillOutput(
     prompt: buildAgentSkillPrompt(workload, adapter),
     traceRoot,
     jobId: workload.job.id,
+    eventPublisher: options.eventPublisher,
   });
   const outputPath = path.join(request.paths.output, "skill-summary.md");
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
@@ -1166,6 +1033,7 @@ async function writeAgentSkillRevisionOutput(
       prompt: buildAgentImproverPrompt(workload),
       traceRoot,
       jobId: workload.job.id,
+      eventPublisher: options.eventPublisher,
     });
     const skillPatch = await createSkillPatchFromWorkspace({
       beforeRoot: before.root,
@@ -1257,6 +1125,7 @@ async function writeRubricJudgeResult(
       adapterAuthRequest: options.adapterAuthRequest,
       adapterAuthEnv: options.adapterAuthEnv,
       runtime,
+      eventPublisher: options.eventPublisher,
     }),
   );
   const usage = runtime.mergeUsageSummaries(criterionRuns.map((run) => run.usage));
@@ -1414,6 +1283,7 @@ async function runRubricCriterionJudge(args: AgentExecutionOptions & {
     traceRoot: path.join(traceRoot, "judge"),
     tracePath,
     jobId: args.workload.job.id,
+    eventPublisher: args.eventPublisher,
   });
   let usage = args.runtime.assignUsageRole("engine", agentResult.usage);
   try {
@@ -1442,6 +1312,7 @@ async function runRubricCriterionJudge(args: AgentExecutionOptions & {
       traceRoot: path.join(traceRoot, "repair"),
       tracePath: repairTracePath,
       jobId: args.workload.job.id,
+      eventPublisher: args.eventPublisher,
     });
     usage = args.runtime.mergeUsageSummaries([
       usage,

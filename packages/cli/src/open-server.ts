@@ -4,7 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  createWorkbenchInspectionSnapshot,
+  createWorkbenchReadOnlyInspectionSnapshot,
+  workbenchJobEvidenceForSnapshot,
   workbenchInspectionFileContent,
   workbenchInspectionFileManifest,
   WorkbenchUserError,
@@ -34,7 +35,7 @@ export async function startWorkbenchOpenServer(
 ): Promise<StartedWorkbenchOpenServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 0;
-  const assetRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "dev-open");
+  const assetRoot = await resolveDevOpenAssetRoot();
   const server = createServer((request, response) => {
     void handleRequest({ request, response, assetRoot, dir: options.dir, authToken: options.authToken });
   });
@@ -64,6 +65,23 @@ export async function startWorkbenchOpenServer(
   };
 }
 
+async function resolveDevOpenAssetRoot(): Promise<string> {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(moduleDir, "dev-open"),
+    path.join(moduleDir, "..", "dist", "dev-open"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      await fs.access(path.join(candidate, "client.js"));
+      return candidate;
+    } catch {
+      // Try the next source/build layout.
+    }
+  }
+  return candidates[0]!;
+}
+
 async function handleRequest({
   request,
   response,
@@ -80,13 +98,32 @@ async function handleRequest({
   try {
     const url = new URL(request.url ?? "/", "http://workbench.local");
     if (url.pathname === "/api/snapshot") {
-      const snapshot = await createWorkbenchInspectionSnapshot({ dir, authToken });
+      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken });
       sendText(response, 200, `${JSON.stringify(inspectionSnapshotManifest(snapshot), null, 2)}\n`, "application/json; charset=utf-8");
+      return;
+    }
+    const jobEvidenceRoute = parseJobEvidenceApiPath(url.pathname);
+    if (jobEvidenceRoute) {
+      const runId = url.searchParams.get("run")?.trim();
+      if (!runId) {
+        sendText(response, 400, `${JSON.stringify({ message: "run is required" })}\n`, "application/json; charset=utf-8");
+        return;
+      }
+      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken });
+      const detail = workbenchJobEvidenceForSnapshot(snapshot, {
+        runId,
+        jobId: jobEvidenceRoute.jobId,
+      });
+      if (!detail) {
+        sendText(response, 404, `${JSON.stringify({ message: "Job evidence not found" })}\n`, "application/json; charset=utf-8");
+        return;
+      }
+      sendText(response, 200, `${JSON.stringify(detail, null, 2)}\n`, "application/json; charset=utf-8");
       return;
     }
     const fileRoute = parseInspectionFileApiPath(url.pathname);
     if (fileRoute) {
-      const snapshot = await createWorkbenchInspectionSnapshot({ dir, authToken });
+      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken });
       const content = inspectionFileContentForSnapshot(snapshot, fileRoute);
       if (!content) {
         sendText(response, 404, `${JSON.stringify({ message: "File not found" })}\n`, "application/json; charset=utf-8");
@@ -120,6 +157,27 @@ function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): Work
       ...version,
       files: inspectionFileManifests(version.files),
     })),
+    skillBundles: snapshot.skillBundles.map((bundle) => ({
+      ...bundle,
+      files: inspectionFileManifests(bundle.files),
+    })),
+    evals: snapshot.evals.map((evalSnapshot) => ({
+      ...evalSnapshot,
+      files: inspectionFileManifests(evalSnapshot.files),
+    })),
+    ...(snapshot.comparison ? {
+      comparison: {
+        ...snapshot.comparison,
+        versions: snapshot.comparison.versions.map((version) => ({
+          ...version,
+          files: inspectionFileManifests(version.files),
+        })),
+        skills: snapshot.comparison.skills.map((bundle) => ({
+          ...bundle,
+          files: inspectionFileManifests(bundle.files),
+        })),
+      },
+    } : {}),
     traces: snapshot.traces.map((trace) => ({
       ...trace,
       files: inspectionFileManifests(trace.files),
@@ -133,6 +191,15 @@ function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): Work
 
 function inspectionFileManifests(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
   return files.map(workbenchInspectionFileManifest);
+}
+
+function parseJobEvidenceApiPath(pathname: string): { jobId: string } | null {
+  const segments = pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
+  const [api, jobs, jobId, evidence] = segments;
+  if (api !== "api" || jobs !== "jobs" || evidence !== "evidence" || !jobId || segments.length !== 4) {
+    return null;
+  }
+  return { jobId };
 }
 
 function parseInspectionFileApiPath(pathname: string): {
@@ -232,6 +299,9 @@ function contentType(filePath: string): string {
   }
   if (filePath.endsWith(".woff2")) {
     return "font/woff2";
+  }
+  if (filePath.endsWith(".woff")) {
+    return "font/woff";
   }
   return "application/octet-stream";
 }

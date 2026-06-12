@@ -30,6 +30,7 @@ export interface WorkbenchAdapterOperationRequest {
   protocol: typeof WORKBENCH_ADAPTER_PROTOCOL;
   id: string;
   jobId?: string;
+  progress?: WorkbenchAdapterProgress;
   operation: WorkbenchAdapterOperation;
   invocation: {
     use: string;
@@ -78,6 +79,23 @@ export interface WorkbenchAdapterOperationRequest {
     skills?: string;
     enginePrivate?: string;
   };
+}
+
+export interface WorkbenchAdapterProgress {
+  projectId: string;
+  runId: string;
+  jobId: string;
+  executionId: string;
+  attempt: number;
+  target: WorkbenchAdapterProgressTarget;
+}
+
+export interface WorkbenchAdapterProgressTarget {
+  url: string;
+  token: string;
+  ownerUserId?: string;
+  flushWindowMs?: number;
+  transport?: "http" | "stdout" | "both";
 }
 
 export type WorkbenchAdapterOperationResultValue =
@@ -133,6 +151,7 @@ export function normalizeWorkbenchAdapterOperationRequest(
     protocol: WORKBENCH_ADAPTER_PROTOCOL,
     id: requiredString(record.id, "adapter request id"),
     ...(typeof record.jobId === "string" ? { jobId: record.jobId } : {}),
+    ...(record.progress !== undefined ? { progress: normalizeAdapterProgress(record.progress) } : {}),
     operation,
     invocation: {
       use,
@@ -152,6 +171,39 @@ export function normalizeWorkbenchAdapterOperationRequest(
       ...(typeof paths.enginePrivate === "string" ? { enginePrivate: paths.enginePrivate } : {}),
     },
   };
+}
+
+function normalizeAdapterProgress(value: unknown): WorkbenchAdapterProgress {
+  const record = requiredJsonRecord(value, "adapter request progress");
+  return {
+    projectId: requiredString(record.projectId, "adapter request progress.projectId"),
+    runId: requiredString(record.runId, "adapter request progress.runId"),
+    jobId: requiredString(record.jobId, "adapter request progress.jobId"),
+    executionId: requiredString(record.executionId, "adapter request progress.executionId"),
+    attempt: requiredPositiveInteger(record.attempt, "adapter request progress.attempt"),
+    target: normalizeAdapterProgressTarget(record.target),
+  };
+}
+
+function normalizeAdapterProgressTarget(value: unknown): WorkbenchAdapterProgressTarget {
+  const record = requiredJsonRecord(value, "adapter request progress.target");
+  const target: WorkbenchAdapterProgressTarget = {
+    url: requiredString(record.url, "adapter request progress.target.url"),
+    token: requiredString(record.token, "adapter request progress.target.token"),
+  };
+  if (record.ownerUserId !== undefined) {
+    target.ownerUserId = requiredString(record.ownerUserId, "adapter request progress.target.ownerUserId");
+  }
+  if (record.flushWindowMs !== undefined) {
+    target.flushWindowMs = requiredNonNegativeNumber(record.flushWindowMs, "adapter request progress.target.flushWindowMs");
+  }
+  if (record.transport !== undefined) {
+    if (record.transport !== "http" && record.transport !== "stdout" && record.transport !== "both") {
+      throw new Error("adapter request progress.target.transport must be http, stdout, or both.");
+    }
+    target.transport = record.transport;
+  }
+  return target;
 }
 
 export async function ensureWorkbenchAdapterOutputDir(
@@ -396,6 +448,20 @@ function requiredOperation(
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`${label} is required.`);
+  }
+  return value;
+}
+
+function requiredPositiveInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return value;
+}
+
+function requiredNonNegativeNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative number.`);
   }
   return value;
 }

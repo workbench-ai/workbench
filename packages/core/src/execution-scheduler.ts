@@ -23,15 +23,17 @@ export interface WorkbenchExecutionDagResult {
   cancelledJobCount: number;
 }
 
+type WorkbenchExecutionDagJobHook = (job: RemoteWorkbenchJob) => void | Promise<void>;
+
 export interface WorkbenchExecutionDagRunInput {
   jobs: readonly RemoteWorkbenchJob[];
   capacity: WorkbenchExecutionDagCapacity;
   sandboxBackend: WorkbenchSandboxBackendName;
   executeJob: (job: RemoteWorkbenchJob) => Promise<RemoteWorkbenchJob>;
   now?: () => string;
-  onJobQueued?: (job: RemoteWorkbenchJob) => void;
-  onJobStarted?: (job: RemoteWorkbenchJob) => void;
-  onJobFinished?: (job: RemoteWorkbenchJob) => void;
+  onJobQueued?: WorkbenchExecutionDagJobHook;
+  onJobStarted?: WorkbenchExecutionDagJobHook;
+  onJobFinished?: WorkbenchExecutionDagJobHook;
 }
 
 interface RunningJob {
@@ -82,14 +84,17 @@ export async function runWorkbenchExecutionDag(
       throw new Error(`Job ${job.id} has unsupported initial DAG status ${job.status}.`);
     }
     pending.set(job.id, job);
-    args.onJobQueued?.(job);
+    await runJobHook(args.onJobQueued, job);
   }
 
   while (pending.size > 0 || running.size > 0) {
-    const progressed = startReadyJobs();
+    const progressed = await startReadyJobs();
     if (running.size === 0) {
       if (pending.size === 0) {
         break;
+      }
+      if (await cancelTerminalBlockedPendingJobs()) {
+        continue;
       }
       const ready = readyPendingJobs();
       if (ready.length > 0) {
@@ -121,7 +126,7 @@ export async function runWorkbenchExecutionDag(
     cancelledJobCount,
   };
 
-  function startReadyJobs(): boolean {
+  async function startReadyJobs(): Promise<boolean> {
     let progressed = false;
     for (const job of [...pending.values()]) {
       const dependencyStatus = dependencyTerminalStatus(job);
@@ -129,7 +134,7 @@ export async function runWorkbenchExecutionDag(
         continue;
       }
       if (dependencyStatus !== "ready") {
-        cancelPendingJob(job, dependencyStatus);
+        await cancelPendingJob(job, dependencyStatus);
         progressed = true;
         continue;
       }
@@ -149,7 +154,7 @@ export async function runWorkbenchExecutionDag(
       };
       startedJobCount += 1;
       maxConcurrency = Math.max(maxConcurrency, running.size + 1);
-      args.onJobStarted?.(runningJob);
+      await runJobHook(args.onJobStarted, runningJob);
       const promise = finishJob(runningJob, cost);
       running.set(job.id, { cost, promise });
       progressed = true;
@@ -159,6 +164,19 @@ export async function runWorkbenchExecutionDag(
 
   function readyPendingJobs(): RemoteWorkbenchJob[] {
     return [...pending.values()].filter((job) => dependencyTerminalStatus(job) === "ready");
+  }
+
+  async function cancelTerminalBlockedPendingJobs(): Promise<boolean> {
+    let cancelled = false;
+    for (const job of [...pending.values()]) {
+      const dependencyStatus = dependencyTerminalStatus(job);
+      if (dependencyStatus !== "failed" && dependencyStatus !== "cancelled") {
+        continue;
+      }
+      await cancelPendingJob(job, dependencyStatus);
+      cancelled = true;
+    }
+    return cancelled;
   }
 
   function dependencyTerminalStatus(job: RemoteWorkbenchJob): "ready" | "blocked" | "failed" | "cancelled" {
@@ -183,10 +201,10 @@ export async function runWorkbenchExecutionDag(
     return blocked ? "blocked" : "ready";
   }
 
-  function cancelPendingJob(
+  async function cancelPendingJob(
     job: RemoteWorkbenchJob,
     dependencyStatus: "failed" | "cancelled",
-  ): void {
+  ): Promise<void> {
     pending.delete(job.id);
     const finishedAt = now();
     const cancelled: RemoteWorkbenchJob = {
@@ -199,7 +217,7 @@ export async function runWorkbenchExecutionDag(
     cancelledJobCount += 1;
     terminal.set(job.id, cancelled);
     results.set(job.id, cancelled);
-    args.onJobFinished?.(cancelled);
+    await runJobHook(args.onJobFinished, cancelled);
   }
 
   async function finishJob(
@@ -224,8 +242,18 @@ export async function runWorkbenchExecutionDag(
     }
     terminal.set(runningJob.id, completed);
     results.set(runningJob.id, completed);
-    args.onJobFinished?.(completed);
+    await runJobHook(args.onJobFinished, completed);
   }
+}
+
+async function runJobHook(
+  hook: WorkbenchExecutionDagJobHook | undefined,
+  job: RemoteWorkbenchJob,
+): Promise<void> {
+  if (!hook) {
+    return;
+  }
+  await hook(job);
 }
 
 export function workbenchJobDependencies(job: RemoteWorkbenchJob): string[] {

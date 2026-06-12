@@ -17,6 +17,18 @@ export function formatCost(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(4)}` : "n/a";
 }
 
+export function formatRunCost(run: Pick<WorkbenchRun, "costUsd" | "status" | "id"> | null | undefined): string {
+  if (!run) {
+    return "Not tested";
+  }
+  if (typeof run.costUsd === "number" && Number.isFinite(run.costUsd)) {
+    return formatCost(run.costUsd);
+  }
+  return run.status === "failed" || run.status === "canceled"
+    ? "Failed before usage"
+    : "Not reported";
+}
+
 export function formatDurationMs(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return "n/a";

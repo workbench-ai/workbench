@@ -1,5 +1,4 @@
 import { promises as fs } from "node:fs";
-import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -23,6 +22,7 @@ import {
 } from "@workbench-ai/workbench-protocol";
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -36,8 +36,8 @@ describe("built-in Workbench adapters", () => {
     expect(workbench?.install).toEqual([]);
     expect(workbench?.operations).toMatchObject({
       "engine.resolve": { command: "workbench-adapter-workbench" },
-      "engine.run": { command: "workbench-adapter-workbench" },
     });
+    expect(workbench?.operations["engine.run"]).toBeUndefined();
   });
 
   test("executes Codex-shaped agent adapters through an operation request", async () => {
@@ -56,7 +56,7 @@ describe("built-in Workbench adapters", () => {
       invocation: {
         use: "codex",
         with: {
-          model: "gpt-5.4-mini",
+          model: "gpt-5.3-codex-spark",
           instructions: "Write one durable output file.",
         },
       },
@@ -118,7 +118,7 @@ describe("built-in Workbench adapters", () => {
         usage: {
           total: {
             provider: "openai/codex",
-            model: "gpt-5.4-mini",
+            model: "gpt-5.3-codex-spark",
             totalTokens: 3,
             costUsd: 0,
             costSource: "provider",
@@ -138,7 +138,7 @@ describe("built-in Workbench adapters", () => {
       role: "runner",
       provider: {
         use: "codex",
-        model: "gpt-5.4-mini",
+        model: "gpt-5.3-codex-spark",
       },
       adapterAuthRequest: {
         self: {
@@ -160,7 +160,7 @@ describe("built-in Workbench adapters", () => {
   test("defaults Codex agent turns to the supported Workbench model", async () => {
     const { codexHarness } = await import("@workbench-ai/agent-driver-openai-codex");
 
-    expect(codexHarness().manifest.defaults.model).toBe("gpt-5.5");
+    expect(codexHarness().manifest.defaults.model).toBe("gpt-5.3-codex-spark");
   });
 
   test("keeps agent stall timeout shorter than the full turn timeout", () => {
@@ -272,7 +272,7 @@ describe("built-in Workbench adapters", () => {
       role: "engine",
       provider: {
         use: "codex",
-        model: "gpt-5.4-mini",
+        model: "gpt-5.3-codex-spark",
       },
       adapterAuthRequest: {
         adapters: {
@@ -488,308 +488,30 @@ describe("built-in Workbench adapters", () => {
     })).rejects.toThrow("Workbench engine cases root must contain case directories");
   });
 
-  test("delegates shared Workbench engine grading through one runtime-control sandbox", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-shared-"));
-    await fs.mkdir(path.join(root, "input", "skill"), { recursive: true });
-    await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
+  test("rejects Workbench engine-run orchestration", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-run-removed-"));
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
-    await fs.writeFile(path.join(root, "input", "skill", "SKILL.md"), "Do the shared work.\n");
-    await fs.writeFile(path.join(root, "input", "case", "prompt.md"), "Public shared case.\n");
-    const calls: unknown[] = [];
-    const token = "runtime-token";
-    const server = createServer(async (request, response) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of request) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      expect(request.headers.authorization).toBe(`Bearer ${token}`);
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-      calls.push(body);
-      expect(body.prepare).toBe(true);
-      expect(body.collectWorkspace).toBeUndefined();
-      expect(body).toMatchObject({
-        operations: [
-          { label: "skill", operation: "skill.run" },
-          { label: "score", operation: "engine.run" },
-        ],
-      });
-      const inputs = body.inputs as {
-        skill?: Array<{ path: string; content: string }>;
-        case?: Array<{ path: string; content: string }>;
-        enginePrivate?: Array<{ path: string; content: string }>;
-        output?: unknown[];
-        workspace?: unknown[];
-      };
-      expect(inputs.skill).toEqual([
-        expect.objectContaining({ path: "SKILL.md", content: "Do the shared work.\n" }),
-      ]);
-      expect(inputs.case).toEqual([
-        expect.objectContaining({ path: "prompt.md", content: "Public shared case.\n" }),
-      ]);
-      expect(inputs.enginePrivate).toEqual([]);
-      expect(inputs.output).toBeUndefined();
-      expect(inputs.workspace).toBeUndefined();
-      response.setHeader("content-type", "application/json");
-      response.end(`${JSON.stringify({
-        ok: true,
-        files: [{
-          path: "shared-score.txt",
-          kind: "text",
-          encoding: "utf8",
-          executable: false,
-          content: "shared score\n",
-        }],
-        fileChanges: ["shared-score.txt"],
-        operationResults: [{
-          protocol: "workbench.adapter-result.v1",
-          operation: "skill.run",
-          ok: true,
-          usage: {
-            total: {
-              provider: "test",
-              totalTokens: 2,
-              costUsd: 0.02,
-              costSource: "provider",
-            },
-          },
-        }, {
-          protocol: "workbench.adapter-result.v1",
-          operation: "engine.run",
-          ok: true,
-          value: { score: 1 },
-          usage: {
-            total: {
-              provider: "test",
-              totalTokens: 3,
-              costUsd: 0.03,
-              costSource: "provider",
-            },
-          },
-        }],
-        result: { score: 1 },
-      })}\n`);
-    });
-    const url = await listenOnLocalhost(server);
-    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_URL", url);
-    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_TOKEN", token);
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
-      id: "exec_workbench_engine_shared",
+      id: "exec_workbench_engine_removed",
       operation: "engine.run",
       invocation: {
         use: "workbench",
         with: {
           score: {
-            use: "inline-score",
-            command: "score-command",
+            use: "tests",
           },
-        },
-      },
-      context: {
-        skill: {
-          run: {
-            use: "inline-skill",
-            command: "skill-command",
-          },
-        },
-        attempt: {
-          caseId: "case-001",
-        },
-        case: {
-          prompt: "Run skill and score in one sandbox.",
         },
       },
       paths: adapterCommandPaths(root),
     }, null, 2)}\n`);
 
-    try {
-      await executeWorkbenchBuiltInAdapterCommand({
-        adapterId: "workbench",
-        requestPath,
-      });
-    } finally {
-      await closeServer(server);
-    }
-
-    expect(calls).toHaveLength(1);
-    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
-    expect(result.value.score).toBe(1);
-    expect(result.usage?.runner?.costUsd).toBe(0.02);
-    expect(result.usage?.engine?.costUsd).toBe(0.03);
-    await expect(fs.readFile(path.join(root, "output", "shared-score.txt"), "utf8"))
-      .resolves.toBe("shared score\n");
-  });
-
-  test("delegates separate Workbench engine runner and grader sandboxes through runtime-control", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-private-"));
-    await fs.mkdir(path.join(root, "input", "skill"), { recursive: true });
-    await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
-    await fs.mkdir(path.join(root, "private", "engine"), { recursive: true });
-    await fs.mkdir(path.join(root, "output"), { recursive: true });
-    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
-    await fs.writeFile(path.join(root, "input", "skill", "SKILL.md"), "Do the work.\n");
-    await fs.writeFile(path.join(root, "input", "case", "prompt.md"), "Public case.\n");
-    await fs.writeFile(path.join(root, "private", "engine", "secret.txt"), "hidden\n");
-    const calls: unknown[] = [];
-    const token = "runtime-token";
-    const server = createServer(async (request, response) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of request) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      expect(request.headers.authorization).toBe(`Bearer ${token}`);
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
-      calls.push(body);
-      response.setHeader("content-type", "application/json");
-      if (calls.length === 1) {
-        expect(body.prepare).toBe(true);
-        expect(body.collectWorkspace).toBe(true);
-        expect(body).toMatchObject({
-          operations: [{ operation: "skill.run" }],
-        });
-        expect((body.inputs as { enginePrivate?: unknown[] }).enginePrivate).toBeUndefined();
-        response.end(`${JSON.stringify({
-          ok: true,
-          files: [{
-            path: "skill-artifact.txt",
-            kind: "text",
-            encoding: "utf8",
-            executable: false,
-            content: "skill\n",
-          }, {
-            path: ".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json",
-            kind: "text",
-            encoding: "utf8",
-            executable: false,
-            content: "{\"trace\":true}\n",
-          }],
-          fileChanges: ["skill-artifact.txt", ".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json"],
-          workspaceFiles: [{
-            path: "answer.txt",
-            kind: "text",
-            encoding: "utf8",
-            executable: false,
-            content: "workspace\n",
-          }],
-          operationResults: [{
-            protocol: "workbench.adapter-result.v1",
-            operation: "skill.run",
-            ok: true,
-          }],
-          usage: {
-            runner: {
-              provider: "test",
-              totalTokens: 4,
-              costUsd: 0.04,
-              costSource: "provider",
-            },
-          },
-        })}\n`);
-        return;
-      }
-      expect(body.prepare).toBe(false);
-      expect(body).toMatchObject({
-        operations: [{ operation: "engine.run" }],
-      });
-      const inputs = body.inputs as {
-        workspace?: Array<{ path: string; content: string }>;
-        output?: Array<{ path: string; content: string }>;
-        enginePrivate?: Array<{ path: string; content: string }>;
-      };
-      expect(inputs.workspace).toEqual([
-        expect.objectContaining({ path: "answer.txt", content: "workspace\n" }),
-      ]);
-      expect(inputs.output).toEqual([
-        expect.objectContaining({ path: "skill-artifact.txt", content: "skill\n" }),
-      ]);
-      expect(inputs.output?.map((file) => file.path)).not.toContain(".workbench/traces/000001-run/000002-attempt/runtime-runner/runner/trace.json");
-      expect(inputs.enginePrivate).toEqual([
-        expect.objectContaining({ path: "secret.txt", content: "hidden\n" }),
-      ]);
-      response.end(`${JSON.stringify({
-        ok: true,
-        files: [{
-          path: "score-artifact.txt",
-          kind: "text",
-          encoding: "utf8",
-          executable: false,
-          content: "score\n",
-        }],
-        fileChanges: ["score-artifact.txt"],
-        operationResults: [{
-          protocol: "workbench.adapter-result.v1",
-          operation: "engine.run",
-          ok: true,
-          value: { score: 1 },
-        }],
-        usage: {
-          engine: {
-            provider: "test",
-            totalTokens: 6,
-            costUsd: 0.06,
-            costSource: "provider",
-          },
-        },
-        result: { score: 1 },
-      })}\n`);
-    });
-    const url = await listenOnLocalhost(server);
-    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_URL", url);
-    vi.stubEnv("WORKBENCH_RUNTIME_CONTROL_TOKEN", token);
-    const requestPath = path.join(root, ".workbench", "request.json");
-    await fs.writeFile(requestPath, `${JSON.stringify({
-      protocol: "workbench.adapter.v3",
-      id: "exec_workbench_engine_private",
-      operation: "engine.run",
-      invocation: {
-        use: "workbench",
-        with: {
-          score: {
-            use: "inline-score",
-            command: "score-command",
-          },
-        },
-      },
-      context: {
-        skill: {
-          run: {
-            use: "inline-skill",
-            command: "skill-command",
-          },
-        },
-        attempt: {
-          caseId: "case-001",
-        },
-        case: {
-          prompt: "Run skill and score.",
-        },
-      },
-      paths: adapterCommandPaths(root),
-    }, null, 2)}\n`);
-
-    try {
-      await executeWorkbenchBuiltInAdapterCommand({
-        adapterId: "workbench",
-        requestPath,
-      });
-    } finally {
-      await closeServer(server);
-    }
-
-    expect(calls).toHaveLength(2);
-    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
-    expect(result.value.score).toBe(1);
-    expect(result.usage?.runner?.costUsd).toBe(0.04);
-    expect(result.usage?.engine?.costUsd).toBe(0.06);
-    expect((result.value as { usage?: unknown }).usage).toBeUndefined();
-    await expect(fs.readFile(path.join(root, "output", "skill-artifact.txt"), "utf8"))
-      .resolves.toBe("skill\n");
-    await expect(fs.readFile(path.join(root, "output", "score-artifact.txt"), "utf8"))
-      .resolves.toBe("score\n");
-    await expect(fs.readFile(path.join(root, "output", ".workbench", "traces", "exec_workbench_engine_private", "runner", "trace.json"), "utf8"))
-      .resolves.toBe("{\"trace\":true}\n");
+    await expect(executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "workbench",
+      requestPath,
+    })).rejects.toThrow("Workbench engine.run is no longer an orchestration adapter");
   });
 
   test("requires command engines to publish an engine.run result", async () => {
@@ -814,6 +536,165 @@ describe("built-in Workbench adapters", () => {
       adapterId: "command",
       requestPath,
     })).rejects.toThrow("Command engine must write workbench-result.json for engine.run.");
+  });
+
+  test("reads tests engine rewards from the verifier output directory", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-reward-"));
+    const enginePrivate = path.join(root, "private", "engine");
+    await fs.mkdir(enginePrivate, { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(
+      path.join(enginePrivate, "test.sh"),
+      "printf 0.5 > \"$WORKBENCH_TESTS_VERIFIER_DIR/reward.txt\"\n",
+    );
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_tests_reward",
+      operation: "engine.run",
+      invocation: {
+        use: "tests",
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    await executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "tests",
+      requestPath,
+    });
+
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    expect(result.ok).toBe(true);
+    expect(result.value).toMatchObject({ score: 0.5 });
+  });
+
+  test("publishes direct adapter step progress", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-progress-"));
+    const enginePrivate = path.join(root, "private", "engine");
+    await fs.mkdir(enginePrivate, { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(
+      path.join(enginePrivate, "test.sh"),
+      "printf 1 > \"$WORKBENCH_TESTS_VERIFIER_DIR/reward.txt\"\n",
+    );
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_tests_progress",
+      operation: "engine.run",
+      invocation: {
+        use: "tests",
+      },
+      progress: {
+        projectId: "project_1",
+        runId: "run_1",
+        jobId: "job_1",
+        executionId: "exec_1",
+        attempt: 1,
+        target: {
+          url: "http://127.0.0.1:9/progress",
+          token: "progress-token",
+          transport: "stdout",
+        },
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "tests",
+      requestPath,
+    });
+
+    const events = stdout.mock.calls
+      .map((call) => String(call[0] ?? ""))
+      .filter((line) => line.startsWith("__WORKBENCH_PROGRESS__"))
+      .flatMap((line) => {
+        const envelope = JSON.parse(line.slice("__WORKBENCH_PROGRESS__".length)) as {
+          body: { batch: { events: Array<{ payload: unknown; role?: string }> } };
+        };
+        return envelope.body.batch.events;
+      });
+    expect(events).toEqual([
+      expect.objectContaining({
+        role: "engine",
+        payload: expect.objectContaining({
+          step: "tests.engine.run",
+          status: "started",
+        }),
+      }),
+      expect.objectContaining({
+        role: "engine",
+        payload: expect.objectContaining({
+          step: "tests.engine.run",
+          status: "succeeded",
+        }),
+      }),
+    ]);
+  });
+
+  test("fails tests engine runs whose verifier writes no reward output", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-no-reward-"));
+    const enginePrivate = path.join(root, "private", "engine");
+    await fs.mkdir(enginePrivate, { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(path.join(enginePrivate, "test.sh"), "exit 0\n");
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_tests_no_reward",
+      operation: "engine.run",
+      invocation: {
+        use: "tests",
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    await expect(executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "tests",
+      requestPath,
+    })).rejects.toThrow("did not find reward.json or reward.txt");
+  });
+
+  test("rejects skill patches with malformed entries instead of dropping them", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-command-bad-patch-"));
+    await fs.mkdir(path.join(root, "input", "skill"), { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(path.join(root, "input", "skill", "SKILL.md"), "Original.\n");
+    const badPatch = JSON.stringify({
+      files: [
+        { path: "SKILL.md", content: "Updated.\n" },
+        { path: "missing-content.md" },
+      ],
+      fileChanges: ["SKILL.md"],
+    });
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_command_bad_patch",
+      operation: "skill.improve",
+      invocation: {
+        use: "command",
+        with: {
+          command: `cat > "$WORKBENCH_SKILL_PATCH" <<'WORKBENCH_PATCH_EOF'\n${badPatch}\nWORKBENCH_PATCH_EOF`,
+        },
+      },
+      context: {
+        improve: {
+          edits: ["SKILL.md"],
+        },
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    await expect(executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "command",
+      requestPath,
+    })).rejects.toThrow(/files\[1\] must be an object with string path and content fields/u);
   });
 
   test("retries Claude agent turns that exit with a transient SIGTERM", async () => {
@@ -849,25 +730,6 @@ describe("built-in Workbench adapters", () => {
     expect(attempts).toBe(1);
   });
 });
-
-function listenOnLocalhost(server: ReturnType<typeof createServer>): Promise<string> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("Test server did not bind to a TCP address."));
-        return;
-      }
-      resolve(`http://127.0.0.1:${address.port}`);
-    });
-  });
-}
-
-function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
-  return new Promise((resolve) => server.close(() => resolve()));
-}
 
 function adapterCommandPaths(root: string) {
   return {
@@ -912,7 +774,7 @@ async function writeRubricRequest(
         judge: {
           use: "codex",
           with: {
-            model: "gpt-5.4-mini",
+            model: "gpt-5.3-codex-spark",
           },
         },
         criteria: options.criteria.map((criterion) => ({

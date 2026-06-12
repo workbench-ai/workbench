@@ -1,8 +1,11 @@
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
 import type {
   WorkbenchLineageEdge,
+  WorkbenchRun,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
+
+import { formatVersionDisplayName } from "./comparison-metrics";
 
 export const VERSION_LINEAGE_NODE_WIDTH = 224;
 const VERSION_LINEAGE_NODE_INITIAL_HEIGHT = 116;
@@ -12,14 +15,17 @@ const VERSION_LINEAGE_NODE_CLASS_NAME =
 export interface VersionLineageGraph {
   roots: string[];
   nodes: VersionLineageNodeData[];
+  edges: WorkbenchLineageEdge[];
   edgeCount: number;
 }
 
 export interface VersionLineageNodeData extends Record<string, unknown> {
   version: WorkbenchVersion;
+  label: string;
   active: boolean;
-  childCount: number;
-  edgeReason: string | null;
+  published: boolean;
+  score: number | null;
+  improvedFromLabel: string | null;
 }
 
 export type VersionLineageNode = Node<VersionLineageNodeData, "version">;
@@ -67,6 +73,8 @@ export function buildVersionLineageGraph(args: {
   versions: readonly WorkbenchVersion[];
   lineage: readonly WorkbenchLineageEdge[];
   currentVersionId?: string | null;
+  publishedVersionId?: string | null;
+  runs?: readonly WorkbenchRun[];
 }): VersionLineageGraph {
   const versions = [...args.versions].sort(compareVersions);
   const versionById = new Map(versions.map((version) => [version.id, version]));
@@ -99,33 +107,48 @@ export function buildVersionLineageGraph(args: {
   const rootVersions = versions.filter((version) => !childIds.has(version.id));
   const roots = (rootVersions.length > 0 ? rootVersions : versions).map((version) => version.id);
   const incomingEdgeByChild = new Map(validEdges.map((edge) => [edge.childId, edge]));
+  const latestScoredRunByVersion = new Map<string, WorkbenchRun>();
+  for (const run of args.runs ?? []) {
+    if (typeof run.score !== "number") {
+      continue;
+    }
+    const latest = latestScoredRunByVersion.get(run.versionId);
+    if (!latest || run.createdAt > latest.createdAt) {
+      latestScoredRunByVersion.set(run.versionId, run);
+    }
+  }
   const nodes = versions.map((version) => {
     const incomingEdge = incomingEdgeByChild.get(version.id);
+    const improvedFromParent = incomingEdge?.reason === "improve"
+      ? versionById.get(incomingEdge.parentId)
+      : undefined;
     return {
       version,
+      label: formatVersionDisplayName(version.id, versions),
       active: args.currentVersionId === version.id,
-      childCount: childrenByParent.get(version.id)?.length ?? 0,
-      edgeReason: incomingEdge ? formatLineageEdgeReason(incomingEdge) : null,
+      published: args.publishedVersionId === version.id,
+      score: latestScoredRunByVersion.get(version.id)?.score ?? null,
+      improvedFromLabel: improvedFromParent
+        ? formatVersionDisplayName(improvedFromParent.id, versions)
+        : null,
     };
   });
 
-  return { roots, nodes, edgeCount: validEdges.length };
+  return { roots, nodes, edges: validEdges, edgeCount: validEdges.length };
 }
 
 export async function buildVersionLineageFlow(args: {
   versions: readonly WorkbenchVersion[];
   lineage: readonly WorkbenchLineageEdge[];
   currentVersionId?: string | null;
+  publishedVersionId?: string | null;
+  runs?: readonly WorkbenchRun[];
 }): Promise<{
   nodes: VersionLineageNode[];
   edges: VersionLineageEdge[];
 }> {
   const graph = buildVersionLineageGraph(args);
-  const versionById = new Map(args.versions.map((version) => [version.id, version]));
-  const validEdges = args.lineage.filter((edge) =>
-    edge.parentId !== edge.childId &&
-    versionById.has(edge.parentId) &&
-    versionById.has(edge.childId));
+  const validEdges = graph.edges;
   const nodes = graph.nodes.map((node) => ({
     id: versionLineageNodeId(node.version.id),
     type: "version",
@@ -138,10 +161,11 @@ export async function buildVersionLineageFlow(args: {
     selectable: true,
     ariaRole: "button",
     ariaLabel: [
-      node.version.id,
+      node.label,
       node.version.message,
       node.active ? "current" : null,
-      node.edgeReason,
+      node.published ? "published" : null,
+      node.improvedFromLabel ? `improved from ${node.improvedFromLabel}` : null,
     ].filter(Boolean).join(", "),
     domAttributes: createVersionLineageNodeDomAttributes({
       "data-testid": versionLineageNodeTestId(node.version.id),
@@ -215,13 +239,6 @@ async function getElkInstance(): Promise<ElkInstance> {
     return new Elk();
   });
   return elkInstancePromise;
-}
-
-function formatLineageEdgeReason(edge: WorkbenchLineageEdge): string {
-  return [
-    edge.reason,
-    edge.runId ? `run ${edge.runId}` : null,
-  ].filter(Boolean).join(" / ");
 }
 
 function compareVersions(left: WorkbenchVersion, right: WorkbenchVersion): number {

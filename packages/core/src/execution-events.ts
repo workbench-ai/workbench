@@ -11,6 +11,7 @@ export interface WorkbenchExecutionProgressTarget {
   ownerUserId?: string;
   flushWindowMs?: number;
   transport?: "http" | "stdout" | "both";
+  appendBatch?: (batch: WorkbenchExecutionEventBatch) => Promise<void>;
 }
 
 export interface WorkbenchExecutionEventPublisherContext {
@@ -129,6 +130,7 @@ function validProgressTarget(target: WorkbenchExecutionProgressTarget | undefine
       ? { flushWindowMs: target.flushWindowMs }
       : {}),
     ...(target.transport === "stdout" || target.transport === "both" ? { transport: target.transport } : { transport: "http" as const }),
+    ...(target.appendBatch ? { appendBatch: target.appendBatch } : {}),
   };
 }
 
@@ -154,6 +156,10 @@ export interface WorkbenchProgressStdoutEnvelope {
     leaseToken: string;
     batch: WorkbenchExecutionEventBatch;
   };
+}
+
+export interface PublishWorkbenchProgressStdoutEnvelopeOptions {
+  forwardStdout?: boolean;
 }
 
 export function createWorkbenchProgressStdoutParser(
@@ -224,6 +230,7 @@ export function createWorkbenchProgressStdoutParser(
 export async function publishWorkbenchProgressStdoutEnvelope(
   envelope: WorkbenchProgressStdoutEnvelope,
   expectedTarget?: WorkbenchExecutionProgressTarget,
+  options: PublishWorkbenchProgressStdoutEnvelopeOptions = {},
 ): Promise<void> {
   const target = validProgressTarget(expectedTarget);
   if (!target) {
@@ -233,14 +240,23 @@ export async function publishWorkbenchProgressStdoutEnvelope(
   if (!progressEnvelopeMatchesTarget(envelope, target)) {
     return;
   }
-  await postProgressBody({
+  if (target.appendBatch) {
+    await target.appendBatch(envelope.body.batch);
+    return;
+  }
+  const deliveredEnvelope = {
     url: target.url,
     body: {
       ...envelope.body,
       ...(target.ownerUserId ? { ownerUserId: target.ownerUserId } : {}),
       leaseToken: target.token,
     },
-  });
+  };
+  if (target.transport === "stdout" && options.forwardStdout === true) {
+    process.stdout.write(`${WORKBENCH_PROGRESS_STDOUT_PREFIX}${JSON.stringify(deliveredEnvelope)}\n`);
+    return;
+  }
+  await postProgressBody(deliveredEnvelope);
 }
 
 function progressEnvelopeMatchesTarget(

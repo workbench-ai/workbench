@@ -2,7 +2,10 @@ import { describe, expect, test } from "vitest";
 
 import {
   assertWorkbenchAdapterAuthEnvNameAllowed,
+  isWorkbenchLocalMetadataPath,
   isReservedWorkbenchAdapterAuthEnvName,
+  normalizeWorkbenchSourcePath,
+  normalizeWorkbenchSourceRequestPath,
   workbenchInspectionFileContent,
   workbenchInspectionFileContentUnavailableReason,
   workbenchInspectionFileManifest,
@@ -16,10 +19,9 @@ describe("workbench contract", () => {
     const state = {
       schema: "workbench.skill.state.v1",
       root: "/tmp/skill",
-      currentVersionId: "v001",
       refs: { current: "v001" },
       remotes: {
-        origin: { name: "origin", url: "https://workbench.example/skills/acme/skill", type: "workbench" },
+        origin: { name: "origin", url: "https://workbench.example/skills/acme/skill", kind: "workbench-cloud" },
       },
       versions: [{
         id: "v001",
@@ -36,6 +38,7 @@ describe("workbench contract", () => {
       runs: [],
       jobs: [],
       traces: [],
+      executionEvents: [],
       artifacts: [],
       lineage: [],
     } satisfies WorkbenchProjectState;
@@ -45,7 +48,6 @@ describe("workbench contract", () => {
         root: state.root,
         initialized: true,
         currentVersionId: "v001",
-        hasUnversionedChanges: false,
         defaultSkill: "primary",
         defaultAgent: "default",
         versionCount: 1,
@@ -57,10 +59,12 @@ describe("workbench contract", () => {
       versions: state.versions,
       skillSources: state.skillSources,
       skillBundles: state.skillBundles,
-      agents: state.agents,
+      evals: state.evals,
+      agents: [{ hash: "agent_hash", agent: state.agents[0]! }],
       runs: state.runs,
       jobs: state.jobs,
       traces: state.traces,
+      executionEvents: state.executionEvents,
       artifacts: state.artifacts,
       lineage: state.lineage,
       remotes: Object.values(state.remotes),
@@ -74,7 +78,7 @@ describe("workbench contract", () => {
     } satisfies WorkbenchInspectionFileContent;
 
     expect(JSON.parse(JSON.stringify({ state, snapshot, fileContent }))).toMatchObject({
-      state: { schema: "workbench.skill.state.v1", currentVersionId: "v001" },
+      state: { schema: "workbench.skill.state.v1", refs: { current: "v001" } },
       snapshot: { status: { initialized: true }, refs: { current: "v001" } },
       fileContent: { path: "output/blob.bin", unavailableReason: "Binary file content is not rendered." },
     });
@@ -110,5 +114,19 @@ describe("workbench contract", () => {
     });
     expect(workbenchInspectionFileContentUnavailableReason({ encoding: "base64" }))
       .toBe("Base64 file content is not rendered.");
+  });
+
+  test("normalizes source paths and identifies local Workbench metadata", () => {
+    expect(normalizeWorkbenchSourcePath(".workbench/eval.yaml")).toBe(".workbench/eval.yaml");
+    expect(normalizeWorkbenchSourceRequestPath("/.workbench/eval.yaml")).toBe(".workbench/eval.yaml");
+    expect(() => normalizeWorkbenchSourcePath("/.workbench/eval.yaml")).toThrow(/Unsafe Workbench source path/u);
+    expect(() => normalizeWorkbenchSourcePath("../state")).toThrow(/Unsafe Workbench source path/u);
+    expect(() => normalizeWorkbenchSourcePath("source//SKILL.md")).toThrow(/Unsafe Workbench source path/u);
+
+    expect(isWorkbenchLocalMetadataPath(".workbench/remotes.yaml")).toBe(true);
+    expect(isWorkbenchLocalMetadataPath(".workbench/locks/project.lock")).toBe(true);
+    expect(isWorkbenchLocalMetadataPath(".workbench/objects/run/run_001.json")).toBe(true);
+    expect(isWorkbenchLocalMetadataPath(".workbench/eval.yaml")).toBe(false);
+    expect(isWorkbenchLocalMetadataPath("SKILL.md")).toBe(false);
   });
 });

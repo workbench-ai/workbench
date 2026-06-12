@@ -1,5 +1,44 @@
 import { cn } from "../../lib/utils";
 
+/**
+ * The Workbench mark: the "ascending band" — a 4x4 case-dot grid cut to a
+ * diagonal band climbing from bottom-left to top-right, dot radii growing
+ * along the ascent. Monochrome only: it renders in currentColor (ink on
+ * light surfaces, white on dark), never in an accent color.
+ */
+export function WorkbenchLogoMark({
+  size = 22,
+  className,
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      height={size}
+      viewBox="0 0 26.5 26.5"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <g fill="currentColor">
+        <circle cx="16.5" cy="3.5" r="2.58" />
+        <circle cx="23" cy="3.5" r="2.8" />
+        <circle cx="10" cy="10" r="2.15" />
+        <circle cx="16.5" cy="10" r="2.37" />
+        <circle cx="23" cy="10" r="2.58" />
+        <circle cx="3.5" cy="16.5" r="1.72" />
+        <circle cx="10" cy="16.5" r="1.93" />
+        <circle cx="16.5" cy="16.5" r="2.15" />
+        <circle cx="3.5" cy="23" r="1.5" />
+        <circle cx="10" cy="23" r="1.72" />
+      </g>
+    </svg>
+  );
+}
+
 export function WorkbenchBrand({
   product,
   className,
@@ -11,23 +50,11 @@ export function WorkbenchBrand({
   return (
     <span
       className={cn(
-        "flex h-8 shrink-0 items-center gap-2 text-lg font-medium leading-none tracking-tight text-foreground",
+        "flex h-8 shrink-0 items-center gap-2 text-lg font-medium leading-none tracking-[-0.035em] text-foreground",
         className,
       )}
     >
-      <svg
-        aria-hidden="true"
-        className="size-7 shrink-0"
-        height="28"
-        viewBox="0 0 28 28"
-        width="28"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <rect width="28" height="28" fill="currentColor" rx="4" ry="4" className="text-primary" />
-        <rect x="7" y="10.4" width="14" height="1.1" fill="white" rx="0.55" ry="0.55" />
-        <rect x="9.8" y="10.4" width="1.1" height="7.7" fill="white" rx="0.55" ry="0.55" />
-        <rect x="17.1" y="10.4" width="1.1" height="7.7" fill="white" rx="0.55" ry="0.55" />
-      </svg>
+      <WorkbenchLogoMark className="shrink-0" size={22} />
       <span>{label}</span>
     </span>
   );

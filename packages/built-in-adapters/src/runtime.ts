@@ -8,11 +8,11 @@ export async function importWorkbenchRuntime(): Promise<typeof WorkbenchRuntime>
 }
 
 async function importWorkbenchRuntimeUncached(): Promise<typeof WorkbenchRuntime> {
-  const skills = runtimeImportOptions();
+  const specifiers = runtimeImportOptions();
   let lastError: unknown;
-  for (const skill of skills) {
+  for (const specifier of specifiers) {
     try {
-      return await import(skill) as typeof WorkbenchRuntime;
+      return await import(specifier) as typeof WorkbenchRuntime;
     } catch (error) {
       lastError = error;
     }
@@ -30,5 +30,5 @@ function runtimeImportOptions(): string[] {
     "/app/products/workbench/packages/core/src/index.ts",
     new URL("../../core/src/index.ts", import.meta.url).href,
     "@workbench-ai/workbench-core",
-  ].filter((skill): skill is string => typeof skill === "string" && skill.length > 0);
+  ].filter((specifier): specifier is string => typeof specifier === "string" && specifier.length > 0);
 }

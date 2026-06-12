@@ -7,6 +7,8 @@ const defaultSourceEditorOptions: Monaco.editor.IStandaloneEditorConstructionOpt
   {
     automaticLayout: true,
     minimap: { enabled: false },
+    fontFamily:
+      '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
     fontSize: 13,
     lineHeight: 20,
     wordWrap: "on",

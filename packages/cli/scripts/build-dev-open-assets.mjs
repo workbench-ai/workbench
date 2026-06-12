@@ -47,7 +47,7 @@ async function copyStylesheetAssets({ css, fromDir, toDir }) {
     const rawUrl = match[2];
     const sourcePath = path.resolve(fromDir, rawUrl);
     const fileName = path.basename(rawUrl);
-    if (path.extname(fileName) !== ".woff2") {
+    if (!new Set([".woff", ".woff2"]).has(path.extname(fileName))) {
       throw new Error(`Unsupported Workbench dev stylesheet asset: ${rawUrl}`);
     }
     refs.set(rawUrl, {

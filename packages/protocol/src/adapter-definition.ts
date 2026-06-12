@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-
 import type {
   Json,
 } from "@workbench-ai/workbench-contract";
@@ -20,10 +18,6 @@ import {
 } from "./adapter-manifest.ts";
 import {
   WORKBENCH_ADAPTER_RESULT_PROTOCOL,
-  ensureWorkbenchAdapterOutputDir,
-  readWorkbenchAdapterOperationRequest,
-  workbenchAdapterOperationResultPath,
-  writeWorkbenchAdapterOperationResult,
   type WorkbenchAdapterOperationRequest,
   type WorkbenchAdapterOperationResult,
   type WorkbenchAdapterOperationResultValue,
@@ -69,12 +63,6 @@ export type WorkbenchAdapterHandlerReturn =
   | WorkbenchAdapterOperationResultValue
   | undefined
   | void;
-
-export interface RunDefinedWorkbenchAdapterOptions<TContext = unknown> {
-  requestPath?: string;
-  outputRoot?: string;
-  runtime?: TContext;
-}
 
 export function defineAdapter<TContext = unknown>(
   definition: WorkbenchAdapterDefinition<TContext>,
@@ -132,45 +120,6 @@ export function workbenchAdapterManifestFromDefinition(
     ...(definition.auth ? { auth: cloneJson(definition.auth) } : {}),
     ...(definition.slots ? { slots: cloneJson(definition.slots) } : {}),
   };
-}
-
-export async function runDefinedAdapter<TContext = unknown>(
-  definition: WorkbenchAdapterDefinition<TContext>,
-  options: RunDefinedWorkbenchAdapterOptions<TContext> = {},
-): Promise<WorkbenchAdapterOperationResult | null> {
-  let request = await readWorkbenchAdapterOperationRequest(options.requestPath);
-  if (request.invocation.use !== definition.id) {
-    throw new Error(`Adapter ${definition.id} cannot execute request for ${request.invocation.use}.`);
-  }
-  if (options.outputRoot && options.outputRoot !== request.paths.output) {
-    request = {
-      ...request,
-      paths: {
-        ...request.paths,
-        output: options.outputRoot,
-        result: workbenchAdapterOperationResultPath(options.outputRoot),
-      },
-    };
-  }
-  await ensureWorkbenchAdapterOutputDir(request);
-  const operationDefinition = operationDefinitionForRequest(definition, request.operation);
-  if (!operationDefinition) {
-    throw new Error(`Adapter ${definition.id} does not implement ${request.operation}.`);
-  }
-  if (!operationDefinition.handle) {
-    throw new Error(`Adapter ${definition.id} ${request.operation} does not define a handler.`);
-  }
-  const handlerResult = await operationDefinition.handle(adapterHandlerContext({
-    definition,
-    request,
-    runtime: options.runtime as TContext,
-  }));
-  if (await fileExists(request.paths.result)) {
-    return null;
-  }
-  const result = normalizeHandlerResult(request.operation, handlerResult);
-  await writeWorkbenchAdapterOperationResult(request.paths.output, result);
-  return result;
 }
 
 export function operationDefinitionForRequest<TContext = unknown>(
@@ -238,41 +187,6 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function adapterHandlerContext<TContext>(args: {
-  definition: WorkbenchAdapterDefinition<TContext>;
-  request: WorkbenchAdapterOperationRequest;
-  runtime: TContext;
-}): WorkbenchAdapterHandlerContext<TContext> {
-  return {
-    request: args.request,
-    operation: args.request.operation,
-    invocation: args.request.invocation,
-    with: adapterWithRecord(args.request),
-    paths: args.request.paths,
-    runtime: args.runtime,
-    slot: (name) => adapterSlotInvocation(args.request, args.definition.slots, name),
-    result: (value, metadata = {}) => adapterResult(args.request.operation, value, metadata),
-  };
-}
-
-function normalizeHandlerResult(
-  operation: WorkbenchAdapterOperation,
-  result: WorkbenchAdapterHandlerReturn,
-): WorkbenchAdapterOperationResult {
-  if (isOperationResult(result)) {
-    return result;
-  }
-  return adapterResult(operation, result === undefined ? null : result);
-}
-
-function isOperationResult(value: unknown): value is WorkbenchAdapterOperationResult {
-  return !!value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    (value as { protocol?: unknown }).protocol === WORKBENCH_ADAPTER_RESULT_PROTOCOL &&
-    typeof (value as { operation?: unknown }).operation === "string";
-}
-
 function adapterWithRecord(request: WorkbenchAdapterOperationRequest): Record<string, Json> {
   const value = request.invocation.with;
   return value && typeof value === "object" && !Array.isArray(value)
@@ -301,8 +215,4 @@ function isInvocationLike(value: unknown): value is WorkbenchAdapterInvocationLi
     !Array.isArray(value) &&
     typeof (value as { use?: unknown }).use === "string" &&
     ((value as { use: string }).use.length > 0);
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  return fs.stat(filePath).then((stat) => stat.isFile(), () => false);
 }

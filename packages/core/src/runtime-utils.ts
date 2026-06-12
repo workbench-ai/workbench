@@ -193,9 +193,9 @@ export function normalizeWorkbenchWorkerId(value: unknown): string | undefined {
   return NON_IDENTIFYING_WORKER_IDS.has(normalized.toLowerCase()) ? undefined : normalized;
 }
 
-export function resolveWorkbenchWorkerId(skills: readonly unknown[], fallback: string): string {
-  for (const skill of skills) {
-    const normalized = normalizeWorkbenchWorkerId(skill);
+export function resolveWorkbenchWorkerId(candidates: readonly unknown[], fallback: string): string {
+  for (const candidate of candidates) {
+    const normalized = normalizeWorkbenchWorkerId(candidate);
     if (normalized) {
       return normalized;
     }

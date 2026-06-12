@@ -31,7 +31,7 @@ The tests assert the skill-first command surface, local runtime lifecycle, read-
 tmpdir=$(mktemp -d)
 workbench init "$tmpdir/earnings-prep"
 workbench check --dir "$tmpdir/earnings-prep"
-workbench eval --dir "$tmpdir/earnings-prep" --agent default --samples 1 --json
+workbench eval --dir "$tmpdir/earnings-prep" --agents default --samples 1 --json
 workbench versions --dir "$tmpdir/earnings-prep"
 workbench compare --dir "$tmpdir/earnings-prep" --versions all --skills all --agents all
 workbench open --dir "$tmpdir/earnings-prep"
@@ -45,11 +45,10 @@ The init eval is a smoke check. Run `workbench improve` only after a workflow-sp
 ```bash
 tmpdir=$(mktemp -d)
 workbench init "$tmpdir/earnings-prep"
-workbench eval --dir "$tmpdir/earnings-prep" --agent default --samples 1 --json
-workbench remote add origin "file://$tmpdir/remote" --dir "$tmpdir/earnings-prep"
-workbench sync --dir "$tmpdir/earnings-prep"
-workbench publish --dir "$tmpdir/earnings-prep" --visibility private
+workbench eval --dir "$tmpdir/earnings-prep" --agents default --samples 1 --json
+workbench remote add --name origin --url "file://$tmpdir/remote" --dir "$tmpdir/earnings-prep"
+workbench sync origin --dir "$tmpdir/earnings-prep"
 find "$tmpdir/remote" -maxdepth 3 -type f | sort
 ```
 
-The remote should contain `workbench.object-pack.v1` objects, refs, `source/`, and pinned `releases/<version>/` source. Workbench must not create or mutate Git refs.
+The remote should contain `workbench.object-pack.v1` objects and refs. File remotes are sync-only; Workbench Cloud remotes are the source publication surface. Workbench must not create or mutate Git refs.

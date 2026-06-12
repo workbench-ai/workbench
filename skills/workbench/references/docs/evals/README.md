@@ -12,10 +12,10 @@ SKILL.md
 .workbench/.gitignore
 .workbench/objects/
 .workbench/refs/
-.workbench/queue/
+.workbench/sync/
 ```
 
-The runtime directories are ignored by Git. Authored compatibility files such as `.workbench/eval.yaml`, cases, agents, skill composition, environments, and remotes are part of Workbench source versions.
+The runtime directories are ignored by Git. Authored Workbench source files such as `.workbench/eval.yaml`, cases, agents, optional skill composition, and optional custom environments are part of Workbench source versions. `.workbench/remotes.yaml` is local remote metadata, not source.
 
 ## `SKILL.md`
 
@@ -71,10 +71,10 @@ Skill eval jobs support Docker-style command tests through `local` or `command` 
 
 ```bash
 workbench check
-workbench eval --agent default --samples 1
-workbench compare --versions all --skills all --agents all
+workbench eval --agents default --samples 1
+workbench compare
 workbench versions
-workbench show v001:SKILL.md
+workbench show current:SKILL.md
 ```
 
 Use failed or reviewed traces as evidence for better cases and skill edits. `workbench improve` refuses to create cosmetic versions from passing smoke history or from agents without a skill-improvement adapter. `case add --from TRACE_ID` creates a trace-backed draft that needs expert acceptance criteria before it can pass.
@@ -82,5 +82,6 @@ Use failed or reviewed traces as evidence for better cases and skill edits. `wor
 ```bash
 workbench agent add patcher --adapter command --with 'improveCommand=printf "\nTighten the workflow instructions from trace evidence.\n" >> "$SKILL_DIR/SKILL.md"'
 workbench improve --agent patcher --budget 1 --samples 1
-workbench show v002:SKILL.md
+workbench versions
+workbench show <improved-version-id>:SKILL.md
 ```

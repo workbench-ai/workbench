@@ -12,10 +12,6 @@
       "types": "./src/lib/routes.ts",
       "default": "./src/lib/routes.ts"
     },
-    "./initial-data": {
-      "types": "./src/lib/initial-data.ts",
-      "default": "./src/lib/initial-data.ts"
-    },
     "./styles.css": "./src/styles.css"
   },
   "scripts": {

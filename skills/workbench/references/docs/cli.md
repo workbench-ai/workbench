@@ -1,107 +1,89 @@
 # Workbench CLI
 
-The CLI is the action surface for skill management. The web UI is read-only inspection.
+The CLI is the action surface for Workbench. The web UI is read-only inspection over the same committed Workbench objects.
 
-## Create
+## Primary Loop
 
 ```bash
 workbench init ./earnings-prep
 cd ./earnings-prep
 workbench check
-workbench status
-workbench versions
+workbench eval --agents default --samples 1
+workbench compare
+workbench improve --agent patcher --budget 1 --samples 1
 ```
 
-`init` writes `SKILL.md`, `.workbench/eval.yaml`, `.workbench/cases/case-001/case.yaml`, `.workbench/agents.yaml`, `.workbench/.gitignore`, and ignored runtime directories. The generated case is a smoke check for the harness; replace it with workflow-specific cases before treating scores as skill quality.
+`init` writes `SKILL.md`, `.workbench/eval.yaml`, `.workbench/cases/case-001/case.yaml`, `.workbench/agents.yaml`, `.workbench/.gitignore`, and ignored runtime directories. The generated case is a smoke check; replace it with workflow-specific cases before treating scores as skill quality.
 
-Simple projects do not need `.workbench/skills.yaml`; Workbench implicitly evaluates the root `SKILL.md` as `primary`. Add `.workbench/skills.yaml` only when comparing multiple measured skills or installing included skills beside the measured skill.
+Workbench creates source versions automatically at command boundaries. If the folder changed since the current version, the next command creates a content-derived version id before acting.
 
-## Evaluate And Improve
+`eval` and `compare` use manifest defaults when selector flags are omitted. Use plural selectors only when you intentionally broaden or narrow the set:
 
 ```bash
-workbench eval --agent default --samples 1
-workbench eval --skill all --agent all --samples 1
-workbench eval --agent default --samples 1 --rerun
+workbench eval --skills all --agents all --samples 1
 workbench compare --skills all --agents all --versions all
-workbench retry RUN_ID
-workbench improve --agent patcher --budget 1 --samples 1
+workbench eval --agents default --samples 1 --rerun
 ```
 
-Workbench creates source versions automatically. If the folder changed since the current version, the next command creates the next `vNNN` before running.
-
-Use agents to compare runtime configurations. `local` and `command` agents run Docker-style case tests directly. `codex` and `claude` agents run the provider as the skill executor and score the same cases through the configured score adapter; connect adapter auth before using them locally or in Cloud.
+`improve` edits one mutable project skill with one agent. If defaults expand to more than one skill or agent, pass singular selectors:
 
 ```bash
-workbench agent add default --adapter local
-workbench agent add strict --adapter command --with command='sh "$CASE_DIR/tests/test.sh"'
-workbench agent add networked --adapter command --with network=on
-workbench agent add codex --adapter codex --model gpt-5.4-mini --with auth=default
-workbench auth connect codex --method api-key
-workbench eval --agent all --samples 1
+workbench improve --skill primary --agent patcher --budget 1 --samples 1
 ```
 
-Local command agents use the same network vocabulary for eval and improve. `network=on`, `network=open`, and `network=true` mean open egress and run Docker with `bridge`; `network=off`, `network=none`, and `network=false` mean isolated egress and run Docker with `none`. Other non-empty strings are treated as custom Docker network names.
+Run `improve` only after failed or reviewed trace evidence exists. Passing smoke traces are not meaningful improvement evidence. Workbench records the candidate version and proof run evidence; it switches only when the proof run succeeds and beats the incumbent.
 
-Run `workbench improve` only after failed or reviewed trace evidence exists. Passing smoke traces are not enough for a meaningful improvement. Workbench records the proposed improved version and proof evidence every time, but it switches to that version only when the proof run succeeds and beats the latest scored incumbent for the same skill bundle, eval hash, and agent.
+## Source And Selection
 
-Command-style agents can make improvement substantive by providing an `improveCommand`. Workbench runs it in Docker with the current skill mounted at `SKILL_DIR`, all installed skills under `SKILLS_DIR`, trace evidence mounted at `TRACE_DIR`, and output at `OUTPUT_DIR`. The command may edit files under `SKILL_DIR` directly or write a skill patch JSON to the protocol path in `WORKBENCH_SKILL_PATCH`. By default only `SKILL.md` is editable; pass `--with improveEdits=SKILL.md,assets` to allow supporting files.
-
-```bash
-workbench agent add patcher --adapter command --with 'improveCommand=printf "\nReview failure handling before final delivery.\n" >> "$SKILL_DIR/SKILL.md"'
-workbench improve --agent patcher --budget 1 --samples 1
-```
-
-Agents without `improveCommand` or a provider-backed skill-improvement adapter fail clearly.
-
-`workbench eval` reuses matching completed local evidence for the same version, skill bundle, agent, eval snapshot, and sample count. Pass `--rerun` to force new execution. `workbench retry RUN_ID` replays only failed jobs from the prior run, preserving the original version, skill, agent, case, and sample pairs. If a run has no failed jobs, use `workbench eval --rerun` to intentionally run it again.
-
-## Skill Composition
-
-Top-level entries in `.workbench/skills.yaml` are measured skills. Nested `includes` are installed beside one measured skill and are included in that bundle hash.
+Simple projects do not need `.workbench/skills.yaml`; Workbench implicitly evaluates the root `SKILL.md` as `primary`. Add `.workbench/skills.yaml` only when comparing multiple measured skills or installing included skills beside a measured skill.
 
 ```yaml
+default: all
 skills:
   primary:
     path: .
     includes:
       - name: helper
         path: skills/helper
+  no-skill:
+    baseline: none
   upstream:
     from: github:anthropics/skills//skills/frontend-design
     ref: <commit-sha>
 ```
 
-Local `path` values must stay inside the project root. Use remote refs or vendor a skill into the project instead of pointing at `../other-skill`.
+Top-level entries are measured skills. Each measured skill defines exactly one of `path`, `from`, or `baseline`; the only baseline value is `none`. Local paths must stay inside the project root. Nested `includes` are installed beside one measured skill and affect that bundle hash, but they are not comparison rows.
 
-## Versions
+Agents use the same selector shape:
 
-```bash
-workbench versions
-workbench show v002:SKILL.md
-workbench files v002
-workbench diff v001..v002
-workbench switch v001
+```yaml
+default: default
+agents:
+  default:
+    adapter: local
+    model: deterministic
+    with: {}
 ```
 
-`versions` lists source history. `switch` materializes the selected source version into the working folder and updates the current Workbench ref. It does not invoke Git; Git users see ordinary file changes if the project is inside a Git repository.
-
-## Remotes And Publish
+`local` and `command` agents run Docker-style case tests directly. `codex` and `claude` agents run the provider as the skill executor and score the same cases through the configured score adapter. Connect adapter auth before using provider-backed agents locally or in Cloud.
 
 ```bash
-workbench remote add origin file:///tmp/earnings-prep-remote
-workbench sync
-workbench publish --visibility private
+workbench agent add default --adapter local
+workbench agent add strict --adapter command --with command='sh "$CASE_DIR/tests/test.sh"'
+workbench agent add codex --adapter codex --model gpt-5.3-codex-spark --with auth=default
+workbench auth connect codex --method api-key
+workbench skills list
 ```
-
-Remotes are Workbench object endpoints, not Git remotes. `sync` merges versions, runs, jobs, traces, artifacts, lineage, and refs. File remotes are useful for local portability. Workbench Cloud remotes use HTTP and the same object pack schema after `workbench login`.
-
-`publish` makes a selected version installable from the remote and returns install URLs. Publication is explicit; normal sync shares evidence and source versions but does not change published visibility.
 
 ## Inspect
 
 ```bash
-workbench show trace_job_000002:stderr.log
-workbench show artifact_000002:output/result.json
+workbench status
+workbench versions
+workbench show <version-id>:SKILL.md
+workbench files <version-id>
+workbench diff <base-version-id>..<improved-version-id>
+workbench switch <version-id>
 workbench trace RUN_ID
 workbench list runs
 workbench list jobs
@@ -113,23 +95,41 @@ workbench open
 workbench open --json
 ```
 
-`show REF:PATH` works for version files, trace files, and artifact files. `list sessions` is read-only evidence discovery for native Codex and Claude session JSONL files; set `CODEX_HOME` or `CLAUDE_HOME` to point at non-default homes.
+`switch` materializes a recorded source version into the working folder and updates the current Workbench ref. It does not invoke Git.
+
+`show REF:PATH` reads version files, trace files, and artifact files. `list runs`, `list jobs`, `list traces`, `list artifacts`, `trace`, `skills list`, and `open --json` read committed object state without taking the project write lock, so they remain usable while an eval or improve command is running. Summary commands omit file content; use `show REF:PATH` for content.
+
+`workbench open` serves the shared read-only inspection model. The web `Compare` surface is the browser counterpart to `workbench compare`; write actions remain in the CLI.
+
+## Remotes, Publish, Install
+
+```bash
+workbench remote add --name origin --url file:///tmp/earnings-prep-remote
+workbench remote add --name cloud --url https://v2.workbench.ai/skills/acme/earnings-prep
+workbench remote list
+workbench sync origin
+workbench publish --remote cloud --visibility private
+workbench install --source https://v2.workbench.ai/skills/acme/earnings-prep --agent codex --yes
+```
+
+Remotes are Workbench object endpoints, not Git remotes. `remote add --name NAME --url URL` accepts explicit `file:///absolute/path` remotes and Workbench Cloud skill URLs like `https://v2.workbench.ai/skills/OWNER/SKILL`. Every sync attempt writes `.workbench/sync/<remote>.json`, which `workbench status --json` surfaces with per-remote status, last error, publication state, and next commands.
+
+File remotes are sync-only. Workbench Cloud remotes can also publish installable source. `publish` returns canonical `/skills/OWNER/SKILL` install URLs plus pinned `/skills/OWNER/SKILL/releases/VERSION` URLs. `install --source URL` installs published source into explicit targets only: `--agent codex`, `--agent claude`, or `--local`. Public URLs remain compatible with the public `skills` CLI through well-known discovery.
 
 ## Auth
 
 ```bash
+workbench login --base-url https://v2.workbench.ai
+workbench login --start-only
+workbench login --wait --timeout 120
 workbench auth status
-workbench auth status codex
 workbench auth connect codex --method api-key
-workbench auth connect codex --method oauth --profile-root "$HOME"
-workbench auth connect claude --method api-key
 workbench auth connect claude --method bedrock
 workbench auth disconnect codex
-workbench login --base-url https://v2.workbench.ai
 workbench logout
 ```
 
-Auth uses the local Workbench adapter-auth store so adapter credentials can be checked, captured, and disconnected by adapter and profile. Codex supports `api-key` via `OPENAI_API_KEY` and `oauth` via `.codex/auth.json` under `--profile-root`. Claude supports `api-key` via `ANTHROPIC_API_KEY`, `oauth` via `.claude.json`, and `bedrock` via the Claude/AWS environment variables. When the CLI is logged in, `auth connect` and `auth disconnect` also update the matching Workbench Cloud adapter connection unless `--local-only` is passed.
+`login` connects the CLI to Workbench Cloud. Headless flows use `login --start-only` to record a pending device authorization and `login --wait --timeout N` to poll it. `auth status --json` reports Workbench Cloud auth separately from adapter auth. When the CLI is logged in, `auth connect` and `auth disconnect` also update the matching Workbench Cloud adapter connection unless `--local-only` is passed.
 
 ## Cases
 
@@ -141,4 +141,4 @@ workbench case show case-001
 workbench case remove case-001
 ```
 
-Cases live under `.workbench/cases`. `case add --from TRACE_ID` records trace evidence and creates a draft that fails until expert acceptance criteria and tests are added.
+Cases live under `.workbench/cases`. `case add --from TRACE_ID` creates a trace-backed draft that needs expert acceptance criteria and tests before it can pass.
