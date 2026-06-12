@@ -2437,6 +2437,9 @@ describe("skill-first Workbench runtime", () => {
     expect(syncedSnapshot.refs["remotes/origin/current"]).toBeUndefined();
     expect(storedState?.refs.current).toBeUndefined();
     expect(storedState?.refs["remotes/origin/current"]).toBeUndefined();
+    const statusAfterSync = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
+    expect(statusAfterSync.next).toContain("workbench publish");
+    expect(statusAfterSync.next).not.toContain("workbench publish --private");
 
     const published = await publishWorkbenchVersion({
       dir: root,
@@ -2445,6 +2448,7 @@ describe("skill-first Workbench runtime", () => {
     });
     expect(published.version.id).toBe(currentVersionId);
     expect(published.visibility).toBe("private");
+    expect(published.installHandle).toBe("alice/http-skill");
     expect(published.installUrl).toBe("https://cloud.test/skills/alice/http-skill");
     expect(published.pinnedInstallUrl).toBe(`https://cloud.test/skills/alice/http-skill/releases/${currentVersionId}`);
     const privatePublishPut = [...putBodies].reverse()
@@ -2472,6 +2476,7 @@ describe("skill-first Workbench runtime", () => {
       visibility: "public",
       authToken: "test-token",
     });
+    expect(publicPublished.installHandle).toBe("alice/http-skill");
     expect(publicPublished.installUrl).toBe("https://cloud.test/skills/alice/http-skill");
     expect(publicPublished.pinnedInstallUrl).toBe(`https://cloud.test/skills/alice/http-skill/releases/${currentVersionId}`);
     const publicPublicationSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
@@ -2483,8 +2488,7 @@ describe("skill-first Workbench runtime", () => {
     expect(publicPublicationSnapshot.refs["remotes/origin/publication/install-url"])
       .toBe("https://cloud.test/skills/alice/http-skill");
     const statusAfterPublish = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
-    expect(statusAfterPublish.next).toContain("workbench install --source https://cloud.test/skills/alice/http-skill --list");
-    expect(statusAfterPublish.next).not.toContain("workbench install https://cloud.test/skills/alice/http-skill --list");
+    expect(statusAfterPublish.next).toContain("workbench install alice/http-skill --list");
   });
 
   test("resolves HTTP Workbench owner remotes by exact namespace", async () => {

@@ -12,8 +12,8 @@
       "id": "author-minimal-skill-eval",
       "title": "Author a minimal skill eval",
       "category": "skill_authoring",
-      "prompt": "Create a Workbench-managed skill for earnings prep, validate it, run the local smoke loop, and explain how source versions are created.",
-      "expected_output": "The response uses the Workbench skill, writes or scaffolds SKILL.md, .workbench/eval.yaml, .workbench/cases/case-001/case.yaml, and .workbench/agents.yaml, validates with workbench check, runs or proposes workbench eval --agents default --samples 1, and explains that Workbench versions are automatic.",
+      "prompt": "Create a Workbench-managed skill for earnings prep, run the local smoke loop, and explain how source versions are created.",
+      "expected_output": "The response uses the Workbench skill, writes or scaffolds SKILL.md, .workbench/eval.yaml, .workbench/cases/case-001/case.yaml, and .workbench/agents.yaml, runs or proposes workbench eval --agents default -n 1, and explains that Workbench versions are automatic.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -34,13 +34,13 @@
           "text": "uses skill-first source shape",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+init\\b|SKILL\\.md|\\.workbench/eval\\.yaml"
+          "value": "(?:^|\\s)workbench\\s+new\\b|SKILL\\.md|\\.workbench/eval\\.yaml"
         },
         {
-          "text": "validates source",
+          "text": "runs the smoke eval",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+check\\b"
+          "value": "(?:^|\\s)workbench\\s+eval\\b"
         },
         {
           "text": "runs eval",
@@ -90,8 +90,8 @@
       "id": "inspect-and-switch-version",
       "title": "Inspect and switch improved version",
       "category": "version_inspection",
-      "prompt": "An improved Workbench skill version id is available from `workbench versions`. Inspect SKILL.md, compare it to its base version, and accept that version locally.",
-      "expected_output": "The response uses workbench versions, workbench show <version-id>:SKILL.md, workbench diff <base-version-id>..<improved-version-id>, and workbench switch <improved-version-id>.",
+      "prompt": "An improved Workbench skill version id is available from `workbench log --versions`. Inspect SKILL.md, compare it to its base version, and accept that version locally.",
+      "expected_output": "The response uses workbench log --versions, workbench show <version-id>:SKILL.md, workbench diff <base-version-id>..<improved-version-id>, and workbench switch <improved-version-id>.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -106,7 +106,7 @@
           "text": "lists versions",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+versions\\b"
+          "value": "(?:^|\\s)workbench\\s+log\\b[^\\n]*--versions\\b"
         },
         {
           "text": "shows skill file",
@@ -129,11 +129,11 @@
       ]
     },
     {
-      "id": "object-remote-sync-shape",
-      "title": "Use Workbench object remotes",
-      "category": "sync",
-      "prompt": "Share a Workbench-managed skill through a Workbench remote and explain what gets written to the remote.",
-      "expected_output": "The response uses workbench remote add --name origin --url URL and workbench sync origin. It explains that the remote stores Workbench object packs with source versions, evidence, refs, traces, and artifacts, and that workbench publish requires a Workbench Cloud remote for installable source.",
+      "id": "publish-and-install-shape",
+      "title": "Publish and install a Workbench skill",
+      "category": "sharing",
+      "prompt": "Share a Workbench-managed skill through Workbench Cloud and explain what gets published.",
+      "expected_output": "The response uses workbench publish and workbench install OWNER/SKILL. It explains that Workbench Cloud publishes installable source while Workbench object sync stores source versions, evidence, refs, traces, and artifacts.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -145,16 +145,16 @@
       },
       "assertions": [
         {
-          "text": "adds remote",
+          "text": "publishes source",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+remote\\s+add\\b[^\\n]*--name\\s+origin\\b[^\\n]*--url\\b"
+          "value": "(?:^|\\s)workbench\\s+publish\\b"
         },
         {
-          "text": "syncs object remote",
+          "text": "installs by handle",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+sync\\b"
+          "value": "(?:^|\\s)workbench\\s+install\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\b"
         },
         {
           "text": "describes object remote",

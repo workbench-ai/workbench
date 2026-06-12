@@ -590,7 +590,7 @@ describe("comparison metric helpers", () => {
         versionId: "v001",
         runId: "run_failed",
         status: "failed",
-        error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench auth connect codex.",
+        error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench login codex.",
       }),
     ]);
 
@@ -604,8 +604,8 @@ describe("comparison metric helpers", () => {
     expect(rows[0]).toMatchObject({
       status: "failed",
       statusLabel: "Failed",
-      evidenceLabel: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench auth connect codex.",
-      error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench auth connect codex.",
+      evidenceLabel: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench login codex.",
+      error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench login codex.",
       runId: "run_failed",
     });
     expect(rows[0]?.score).toBeUndefined();

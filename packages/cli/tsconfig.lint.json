@@ -2,6 +2,23 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "rootDir": "..",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "paths": {
+      "@workbench-ai/workbench-contract": [
+        "../contract/src/index.ts"
+      ],
+      "@workbench-ai/workbench-core": [
+        "../core/src/index.ts"
+      ],
+      "@workbench-ai/workbench-protocol": [
+        "../protocol/src/index.ts"
+      ]
+    }
   }
 }

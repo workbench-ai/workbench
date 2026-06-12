@@ -4,6 +4,8 @@ Workbench is a skill management runtime. It runs skills on evals with agents, re
 
 The CLI is the canonical action surface. The local and hosted web UX is read-only inspection over the same `WorkbenchInspectionSnapshot` used by CLI formatters. Workbench Cloud is the hosted Workbench remote, runner provider, team skill catalog, and hosted source provider.
 
+[`docs/jtbd.md`](docs/jtbd.md) is the jobs-to-be-done ergonomics contract: the complete steady-state command sequences users run to complete each job. Changes to the CLI contract below must keep those sequences true.
+
 ## Vocabulary
 
 - Skill: a measured agent skill. The implicit local skill is `primary`.
@@ -98,38 +100,31 @@ Authored Workbench source files are part of versions: `SKILL.md`, support files,
 
 ## CLI Contract
 
-The primary operator loop is `init`, `check`, `eval`, `compare`, and `improve`. The full CLI contract is larger because Workbench also exposes source inspection, low-level evidence reads, remotes, publication, installation, and auth.
+The taught operator loop is `new`, `eval`, `improve`, `compare`, `publish`, and `install`. The full CLI contract also exposes status, inspection, source switching, case and agent bookkeeping, auth, and plumbing sync.
 
 ```text
-workbench init [DIR] [--json]
+workbench [--json]
+workbench new [DIR] [--json]
 workbench status [--dir DIR] [--json]
-workbench check [--dir DIR] [--json]
-workbench versions [--dir DIR] [--json]
+workbench log [--runs|--versions] [--json]
+workbench show REF[:PATH] [--json]
 workbench switch VERSION [--dir DIR] [--json]
 workbench diff [A..B] [--dir DIR] [--json]
-workbench sync [REMOTE] [--dir DIR] [--dry-run] [--json]
-workbench install --source SOURCE [--agent codex|claude]... [--local] [--yes] [--list] [--dry-run] [--json]
-workbench eval [VERSION] [--skills all|LIST] [--agents all|LIST] [--samples N] [--rerun] [--json]
-workbench improve [VERSION] [--skill SKILL] [--agent AGENT] [--budget N] [--samples N] [--json]
+workbench eval [VERSION] [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--json]
+workbench improve [VERSION] [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--json]
 workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]
-workbench show REF[:PATH] [--json]
-workbench files REF [--json]
-workbench list runs|jobs|traces|artifacts|sessions [--json]
-workbench trace RUN_ID|JOB_ID|TRACE_ID [--json]
-workbench remote add --name NAME --url URL [--replace] [--dry-run] [--dir DIR] [--json]
-workbench remote list [--dir DIR] [--json]
-workbench remote remove NAME [--dir DIR] [--json]
-workbench agent list|add|show|default|remove ...
-workbench skills list
-workbench case list|add|show|remove ...
-workbench publish [VERSION] [--visibility private|internal|public] [--remote REMOTE] [--dry-run] [--dir DIR] [--json]
-workbench auth status|connect|disconnect ...
-workbench login [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--json]
-workbench logout [--json]
+workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]
+workbench install HANDLE_OR_URL [--to codex|claude|local]... [--yes] [--list] [--dry-run] [--json]
+workbench case add [RUN_ID] | list | rm ID [--json]
+workbench agent add NAME --adapter X [--model M] [--with k=v]... | list | rm NAME [--json]
+workbench login [PROVIDER] [--method METHOD] [--profile P] [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--local-only] [--json]
+workbench logout [PROVIDER] [--json]
+workbench sync [REMOTE] [--dir DIR] [--dry-run] [--json]
 workbench open [--host HOST] [--port PORT] [--no-open] [--json]
+workbench help [COMMAND] [--all]
 ```
 
-The CLI surface above is the complete product contract. New docs and skills should teach the primary loop first and link to command help or this contract for lower-level inspection and sharing commands; do not add aliases for stale grammar.
+Default help shows only orientation plus the six taught commands. `help --all` shows the complete product contract above. New docs and skills should teach the primary loop first and link to command help or this contract for lower-level inspection and sync commands; do not add aliases for stale grammar.
 
 ## Runtime Behavior
 
@@ -143,7 +138,7 @@ Command and local agents run eval jobs with isolated network unless configured w
 
 If an eval adapter, command, auth materialization, or runtime fails, Workbench records failed run, job, trace, and artifact evidence with the error. Failed execution is not treated as missing score data.
 
-`improve` edits only the mutable `primary` project skill. It requires exactly one selected skill and one selected agent; if a default selector expands to multiple entries, pass `--skill primary --agent AGENT`. It requires failed or reviewed trace evidence for the selected skill and agent. Command agents must define `improveCommand`; provider-backed Codex and Claude agents use adapter auth. Passing smoke traces are not improvement evidence. Workbench records the proposed improved version and proof-run evidence. If the improve adapter cannot create a patch, or the proof eval fails at the adapter/runtime layer, `improve` fails clearly; a proof eval failure still leaves the candidate version and proof run available for inspection. Workbench switches to the improved version only when the proof run succeeds and beats the incumbent.
+`improve` edits only the mutable `primary` project skill. It requires exactly one selected skill and one selected agent; if a default selector expands to multiple entries, pass `--skills primary --agents AGENT`. It requires failed or reviewed trace evidence for the selected skill and agent. Command agents must define `improveCommand`; provider-backed Codex and Claude agents use adapter auth. Passing smoke traces are not improvement evidence. Workbench records the proposed improved version and proof-run evidence. If the improve adapter cannot create a patch, or the proof eval fails at the adapter/runtime layer, `improve` fails clearly; a proof eval failure still leaves the candidate version and proof run available for inspection. Workbench switches to the improved version only when the proof run succeeds and beats the incumbent. Hosted `improve --cloud` follows the same local materialization rule after terminal Cloud evidence syncs back; if the local current version changed while the hosted run was in flight, Workbench refuses to overwrite it and leaves `workbench switch VERSION` as the explicit resolution.
 
 `switch` is the explicit command that materializes an older or alternate version into the working folder. It does not invoke Git.
 
@@ -153,11 +148,11 @@ If an eval adapter, command, auth materialization, or runtime fails, Workbench r
 
 Raw Workbench runtime state is not a Git repository. Git users keep using Git normally; Workbench does not call Git, write Git branches, create tags, commit, push, pull, or mutate Git refs. Workbench storage is repo-local and ignored, similar in spirit to `.git` but independent of Git.
 
-`workbench remote add --name NAME --url URL` records a non-secret local Workbench remote URL in schema-tagged `.workbench/remotes.yaml`, analogous to git remote configuration. Accepted URLs are explicit `file:///absolute/path` remotes and Workbench Cloud skill URLs such as `https://v2.workbench.ai/skills/OWNER/SKILL`; bare paths and API implementation URLs are rejected. Adding or changing a remote does not create a skill version. `workbench sync` merges immutable object packs between local `.workbench/objects` and the remote and records each attempt in `.workbench/sync/<remote>.json`. File remotes are sync-only and are supported for local portability tests. Workbench Cloud remotes use the same object pack schema over HTTP and are the only remotes that can publish installable source.
+Workbench remotes are non-secret local Workbench object endpoints recorded in schema-tagged `.workbench/remotes.yaml`, analogous to git remote configuration but not exposed as taught CLI nouns. `publish` creates or updates the Cloud remote for the selected skill handle, and `eval --cloud` or `improve --cloud` auto-links the same Cloud skill project when a logged-in project has no linked Cloud remote yet. File remotes can be configured by editing `.workbench/remotes.yaml` for portability tests. Accepted URLs are explicit `file:///absolute/path` remotes and Workbench Cloud skill URLs such as `https://v2.workbench.ai/skills/OWNER/SKILL`; bare paths and API implementation URLs are rejected. Adding or changing a remote does not create a skill version. `workbench sync` merges immutable object packs between local `.workbench/objects` and the remote and records each attempt in `.workbench/sync/<remote>.json`. File remotes are sync-only. Workbench Cloud remotes use the same object pack schema over HTTP and are the only remotes that can publish installable source.
 
 When a remote exists, write commands perform best-effort post-sync and read commands may perform best-effort pre-sync. If a remote is unavailable, local objects remain usable, `workbench status --json` reports the per-remote error and next command, and explicit `workbench sync REMOTE` is the repair command.
 
-`workbench publish [VERSION]` syncs the selected version to a Workbench Cloud remote, marks it as the published source version, and asks Workbench Cloud to expose installable source. Workbench Cloud publishes return one canonical install URL like `https://v2.workbench.ai/skills/OWNER/SKILL` plus a pinned release URL like `https://v2.workbench.ai/skills/OWNER/SKILL/releases/VERSION` for every source visibility. File remotes reject publish because they are object-pack sync endpoints, not source hosts. `workbench install --source URL` installs Workbench-aware source only to explicit native targets (`--agent codex`, `--agent claude`, or `--local`); public URLs also work with the public `skills` CLI through well-known discovery. Publication is explicit; ordinary sync shares evidence and source versions but does not change published visibility.
+`workbench publish [VERSION]` syncs the selected version to a Workbench Cloud remote, marks it as the published source version, and asks Workbench Cloud to expose installable source. `--as OWNER/SKILL` sets or replaces the linked Cloud skill handle and is persisted, including during dry-run preview; subsequent bare `publish` uses that handle. Workbench Cloud publishes return one canonical install handle like `OWNER/SKILL`, a canonical URL like `https://v2.workbench.ai/skills/OWNER/SKILL`, and a pinned release URL like `https://v2.workbench.ai/skills/OWNER/SKILL/releases/VERSION` for every source visibility. File remotes reject publish because they are object-pack sync endpoints, not source hosts. `workbench install HANDLE_OR_URL` installs Workbench-aware source only to explicit or detected native targets (`--to codex`, `--to claude`, or `--to local`); public URLs also work with the public `skills` CLI through well-known discovery. Publication is explicit; ordinary sync and `--cloud` auto-linking share evidence and source versions but do not expose installable source or change published visibility.
 
 Workbench Cloud owns the `OWNER` namespace in those URLs. Personal namespaces are created from user profiles. Organization namespaces, teams, membership, and skill grants live only in Cloud. The CLI does not add commands for organization or team state, and no organization/team metadata is persisted in `.workbench`.
 
@@ -165,7 +160,7 @@ Published source visibility does not grant project evidence access. `private` so
 
 ## Web UX
 
-`workbench open` serves the local read-only inspection UI from the last committed Workbench object state. It does not reconcile source or wait for a long-running eval or improve command; active runs, queued/running jobs, and live trace-progress batches are persisted as ordinary objects. `workbench open --json`, `workbench list runs|jobs|traces|artifacts`, `workbench trace`, and `workbench skills list` read the same committed inspection state without taking the project write lock. List commands are summary-first and omit file content; use `workbench show REF:PATH` to read version, trace, or artifact file content. Hosted skill pages use the same snapshot projection. The web UI may navigate, filter, and inspect, but write actions stay in the CLI. Run status, job status, and execution timelines can update while a command is still running. Captured files and terminal trace artifacts are attached when the job records terminal trace evidence.
+`workbench open` serves the local read-only inspection UI from the last committed Workbench object state. It does not reconcile source or wait for a long-running eval or improve command; active runs, queued/running jobs, and live trace-progress batches are persisted as ordinary objects. `workbench open --json`, `workbench log`, and `workbench show` read the same committed inspection state without taking the project write lock. Timeline commands are summary-first and omit file content; use `workbench show REF:PATH` to read version, trace, or artifact file content. Hosted skill pages use the same snapshot projection. The web UI may navigate, filter, and inspect, but write actions stay in the CLI. Run status, job status, and execution timelines can update while a command is still running. Captured files and terminal trace artifacts are attached when the job records terminal trace evidence.
 
 Cloud source-only viewers still receive a `WorkbenchInspectionSnapshot`, but Cloud constructs it from the published version and publication refs only. Source-only snapshots intentionally omit runs, jobs, traces, artifacts, private eval evidence, and improvement history. Users with project read access receive the full snapshot for the same URL.
 

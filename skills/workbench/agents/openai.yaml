@@ -2,4 +2,4 @@ interface:
   display_name: "Workbench"
   short_description: "Create, evaluate, improve, version, inspect, sync, and publish Workbench-managed agent skills"
   default_prompt: >-
-    Use the Workbench skill. Read SKILL.md first, then load only the relevant referenced docs. For a new workflow, create or edit a skill, validate it with workbench check, run workbench eval to create source versions automatically, run workbench improve when there is evidence to improve from, compare skills and agents, use workbench sync for Workbench object remotes, and use workbench publish when the user wants installable source.
+    Use the Workbench skill. Read SKILL.md first, then load only the relevant referenced docs. For a new workflow, create or edit a skill, run workbench eval to create source versions automatically, inspect with workbench log and workbench show, run workbench improve when there is evidence to improve from, compare skills and agents, use workbench publish when the user wants installable source, and use workbench sync only as object-sync plumbing.

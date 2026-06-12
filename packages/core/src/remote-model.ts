@@ -26,7 +26,7 @@ export function parseWorkbenchRemoteUrl(rawUrl: string): ParsedWorkbenchRemoteUr
   const trimmed = rawUrl.trim();
   if (!trimmed) {
     throw new WorkbenchCodedError("remote_invalid_url", "Workbench remote URL must be non-empty.", {
-      remediation: "Run workbench remote add --name NAME --url file:///absolute/path or workbench remote add --name NAME --url https://HOST/skills/OWNER/SKILL.",
+      remediation: "Use publish for Workbench Cloud links or edit .workbench/remotes.yaml for plumbing file remotes.",
       exitCode: 2,
     });
   }
@@ -73,7 +73,7 @@ export function parseWorkbenchRemoteUrl(rawUrl: string): ParsedWorkbenchRemoteUr
   const segments = url.pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
   if (segments.length !== 3 || segments[0] !== "skills") {
     throw new WorkbenchCodedError("remote_invalid_skill_slug", `Workbench Cloud remote must use /skills/OWNER/SKILL: ${trimmed}`, {
-      remediation: "Run workbench remote add --name NAME --url https://HOST/skills/OWNER/SKILL.",
+      remediation: "Use publish for Workbench Cloud links or edit .workbench/remotes.yaml with https://HOST/skills/OWNER/SKILL.",
       subject: { url: trimmed },
       exitCode: 2,
     });

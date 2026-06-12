@@ -29,10 +29,9 @@ The tests assert the skill-first command surface, local runtime lifecycle, read-
 
 ```bash
 tmpdir=$(mktemp -d)
-workbench init "$tmpdir/earnings-prep"
-workbench check --dir "$tmpdir/earnings-prep"
-workbench eval --dir "$tmpdir/earnings-prep" --agents default --samples 1 --json
-workbench versions --dir "$tmpdir/earnings-prep"
+workbench new "$tmpdir/earnings-prep"
+workbench eval --dir "$tmpdir/earnings-prep" --agents default -n 1 --json
+workbench log --dir "$tmpdir/earnings-prep" --versions
 workbench compare --dir "$tmpdir/earnings-prep" --versions all --skills all --agents all
 workbench open --dir "$tmpdir/earnings-prep"
 workbench open --dir "$tmpdir/earnings-prep" --json
@@ -44,9 +43,16 @@ The init eval is a smoke check. Run `workbench improve` only after a workflow-sp
 
 ```bash
 tmpdir=$(mktemp -d)
-workbench init "$tmpdir/earnings-prep"
-workbench eval --dir "$tmpdir/earnings-prep" --agents default --samples 1 --json
-workbench remote add --name origin --url "file://$tmpdir/remote" --dir "$tmpdir/earnings-prep"
+workbench new "$tmpdir/earnings-prep"
+workbench eval --dir "$tmpdir/earnings-prep" --agents default -n 1 --json
+mkdir -p "$tmpdir/earnings-prep/.workbench"
+cat > "$tmpdir/earnings-prep/.workbench/remotes.yaml" <<EOF
+schema: workbench.remotes.v1
+remotes:
+  origin:
+    url: file://$tmpdir/remote
+    kind: file
+EOF
 workbench sync origin --dir "$tmpdir/earnings-prep"
 find "$tmpdir/remote" -maxdepth 3 -type f | sort
 ```

@@ -46,7 +46,7 @@ export function resolveInstallTargets(options: {
     const agent = rawAgent.trim().toLowerCase();
     if (agent !== "codex" && agent !== "claude") {
       throw new WorkbenchCodedError("usage", `Unsupported install agent: ${rawAgent}`, {
-        remediation: "Use --agent codex, --agent claude, or --local.",
+        remediation: "Use --to codex, --to claude, or --to local.",
         exitCode: 2,
       });
     }
@@ -65,7 +65,7 @@ export function resolveInstallTargets(options: {
   }
   if (targets.length === 0) {
     throw new WorkbenchCodedError("install_target_required", "workbench install requires an explicit target.", {
-      remediation: "Run workbench install --source SOURCE --agent codex, workbench install --source SOURCE --agent claude, or workbench install --source SOURCE --local.",
+      remediation: "Run workbench install OWNER/SKILL --to codex, workbench install OWNER/SKILL --to claude, or workbench install OWNER/SKILL --to local.",
       exitCode: 2,
     });
   }

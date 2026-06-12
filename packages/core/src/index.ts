@@ -928,7 +928,7 @@ async function explicitAdapterAuthProfilesForExecution(
     if (missingLoaded >= 0) {
       const target = required[missingLoaded]!;
       throw new Error(
-        `ADAPTER_AUTH_REQUIRED: ${target.adapterId}${target.slot ? `/${target.slot}` : ""} disconnected. Run workbench auth connect ${target.adapterId}${target.slot ? `/${target.slot}` : ""}.`,
+        `ADAPTER_AUTH_REQUIRED: ${target.adapterId}${target.slot ? `/${target.slot}` : ""} disconnected. Run workbench login ${target.adapterId}${target.slot ? `/${target.slot}` : ""}.`,
       );
     }
     return loaded.map((bundle) => bundle!);
@@ -936,7 +936,7 @@ async function explicitAdapterAuthProfilesForExecution(
   if (missing.length > 0) {
     const target = missing[0]!;
     throw new Error(
-      `ADAPTER_AUTH_REQUIRED: ${target.adapterId}${target.slot ? `/${target.slot}` : ""} disconnected. Run workbench auth connect ${target.adapterId}${target.slot ? `/${target.slot}` : ""}.`,
+      `ADAPTER_AUTH_REQUIRED: ${target.adapterId}${target.slot ? `/${target.slot}` : ""} disconnected. Run workbench login ${target.adapterId}${target.slot ? `/${target.slot}` : ""}.`,
     );
   }
   return required.map((target) => providedByTarget.get(adapterAuthTargetKey(target))!);
@@ -2560,6 +2560,7 @@ export interface WorkbenchPublishResult {
   remote: WorkbenchRemote;
   version: WorkbenchVersion;
   visibility: WorkbenchPublishVisibility;
+  installHandle: string;
   installUrl: string;
   pinnedInstallUrl: string;
   dryRun?: boolean;
@@ -2837,7 +2838,7 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
         total: 0,
       },
       remotes: [],
-      next: [`workbench init ${root}`],
+      next: [`workbench new ${root}`],
     };
   }
   return withWorkbenchProjectLockRoot(root, async () => {
@@ -2919,8 +2920,8 @@ function statusNextCommands(args: {
   }
   const lastRun = [...args.state.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   if (lastRun?.status === "failed" || lastRun?.status === "canceled") {
-    commands.push(`workbench trace ${lastRun.id}`);
-    commands.push(`workbench improve --agent ${args.defaultAgent ?? "default"} --budget 1 --samples 1`);
+    commands.push(`workbench show ${lastRun.id}`);
+    commands.push(`workbench improve --agents ${args.defaultAgent ?? "default"} --budget 1 -n 1`);
   }
   const failedRemote = args.remotes.find((remote) => remote.sync.status === "error");
   if (failedRemote) {
@@ -2932,13 +2933,22 @@ function statusNextCommands(args: {
     remote.sync.status === "up_to_date"
   );
   if (unpublishedRemote) {
-    commands.push(`workbench publish --remote ${unpublishedRemote.name} --visibility private`);
+    commands.push("workbench publish");
   }
   const publishedRemote = args.remotes.find((remote) => remote.kind === "workbench-cloud" && remote.publication.installUrl);
   if (publishedRemote?.publication.installUrl) {
-    commands.push(`workbench install --source ${publishedRemote.publication.installUrl} --list`);
+    commands.push(`workbench install ${installHandleFromPublicationUrl(publishedRemote.publication.installUrl) ?? publishedRemote.publication.installUrl} --list`);
   }
   return [...new Set(commands)];
+}
+
+function installHandleFromPublicationUrl(installUrl: string): string | undefined {
+  try {
+    const parsed = parseWorkbenchRemoteUrl(installUrl);
+    return parsed.kind === "workbench-cloud" ? `${parsed.owner}/${parsed.skill}` : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function workbenchStatusUnlocked(root: string, options: WorkbenchCommandOptions = {}): Promise<WorkbenchStatus> {
@@ -3926,7 +3936,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     authToken: options.authToken,
   });
   if (runtime.skillBundles.length !== 1 || runtime.selectedAgents.length !== 1) {
-    throw new WorkbenchUserError("workbench improve requires exactly one skill and one agent. Pass --skill primary --agent AGENT.");
+    throw new WorkbenchUserError("workbench improve requires exactly one skill and one agent. Pass --skills primary --agents AGENT.");
   }
   const [skillBundle] = runtime.skillBundles;
   if (!skillBundle) {
@@ -4319,7 +4329,7 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
     const file = version.files.find((entry) => entry.path === filePath);
     if (!file) {
       throw new WorkbenchCodedError("ref_not_found", `File not found in ${version.id}: ${filePath}`, {
-        remediation: `Run workbench files ${version.id}.`,
+        remediation: `Run workbench show ${version.id}.`,
         subject: { ref: version.id, path: filePath },
         exitCode: 1,
       });
@@ -4340,7 +4350,7 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
       const file = trace.files.find((entry) => entry.path === filePath);
       if (!file) {
         throw new WorkbenchCodedError("ref_not_found", `File not found in ${trace.id}: ${filePath}`, {
-          remediation: `Run workbench files ${trace.id}.`,
+          remediation: `Run workbench show ${trace.id}.`,
           subject: { ref: trace.id, path: filePath },
           exitCode: 1,
         });
@@ -4355,7 +4365,7 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
       const file = artifact.files.find((entry) => entry.path === filePath);
       if (!file) {
         throw new WorkbenchCodedError("ref_not_found", `File not found in ${artifact.id}: ${filePath}`, {
-          remediation: `Run workbench files ${artifact.id}.`,
+          remediation: `Run workbench show ${artifact.id}.`,
           subject: { ref: artifact.id, path: filePath },
           exitCode: 1,
         });
@@ -4365,7 +4375,7 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
     return artifact;
   }
   throw new WorkbenchCodedError("ref_not_found", `Workbench object not found: ${objectRef}`, {
-    remediation: "Run workbench list runs --json or workbench versions --json.",
+    remediation: "Run workbench log --json.",
     subject: { ref: objectRef },
     exitCode: 1,
   });
@@ -4394,7 +4404,7 @@ export async function filesForWorkbenchRef(ref: string, options: WorkbenchComman
     return artifact.files.map(copyFile);
   }
   throw new WorkbenchCodedError("ref_not_found", `Workbench file object not found: ${ref}`, {
-    remediation: "Run workbench list runs --json, workbench list artifacts --json, or workbench versions --json.",
+    remediation: "Run workbench log --json, then workbench show REF.",
     subject: { ref },
     exitCode: 1,
   });
@@ -4649,7 +4659,7 @@ export async function addWorkbenchRemote(name: string, url: string, options: Wor
           ? "replaced"
           : (() => {
               throw new WorkbenchCodedError("remote_name_conflict", `Remote ${remoteName} already points at a different URL.`, {
-                remediation: `Run workbench remote add --name ${remoteName} --url ${remote.url} --replace to change it.`,
+                remediation: `Update .workbench/remotes.yaml so ${remoteName} points at ${remote.url}.`,
                 subject: { remote: remoteName, currentUrl: existing.url, requestedUrl: remote.url },
                 exitCode: 1,
               });
@@ -4802,6 +4812,7 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
         remote: sync.remote,
         version,
         visibility: options.visibility ?? "private",
+        installHandle: workbenchRemoteInstallHandle(sync.remote),
         installUrl: workbenchRemoteSourceUrl(sync.remote),
         pinnedInstallUrl: workbenchRemoteReleaseSourceUrl(sync.remote, version.id),
         dryRun: true,
@@ -4824,6 +4835,7 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
       remote: sync.remote,
       version,
       visibility: options.visibility ?? "private",
+      installHandle: publication.installHandle,
       installUrl: publication.installUrl,
       pinnedInstallUrl: publication.pinnedInstallUrl,
     };
@@ -4835,7 +4847,7 @@ function assertPublishableRemote(remote: WorkbenchRemote): void {
     return;
   }
   throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can publish installable source.`, {
-    remediation: "Run workbench remote add --name cloud --url https://HOST/skills/OWNER/SKILL, then workbench publish --remote cloud.",
+    remediation: "Run workbench login, then workbench publish from the skill project.",
     subject: { remote: remote.name, kind: remote.kind, url: remote.url },
     exitCode: 1,
   });
@@ -7108,7 +7120,7 @@ async function readAgents(root: string): Promise<WorkbenchAgent[]> {
     source = await fs.readFile(filePath, "utf8");
   } catch (error) {
     if (fileErrorCode(error) === "ENOENT") {
-      throw new WorkbenchUserError(`Missing ${path.join(".workbench", AGENTS_FILE)}. Run \`workbench init\` or restore the agent file before continuing.`);
+      throw new WorkbenchUserError(`Missing ${path.join(".workbench", AGENTS_FILE)}. Run \`workbench new\` or restore the agent file before continuing.`);
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new WorkbenchUserError(`Unable to read ${path.join(".workbench", AGENTS_FILE)}: ${message}`);
@@ -8180,7 +8192,7 @@ async function loadState(root: string, options: { allowMissing?: boolean } = {})
   const workbenchRoot = workbenchDir(root);
   if (!await exists(workbenchRoot)) {
     if (!options.allowMissing) {
-      throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench init` first.");
+      throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench new` first.");
     }
     return emptyWorkbenchState(root);
   }
@@ -8205,7 +8217,7 @@ async function loadStateReadOnlyWithRetry(root: string): Promise<WorkbenchProjec
 async function loadStateReadOnly(root: string): Promise<WorkbenchProjectState> {
   const workbenchRoot = workbenchDir(root);
   if (!await exists(workbenchRoot)) {
-    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench init` first.");
+    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench new` first.");
   }
   await assertStateDirsAvailableForReadOnly(root);
   return readStateFromObjectStore(root, <T>(type: WorkbenchStateObjectType) => readObjectTypeDirReadOnly<T>(root, type));
@@ -8378,13 +8390,14 @@ async function writeRemotePublishedSource(
   remote: WorkbenchRemote,
   version: WorkbenchVersion,
   options: WorkbenchRemoteWriteOptions,
-): Promise<{ installUrl: string; pinnedInstallUrl: string }> {
+): Promise<{ installHandle: string; installUrl: string; pinnedInstallUrl: string }> {
   if (isHttpRemote(remote)) {
     const target = await resolveHttpRemoteSkill(remote, options, options.state);
     if (!target.owner || !target.name) {
       throw new WorkbenchUserError(`Workbench Cloud remote did not return owner/name identity for ${remote.url}.`);
     }
     const publication = {
+      installHandle: `${target.owner}/${target.name}`,
       installUrl: `${target.baseUrl}/skills/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}`,
       pinnedInstallUrl: `${target.baseUrl}/skills/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/releases/${encodeURIComponent(version.id)}`,
     };
@@ -8404,7 +8417,7 @@ async function writeRemotePublishedSource(
     return publication;
   }
   throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can publish installable source.`, {
-    remediation: "Run workbench remote add --name cloud --url https://HOST/skills/OWNER/SKILL, then workbench publish --remote cloud.",
+    remediation: "Run workbench login, then workbench publish from the skill project.",
     subject: { remote: remote.name, kind: remote.kind, url: remote.url },
     exitCode: 1,
   });
@@ -8417,6 +8430,17 @@ function remoteObjectPackRoot(remote: WorkbenchRemote): string {
   throw new WorkbenchCodedError("remote_invalid_url", "Workbench Cloud remotes require authenticated object sync.", {
     subject: { remote: remote.name, url: remote.url },
   });
+}
+
+function workbenchRemoteInstallHandle(remote: WorkbenchRemote): string {
+  if (!isHttpRemote(remote)) {
+    throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes have install handles.`, {
+      subject: { remote: remote.name, kind: remote.kind, url: remote.url },
+      exitCode: 1,
+    });
+  }
+  const parsed = parseHttpRemote(remote);
+  return `${parsed.owner}/${parsed.name}`;
 }
 
 function workbenchRemoteSourceUrl(remote: WorkbenchRemote): string {
@@ -8839,7 +8863,7 @@ async function readWorkbenchRemotesFile(root: string): Promise<Record<string, Wo
   const parsed = parseYamlRecord(await fs.readFile(filePath, "utf8"));
   if (parsed.schema !== "workbench.remotes.v1") {
     throw new WorkbenchCodedError("remote_invalid_url", `${path.join(WORKBENCH_DIR, REMOTES_FILE)} must use schema workbench.remotes.v1.`, {
-      remediation: "Recreate remotes with workbench remote add --name origin --url URL.",
+      remediation: "Fix .workbench/remotes.yaml or publish again to recreate the Workbench Cloud link.",
       subject: { path: path.join(WORKBENCH_DIR, REMOTES_FILE) },
       exitCode: 2,
     });
@@ -8857,7 +8881,7 @@ async function readWorkbenchRemotesFile(root: string): Promise<Record<string, Wo
     const parsedUrl = parseWorkbenchRemoteUrl(url);
     if (kind && kind !== parsedUrl.kind) {
       throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote ${remoteName} kind does not match its URL.`, {
-        remediation: `Run workbench remote add --name ${remoteName} --url ${parsedUrl.url} --replace.`,
+        remediation: `Update .workbench/remotes.yaml so ${remoteName} points at ${parsedUrl.url}.`,
         subject: { remote: remoteName, kind, url },
         exitCode: 2,
       });
@@ -8967,12 +8991,12 @@ function resolveRemote(state: WorkbenchProjectState, name?: string): WorkbenchRe
     }
     if (remotes.length === 0) {
       throw new WorkbenchCodedError("remote_required", "No remotes are configured.", {
-        remediation: "Run workbench remote add --name origin --url https://HOST/skills/OWNER/SKILL.",
+        remediation: "Run workbench publish to create a Workbench Cloud link.",
         exitCode: 2,
       });
     }
     throw new WorkbenchCodedError("remote_required", "Multiple remotes are configured and none is named origin; name the remote to use.", {
-      remediation: "Run workbench remote list.",
+      remediation: "Run workbench status and pass one remote name explicitly.",
       subject: { remotes: remotes.map((entry) => entry.name) },
       exitCode: 2,
     });
@@ -8981,7 +9005,7 @@ function resolveRemote(state: WorkbenchProjectState, name?: string): WorkbenchRe
   const remote = state.remotes[remoteName];
   if (!remote) {
     throw new WorkbenchCodedError("remote_not_found", `Remote not found: ${remoteName}`, {
-      remediation: "Run workbench remote list.",
+      remediation: "Run workbench status to inspect linked remotes.",
       subject: { remote: remoteName },
       exitCode: 1,
     });
@@ -9706,7 +9730,7 @@ function assertImmutableObjectCompatible(existing: unknown, incoming: unknown, l
 
 async function requireInitialized(root: string): Promise<void> {
   if (!await exists(workbenchDir(root))) {
-    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench init` first.");
+    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench new` first.");
   }
 }
 

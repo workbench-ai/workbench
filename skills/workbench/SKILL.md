@@ -14,12 +14,11 @@ Assume the user is chatting with an agent that can edit files and run commands. 
 Use the small loop first:
 
 ```bash
-workbench init ./earnings-prep
+workbench new ./earnings-prep
 cd ./earnings-prep
-workbench check
-workbench eval --agents default --samples 1
+workbench eval --agents default -n 1
 workbench compare
-workbench versions
+workbench log --versions
 workbench show current:SKILL.md
 ```
 
@@ -28,14 +27,14 @@ The init case is only a smoke check. Replace it with representative workflow cas
 Use selector flags only when the user intentionally wants a broader or narrower matrix:
 
 ```bash
-workbench eval --skills all --agents all --samples 1
+workbench eval --skills all --agents all -n 1
 workbench compare --skills all --agents all --versions all
 ```
 
-Run `workbench improve` only after failed or reviewed trace evidence exists. Passing smoke traces are not enough. `improve` edits one skill with one agent, so pass singular selectors when defaults expand to multiple entries:
+Run `workbench improve` only after failed or reviewed trace evidence exists. Passing smoke traces are not enough. `improve` edits one skill with one agent, so use plural selector flags to narrow defaults to one skill and one agent when needed:
 
 ```bash
-workbench improve --skill primary --agent patcher --budget 1 --samples 1
+workbench improve --skills primary --agents patcher --budget 1 -n 1
 ```
 
 ## Source Shape
@@ -56,10 +55,9 @@ Do not point local skill paths outside the project folder. Use `baseline: none` 
 
 ```bash
 workbench status
-workbench versions
-workbench list runs
-workbench list traces
-workbench trace RUN_ID
+workbench log
+workbench log --runs
+workbench show RUN_ID
 workbench show TRACE_ID:stderr.log
 workbench show VERSION_ID:SKILL.md
 workbench diff BASE_VERSION_ID..IMPROVED_VERSION_ID
@@ -77,8 +75,8 @@ Use agents to compare runtime configurations. `local` and `command` agents run D
 workbench agent add default --adapter local
 workbench agent add strict --adapter command --with command='sh "$CASE_DIR/tests/test.sh"'
 workbench agent add codex --adapter codex --model gpt-5.3-codex-spark --with auth=default
-workbench auth connect codex --method api-key
-workbench eval --agents all --samples 1
+workbench login codex --method api-key
+workbench eval --agents all -n 1
 workbench compare --agents all --versions all
 ```
 
@@ -89,16 +87,19 @@ If an eval adapter, command, auth materialization, or runtime fails, Workbench r
 ## Remotes, Publish, Auth
 
 ```bash
-workbench remote add --name origin --url file:///tmp/earnings-prep-remote
-workbench remote add --name cloud --url https://v2.workbench.ai/skills/acme/earnings-prep
-workbench sync origin
-workbench publish --remote cloud --visibility private
-workbench install --source https://v2.workbench.ai/skills/acme/earnings-prep --agent codex --yes
+workbench login
+workbench eval --cloud
+workbench improve --cloud
+workbench publish --as acme/earnings-prep
+workbench publish
+workbench publish --public
+workbench install acme/earnings-prep --to codex --yes
+workbench sync cloud
 ```
 
-Remotes exchange Workbench object packs; they are not Git remotes. File remotes are sync-only. Workbench Cloud remotes can publish installable source. `install --source URL` installs only into explicit native targets such as `--agent codex`, `--agent claude`, or `--local`.
+Remotes exchange Workbench object packs; they are not Git remotes. A logged-in `eval --cloud` or `improve --cloud` auto-links an unpublished Cloud skill project when needed, syncs objects before scheduling, and syncs evidence back after the hosted run. `publish` is the only command that exposes installable source; `publish --as OWNER/SKILL` sets or replaces the persisted handle when the derived one is wrong. `sync` is plumbing for repair and portability checks. `install HANDLE_OR_URL` installs published source into detected native targets or explicit targets such as `--to codex`, `--to claude`, or `--to local`.
 
-Use `workbench login` before authenticated Workbench Cloud remotes. For headless use, `workbench login --start-only` records a pending device authorization and `workbench login --wait --timeout N` polls it. Use `workbench auth status|connect|disconnect` when provider-backed agents need explicit adapter auth.
+Use `workbench login` before authenticated Workbench Cloud operations. For headless use, `workbench login --start-only` records a pending device authorization and `workbench login --wait --timeout N` polls it. Use `workbench login PROVIDER` and `workbench logout PROVIDER` when provider-backed agents need explicit adapter auth.
 
 ## What Belongs In The Skill Layer
 
@@ -108,6 +109,7 @@ Keep these in skills unless core runtime support is required: discovering cases 
 
 Load only what is needed:
 
+- `references/docs/jtbd.md` for the job-level command sequences users expect.
 - `references/docs/cli.md` for command syntax.
 - `references/docs/evals/README.md` for source shape and authoring loop.
 - `references/SPEC.md` for the hard-cut product contract.

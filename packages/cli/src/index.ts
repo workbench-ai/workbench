@@ -9,17 +9,14 @@ import {
   addWorkbenchCase,
   addWorkbenchRemote,
   addWorkbenchAgent,
-  checkWorkbenchSkill,
   compareWorkbench,
   createWorkbenchAdapterAuthBundle,
   createWorkbenchReadOnlyInspectionSnapshot,
   diffWorkbenchVersions,
   evalWorkbenchSkill,
-  filesForWorkbenchRef,
   improveWorkbenchSkill,
   initWorkbenchSkill,
   listWorkbenchCases,
-  listWorkbenchRemotes,
   listWorkbenchAgents,
   listWorkbenchVersions,
   localWorkbenchAdapterAuthStore,
@@ -27,9 +24,6 @@ import {
   publishWorkbenchVersion,
   removeWorkbenchCase,
   removeWorkbenchAgent,
-  removeWorkbenchRemote,
-  setDefaultWorkbenchAgent,
-  showWorkbenchCase,
   showWorkbenchRef,
   switchWorkbenchVersion,
   syncWorkbenchRemote,
@@ -48,9 +42,11 @@ import {
   type WorkbenchRun,
   type WorkbenchAgent,
   type WorkbenchExecutionTraceDetail,
+  type WorkbenchRemote,
   type WorkbenchTrace,
   type WorkbenchVersion,
 } from "@workbench-ai/workbench-core";
+import { normalizeWorkbenchSkillName } from "@workbench-ai/workbench-contract";
 import { emitError, emitResult } from "./output.js";
 import {
   installSnapshotToTargets,
@@ -58,6 +54,7 @@ import {
   normalizeInstallSnapshotPath,
   resolveInstallTargets,
   supportedInstallTargets,
+  type WorkbenchInstallTargetName,
 } from "./install-targets.js";
 import { startWorkbenchOpenServer } from "./open-server.js";
 
@@ -71,154 +68,128 @@ interface ParsedArgs {
   flags: Record<string, string | boolean | string[]>;
 }
 
+interface WorkbenchSkillHandle {
+  owner: string;
+  skill: string;
+}
+
 const require = createRequire(import.meta.url);
 
 const HELP = [
   "Usage:",
+  "  workbench [--json]",
   "  workbench <command> [options]",
   "",
-  "Primary loop:",
-  "  workbench init [DIR] [--json]",
-  "  workbench check [--dir DIR] [--json]",
-  "  workbench eval [VERSION] [--skills all|LIST] [--agents all|LIST] [--samples N] [--rerun] [--json]",
+  "Bare workbench prints project status and the next useful command.",
+  "",
+  "Taught commands:",
+  "  workbench new [DIR] [--json]",
+  "  workbench eval [VERSION] [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--json]",
+  "  workbench improve [VERSION] [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--json]",
   "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
-  "  workbench improve [VERSION] [--skill SKILL] [--agent AGENT] [--budget N] [--samples N] [--json]",
+  "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--json]",
+  "  workbench install HANDLE_OR_URL [--to codex|claude|local]... [--yes] [--list] [--dry-run] [--json]",
+  "",
+  "More:",
+  "  workbench help --all",
+].join("\n");
+
+const HELP_ALL = [
+  "Usage:",
+  "  workbench                          # = workbench status",
+  "  workbench new [DIR] [--json]",
+  "  workbench eval [VERSION] [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--json]",
+  "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
+  "  workbench improve [VERSION] [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--json]",
+  "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--json]",
+  "  workbench install HANDLE_OR_URL [--to codex|claude|local]... [--yes] [--list] [--dry-run] [--json]",
   "",
   "Inspect:",
   "  workbench status [--dir DIR] [--json]",
-  "  workbench versions [--dir DIR] [--json]",
-  "  workbench switch VERSION [--dir DIR] [--json]",
-  "  workbench diff [A..B] [--dir DIR] [--json]",
+  "  workbench log [--runs|--versions] [--json]",
   "  workbench show REF[:PATH] [--json]",
-  "  workbench files REF [--json]",
-  "  workbench list runs|jobs|traces|artifacts|sessions [--json]",
-  "  workbench trace RUN_ID|JOB_ID|TRACE_ID [--json]",
+  "  workbench diff [A..B] [--json]",
+  "  workbench switch VERSION [--json]",
   "  workbench open [--host HOST] [--port PORT] [--no-open] [--json]",
   "",
   "Configure:",
-  "  workbench agent list|add|show|default|remove ...",
-  "  workbench skills list",
-  "  workbench case list|add|show|remove ...",
+  "  workbench case add [RUN_ID] | list | rm ID [--json]",
+  "  workbench agent add NAME --adapter X [--model M] [--with k=v]... | list | rm NAME [--json]",
   "",
   "Share and auth:",
-  "  workbench remote add --name NAME --url URL [--replace] [--dry-run] [--dir DIR] [--json]",
-  "  workbench remote list [--dir DIR] [--json]",
-  "  workbench remote remove NAME [--dir DIR] [--json]",
-  "  workbench sync [REMOTE] [--dry-run] [--dir DIR] [--json]",
-  "  workbench publish [VERSION] [--remote REMOTE] [--visibility private|internal|public] [--dry-run] [--dir DIR] [--json]",
-  "  workbench install --source SOURCE [--agent codex|claude]... [--local] [--yes] [--list] [--dry-run] [--json]",
-  "  workbench auth status [ADAPTER[/SLOT]] [--profile PROFILE] [--json]",
-  "  workbench auth connect ADAPTER[/SLOT] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]",
-  "  workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--json]",
-  "  workbench login [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--json]",
-  "  workbench logout [--json]",
+  "  workbench login [PROVIDER] [--method METHOD] [--profile P] [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--local-only] [--json]",
+  "  workbench logout [PROVIDER] [--json]",
+  "  workbench sync [REMOTE] [--dry-run] [--json]",
   "",
   "Remote URLs:",
   "  https://HOST/skills/OWNER/SKILL  Workbench Cloud skill remote",
-  "  file:///absolute/path            local file remote",
-  "",
-  "Examples:",
-  "  workbench init ./earnings-prep",
-  "  workbench check --dir ./earnings-prep",
-  "  workbench eval --agents default --samples 1",
-  "  workbench compare",
-  "  workbench status --json",
-  "  workbench remote add --name origin --url https://v2.workbench.ai/skills/acme/earnings-prep",
-  "  workbench publish --remote origin --visibility public --json",
-  "  workbench install --source https://v2.workbench.ai/skills/acme/earnings-prep --agent codex --yes",
-  "",
-  "Environment:",
-  "  CODEX_HOME and CLAUDE_HOME override read-only session discovery roots.",
-  "  WORKBENCH_API_URL selects a Workbench Cloud API base URL for login, auth, and HTTP remotes.",
-  "  WORKBENCH_API_TOKEN supplies a Workbench Cloud token without a login (WORKBENCH_SMOKE_BEARER_TOKEN is a fallback).",
-  "  WORKBENCH_CONFIG overrides the CLI config path (default ~/.workbench/config.json).",
-  "  WORKBENCH_DEVICE_AUTH overrides the pending device login record path.",
-  "  WORKBENCH_ADAPTER_AUTH_STORE overrides the local adapter auth store directory.",
+  "  file:///absolute/path            local file remote for plumbing sync",
 ].join("\n");
 
 const COMMAND_HELP: Record<string, string> = {
-  auth: [
+  new: [
     "Usage:",
-    "  workbench auth status [ADAPTER[/SLOT]] [--profile PROFILE] [--json]",
-    "  workbench auth connect ADAPTER[/SLOT] [--method api-key|oauth|bedrock] [--profile PROFILE] [--profile-root DIR] [--local-only] [--json]",
-    "  workbench auth disconnect ADAPTER[/SLOT] [--profile PROFILE] [--local-only] [--json]",
+    "  workbench new [DIR] [--json]",
     "",
-    "Stores adapter credentials locally and uploads them to Workbench Cloud when logged in unless --local-only is passed. Codex supports oauth and api-key. Claude supports oauth, api-key, and bedrock.",
-    "",
-    "Examples:",
-    "  workbench auth status --json",
-    "  workbench auth connect codex --method api-key",
-    "  workbench auth disconnect codex --json",
+    "Creates a Workbench skill project.",
   ].join("\n"),
   eval: [
     "Usage:",
-    "  workbench eval [VERSION] [--skills all|LIST] [--agents all|LIST] [--samples N] [--rerun] [--json]",
+    "  workbench eval [VERSION] [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--json]",
     "",
     "Runs eval jobs for the selected version, measured skills, and agents. Omitted selectors use manifest defaults.",
   ].join("\n"),
   improve: [
     "Usage:",
-    "  workbench improve [VERSION] [--skill SKILL] [--agent AGENT] [--budget N] [--samples N] [--json]",
+    "  workbench improve [VERSION] [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--json]",
     "",
-    "Creates one improved child version from evidence. Pass singular --skill and --agent when defaults expand to multiple entries.",
+    "Creates one improved child version from evidence. The selected skills and agents must resolve to exactly one entry each.",
+  ].join("\n"),
+  compare: [
+    "Usage:",
+    "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
+    "",
+    "Compares recorded eval evidence across selected skills, agents, and versions.",
   ].join("\n"),
   install: [
     "Usage:",
-    "  workbench install --source SOURCE [--agent codex|claude]... [--local] [--yes] [--list] [--dry-run] [--json]",
+    "  workbench install HANDLE_OR_URL [--to codex|claude|local]... [--yes] [--list] [--dry-run] [--json]",
     "",
-    "Installs published Workbench Cloud source into explicit local agent targets.",
+    "Installs published Workbench Cloud source into local agent targets.",
     "",
     "Example:",
-    "  workbench install --source https://v2.workbench.ai/skills/acme/earnings-prep --agent codex --yes",
-  ].join("\n"),
-  remote: [
-    "Usage:",
-    "  workbench remote add --name NAME --url URL [--replace] [--dry-run] [--dir DIR] [--json]",
-    "  workbench remote list [--dir DIR] [--json]",
-    "  workbench remote remove NAME [--dir DIR] [--json]",
-    "",
-    "Remotes exchange Workbench object packs. Only Workbench Cloud remotes can publish installable source.",
-    "",
-    "Examples:",
-    "  workbench remote add --name origin --url https://v2.workbench.ai/skills/acme/earnings-prep",
-    "  workbench remote add --name scratch --url file:///tmp/earnings-prep-remote --replace",
+    "  workbench install acme/earnings-prep --to codex --yes",
   ].join("\n"),
   status: [
     "Usage:",
     "  workbench status [--dir DIR] [--json]",
     "",
     "Reports project, worktree, run, per-remote sync/publication, and auth state. --json emits the workbench.status.v1 dashboard.",
-    "",
-    "Example:",
-    "  workbench status --json",
   ].join("\n"),
   logout: [
     "Usage:",
-    "  workbench logout [--json]",
+    "  workbench logout [PROVIDER] [--json]",
     "",
-    "Revokes and removes the local Workbench Cloud token. Reports whether the token was revoked and whether local adapter auth records remain.",
-    "",
-    "Example:",
-    "  workbench logout --json",
+    "With no provider, logs out of Workbench Cloud. With a provider such as codex or claude, removes local adapter auth.",
   ].join("\n"),
   show: [
     "Usage:",
     "  workbench show REF [--json]",
     "  workbench show REF:PATH [--json]",
     "",
-    "Shows a Workbench object or a file inside a version, trace, or artifact.",
+    "Shows a Workbench object, lists files for file-backed objects, or prints one file.",
   ].join("\n"),
-  list: [
+  log: [
     "Usage:",
-    "  workbench list runs|jobs|traces|artifacts|sessions [--json]",
+    "  workbench log [--runs|--versions] [--json]",
     "",
-    "Lists Workbench evidence or read-only native Codex/Claude session files.",
+    "Shows one reverse-chronological timeline of versions and runs.",
   ].join("\n"),
-  versions: [
+  diff: [
     "Usage:",
-    "  workbench versions [--json]",
+    "  workbench diff [A..B] [--json]",
     "",
-    "Lists Workbench skill versions.",
+    "Shows changed files between two Workbench source versions.",
   ].join("\n"),
   switch: [
     "Usage:",
@@ -226,159 +197,144 @@ const COMMAND_HELP: Record<string, string> = {
     "",
     "Switches the working skill source to a recorded Workbench version.",
   ].join("\n"),
+  open: [
+    "Usage:",
+    "  workbench open [--host HOST] [--port PORT] [--no-open] [--json]",
+    "",
+    "Serves or emits the read-only Workbench inspection snapshot.",
+  ].join("\n"),
+  case: [
+    "Usage:",
+    "  workbench case list [--json]",
+    "  workbench case add [RUN_ID] [--json]",
+    "  workbench case rm ID [--json]",
+    "",
+    "Lists cases, creates a draft case, or removes a case.",
+  ].join("\n"),
+  agent: [
+    "Usage:",
+    "  workbench agent list [--json]",
+    "  workbench agent add NAME --adapter X [--model M] [--with k=v]... [--json]",
+    "  workbench agent rm NAME [--json]",
+    "",
+    "Lists, adds, or removes eval agent configurations.",
+  ].join("\n"),
   sync: [
     "Usage:",
     "  workbench sync [REMOTE] [--dry-run] [--dir DIR] [--json]",
     "",
-    "Synchronizes local evidence and version objects with a Workbench remote. --dry-run reports what would be exchanged.",
-    "",
-    "Examples:",
-    "  workbench sync origin --json",
-    "  workbench sync origin --dry-run --json",
+    "Plumbing command: synchronizes local evidence and version objects with a Workbench remote.",
   ].join("\n"),
   publish: [
     "Usage:",
-    "  workbench publish [VERSION] [--remote REMOTE] [--visibility private|internal|public] [--dry-run] [--dir DIR] [--json]",
+    "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
     "",
-    "Publishes installable skill source from the selected version to a Workbench Cloud remote.",
-    "",
-    "Examples:",
-    "  workbench publish --remote origin --visibility private --json",
-    "  workbench publish <version-id> --remote origin --dry-run --json",
+    "Publishes installable skill source to Workbench Cloud. --as sets the linked OWNER/SKILL handle.",
   ].join("\n"),
   login: [
     "Usage:",
-    "  workbench login [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--json]",
-    "  workbench logout [--json]",
+    "  workbench login [PROVIDER] [--method METHOD] [--profile P] [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--local-only] [--json]",
+    "  workbench logout [PROVIDER] [--json]",
     "",
-    "Connects the CLI to Workbench Cloud with the device login flow.",
-    "",
-    "Examples:",
-    "  workbench login --start-only --json",
-    "  workbench login --wait --timeout 120 --json",
+    "Connects the CLI to Workbench Cloud or captures local adapter auth for a provider.",
   ].join("\n"),
 };
 
-const BOOLEAN_FLAGS = new Set([
-  "help",
-  "dry-run",
-  "json",
-  "local",
-  "local-only",
-  "list",
-  "no-open",
-  "start-only",
-  "replace",
-  "rerun",
-  "wait",
-  "yes",
-]);
-
 type FlagKind = "boolean" | "string" | "positive-integer" | "repeat-string";
 
-const FLAG_DEFINITIONS: Record<string, FlagKind> = {
-  adapter: "string",
-  "base-url": "string",
-  budget: "positive-integer",
-  dir: "string",
-  from: "string",
-  "dry-run": "boolean",
-  help: "boolean",
-  host: "string",
-  json: "boolean",
-  local: "boolean",
-  "local-only": "boolean",
-  list: "boolean",
-  method: "string",
-  model: "string",
-  name: "string",
-  "no-open": "boolean",
-  port: "positive-integer",
-  profile: "string",
-  "profile-root": "string",
-  remote: "string",
-  replace: "boolean",
-  rerun: "boolean",
-  samples: "positive-integer",
-  source: "string",
-  "start-only": "boolean",
-  agent: "string",
-  agents: "string",
-  skill: "string",
-  skills: "string",
-  version: "boolean",
-  versions: "string",
-  visibility: "string",
-  timeout: "positive-integer",
-  url: "string",
-  wait: "boolean",
-  with: "repeat-string",
-  yes: "boolean",
-};
+type FlagSpec = Readonly<Record<string, FlagKind>>;
 
-const COMMAND_FLAGS: Record<string, readonly string[]> = {
-  check: ["dir", "json"],
-  compare: ["agents", "dir", "json", "skills", "versions"],
-  diff: ["dir", "json"],
-  eval: ["agents", "dir", "json", "rerun", "samples", "skills"],
-  files: ["dir", "json"],
-  improve: ["agent", "budget", "dir", "json", "samples", "skill"],
-  init: ["dir", "json"],
-  install: ["agent", "dry-run", "json", "list", "local", "source", "yes"],
-  list: ["dir", "json"],
-  login: ["base-url", "json", "no-open", "start-only", "timeout", "wait"],
-  logout: ["json"],
-  open: ["dir", "host", "json", "no-open", "port"],
-  publish: ["dir", "dry-run", "json", "remote", "visibility"],
-  show: ["dir", "json"],
-  status: ["dir", "json"],
-  switch: ["dir", "json"],
-  sync: ["dir", "dry-run", "json"],
-  trace: ["dir", "json"],
-  versions: ["dir", "json"],
+const COMMON_FLAGS = {
+  json: "boolean",
+} as const satisfies FlagSpec;
+
+const PROJECT_FLAGS = {
+  ...COMMON_FLAGS,
+  dir: "string",
+} as const satisfies FlagSpec;
+
+const HELP_FLAG = {
+  help: "boolean",
+} as const satisfies FlagSpec;
+
+const VERSION_FLAG = {
+  version: "boolean",
+} as const satisfies FlagSpec;
+
+const COMMAND_FLAGS: Record<string, FlagSpec> = {
+  compare: { ...PROJECT_FLAGS, ...HELP_FLAG, agents: "string", skills: "string", versions: "string" },
+  diff: { ...PROJECT_FLAGS, ...HELP_FLAG },
+  eval: {
+    ...PROJECT_FLAGS,
+    ...HELP_FLAG,
+    agents: "string",
+    cloud: "boolean",
+    rerun: "boolean",
+    samples: "positive-integer",
+    skills: "string",
+  },
+  help: { ...COMMON_FLAGS, ...HELP_FLAG, all: "boolean" },
+  improve: {
+    ...PROJECT_FLAGS,
+    ...HELP_FLAG,
+    agents: "string",
+    budget: "positive-integer",
+    cloud: "boolean",
+    samples: "positive-integer",
+    skills: "string",
+  },
+  install: { ...COMMON_FLAGS, ...HELP_FLAG, "dry-run": "boolean", list: "boolean", to: "repeat-string", yes: "boolean" },
+  log: { ...PROJECT_FLAGS, ...HELP_FLAG, runs: "boolean", versions: "boolean" },
+  login: {
+    ...COMMON_FLAGS,
+    ...HELP_FLAG,
+    "base-url": "string",
+    "local-only": "boolean",
+    method: "string",
+    "no-open": "boolean",
+    profile: "string",
+    "profile-root": "string",
+    "start-only": "boolean",
+    timeout: "positive-integer",
+    wait: "boolean",
+  },
+  logout: { ...COMMON_FLAGS, ...HELP_FLAG },
+  new: { ...PROJECT_FLAGS, ...HELP_FLAG },
+  open: { ...PROJECT_FLAGS, ...HELP_FLAG, host: "string", "no-open": "boolean", port: "positive-integer" },
+  publish: {
+    ...PROJECT_FLAGS,
+    ...HELP_FLAG,
+    as: "string",
+    "dry-run": "boolean",
+    private: "boolean",
+    public: "boolean",
+    team: "boolean",
+  },
+  show: { ...PROJECT_FLAGS, ...HELP_FLAG },
+  status: { ...PROJECT_FLAGS, ...HELP_FLAG },
+  switch: { ...PROJECT_FLAGS, ...HELP_FLAG },
+  sync: { ...PROJECT_FLAGS, ...HELP_FLAG, "dry-run": "boolean" },
+  version: { ...COMMON_FLAGS, ...VERSION_FLAG },
 };
 
 interface SubcommandFlagSpec {
   defaultSubcommand?: string;
-  flags: Record<string, readonly string[]>;
+  flags: Record<string, FlagSpec>;
 }
 
 const SUBCOMMAND_FLAGS: Record<string, SubcommandFlagSpec> = {
-  auth: {
-    defaultSubcommand: "status",
-    flags: {
-      status: ["json", "profile"],
-      connect: ["json", "local-only", "method", "profile", "profile-root"],
-      disconnect: ["json", "local-only", "profile"],
-    },
-  },
   case: {
     flags: {
-      list: ["dir", "json"],
-      add: ["dir", "from", "json"],
-      show: ["dir", "json"],
-      remove: ["dir", "json"],
-    },
-  },
-  remote: {
-    flags: {
-      add: ["dir", "dry-run", "json", "name", "replace", "url"],
-      list: ["dir", "json"],
-      remove: ["dir", "json"],
-    },
-  },
-  skills: {
-    flags: {
-      list: ["dir", "json"],
+      list: { ...PROJECT_FLAGS, ...HELP_FLAG },
+      add: { ...PROJECT_FLAGS, ...HELP_FLAG },
+      rm: { ...PROJECT_FLAGS, ...HELP_FLAG },
     },
   },
   agent: {
     flags: {
-      list: ["dir", "json"],
-      add: ["adapter", "dir", "json", "model", "with"],
-      show: ["dir", "json"],
-      default: ["dir", "json"],
-      remove: ["dir", "json"],
+      list: { ...PROJECT_FLAGS, ...HELP_FLAG },
+      add: { ...PROJECT_FLAGS, ...HELP_FLAG, adapter: "string", model: "string", with: "repeat-string" },
+      rm: { ...PROJECT_FLAGS, ...HELP_FLAG },
     },
   },
 };
@@ -390,20 +346,23 @@ export async function runCli(argv: readonly string[], io: CliIo = {
   const parsed = parseArgs(argv);
   const command = parsed.positionals[0];
   try {
-    if (command === "--version" || command === "-v" || command === "version" || parsed.flags.version === true) {
+    validateCommandFlags(parsed, command);
+    if (command === "version" || parsed.flags.version === true) {
       io.stdout.write(`workbench ${getCliVersion()}\n`);
       return 0;
     }
-    if (!command || command === "help" || command === "--help" || command === "-h") {
+    if (command === "help") {
       const helpCommand = command === "help" ? optionalPositional(parsed, 1) : undefined;
-      io.stdout.write(`${helpCommand ? commandHelp(helpCommand) : HELP}\n`);
+      io.stdout.write(`${parsed.flags.all === true ? HELP_ALL : helpCommand ? commandHelp(helpCommand) : HELP}\n`);
       return 0;
     }
     if (parsed.flags.help === true) {
-      io.stdout.write(`${commandHelp(command)}\n`);
+      io.stdout.write(`${command ? commandHelp(command) : HELP}\n`);
       return 0;
     }
-    validateCommandFlags(parsed, command);
+    if (!command) {
+      return await handleStatus(parsed, io);
+    }
     if (command === "login") {
       return await handleLogin(parsed, io);
     }
@@ -414,27 +373,17 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       return await handleInstall(parsed, io);
     }
     const core = await coreOptions(parsed);
-    if (command === "init") {
+    if (command === "new") {
       const status = await initWorkbenchSkill({ dir: parsed.positionals[1] ?? dirFlag(parsed) });
-      return output(status, parsed, io, () => `Initialized Workbench skill at ${status.root}.`);
+      return output(status, parsed, io, () => `Created Workbench skill at ${status.root}.\nnext: edit SKILL.md, then run workbench eval`);
     }
     if (command === "status") {
-      const status = await workbenchStatusSnapshot(core);
-      const auth = await workbenchCliAuthStatus();
-      return emitResult("workbench.status.v1", {
-        project: status.project as Json,
-        worktree: status.worktree as Json,
-        runs: status.runs as Json,
-        remotes: status.remotes as Json,
-        auth: auth as unknown as Json,
-        next: status.next as Json,
-      }, parsed, io, () => formatStatusSnapshot({ ...status, auth }));
-    }
-    if (command === "check") {
-      const result = await checkWorkbenchSkill(core);
-      return output(result, parsed, io, () => formatCheck(result));
+      return await handleStatus(parsed, io);
     }
     if (command === "eval") {
+      if (parsed.flags.cloud === true) {
+        return await handleCloudEval(parsed, io);
+      }
       const runs = await evalWorkbenchSkill({
         ...core,
         version: optionalPositional(parsed, 1),
@@ -448,21 +397,34 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       if (failedRuns.length > 0) {
         return emitEvalFailure(runs, failedRuns, artifactIds, parsed, io);
       }
-      return output(runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? [])), parsed, io, () => runs.map(formatRun).join("\n"));
+      const deltas = await evalDeltas(core, runs);
+      const nextCommands = evalSuccessNextCommands(runs);
+      return emitResult("workbench.cli.eval.v1", {
+        result: runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? [])),
+        deltas: deltas as unknown as Json,
+        nextCommands: nextCommands as unknown as Json,
+      }, parsed, io, () => [
+        runs.map(formatRun).join("\n"),
+        ...deltas.map(formatEvalDelta),
+        ...(nextCommands[0] ? [`next: ${nextCommands[0]}`] : []),
+      ].filter(Boolean).join("\n"));
     }
     if (command === "improve") {
+      if (parsed.flags.cloud === true) {
+        return await handleCloudImprove(parsed, io);
+      }
       const result = await improveWorkbenchSkill({
         ...core,
         version: optionalPositional(parsed, 1),
-        skill: stringFlag(parsed, "skill"),
-        agent: stringFlag(parsed, "agent"),
+        skill: stringFlag(parsed, "skills"),
+        agent: stringFlag(parsed, "agents"),
         budget: intFlag(parsed, "budget"),
         samples: intFlag(parsed, "samples"),
       });
       return output({
         ...result,
         version: versionSummary(result.version),
-      } as unknown as Json, parsed, io, () => formatImproveResult(result));
+      } as unknown as Json, parsed, io, () => `${formatImproveResult(result)}\nnext: workbench eval`);
     }
     if (command === "compare") {
       const comparison = await compareWorkbench({
@@ -473,93 +435,27 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       });
       return output(comparison, parsed, io, () => formatComparison(comparison));
     }
-    if (command === "versions") {
-      const versions = await listWorkbenchVersions(core);
-      return output(versions.map(versionSummary), parsed, io, () => versions.map(formatVersion).join("\n") || "No versions.");
-    }
     if (command === "switch") {
       const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.");
       const version = await switchWorkbenchVersion(versionRef, core);
       return output(versionSummary(version), parsed, io, () => `Switched to ${version.id}.`);
     }
     if (command === "diff") {
-      const range = requiredPositional(parsed, 1, "workbench diff requires A..B.");
+      const range = optionalPositional(parsed, 1) ?? await defaultDiffRange(core);
       const diffs = await diffWorkbenchVersions(range, core);
       return output(diffs, parsed, io, () => diffs.map((entry) => `${entry.status}\t${entry.path}`).join("\n") || "No diff.");
     }
     if (command === "show") {
-      const ref = requiredPositional(parsed, 1, "workbench show requires REF.");
-      const session = await showLocalAgentSession(ref);
-      if (session) {
-        return output(session, parsed, io, () => formatSessionDetail(session));
-      }
-      const value = await showWorkbenchRef(ref, core);
-      return output(value, parsed, io, () => formatShow(value));
+      return await handleShow(parsed, io);
     }
-    if (command === "files") {
-      const ref = requiredPositional(parsed, 1, "workbench files requires REF.");
-      const files = await filesForWorkbenchRef(ref, core);
-      return output(files.map(fileSummary), parsed, io, () => files.map((file) => file.path).join("\n") || "No files.");
-    }
-    if (command === "list") {
-      return await handleList(parsed, io);
-    }
-    if (command === "trace") {
-      const ref = optionalPositional(parsed, 1);
-      if (!ref) {
-        throw new WorkbenchCodedError("usage", "workbench trace requires RUN_ID, JOB_ID, or TRACE_ID.", {
-          remediation: "Run workbench list runs --json or workbench list traces --json.",
-          exitCode: 2,
-        });
-      }
-      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
-      const run = snapshot.runs.find((entry) => entry.id === ref);
-      const job = snapshot.jobs.find((entry) => entry.id === ref);
-      const traces = run
-        ? snapshot.traces.filter((trace) => run.traceIds.includes(trace.id))
-        : job
-          ? snapshot.traces.filter((trace) => job.traceIds.includes(trace.id))
-        : snapshot.traces.filter((trace) => trace.id === ref);
-      if (traces.length === 0) {
-        const jobs = run
-          ? snapshot.jobs.filter((entry) => entry.runId === run.id)
-          : job ? [job] : [];
-        const details = jobs.flatMap((entry) => {
-          const detail = workbenchJobEvidenceForSnapshot(snapshot, {
-            runId: entry.runId,
-            jobId: entry.id,
-          });
-          return detail ? [detail] : [];
-        }).filter((detail) =>
-          detail.executions.some((execution) =>
-            execution.sessions.length > 0 ||
-            execution.trace.spans.length > 0 ||
-            execution.trace.events.length > 0 ||
-            execution.trace.summaries.length > 0
-          )
-        );
-        if (details.length > 0) {
-          return output(details, parsed, io, () => details.map(formatTraceDetail).join("\n"));
-        }
-        throw new WorkbenchCodedError("ref_not_found", `Trace not found: ${ref}`, {
-          remediation: "Run workbench list runs --json, workbench list jobs --json, or workbench list traces --json.",
-          subject: { ref },
-          exitCode: 1,
-        });
-      }
-      return output(traces, parsed, io, () => traces.map(formatTrace).join("\n"));
+    if (command === "log") {
+      return await handleLog(parsed, io);
     }
     if (command === "agent") {
       return await handleAgent(parsed, io);
     }
-    if (command === "skills") {
-      return await handleSkills(parsed, io);
-    }
     if (command === "case") {
       return await handleCase(parsed, io);
-    }
-    if (command === "remote") {
-      return await handleRemote(parsed, io);
     }
     if (command === "sync") {
       const result = await syncWorkbenchRemote({
@@ -577,17 +473,39 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       }, parsed, io, () => `${result.dryRun ? "Would sync" : "Synced"} ${result.remote.name}: pushed ${result.pushed}, pulled ${result.pulled}${result.upToDate ? " (up to date)" : ""}.`);
     }
     if (command === "publish") {
+      const preview = parsed.flags["dry-run"] === true && !stringFlag(parsed, "as")
+        ? await previewPublishWithDerivedRemote(parsed)
+        : undefined;
+      if (preview) {
+        return emitResult("workbench.cli.publish.v1", {
+          remote: preview.remote as unknown as Json,
+          version: versionSummary(preview.version),
+          visibility: preview.visibility,
+          installHandle: preview.installHandle,
+          installUrl: preview.installUrl,
+          pinnedInstallUrl: preview.pinnedInstallUrl,
+          dryRun: true,
+        }, parsed, io, () => [
+          `Would publish ${preview.version.id} to remote ${preview.remote.name}.`,
+          `Visibility: ${preview.visibility}`,
+          `Install: ${preview.installUrl}`,
+          `Pinned: ${preview.pinnedInstallUrl}`,
+          `next: workbench install ${preview.installHandle}`,
+        ].join("\n"));
+      }
+      const remote = await ensurePublishRemote(parsed);
       const result = await publishWorkbenchVersion({
         ...core,
         version: optionalPositional(parsed, 1),
-        remote: stringFlag(parsed, "remote"),
+        remote,
         dryRun: parsed.flags["dry-run"] === true,
-        visibility: parsePublishVisibility(stringFlag(parsed, "visibility")),
+        visibility: parsePublishVisibilityFlags(parsed),
       });
       return emitResult("workbench.cli.publish.v1", {
         remote: result.remote as unknown as Json,
         version: versionSummary(result.version),
         visibility: result.visibility,
+        installHandle: result.installHandle,
         installUrl: result.installUrl,
         pinnedInstallUrl: result.pinnedInstallUrl,
         ...(result.dryRun ? { dryRun: true } : {}),
@@ -596,10 +514,8 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         `Visibility: ${result.visibility}`,
         `Install: ${result.installUrl}`,
         `Pinned: ${result.pinnedInstallUrl}`,
+        `next: workbench install ${result.installHandle}`,
       ].join("\n"));
-    }
-    if (command === "auth") {
-      return await handleAuth(parsed, io);
     }
     if (command === "open") {
       if (parsed.flags.json === true) {
@@ -626,30 +542,109 @@ export async function runCli(argv: readonly string[], io: CliIo = {
   }
 }
 
-async function handleList(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const kind = requiredPositional(parsed, 1, "workbench list requires runs|jobs|traces|artifacts|sessions.");
-  if (kind === "sessions") {
-    const sessions = await listLocalAgentSessions();
-    return output(sessions, parsed, io, () => sessions.map(formatSession).join("\n") || "No local sessions.");
+async function handleStatus(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const status = await workbenchStatusSnapshot(await coreOptions(parsed));
+  const auth = await workbenchCliAuthStatus();
+  return emitResult("workbench.status.v1", {
+    project: status.project as Json,
+    worktree: status.worktree as Json,
+    runs: status.runs as Json,
+    remotes: status.remotes as Json,
+    auth: auth as unknown as Json,
+    next: status.next as Json,
+  }, parsed, io, () => formatStatusSnapshot({ ...status, auth }));
+}
+
+async function handleLog(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  if (parsed.flags.runs === true && parsed.flags.versions === true) {
+    throw new WorkbenchCodedError("usage", "workbench log accepts only one of --runs or --versions.", {
+      remediation: "Run workbench log --runs or workbench log --versions.",
+      exitCode: 2,
+    });
+  }
+  if (parsed.positionals.length > 1) {
+    if (parsed.flags.runs === true) {
+      throw new WorkbenchUserError("--runs does not accept a value.");
+    }
+    if (parsed.flags.versions === true) {
+      throw new WorkbenchUserError("--versions does not accept a value.");
+    }
+    rejectExtraInput(parsed, {
+      maxPositionals: 1,
+      message: "workbench log does not accept refs or paths.",
+      remediation: "Run workbench log, workbench log --runs, or workbench log --versions.",
+    });
   }
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(await coreOptions(parsed));
-  if (kind === "runs") {
-    return output(snapshot.runs, parsed, io, () => snapshot.runs.map(formatRun).join("\n") || "No runs.");
+  const includeRuns = parsed.flags.versions !== true;
+  const includeVersions = parsed.flags.runs !== true;
+  const entries: WorkbenchLogEntry[] = [
+    ...(includeVersions ? snapshot.versions.map((version) => ({
+      kind: "version" as const,
+      id: version.id,
+      createdAt: version.createdAt,
+      message: version.message,
+      fileCount: version.files.length,
+    })) : []),
+    ...(includeRuns ? snapshot.runs.map((run) => ({
+      kind: "run" as const,
+      id: run.id,
+      createdAt: run.createdAt,
+      status: run.status,
+      versionId: run.versionId,
+      skillName: run.skillName,
+      agentName: run.agentName,
+      ...(run.score !== undefined ? { score: run.score } : {}),
+    })) : []),
+  ].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return emitResult("workbench.cli.log.v1", {
+    entries: entries as unknown as Json,
+  }, parsed, io, () => entries.map(formatLogEntry).join("\n") || "No history.");
+}
+
+type WorkbenchLogEntry =
+  | { kind: "version"; id: string; createdAt: string; message: string; fileCount: number }
+  | { kind: "run"; id: string; createdAt: string; status: string; versionId: string; skillName: string; agentName: string; score?: number };
+
+async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const ref = requiredPositional(parsed, 1, "workbench show requires REF.");
+  const session = await showLocalAgentSession(ref);
+  if (session) {
+    return output(session, parsed, io, () => formatSessionDetail(session));
   }
-  if (kind === "jobs") {
-    return output(snapshot.jobs, parsed, io, () => snapshot.jobs.map(formatJob).join("\n") || "No jobs.");
+  const core = await coreOptions(parsed);
+  const [objectRef, requestedPath] = splitShowRef(ref);
+  if (requestedPath) {
+    const runOrJobFile = await fileForRunOrJobRef(core, objectRef, requestedPath);
+    if (runOrJobFile) {
+      return output(runOrJobFile, parsed, io, () => formatShow(runOrJobFile));
+    }
+    const value = await showWorkbenchRef(ref, core);
+    return output(value, parsed, io, () => formatShow(value));
   }
-  if (kind === "traces") {
-    return output(snapshot.traces.map(traceSummary), parsed, io, () => snapshot.traces.map(formatTrace).join("\n") || "No traces.");
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const version = snapshot.versions.find((entry) => entry.id === objectRef);
+  if (version) {
+    return output(fileListing("version", version.id, version.files), parsed, io, () => formatFileListing("version", version.id, version.files));
   }
-  if (kind === "artifacts") {
-    return output(snapshot.artifacts.map(artifactSummary), parsed, io, () => snapshot.artifacts.map(formatArtifact).join("\n") || "No artifacts.");
+  const trace = snapshot.traces.find((entry) => entry.id === objectRef);
+  if (trace) {
+    return output(fileListing("trace", trace.id, trace.files), parsed, io, () => formatFileListing("trace", trace.id, trace.files));
   }
-  throw new WorkbenchUserError(`Unsupported list target: ${kind}`);
+  const artifact = snapshot.artifacts.find((entry) => entry.id === objectRef);
+  if (artifact) {
+    return output(fileListing("artifact", artifact.id, artifact.files), parsed, io, () => formatFileListing("artifact", artifact.id, artifact.files));
+  }
+  const details = evidenceDetailsForRunOrJob(snapshot, objectRef);
+  if (details.length > 0) {
+    return output(details, parsed, io, () => details.map(formatTraceDetail).join("\n"));
+  }
+  const value = await showWorkbenchRef(ref, core);
+  return output(value, parsed, io, () => formatShow(value));
 }
 
 async function handleAgent(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const subcommand = requiredPositional(parsed, 1, "workbench agent requires list|add|show|default|remove.");
+  const subcommand = requiredPositional(parsed, 1, "workbench agent requires list|add|rm.");
   if (subcommand === "list") {
     const agents = await listWorkbenchAgents(await coreOptions(parsed));
     return output(agents, parsed, io, () => agents.map(formatAgent).join("\n") || "No agents.");
@@ -669,204 +664,83 @@ async function handleAgent(parsed: ParsedArgs, io: CliIo): Promise<number> {
     });
     return output(agent, parsed, io, () => `Added agent ${formatAgent(agent)}.`);
   }
-  if (subcommand === "show") {
-    const name = requiredPositional(parsed, 2, "workbench agent show requires NAME.");
-    const agent = (await listWorkbenchAgents(await coreOptions(parsed))).find((entry) => entry.name === name);
-    if (!agent) {
-      throw new WorkbenchCodedError("ref_not_found", `Agent not found: ${name}`, {
-        remediation: "Run workbench agent list.",
-        subject: { agent: name },
-        exitCode: 1,
-      });
-    }
-    return output(agent, parsed, io, () => formatAgent(agent));
-  }
-  if (subcommand === "default") {
-    const result = await setDefaultWorkbenchAgent(requiredPositional(parsed, 2, "workbench agent default requires NAME."), await coreOptions(parsed));
-    return output(result, parsed, io, () => `Default agent: ${result.defaultAgent}`);
-  }
-  if (subcommand === "remove") {
-    const result = await removeWorkbenchAgent(requiredPositional(parsed, 2, "workbench agent remove requires NAME."), await coreOptions(parsed));
+  if (subcommand === "rm") {
+    const result = await removeWorkbenchAgent(requiredPositional(parsed, 2, "workbench agent rm requires NAME."), await coreOptions(parsed));
     return output(result, parsed, io, () => `Removed agent ${result.removed}.`);
   }
   throw new WorkbenchUserError(`Unsupported agent command: ${subcommand}`);
 }
 
-async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const subcommand = requiredPositional(parsed, 1, "workbench skills requires list.");
-  if (subcommand !== "list") {
-    throw new WorkbenchUserError(`Unsupported skills command: ${subcommand}`);
-  }
-  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(await coreOptions(parsed));
-  return output(snapshot.skillSources, parsed, io, () =>
-    snapshot.skillSources.map((source) => {
-      const where = source.kind === "remote"
-        ? `${source.from}${source.ref ? `#${source.ref}` : ""}`
-        : source.kind === "none"
-          ? "baseline:none"
-          : source.path;
-      return `${source.name}\t${source.kind}\t${where}\tincludes=${source.includes?.length ?? 0}`;
-    }).join("\n") || "No skills."
-  );
-}
-
 async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const subcommand = requiredPositional(parsed, 1, "workbench case requires list|add|show|remove.");
+  const subcommand = requiredPositional(parsed, 1, "workbench case requires list|add|rm.");
   if (subcommand === "list") {
     const cases = await listWorkbenchCases(await coreOptions(parsed));
     return output(cases, parsed, io, () => cases.map((entry) => `${entry.id}\t${entry.path}`).join("\n") || "No cases.");
   }
   if (subcommand === "add") {
-    const record = await addWorkbenchCase({ ...(await coreOptions(parsed)), fromTraceId: stringFlag(parsed, "from") });
+    const core = await coreOptions(parsed);
+    const sourceRef = optionalPositional(parsed, 2);
+    const record = await addWorkbenchCase({ ...core, fromTraceId: sourceRef ? await traceIdForCaseSource(core, sourceRef) : undefined });
     return output(record, parsed, io, () => `Added case ${record.id}.`);
   }
-  if (subcommand === "show") {
-    const record = await showWorkbenchCase(requiredPositional(parsed, 2, "workbench case show requires CASE_ID."), await coreOptions(parsed));
-    return output(record, parsed, io, () => record.content);
-  }
-  if (subcommand === "remove") {
-    const result = await removeWorkbenchCase(requiredPositional(parsed, 2, "workbench case remove requires CASE_ID."), await coreOptions(parsed));
+  if (subcommand === "rm") {
+    const result = await removeWorkbenchCase(requiredPositional(parsed, 2, "workbench case rm requires CASE_ID."), await coreOptions(parsed));
     return output(result, parsed, io, () => `Removed case ${result.removed}.`);
   }
   throw new WorkbenchUserError(`Unsupported case command: ${subcommand}`);
 }
 
-async function handleRemote(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const subcommand = requiredPositional(parsed, 1, "workbench remote requires add|list|remove.");
-  if (subcommand === "add") {
-    const name = requiredFlag(parsed, {
-      flag: "name",
-      usage: "workbench remote add requires --name NAME.",
-      remediation: "Run workbench remote add --name origin --url https://HOST/skills/OWNER/SKILL.",
-    });
-    const url = requiredFlag(parsed, {
-      flag: "url",
-      usage: "workbench remote add requires --url URL.",
-      remediation: `Run workbench remote add --name ${name} --url https://HOST/skills/OWNER/SKILL.`,
-    });
-    rejectExtraInput(parsed, {
-      maxPositionals: 2,
-      message: "workbench remote add accepts --name NAME and --url URL, not positional NAME or URL.",
-      remediation: "Run workbench remote add --name origin --url https://HOST/skills/OWNER/SKILL.",
-    });
-    const result = await addWorkbenchRemote(
-      name,
-      url,
-      {
-        ...(await coreOptions(parsed)),
-        replace: parsed.flags.replace === true,
-        dryRun: parsed.flags["dry-run"] === true,
-      },
-    );
-    return emitResult("workbench.cli.remote-add.v1", {
-      remote: result.remote as unknown as Json,
-      operation: result.operation,
-      ...(result.dryRun ? { dryRun: true } : {}),
-    }, parsed, io, () => `${result.dryRun ? "Would update" : "Remote"} ${result.remote.name}: ${result.operation}\t${result.remote.kind}\t${result.remote.url}`);
-  }
-  if (subcommand === "list") {
-    const remotes = await listWorkbenchRemotes(await coreOptions(parsed));
-    return emitResult("workbench.cli.remote-list.v1", {
-      remotes: remotes as unknown as Json,
-    }, parsed, io, () => remotes.map((remote) => `${remote.name}\t${remote.kind}\t${remote.url}`).join("\n") || "No remotes.");
-  }
-  if (subcommand === "remove") {
-    const result = await removeWorkbenchRemote(
-      requiredPositional(parsed, 2, "workbench remote remove requires NAME."),
-      await coreOptions(parsed),
-    );
-    return emitResult("workbench.cli.remote-remove.v1", {
-      remote: result.remote,
-      removed: result.removed,
-    }, parsed, io, () => result.removed ? `Removed remote ${result.remote}.` : `Remote ${result.remote} was not configured.`);
-  }
-  throw new WorkbenchUserError(`Unsupported remote command: ${subcommand}`);
+async function handleAdapterLogin(provider: string, parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const target = parseAuthTarget(provider, authProfileFlag(parsed));
+  const method = authMethod(parsed, target.adapterId);
+  const bundle = await collectAdapterAuthBundle({
+    target,
+    method,
+    profileRoot: path.resolve(stringFlag(parsed, "profile-root") ?? os.homedir()),
+  });
+  const saved = await localWorkbenchAdapterAuthStore(adapterAuthStoreRoot()).put(bundle);
+  const remote = await uploadAdapterConnection(saved, parsed);
+  return emitResult(
+    "workbench.cli.login.v1",
+    {
+      provider: saved.adapterId,
+      localAdapter: {
+        adapter: saved.adapterId,
+        ...(saved.slot ? { slot: saved.slot } : {}),
+        profile: saved.profile,
+        method: saved.method,
+        status: saved.status,
+        version: saved.version,
+        updatedAt: saved.updatedAt,
+      } as unknown as Json,
+      workbenchCloud: remote as unknown as Json,
+    },
+    parsed,
+    io,
+    () => `Connected ${formatAuthTarget(saved)} ${saved.method} auth v${saved.version}; Workbench Cloud: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
+  );
 }
 
-async function handleAuth(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const subcommand = optionalPositional(parsed, 1) ?? "status";
-  if (subcommand === "status") {
-    const targetRaw = optionalPositional(parsed, 2);
-    const profile = authProfileFlag(parsed);
-    const store = localWorkbenchAdapterAuthStore(adapterAuthStoreRoot());
-    const cliAuth = await workbenchCliAuthStatus();
-    if (targetRaw) {
-      const status = await store.status(parseAuthTarget(targetRaw, profile));
-      return emitResult("workbench.cli.auth-status.v1", {
-        workbenchCloud: cliAuth.workbenchCloud as unknown as Json,
-        adapters: [authStatusRecordToJson(status)],
-      }, parsed, io, () => [
-        formatWorkbenchCloudAuthStatus(cliAuth.workbenchCloud),
-        "Adapter auth:",
-        formatAuthStatusRecord(status),
-      ].join("\n"));
-    }
-    const statuses = await store.listStatus();
-    const required = await requiredAgentAuthStatuses(parsed, statuses);
-    return emitResult(
-      "workbench.cli.auth-status.v1",
-      {
-        workbenchCloud: cliAuth.workbenchCloud as unknown as Json,
-        adapters: cliAuth.adapters as unknown as Json,
-        required: required as unknown as Json,
-      },
-      parsed,
-      io,
-      () => formatAuthStatusList(cliAuth.workbenchCloud, statuses, required),
-    );
-  }
-  if (subcommand === "connect") {
-    const targetRaw = requiredPositional(parsed, 2, "workbench auth connect requires ADAPTER[/SLOT].");
-    const target = parseAuthTarget(targetRaw, authProfileFlag(parsed));
-    const method = authMethod(parsed, target.adapterId);
-    const bundle = await collectAdapterAuthBundle({
-      target,
-      method,
-      profileRoot: path.resolve(stringFlag(parsed, "profile-root") ?? os.homedir()),
-    });
-    const saved = await localWorkbenchAdapterAuthStore(adapterAuthStoreRoot()).put(bundle);
-    const remote = await uploadAdapterConnection(saved, parsed);
-    return emitResult(
-      "workbench.cli.auth-connect.v1",
-      {
-        localAdapter: {
-          adapter: saved.adapterId,
-          ...(saved.slot ? { slot: saved.slot } : {}),
-          profile: saved.profile,
-          method: saved.method,
-          status: saved.status,
-          version: saved.version,
-          updatedAt: saved.updatedAt,
-        } as unknown as Json,
-        workbenchCloud: remote as unknown as Json,
-      },
-      parsed,
-      io,
-      () => `Connected ${formatAuthTarget(saved)} ${saved.method} auth v${saved.version}; Workbench Cloud: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
-    );
-  }
-  if (subcommand === "disconnect") {
-    const targetRaw = requiredPositional(parsed, 2, "workbench auth disconnect requires ADAPTER[/SLOT].");
-    const target = parseAuthTarget(targetRaw, authProfileFlag(parsed));
-    await localWorkbenchAdapterAuthStore(adapterAuthStoreRoot()).disconnect(target);
-    const remote = await deleteAdapterConnectionRemote(target, parsed);
-    return emitResult(
-      "workbench.cli.auth-disconnect.v1",
-      {
-        localAdapter: {
-          adapter: target.adapterId,
-          ...(target.slot ? { slot: target.slot } : {}),
-          profile: target.profile,
-          status: "disconnected",
-        } as unknown as Json,
-        workbenchCloud: remote as unknown as Json,
-      },
-      parsed,
-      io,
-      () => `Disconnected ${formatAuthTarget(target)}; Workbench Cloud: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
-    );
-  }
-  throw new WorkbenchUserError(`Unsupported auth command: ${subcommand}`);
+async function handleAdapterLogout(provider: string, parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const target = parseAuthTarget(provider, authProfileFlag(parsed));
+  await localWorkbenchAdapterAuthStore(adapterAuthStoreRoot()).disconnect(target);
+  const remote = await deleteAdapterConnectionRemote(target, parsed);
+  return emitResult(
+    "workbench.cli.logout.v1",
+    {
+      provider: target.adapterId,
+      localAdapter: {
+        adapter: target.adapterId,
+        ...(target.slot ? { slot: target.slot } : {}),
+        profile: target.profile,
+        status: "disconnected",
+      } as unknown as Json,
+      workbenchCloud: remote as unknown as Json,
+    },
+    parsed,
+    io,
+    () => `Disconnected ${formatAuthTarget(target)}; Workbench Cloud: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
+  );
 }
 
 function getCliVersion(): string {
@@ -879,51 +753,36 @@ function commandHelp(command: string): string {
 }
 
 function validateCommandFlags(parsed: ParsedArgs, command: string | undefined): void {
-  if (!command) {
-    return;
-  }
-  const allowed = allowedFlagsForCommand(parsed, command);
+  const effectiveCommand = command ?? (parsed.flags.version === true ? "version" : "status");
+  const allowed = allowedFlagsForCommand(parsed, effectiveCommand);
   if (!allowed) {
     return;
   }
-  const allowedSet = new Set(allowed);
+  const allowedSet = new Set(Object.keys(allowed));
   for (const [name, value] of Object.entries(parsed.flags)) {
-    if (!allowedSet.has(name) && name !== "help" && name !== "version") {
-      throw new WorkbenchUserError(`Unsupported flag --${name} for workbench ${command}.`);
+    if (!allowedSet.has(name)) {
+      throw new WorkbenchUserError(`Unsupported flag --${name} for workbench ${effectiveCommand}.`);
     }
-    validateFlagValue(name, value, command === "install" && (name === "agent" || name === "skill"));
+    validateFlagValue(name, value, allowed[name]);
   }
 }
 
-function allowedFlagsForCommand(parsed: ParsedArgs, command: string): readonly string[] | undefined {
+function allowedFlagsForCommand(parsed: ParsedArgs, command: string): FlagSpec | undefined {
   const subcommands = SUBCOMMAND_FLAGS[command];
   if (!subcommands) {
     return COMMAND_FLAGS[command];
   }
   const subcommand = parsed.positionals[1] ?? subcommands.defaultSubcommand;
-  return subcommand ? subcommands.flags[subcommand] ?? ["json"] : ["json"];
+  return subcommand ? subcommands.flags[subcommand] ?? { ...COMMON_FLAGS, ...HELP_FLAG } : { ...COMMON_FLAGS, ...HELP_FLAG };
 }
 
 function validateFlagValue(
   name: string,
   value: string | boolean | string[],
-  repeatString = false,
+  kind: FlagKind | undefined,
 ): void {
-  const kind = FLAG_DEFINITIONS[name];
   if (!kind) {
     return;
-  }
-  if (repeatString) {
-    if (Array.isArray(value)) {
-      if (value.some((entry) => !entry.trim())) {
-        throw new WorkbenchUserError(`--${name} requires a non-empty value.`);
-      }
-      return;
-    }
-    if (typeof value === "string" && value.trim()) {
-      return;
-    }
-    throw new WorkbenchUserError(`--${name} requires a non-empty value.`);
   }
   if (kind === "boolean") {
     if (value !== true) {
@@ -949,14 +808,18 @@ function validateFlagValue(
 }
 
 const CONFIG_SCHEMA = "workbench.cli.config.v1";
+const DEFAULT_WORKBENCH_CLOUD_BASE_URL = "https://v2.workbench.ai";
 const API_REQUEST_MAX_ATTEMPTS = 3;
 const API_REQUEST_GZIP_THRESHOLD_BYTES = 1024 * 1024;
+const CLOUD_RUN_TIMEOUT_MS = 30 * 60 * 1000;
+const CLOUD_RUN_POLL_INTERVAL_MS = 3000;
 
 interface WorkbenchConfig {
   schema: typeof CONFIG_SCHEMA;
   baseUrl?: string;
   accessToken?: string;
   username?: string;
+  installTargets?: WorkbenchInstallTargetName[];
 }
 
 interface DeviceAuthorization {
@@ -985,8 +848,18 @@ interface DeviceToken {
 }
 
 async function handleLogin(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  if (parsed.positionals.length > 1) {
-    throw new WorkbenchUserError("workbench login accepts no positional arguments.");
+  const provider = optionalPositional(parsed, 1);
+  if (provider) {
+    if (parsed.positionals.length > 2) {
+      throw new WorkbenchUserError("workbench login PROVIDER accepts only one provider argument.");
+    }
+    if (parsed.flags["start-only"] === true || parsed.flags.wait === true || parsed.flags.timeout !== undefined || parsed.flags["no-open"] === true) {
+      throw new WorkbenchCodedError("usage", "Workbench Cloud login flags do not apply to provider login.", {
+        remediation: `Run workbench login ${provider} --method ${authMethod(parsed, provider)}.`,
+        exitCode: 2,
+      });
+    }
+    return await handleAdapterLogin(provider, parsed, io);
   }
   if (parsed.flags["start-only"] === true && parsed.flags.wait === true) {
     throw new WorkbenchCodedError("usage", "workbench login accepts only one of --start-only or --wait.", {
@@ -1067,8 +940,12 @@ async function handleLogin(parsed: ParsedArgs, io: CliIo): Promise<number> {
 }
 
 async function handleLogout(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  if (parsed.positionals.length > 1) {
-    throw new WorkbenchUserError("workbench logout accepts no positional arguments.");
+  const provider = optionalPositional(parsed, 1);
+  if (provider) {
+    if (parsed.positionals.length > 2) {
+      throw new WorkbenchUserError("workbench logout PROVIDER accepts only one provider argument.");
+    }
+    return await handleAdapterLogout(provider, parsed, io);
   }
   const config = await loadConfig();
   const baseUrl = optionalWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
@@ -1105,37 +982,29 @@ async function handleLogout(parsed: ParsedArgs, io: CliIo): Promise<number> {
     `Logged out of Workbench${baseUrl ? ` (${baseUrl})` : ""}.`,
     `Token: ${tokenPresent ? "present" : "absent"}; revoke ${revoke}; config ${configRemoved ? "removed" : "unchanged"}.`,
     adapterAuthRetained
-      ? "Local adapter auth records were retained; run workbench auth disconnect ADAPTER to remove them."
+      ? "Local adapter auth records were retained; run workbench logout PROVIDER to remove them."
       : "No local adapter auth records remain.",
   ].join("\n"));
 }
 
 async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const source = requiredFlag(parsed, {
-    flag: "source",
-    usage: "workbench install requires --source SOURCE.",
-    remediation: "Run workbench install --source https://HOST/skills/OWNER/SKILL --agent codex.",
-  });
+  const sourceInput = requiredPositional(parsed, 1, "workbench install requires HANDLE_OR_URL.");
   rejectExtraInput(parsed, {
-    maxPositionals: 1,
-    message: "workbench install accepts --source SOURCE, not positional SOURCE.",
-    remediation: "Run workbench install --source https://HOST/skills/OWNER/SKILL --agent codex.",
+    maxPositionals: 2,
+    message: "workbench install accepts one HANDLE_OR_URL argument.",
+    remediation: "Run workbench install OWNER/SKILL --to codex.",
   });
-  if (parsed.flags.list !== true && stringsFlag(parsed, "agent").length === 0 && parsed.flags.local !== true) {
-    throw new WorkbenchCodedError("install_target_required", "workbench install requires an explicit target.", {
-      remediation: "Run workbench install --source SOURCE --agent codex, workbench install --source SOURCE --agent claude, or workbench install --source SOURCE --local.",
-      exitCode: 2,
-    });
-  }
+  const source = await resolveWorkbenchInstallSourceInput(sourceInput);
   const workbenchSource = parseWorkbenchInstallSource(source);
   if (!workbenchSource) {
     throw new WorkbenchCodedError("usage", "workbench install requires a Workbench Cloud source URL.", {
-      remediation: "Run workbench install --source https://HOST/skills/OWNER/SKILL --agent codex.",
+      remediation: "Run workbench install OWNER/SKILL --to codex.",
       exitCode: 2,
     });
   }
   const snapshot = await fetchWorkbenchInstallSourceSnapshot(workbenchSource, source);
   const sourceSummary = workbenchInstallSourceSummary(workbenchSource, snapshot);
+  const config = await loadConfig();
   if (parsed.flags.list === true) {
     return emitResult("workbench.cli.install.v1", {
       source: sourceSummary,
@@ -1148,9 +1017,11 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
       ...supportedInstallTargets().map((target) => `  ${target.agent}\t${target.destination}`),
     ].join("\n"));
   }
+  const toTargets = stringsFlag(parsed, "to");
+  const selectedTargets = toTargets.length > 0 ? normalizeInstallTargetNames(toTargets) : await defaultInstallTargetNames(config);
   const targets = resolveInstallTargets({
-    agents: stringsFlag(parsed, "agent"),
-    local: parsed.flags.local === true,
+    agents: selectedTargets.filter((target) => target !== "local"),
+    local: selectedTargets.some((target) => target === "local"),
     skillName: snapshot.name,
   });
   const result = await installSnapshotToTargets({
@@ -1159,6 +1030,9 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
     overwrite: parsed.flags.yes === true,
     dryRun: parsed.flags["dry-run"] === true,
   });
+  if (toTargets.length > 0 && parsed.flags["dry-run"] !== true) {
+    await writeConfig({ ...config, installTargets: selectedTargets });
+  }
   return emitResult("workbench.cli.install.v1", {
     source: sourceSummary,
     result: result.result,
@@ -1171,6 +1045,388 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
       : `Installed ${snapshot.name}: ${result.result}`,
     ...result.targets.map((target) => `  ${target.agent}\t${target.previous}\t${target.destination}`),
   ].join("\n"));
+}
+
+async function handleCloudEval(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const started = await startCloudExecution("eval", parsed);
+  const artifactIds = await artifactIdsByRunId(started.core, started.runs);
+  const failedRuns = started.runs.filter((run) => run.status === "failed" || run.status === "canceled");
+  if (failedRuns.length > 0) {
+    return emitEvalFailure(started.runs, failedRuns, artifactIds, parsed, io);
+  }
+  const deltas = await evalDeltas(started.core, started.runs);
+  const nextCommands = cloudEvalNextCommands(started.runs);
+  return emitResult("workbench.cli.eval.v1", {
+    result: started.runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? [])),
+    deltas: deltas as unknown as Json,
+    nextCommands: nextCommands as unknown as Json,
+    cloud: cloudExecutionSummary(started),
+  }, parsed, io, () => [
+    `Completed hosted eval on ${started.remote.url}.`,
+    started.runs.map(formatRun).join("\n"),
+    ...deltas.map(formatEvalDelta),
+    ...(nextCommands[0] ? [`next: ${nextCommands[0]}`] : []),
+  ].filter(Boolean).join("\n"));
+}
+
+async function handleCloudImprove(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const started = await startCloudExecution("improve", parsed);
+  const artifactIds = await artifactIdsByRunId(started.core, started.runs);
+  const failedRuns = started.runs.filter((run) => run.status === "failed" || run.status === "canceled");
+  if (failedRuns.length > 0) {
+    const first = failedRuns[0]!;
+    throw new WorkbenchCodedError("improve_failed", "Hosted improve failed; evidence was saved.", {
+      remediation: `Run workbench show ${first.id}.`,
+      subject: {
+        runIds: failedRuns.map((run) => run.id),
+        statuses: Object.fromEntries(failedRuns.map((run) => [run.id, run.status])),
+      },
+      exitCode: 1,
+    });
+  }
+  const switchedVersionId = await switchHostedImproveVersionIfPromoted(started);
+  const nextCommands = cloudImproveNextCommands(started.runs);
+  return emitResult("workbench.cli.improve.v1", {
+    result: started.runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? [])),
+    nextCommands: nextCommands as unknown as Json,
+    cloud: cloudExecutionSummary(started),
+    ...(switchedVersionId ? { switchedVersionId } : {}),
+  }, parsed, io, () => [
+    `Completed hosted improve on ${started.remote.url}.`,
+    started.runs.map(formatRun).join("\n"),
+    ...(switchedVersionId ? [`Switched local source to ${switchedVersionId}.`] : []),
+    ...(nextCommands[0] ? [`next: ${nextCommands[0]}`] : []),
+  ].filter(Boolean).join("\n"));
+}
+
+interface StartedCloudExecution {
+  core: { dir?: string; authToken?: string };
+  remote: WorkbenchRemote;
+  skillId: string;
+  runs: WorkbenchRun[];
+  startVersionId?: string;
+  source: ParsedWorkbenchInstallSource;
+  sync: {
+    before: { pushed: number; pulled: number; upToDate: boolean };
+    after: { pushed: number; pulled: number; upToDate: boolean };
+  };
+}
+
+async function defaultInstallTargetNames(config: WorkbenchConfig): Promise<WorkbenchInstallTargetName[]> {
+  if (config.installTargets && config.installTargets.length > 0) {
+    return config.installTargets;
+  }
+  const detected: WorkbenchInstallTargetName[] = [];
+  for (const target of supportedInstallTargets()) {
+    if (target.agent === "local") {
+      continue;
+    }
+    const home = path.dirname(path.dirname(target.destination));
+    if (await pathExists(home)) {
+      detected.push(target.agent);
+    }
+  }
+  return detected.length > 0 ? detected : ["local"];
+}
+
+function normalizeInstallTargetNames(values: readonly string[]): WorkbenchInstallTargetName[] {
+  const normalized: WorkbenchInstallTargetName[] = [];
+  for (const value of values) {
+    const target = value.trim().toLowerCase();
+    if (target !== "codex" && target !== "claude" && target !== "local") {
+      throw new WorkbenchCodedError("usage", `Unsupported install target: ${value}`, {
+        remediation: "Use --to codex, --to claude, or --to local.",
+        exitCode: 2,
+      });
+    }
+    normalized.push(target);
+  }
+  return [...new Set(normalized)];
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function startCloudExecution(command: "eval" | "improve", parsed: ParsedArgs): Promise<StartedCloudExecution> {
+  const root = dirFlag(parsed) ?? process.cwd();
+  const remote = await ensureCloudRemoteForExecution(root, parsed);
+  const source = parseWorkbenchInstallSource(remote.url);
+  if (!source) {
+    throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote is not a Cloud skill URL: ${remote.url}`, {
+      remediation: "Run workbench publish to recreate the Workbench Cloud link.",
+      subject: { remote: remote.name, url: remote.url },
+      exitCode: 2,
+    });
+  }
+  const token = await workbenchCloudToken({ baseUrl: source.baseUrl });
+  if (!token) {
+    throw new WorkbenchCodedError("auth_required", `workbench ${command} --cloud requires Workbench Cloud auth.`, {
+      remediation: `Run workbench login --base-url ${source.baseUrl}.`,
+      exitCode: 1,
+    });
+  }
+  const core = { dir: root, authToken: token };
+  const syncBefore = await syncWorkbenchRemote({ ...core, remote: remote.name });
+  const startSnapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const skillId = await resolveCloudSkillId(source);
+  const response = await apiRequest<{ runs?: WorkbenchRun[] }>(
+    `/api/workbench/skills/${encodeURIComponent(skillId)}${command === "improve" ? "/improve" : "/runs"}`,
+    { method: "POST", body: cloudExecutionRequestBody(command, parsed) },
+    source.baseUrl,
+  );
+  const runs = response.runs ?? [];
+  if (runs.length === 0) {
+    throw new WorkbenchCodedError("cloud_run_missing", `Workbench Cloud did not return a run for ${command}.`, {
+      retryable: true,
+      remediation: "Run workbench log --runs.",
+      subject: { remote: remote.name, skillId },
+      exitCode: 1,
+    });
+  }
+  const initialSyncAfter = await syncWorkbenchRemote({ ...core, remote: remote.name });
+  const completed = await waitForCloudRuns({
+    core,
+    remote,
+    runs,
+    initialSync: initialSyncAfter,
+  });
+  return {
+    core,
+    remote,
+    skillId,
+    runs: completed.runs,
+    startVersionId: startSnapshot.status.currentVersionId ?? startSnapshot.refs.current,
+    source,
+    sync: {
+      before: { pushed: syncBefore.pushed, pulled: syncBefore.pulled, upToDate: syncBefore.upToDate },
+      after: { pushed: completed.sync.pushed, pulled: completed.sync.pulled, upToDate: completed.sync.upToDate },
+    },
+  };
+}
+
+async function waitForCloudRuns(input: {
+  core: { dir?: string; authToken?: string };
+  remote: WorkbenchRemote;
+  runs: readonly WorkbenchRun[];
+  initialSync: Awaited<ReturnType<typeof syncWorkbenchRemote>>;
+}): Promise<{ runs: WorkbenchRun[]; sync: Awaited<ReturnType<typeof syncWorkbenchRemote>> }> {
+  const runIds = input.runs
+    .map((run) => run.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (runIds.length === 0 || runIds.length !== input.runs.length) {
+    throw new WorkbenchCodedError("cloud_run_missing", "Workbench Cloud did not return a run id.", {
+      retryable: true,
+      remediation: "Run workbench log --runs.",
+      exitCode: 1,
+    });
+  }
+  let sync = input.initialSync;
+  const timeoutMs = positiveIntEnv("WORKBENCH_CLOUD_RUN_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS;
+  const pollIntervalMs = positiveIntEnv("WORKBENCH_CLOUD_RUN_POLL_INTERVAL_MS") ?? CLOUD_RUN_POLL_INTERVAL_MS;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(input.core);
+    const runs = runIds
+      .map((id) => snapshot.runs.find((entry) => entry.id === id))
+      .filter((run): run is WorkbenchRun => Boolean(run));
+    if (runs.length === runIds.length && runs.every(isTerminalRun)) {
+      return { runs, sync };
+    }
+    if (Date.now() >= deadline) {
+      throw new WorkbenchCodedError("cloud_run_pending", "Hosted Workbench run is still running.", {
+        retryable: true,
+        remediation: runIds[0] ? `Run workbench show ${runIds[0]}.` : "Run workbench log --runs.",
+        subject: {
+          runIds,
+          statuses: Object.fromEntries(runs.map((run) => [run.id, run.status])),
+        },
+        exitCode: 1,
+      });
+    }
+    await sleep(pollIntervalMs);
+    sync = await syncWorkbenchRemote({ ...input.core, remote: input.remote.name });
+  }
+}
+
+function isTerminalRun(run: WorkbenchRun): boolean {
+  return run.status === "succeeded" || run.status === "failed" || run.status === "canceled";
+}
+
+async function switchHostedImproveVersionIfPromoted(started: StartedCloudExecution): Promise<string | undefined> {
+  const outputVersionId = started.runs.find((run) => run.status === "succeeded" && run.outputVersionId)?.outputVersionId;
+  if (!outputVersionId) {
+    return undefined;
+  }
+  const refs = await fetchCloudObjectRefs(started);
+  if (refs.current !== outputVersionId) {
+    return undefined;
+  }
+  await listWorkbenchVersions(started.core);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(started.core);
+  const currentVersionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+  if (started.startVersionId && currentVersionId && currentVersionId !== started.startVersionId) {
+    throw new WorkbenchCodedError("worktree_changed", "Local source changed while hosted improve was running; refusing to overwrite it.", {
+      remediation: `Review workbench diff, then run workbench switch ${outputVersionId} when ready.`,
+      subject: {
+        startedFrom: started.startVersionId,
+        current: currentVersionId,
+        hostedVersion: outputVersionId,
+      },
+      exitCode: 1,
+    });
+  }
+  const version = await switchWorkbenchVersion(outputVersionId, started.core);
+  return version.id;
+}
+
+async function fetchCloudObjectRefs(started: StartedCloudExecution): Promise<Record<string, string>> {
+  const response = await apiRequest<{ objectPack?: { refs?: Record<string, string> } }>(
+    `/api/workbench/skills/${encodeURIComponent(started.skillId)}/objects`,
+    {},
+    started.source.baseUrl,
+  );
+  return response.objectPack?.refs ?? {};
+}
+
+async function ensureCloudRemoteForExecution(root: string, parsed: ParsedArgs): Promise<WorkbenchRemote> {
+  const linked = await linkedCloudRemote(root);
+  if (linked) {
+    return linked;
+  }
+  const link = await cloudRemoteLinkTarget(root);
+  const remote = await derivePublishCloudRemote(parsed, "workbench --cloud", link.name);
+  const source = parseWorkbenchInstallSource(remote.url);
+  if (!source) {
+    throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote is not a Cloud skill URL: ${remote.url}`, {
+      remediation: "Run workbench publish to recreate the Workbench Cloud link.",
+      subject: { remote: remote.name, url: remote.url },
+      exitCode: 2,
+    });
+  }
+  const token = await workbenchCloudToken({ baseUrl: source.baseUrl });
+  if (!token) {
+    throw new WorkbenchCodedError("auth_required", "workbench --cloud requires Workbench Cloud auth.", {
+      remediation: `Run workbench login --base-url ${source.baseUrl}.`,
+      exitCode: 1,
+    });
+  }
+  const result = await addWorkbenchRemote(remote.name, remote.url, {
+    dir: root,
+    authToken: token,
+    replace: link.replace,
+  });
+  return result.remote;
+}
+
+async function linkedCloudRemote(root: string): Promise<WorkbenchRemote | null> {
+  return preferredCloudRemote(await inspectionRemotes(root)) ?? null;
+}
+
+async function inspectionRemotes(root: string): Promise<WorkbenchRemote[]> {
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root }).catch((error) => {
+    if (error instanceof WorkbenchCodedError || error instanceof WorkbenchUserError) {
+      return null;
+    }
+    throw error;
+  });
+  return snapshot?.remotes ?? [];
+}
+
+interface CloudRemoteLinkTarget {
+  name: string;
+  replace: boolean;
+  existing?: WorkbenchRemote;
+}
+
+async function cloudRemoteLinkTarget(root: string): Promise<CloudRemoteLinkTarget> {
+  return cloudRemoteLinkTargetFromRemotes(await inspectionRemotes(root));
+}
+
+function cloudRemoteLinkTargetFromRemotes(remotes: readonly WorkbenchRemote[]): CloudRemoteLinkTarget {
+  const existing = preferredCloudRemote(remotes);
+  if (existing) {
+    return { name: existing.name, replace: true, existing };
+  }
+  return { name: availableCloudRemoteName(remotes), replace: false };
+}
+
+function preferredCloudRemote(remotes: readonly WorkbenchRemote[]): WorkbenchRemote | undefined {
+  const cloudRemotes = remotes.filter((remote) => remote.kind === "workbench-cloud");
+  return cloudRemotes.find((remote) => remote.name === "cloud") ?? cloudRemotes[0];
+}
+
+function availableCloudRemoteName(remotes: readonly WorkbenchRemote[]): string {
+  const names = new Set(remotes.map((remote) => remote.name));
+  if (!names.has("cloud")) {
+    return "cloud";
+  }
+  for (let index = 1; ; index += 1) {
+    const name = `cloud-${index}`;
+    if (!names.has(name)) {
+      return name;
+    }
+  }
+}
+
+async function resolveCloudSkillId(source: ParsedWorkbenchInstallSource): Promise<string> {
+  const listed = await apiRequest<{ skills?: Array<{ id?: string; ownerSlug?: string; name?: string }> }>(
+    "/api/workbench/skills",
+    {},
+    source.baseUrl,
+  );
+  const skill = listed.skills?.find((entry) => entry.ownerSlug === source.owner && entry.name === source.skill);
+  if (!skill?.id) {
+    throw new WorkbenchCodedError("remote_not_found", `Workbench Cloud skill not found: ${source.owner}/${source.skill}`, {
+      remediation: "Run workbench publish.",
+      subject: { owner: source.owner, skill: source.skill },
+      exitCode: 1,
+    });
+  }
+  return skill.id;
+}
+
+function cloudExecutionRequestBody(command: "eval" | "improve", parsed: ParsedArgs): Record<string, Json | undefined> {
+  return {
+    version: optionalPositional(parsed, 1),
+    skill: stringFlag(parsed, "skills"),
+    agent: stringFlag(parsed, "agents"),
+    samples: intFlag(parsed, "samples"),
+    ...(command === "improve" ? { budget: intFlag(parsed, "budget") } : {}),
+  };
+}
+
+function cloudEvalNextCommands(runs: readonly WorkbenchRun[]): string[] {
+  return cloudExecutionNextCommands(runs, "workbench publish");
+}
+
+function cloudImproveNextCommands(runs: readonly WorkbenchRun[]): string[] {
+  return cloudExecutionNextCommands(runs, "workbench eval");
+}
+
+function cloudExecutionNextCommands(runs: readonly WorkbenchRun[], successCommand: string): string[] {
+  const first = runs[0];
+  if (!first) {
+    return ["workbench log --runs"];
+  }
+  if (first.status === "running" || first.status === "failed" || first.status === "canceled") {
+    return [`workbench show ${first.id}`];
+  }
+  return [successCommand];
+}
+
+function cloudExecutionSummary(started: StartedCloudExecution): Json {
+  return {
+    remote: started.remote.name,
+    url: started.remote.url,
+    skillId: started.skillId,
+    sync: started.sync as unknown as Json,
+  };
 }
 
 interface ParsedWorkbenchInstallSource {
@@ -1364,6 +1620,7 @@ async function loadConfig(): Promise<WorkbenchConfig> {
     ...(typeof parsed.baseUrl === "string" ? { baseUrl: normalizeBaseUrl(parsed.baseUrl) } : {}),
     ...(typeof parsed.accessToken === "string" ? { accessToken: parsed.accessToken } : {}),
     ...(typeof parsed.username === "string" ? { username: parsed.username } : {}),
+    ...(Array.isArray(parsed.installTargets) ? { installTargets: normalizeInstallTargetNames(parsed.installTargets.flatMap((entry) => typeof entry === "string" ? [entry] : [])) } : {}),
   };
 }
 
@@ -1648,7 +1905,7 @@ async function apiRequest<T>(
 }
 
 function encodeJsonRequestBody(body: unknown): {
-  body?: Buffer | string;
+  body?: ArrayBuffer | string;
   headers: Record<string, string>;
 } {
   if (body == null) {
@@ -1658,8 +1915,11 @@ function encodeJsonRequestBody(body: unknown): {
   if (Buffer.byteLength(text) < API_REQUEST_GZIP_THRESHOLD_BYTES) {
     return { body: text, headers: { "content-type": "application/json" } };
   }
+  const compressed = gzipSync(text);
+  const compressedBody = new ArrayBuffer(compressed.byteLength);
+  new Uint8Array(compressedBody).set(compressed);
   return {
-    body: gzipSync(text),
+    body: compressedBody,
     headers: {
       "content-encoding": "gzip",
       "content-type": "application/json",
@@ -1799,6 +2059,15 @@ function errorMessage(error: unknown): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function positiveIntEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 async function openBrowser(url: string): Promise<void> {
@@ -2181,6 +2450,16 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       addFlag(flags, "version", true);
       continue;
     }
+    if (arg === "-n") {
+      const value = argv[index + 1];
+      if (value && !value.startsWith("-")) {
+        index += 1;
+        addFlag(flags, "samples", value);
+      } else {
+        addFlag(flags, "samples", true);
+      }
+      continue;
+    }
     if (!arg.startsWith("--") || arg === "--") {
       positionals.push(arg);
       continue;
@@ -2188,7 +2467,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     const eq = arg.indexOf("=");
     const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
     const value = eq === -1 ? argv[index + 1] : arg.slice(eq + 1);
-    if (eq === -1 && BOOLEAN_FLAGS.has(name)) {
+    const flagSpec = flagSpecForParsedPrefix(positionals, flags);
+    const kind = flagSpec?.[name];
+    if (eq === -1 && kind === "boolean") {
       addFlag(flags, name, true);
     } else if (eq === -1 && value && !value.startsWith("-")) {
       index += 1;
@@ -2200,22 +2481,21 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   return { positionals, flags };
 }
 
+function flagSpecForParsedPrefix(
+  positionals: readonly string[],
+  flags: Record<string, string | boolean | string[]>,
+): FlagSpec | undefined {
+  const command = positionals[0] ?? (flags.version === true ? "version" : "status");
+  return allowedFlagsForCommand({ positionals: [...positionals], flags: {} }, command);
+}
+
 function addFlag(flags: Record<string, string | boolean | string[]>, name: string, value: string | boolean): void {
-  if (name === "with") {
+  if (name === "with" || name === "to") {
     const existing = flags[name];
     flags[name] = Array.isArray(existing)
       ? [...existing, String(value)]
       : existing === undefined
         ? [String(value)]
-        : [String(existing), String(value)];
-    return;
-  }
-  if (name === "agent" || name === "skill") {
-    const existing = flags[name];
-    flags[name] = Array.isArray(existing)
-      ? [...existing, String(value)]
-      : existing === undefined
-        ? String(value)
         : [String(existing), String(value)];
     return;
   }
@@ -2302,14 +2582,175 @@ function rejectExtraInput(
   });
 }
 
-function parsePublishVisibility(value: string | undefined): "private" | "internal" | "public" | undefined {
-  if (value === undefined) {
+async function defaultDiffRange(core: { dir?: string; authToken?: string }): Promise<string> {
+  await listWorkbenchVersions(core);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const currentId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+  const current = snapshot.versions.find((version) => version.id === currentId);
+  if (!current) {
+    throw new WorkbenchCodedError("version_not_found", "Current Workbench version was not found.", {
+      remediation: "Run workbench log --versions.",
+      exitCode: 1,
+    });
+  }
+  const parent = current.parentIds[0];
+  return parent ? `${parent}..${current.id}` : `${current.id}..${current.id}`;
+}
+
+function parsePublishVisibilityFlags(parsed: ParsedArgs): "private" | "internal" | "public" | undefined {
+  const selected = [
+    parsed.flags.private === true ? "private" as const : undefined,
+    parsed.flags.team === true ? "internal" as const : undefined,
+    parsed.flags.public === true ? "public" as const : undefined,
+  ].filter((value): value is "private" | "internal" | "public" => Boolean(value));
+  if (selected.length > 1) {
+    throw new WorkbenchCodedError("usage", "workbench publish accepts only one visibility flag.", {
+      remediation: "Run workbench publish --private, workbench publish --team, or workbench publish --public.",
+      exitCode: 2,
+    });
+  }
+  return selected[0];
+}
+
+async function previewPublishWithDerivedRemote(parsed: ParsedArgs): Promise<{
+  remote: WorkbenchRemote;
+  version: WorkbenchVersion;
+  visibility: "private" | "internal" | "public";
+  installHandle: string;
+  installUrl: string;
+  pinnedInstallUrl: string;
+} | undefined> {
+  const root = path.resolve(dirFlag(parsed) ?? process.cwd());
+  const core = await coreOptions(parsed);
+  await listWorkbenchVersions(core);
+  const reconciledSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+  const link = cloudRemoteLinkTargetFromRemotes(reconciledSnapshot.remotes);
+  if (link.existing) {
     return undefined;
   }
-  if (value === "private" || value === "internal" || value === "public") {
-    return value;
+  const remote = await derivePublishCloudRemote(parsed, "workbench publish", link.name);
+  const requestedVersion = optionalPositional(parsed, 1);
+  const versionId = requestedVersion && requestedVersion !== "current"
+    ? requestedVersion
+    : reconciledSnapshot.status.currentVersionId ?? reconciledSnapshot.refs.current;
+  const version = reconciledSnapshot.versions.find((entry) => entry.id === versionId);
+  if (!version) {
+    throw new WorkbenchCodedError("version_not_found", `Version not found: ${requestedVersion ?? "current"}`, {
+      remediation: "Run workbench log --versions.",
+      subject: { version: requestedVersion ?? "current" },
+      exitCode: 1,
+    });
   }
-  throw new WorkbenchUserError("workbench publish --visibility must be private, internal, or public.");
+  return {
+    remote,
+    version,
+    visibility: parsePublishVisibilityFlags(parsed) ?? "private",
+    installHandle: installHandleFromCloudRemote(remote),
+    installUrl: remote.url,
+    pinnedInstallUrl: `${remote.url}/releases/${encodeURIComponent(version.id)}`,
+  };
+}
+
+async function ensurePublishRemote(parsed: ParsedArgs): Promise<string | undefined> {
+  const core = await coreOptions(parsed);
+  const root = path.resolve(dirFlag(parsed) ?? process.cwd());
+  const link = await cloudRemoteLinkTarget(root);
+  const override = stringFlag(parsed, "as");
+  if (override) {
+    const remote = await derivePublishCloudRemote(parsed, "workbench publish", link.name);
+    const result = await addWorkbenchRemote(remote.name, remote.url, { ...core, replace: link.replace });
+    return result.remote.name;
+  }
+  if (link.existing) {
+    return link.existing.name;
+  }
+  const remote = await derivePublishCloudRemote(parsed, "workbench publish", link.name);
+  const result = await addWorkbenchRemote(remote.name, remote.url, core);
+  return result.remote.name;
+}
+
+async function derivePublishCloudRemote(parsed: ParsedArgs, action = "workbench publish", name = "cloud"): Promise<WorkbenchRemote> {
+  const config = await loadConfig();
+  const baseUrl = optionalWorkbenchBaseUrl({ configBaseUrl: config.baseUrl }) ?? DEFAULT_WORKBENCH_CLOUD_BASE_URL;
+  const override = stringFlag(parsed, "as");
+  const handle = override ? parseOwnerSkillHandle(override) : derivedOwnerSkillHandle(parsed, config, action);
+  const url = `${baseUrl}/skills/${encodeURIComponent(handle.owner)}/${encodeURIComponent(handle.skill)}`;
+  return { name, kind: "workbench-cloud", url };
+}
+
+function installHandleFromCloudRemote(remote: WorkbenchRemote): string {
+  const source = parseWorkbenchInstallSource(remote.url);
+  if (!source) {
+    throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote is not a Cloud skill URL: ${remote.url}`, {
+      remediation: "Run workbench publish to recreate the Workbench Cloud link.",
+      subject: { remote: remote.name, url: remote.url },
+      exitCode: 2,
+    });
+  }
+  return `${source.owner}/${source.skill}`;
+}
+
+function parseOwnerSkillHandle(input: string): { owner: string; skill: string } {
+  const handle = normalizedOwnerSkillHandle(input);
+  if (!handle) {
+    throw new WorkbenchCodedError("usage", "workbench publish --as expects OWNER/SKILL.", {
+      remediation: "Run workbench publish --as OWNER/SKILL.",
+      exitCode: 2,
+    });
+  }
+  return handle;
+}
+
+function derivedOwnerSkillHandle(parsed: ParsedArgs, config: WorkbenchConfig, action: string): WorkbenchSkillHandle {
+  const owner = config.username?.trim();
+  if (!owner) {
+    throw new WorkbenchCodedError("auth_required", `${action} needs a logged-in Workbench Cloud username before it can derive OWNER/SKILL.`, {
+      remediation: "Run workbench login.",
+      exitCode: 1,
+    });
+  }
+  const root = path.resolve(dirFlag(parsed) ?? process.cwd());
+  const handle = normalizeOwnerSkillHandle(owner, path.basename(root));
+  if (!handle.owner || !handle.skill) {
+    throw new WorkbenchCodedError("usage", `${action} could not derive a valid OWNER/SKILL handle.`, {
+      remediation: `Run ${action} --as OWNER/SKILL.`,
+      subject: { owner, skill: path.basename(root) },
+      exitCode: 2,
+    });
+  }
+  return handle;
+}
+
+async function resolveWorkbenchInstallSourceInput(input: string): Promise<string> {
+  if (/^https?:\/\//u.test(input)) {
+    return input;
+  }
+  const handle = normalizedOwnerSkillHandle(input);
+  if (!handle) {
+    throw new WorkbenchCodedError("usage", "workbench install expects OWNER/SKILL or a Workbench Cloud skill URL.", {
+      remediation: "Run workbench install OWNER/SKILL --to codex.",
+      exitCode: 2,
+    });
+  }
+  const config = await loadConfig();
+  const baseUrl = optionalWorkbenchBaseUrl({ configBaseUrl: config.baseUrl }) ?? DEFAULT_WORKBENCH_CLOUD_BASE_URL;
+  return `${baseUrl}/skills/${encodeURIComponent(handle.owner)}/${encodeURIComponent(handle.skill)}`;
+}
+
+function normalizedOwnerSkillHandle(value: string): WorkbenchSkillHandle | null {
+  const parts = value.trim().split("/");
+  if (parts.length !== 2) {
+    return null;
+  }
+  const handle = normalizeOwnerSkillHandle(parts[0] ?? "", parts[1] ?? "");
+  return handle.owner && handle.skill ? handle : null;
+}
+
+function normalizeOwnerSkillHandle(owner: string, skill: string): WorkbenchSkillHandle {
+  return {
+    owner: normalizeWorkbenchSkillName(owner),
+    skill: normalizeWorkbenchSkillName(skill),
+  };
 }
 
 function parseWithFlags(parsed: ParsedArgs): Record<string, Json> {
@@ -2382,7 +2823,7 @@ function emitEvalFailure(
   io.stdout.write([
     "Eval failed; evidence was saved.",
     ...failedRuns.map(formatRun),
-    ...(nextCommands.length > 0 ? ["next:", ...nextCommands.map((command) => `  ${command}`)] : []),
+    ...(nextCommands[0] ? [`next: ${nextCommands[0]}`] : []),
   ].join("\n") + "\n");
   return 1;
 }
@@ -2421,14 +2862,13 @@ function runFailureSummary(run: WorkbenchRun, artifactIds: readonly string[]): J
 function evalFailureNextCommands(failedRuns: readonly WorkbenchRun[]): string[] {
   const first = failedRuns[0];
   if (!first) {
-    return ["workbench compare --versions all"];
+    return ["workbench log --runs"];
   }
-  const traceId = first.traceIds[0];
   return [
-    "workbench compare --versions all",
-    `workbench trace ${first.id}`,
-    ...(traceId ? [`workbench show ${traceId}:stderr.log`] : []),
-    `workbench improve --agent ${first.agentName} --budget 1 --samples 1`,
+    `workbench show ${first.id}`,
+    `workbench show ${first.id}:stderr.log`,
+    `workbench case add ${first.id}`,
+    `workbench improve --agents ${first.agentName} --budget 1 -n 1`,
   ];
 }
 
@@ -2439,7 +2879,7 @@ function output(value: unknown, parsed: ParsedArgs, io: CliIo, text: () => strin
 function commandSchema(parsed: ParsedArgs): string {
   const command = parsed.positionals[0] ?? "result";
   const subcommand = parsed.positionals[1];
-  const suffix = ["auth", "remote", "agent", "case", "skills"].includes(command) && subcommand
+  const suffix = ["agent", "case"].includes(command) && subcommand
     ? `${command}-${subcommand}`
     : command;
   return `workbench.cli.${suffix}.v1`;
@@ -2482,6 +2922,162 @@ async function workbenchCliAuthStatus(): Promise<WorkbenchCliAuthStatus> {
   };
 }
 
+type InspectionSnapshot = Awaited<ReturnType<typeof createWorkbenchReadOnlyInspectionSnapshot>>;
+
+function formatLogEntry(entry: WorkbenchLogEntry): string {
+  if (entry.kind === "version") {
+    return `${entry.createdAt}\tversion\t${entry.id}\tfiles=${entry.fileCount}\t${entry.message}`;
+  }
+  const score = entry.score === undefined ? "n/a" : entry.score.toFixed(3);
+  return `${entry.createdAt}\trun\t${entry.id}\t${entry.status}\tversion=${entry.versionId}\tskill=${entry.skillName}\tagent=${entry.agentName}\tscore=${score}`;
+}
+
+function splitShowRef(ref: string): [string, string | null] {
+  const index = ref.indexOf(":");
+  if (index === -1) {
+    return [ref, null];
+  }
+  return [ref.slice(0, index), ref.slice(index + 1)];
+}
+
+async function fileForRunOrJobRef(
+  core: { dir?: string; authToken?: string },
+  objectRef: string,
+  requestedPath: string,
+): Promise<SurfaceSnapshotFile | null> {
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const run = snapshot.runs.find((entry) => entry.id === objectRef);
+  const job = snapshot.jobs.find((entry) => entry.id === objectRef);
+  if (!run && !job) {
+    return null;
+  }
+  const traceIds = run?.traceIds ?? job?.traceIds ?? [];
+  const traces = snapshot.traces.filter((trace) => traceIds.includes(trace.id));
+  for (const trace of traces) {
+    const file = findShowFile(trace.files, requestedPath);
+    if (file) {
+      return file;
+    }
+  }
+  throw new WorkbenchCodedError("ref_not_found", `File not found in ${objectRef}: ${requestedPath}`, {
+    remediation: `Run workbench show ${objectRef}.`,
+    subject: { ref: objectRef, path: requestedPath },
+    exitCode: 1,
+  });
+}
+
+function evidenceDetailsForRunOrJob(snapshot: InspectionSnapshot, ref: string): WorkbenchExecutionTraceDetail[] {
+  const run = snapshot.runs.find((entry) => entry.id === ref);
+  const job = snapshot.jobs.find((entry) => entry.id === ref);
+  const jobs = run
+    ? snapshot.jobs.filter((entry) => entry.runId === run.id)
+    : job ? [job] : [];
+  return jobs.flatMap((entry) => {
+    const detail = workbenchJobEvidenceForSnapshot(snapshot, {
+      runId: entry.runId,
+      jobId: entry.id,
+    });
+    return detail ? [detail] : [];
+  }).filter((detail) =>
+    detail.executions.some((execution) =>
+      execution.sessions.length > 0 ||
+      execution.trace.spans.length > 0 ||
+      execution.trace.events.length > 0 ||
+      execution.trace.summaries.length > 0
+    )
+  );
+}
+
+function findShowFile(files: readonly SurfaceSnapshotFile[], requestedPath: string): SurfaceSnapshotFile | null {
+  const normalized = requestedPath.replace(/\\/gu, "/");
+  return files.find((file) => file.path === normalized) ??
+    files.find((file) => file.path.endsWith(`/${normalized}`)) ??
+    files.find((file) => path.basename(file.path) === normalized) ??
+    null;
+}
+
+function fileListing(kind: "version" | "trace" | "artifact", id: string, files: readonly SurfaceSnapshotFile[]): Json {
+  return {
+    kind,
+    id,
+    fileCount: files.length,
+    files: files.map(fileSummary),
+  };
+}
+
+function formatFileListing(kind: "version" | "trace" | "artifact", id: string, files: readonly SurfaceSnapshotFile[]): string {
+  return [`${kind}\t${id}\tfiles=${files.length}`, ...files.map((file) => file.path)].join("\n");
+}
+
+async function traceIdForCaseSource(core: { dir?: string; authToken?: string }, ref: string): Promise<string> {
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const trace = snapshot.traces.find((entry) => entry.id === ref);
+  if (trace) {
+    return trace.id;
+  }
+  const run = snapshot.runs.find((entry) => entry.id === ref);
+  const job = snapshot.jobs.find((entry) => entry.id === ref);
+  const traceId = run?.traceIds[0] ?? job?.traceIds[0];
+  if (traceId) {
+    return traceId;
+  }
+  throw new WorkbenchCodedError("ref_not_found", `Run, job, or trace not found: ${ref}`, {
+    remediation: "Run workbench log, then workbench case add RUN_ID.",
+    subject: { ref },
+    exitCode: 1,
+  });
+}
+
+interface EvalDelta {
+  runId: string;
+  versionId: string;
+  skillName: string;
+  agentName: string;
+  score?: number;
+  previousScore?: number;
+  delta?: number;
+}
+
+async function evalDeltas(
+  core: { dir?: string; authToken?: string },
+  runs: readonly WorkbenchRun[],
+): Promise<EvalDelta[]> {
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  return runs.map((run) => {
+    const previous = snapshot.runs
+      .filter((candidate) =>
+        candidate.id !== run.id &&
+        candidate.skillName === run.skillName &&
+        candidate.agentName === run.agentName &&
+        typeof candidate.score === "number" &&
+        candidate.createdAt < run.createdAt
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    return {
+      runId: run.id,
+      versionId: run.versionId,
+      skillName: run.skillName,
+      agentName: run.agentName,
+      ...(run.score !== undefined ? { score: run.score } : {}),
+      ...(previous?.score !== undefined ? { previousScore: previous.score } : {}),
+      ...(run.score !== undefined && previous?.score !== undefined ? { delta: run.score - previous.score } : {}),
+    };
+  });
+}
+
+function formatEvalDelta(delta: EvalDelta): string {
+  const score = delta.score === undefined ? "n/a" : delta.score.toFixed(3);
+  if (delta.previousScore === undefined || delta.delta === undefined) {
+    return `${delta.skillName} ${delta.versionId} ${score} (was n/a)`;
+  }
+  const sign = delta.delta >= 0 ? "+" : "";
+  return `${delta.skillName} ${delta.versionId} ${score} (was ${delta.previousScore.toFixed(3)}, ${sign}${delta.delta.toFixed(3)})`;
+}
+
+function evalSuccessNextCommands(runs: readonly WorkbenchRun[]): string[] {
+  return runs.length > 0 ? ["workbench publish"] : ["workbench eval"];
+}
+
 function formatStatusSnapshot(status: Awaited<ReturnType<typeof workbenchStatusSnapshot>> & {
   auth?: WorkbenchCliAuthStatus;
 }): string {
@@ -2514,46 +3110,9 @@ function formatStatusSnapshot(status: Awaited<ReturnType<typeof workbenchStatusS
           : []),
       ];
     })] : ["Remotes: none"]),
-    ...(status.next.length > 0 ? ["Next:", ...status.next.map((command) => `  ${command}`)] : []),
+    ...(status.next[0] ? [`next: ${status.next[0]}`] : []),
   ];
   return lines.join("\n");
-}
-
-function formatCheck(result: Awaited<ReturnType<typeof checkWorkbenchSkill>>): string {
-  return [
-    "Workbench skill is valid.",
-    `Cases: ${result.cases} (${result.plan.source.smokeCaseCount} smoke)`,
-    `Skills: ${result.skills}`,
-    `Agents: ${result.agents}`,
-    `Skill files: ${result.plan.source.skillFiles}`,
-    `Eval files: ${result.plan.source.evalFiles}`,
-    "",
-    "Skill plan:",
-    ...result.plan.skills.map((skill) =>
-      [
-        skill.name,
-        `bundle=${skill.bundleHash.slice(0, 12)}`,
-        `files=${skill.fileCount}`,
-        `includes=${skill.includedSkillCount}`,
-      ].join("\t")
-    ),
-    "",
-    "Agent plan:",
-    ...result.plan.agents.map((agent) =>
-      [
-        agent.name,
-        agent.adapter,
-        agent.model,
-        agent.providerBacked ? "provider-eval" : "local-eval",
-        `network=${agent.network.egress}`,
-        `cpu=${agent.resources.cpu}`,
-        `memoryGb=${agent.resources.memoryGb}`,
-        `timeout=${agent.resources.timeoutMinutes}m`,
-        `image=${agent.image}`,
-        agent.auth ? `auth=${agent.auth}` : undefined,
-      ].filter(Boolean).join("\t")
-    ),
-  ].join("\n");
 }
 
 function formatVersion(version: WorkbenchVersion): string {
