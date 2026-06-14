@@ -27,6 +27,7 @@ import {
   showWorkbenchRef,
   switchWorkbenchVersion,
   syncWorkbenchRemote,
+  workbenchStatus,
   workbenchJobEvidenceForSnapshot,
   workbenchProviderAuthSetupCommand,
   workbenchStatusSnapshot,
@@ -604,8 +605,9 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       let remote: string | undefined;
       let result: Awaited<ReturnType<typeof publishWorkbenchVersion>>;
       try {
-        writeCliProgress(parsed, io, "workbench publish: preparing Cloud skill.");
         remote = await ensurePublishRemote(parsed);
+        await assertPublishCloudAuth(parsed, remote);
+        writeCliProgress(parsed, io, "workbench publish: preparing Cloud skill.");
         await writeAuthenticatedJsonProgress(parsed, io, remote, `workbench publish: publishing ${optionalPositional(parsed, 1) ?? "current"} source.`);
         writeCliProgress(parsed, io, `workbench publish: publishing ${optionalPositional(parsed, 1) ?? "current"} source.`);
         result = await withProgressHeartbeat(io, "workbench publish: remote publish", async () => await publishWorkbenchVersion({
@@ -1250,7 +1252,7 @@ async function handleNewFrom(parsed: ParsedArgs, io: CliIo): Promise<number> {
     adapterAuthStoreRoot: adapterAuthStoreRoot(),
   });
   const hydratedPaths = await hydrateWorkbenchProjectFromSource(status.root, snapshot);
-  const hydratedStatus = await workbenchStatusSnapshot({
+  const hydratedStatus = await workbenchStatus({
     dir: status.root,
     adapterAuthStoreRoot: adapterAuthStoreRoot(),
   }).catch((error) => {
@@ -1263,15 +1265,17 @@ async function handleNewFrom(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const project: NewFromProjectResult = {
     root: status.root,
     initialized: true,
-    ...(hydratedStatus?.project.currentVersionId
-      ? { currentVersionId: hydratedStatus.project.currentVersionId }
+    ...(hydratedStatus?.currentVersionId
+      ? { currentVersionId: hydratedStatus.currentVersionId }
       : latestVersionIdByCreatedAt(versions) ? { currentVersionId: latestVersionIdByCreatedAt(versions) } : {}),
-    ...(hydratedStatus?.project.defaultSkill ? { defaultSkill: hydratedStatus.project.defaultSkill } : {}),
-    ...(hydratedStatus?.project.defaultAgent ? { defaultAgent: hydratedStatus.project.defaultAgent } : {}),
+    ...(hydratedStatus?.defaultSkill ? { defaultSkill: hydratedStatus.defaultSkill } : {}),
+    ...(hydratedStatus?.defaultAgent ? { defaultAgent: hydratedStatus.defaultAgent } : {}),
     createdPaths: status.createdPaths ?? [],
   };
-  const hasCase = hydratedPaths.some((filePath) => /^\.workbench\/cases\/[^/]+\/case\.ya?ml$/u.test(filePath));
-  const next = hasCase ? "workbench eval" : WORKBENCH_AUTHOR_EVAL_CASE_COMMAND;
+  const hydratedSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: status.root });
+  const next = snapshotHasWorkflowCase(hydratedSnapshot)
+    ? "workbench eval"
+    : authorEvalCaseCommand(hydratedSnapshot);
   return emitResult("workbench.cli.new.v1", {
     result: project as unknown as Json,
     source: workbenchInstallSourceSummary(workbenchSource, snapshot),
@@ -1589,9 +1593,27 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
         after: { pushed: completed.sync.pushed, pulled: completed.sync.pulled, upToDate: completed.sync.upToDate },
       },
     };
+  } catch (error) {
+    throw command === "improve" ? cloudImproveErrorWithHostedRemediation(error) : error;
   } finally {
     interrupt.dispose();
   }
+}
+
+function cloudImproveErrorWithHostedRemediation(error: unknown): unknown {
+  if (!(error instanceof WorkbenchCodedError) || !error.remediation) {
+    return error;
+  }
+  const remediation = error.remediation.replace(/(^|&&\s*)workbench improve(?!\s+--cloud)\b/gu, "$1workbench improve --cloud");
+  if (remediation === error.remediation) {
+    return error;
+  }
+  return new WorkbenchCodedError(error.code, error.message, {
+    retryable: error.retryable,
+    remediation,
+    ...(error.subject ? { subject: error.subject } : {}),
+    exitCode: error.exitCode,
+  });
 }
 
 interface CloudInterruptController {
@@ -3609,6 +3631,22 @@ async function ensurePublishRemote(parsed: ParsedArgs): Promise<string | undefin
   });
   const result = await addWorkbenchRemote(remote.name, remote.url, core);
   return result.remote.name;
+}
+
+async function assertPublishCloudAuth(parsed: ParsedArgs, remoteName: string | undefined): Promise<void> {
+  const root = path.resolve(dirFlag(parsed) ?? process.cwd());
+  const remotes = await inspectionRemotes(root);
+  const remote = remoteName
+    ? remotes.find((entry) => entry.name === remoteName)
+    : preferredCloudRemote(remotes);
+  const source = remote ? parseWorkbenchInstallSource(remote.url) : undefined;
+  if (!source || await workbenchCloudToken({ baseUrl: source.baseUrl })) {
+    return;
+  }
+  throw new WorkbenchCodedError("auth_required", "workbench publish requires Workbench Cloud auth.", {
+    remediation: workbenchLoginRemediation(source.baseUrl),
+    exitCode: 1,
+  });
 }
 
 async function writeAuthenticatedJsonProgress(

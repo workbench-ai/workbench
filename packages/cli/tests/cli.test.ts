@@ -479,6 +479,19 @@ describe("workbench skill-first CLI", () => {
       .resolves.not.toBe("v_old\n");
     await expect(fs.access(path.join(root, ".agents", "skills", "pollution", "SKILL.md")))
       .rejects.toMatchObject({ code: "ENOENT" });
+    const showCurrent = await invoke(["show", "current", "--dir", root, "--json"]);
+    expect(showCurrent.code, showCurrent.stdout || showCurrent.stderr).toBe(0);
+    const showCurrentPaths = stdoutJson<{ result: { files: Array<{ path: string }> } }>(showCurrent)
+      .result.files.map((file) => file.path);
+    expect(showCurrentPaths).toEqual(expect.arrayContaining([
+      "SKILL.md",
+      "references/guide.md",
+      "scripts/run.sh",
+      ".workbench/cases/case-001/case.yaml",
+    ]));
+    const hydratedStatus = await invoke(["status", "--dir", root, "--json"]);
+    expect(hydratedStatus.code, hydratedStatus.stdout || hydratedStatus.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(hydratedStatus).next).toBe("workbench eval");
   });
 
   test("new defaults to provider-backed Codex and supports explicit provider/local selection", async () => {
@@ -1991,7 +2004,7 @@ describe("workbench skill-first CLI", () => {
         ok: false,
         code: "usage",
         message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter."),
-        remediation: "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver",
+        remediation: "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --cloud --agents improver",
       });
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
@@ -2158,7 +2171,14 @@ describe("workbench skill-first CLI", () => {
         message: "workbench publish requires Workbench Cloud auth.",
         remediation: "workbench login --base-url https://cloud.test",
       });
-      expect(fetchMock).toHaveBeenCalled();
+      const publishHuman = await invoke(["publish", "--dir", root]);
+      expect(publishHuman.code, publishHuman.stdout || publishHuman.stderr).toBe(1);
+      expect(publishHuman.stderr).not.toContain("workbench publish: preparing Cloud skill.");
+      expect(publishHuman.stderr).not.toContain("workbench publish: publishing current source.");
+      const publishHumanOutput = `${publishHuman.stdout}${publishHuman.stderr}`;
+      expect(publishHumanOutput).toContain("error[auth_required]: workbench publish requires Workbench Cloud auth.");
+      expect(publishHumanOutput).toContain("next: workbench login --base-url https://cloud.test");
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
