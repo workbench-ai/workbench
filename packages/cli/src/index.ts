@@ -10,7 +10,6 @@ import {
   addWorkbenchAgent,
   compareWorkbench,
   createWorkbenchVersionRuntimeSnapshot,
-  createWorkbenchInspectionSnapshot,
   createWorkbenchAdapterAuthBundle,
   createWorkbenchReadOnlyInspectionSnapshot,
   diffWorkbenchVersions,
@@ -466,14 +465,17 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       if (parsed.flags.cloud === true) {
         return await handleCloudEval(parsed, io);
       }
-      const runs = await withProgressHeartbeat(io, "workbench eval: local eval", async () =>
-        await evalWorkbenchSkill({
+      const runs = await withProgressHeartbeat(
+        io,
+        "workbench eval: local eval",
+        async () => await evalWorkbenchSkill({
           ...core,
           skill: stringFlag(parsed, "skills"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           rerun: parsed.flags.rerun === true,
-        })
+        }),
+        { hint: "Read commands remain available: workbench log --runs." },
       );
       const artifactIds = await artifactIdsByRunId(core, runs);
       const failedRuns = runs.filter((run) => run.status === "failed" || run.status === "canceled");
@@ -554,11 +556,17 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       if (parsed.flags["dry-run"] !== true) {
         writeCliProgress(parsed, io, `workbench sync: syncing ${optionalPositional(parsed, 1) ?? "default remote"}.`);
       }
-      const result = await withProgressHeartbeat(io, "workbench sync: remote sync", async () => await syncWorkbenchRemote({
-        ...core,
-        remote: optionalPositional(parsed, 1),
-        dryRun: parsed.flags["dry-run"] === true,
-      }));
+      const syncDryRun = parsed.flags["dry-run"] === true;
+      const result = await withProgressHeartbeat(
+        io,
+        syncDryRun ? "workbench sync: dry-run check" : "workbench sync: remote sync",
+        async () => await syncWorkbenchRemote({
+          ...core,
+          remote: optionalPositional(parsed, 1),
+          dryRun: syncDryRun,
+        }),
+        { hint: syncDryRun ? "No files have been written." : "Read commands remain available: workbench log --runs." },
+      );
       const next = result.dryRun ? null : await syncNextCommand(core, beforeRuns);
       return emitResult("workbench.cli.sync.v1", {
         remote: result.remote as unknown as Json,
@@ -733,7 +741,7 @@ async function handleLog(parsed: ParsedArgs, io: CliIo): Promise<number> {
       remediation: "workbench log",
     });
   }
-  const snapshot = await createWorkbenchInspectionSnapshot(await coreOptions(parsed));
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(await coreOptions(parsed));
   const includeRuns = parsed.flags.versions !== true;
   const includeVersions = parsed.flags.runs !== true;
   const entries: WorkbenchLogEntry[] = [
@@ -3991,13 +3999,15 @@ async function withProgressHeartbeat<T>(
   io: CliIo,
   label: string,
   run: () => Promise<T>,
+  options: { hint?: string } = {},
 ): Promise<T> {
   const startedAt = Date.now();
   let interval: ReturnType<typeof setInterval> | undefined;
   const timeout = setTimeout(() => {
     const writeProgress = (): void => {
       const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
-      io.stderr.write(`${label} still running (${elapsedSeconds}s).\n`);
+      const hint = options.hint ? ` ${options.hint}` : "";
+      io.stderr.write(`${label} still running (${elapsedSeconds}s).${hint}\n`);
     };
     writeProgress();
     interval = setInterval(writeProgress, 30_000);

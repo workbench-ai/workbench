@@ -4617,13 +4617,17 @@ function requireWorkbenchImproveAgentAdapter(agent: WorkbenchAgent): void {
   }
 }
 
-function workbenchImproveEvidenceRequirementMessage(): string {
+export function workbenchImproveEvidenceRequirementMessage(): string {
   return "workbench improve needs scored below-perfect, failed, or reviewed eval evidence for the selected skill on this eval. Run `workbench eval --rerun` until actionable evidence is recorded, or edit the package source directly.";
+}
+
+export function workbenchImproveEvidenceRequirementRemediation(): string {
+  return "workbench eval --rerun";
 }
 
 function workbenchImproveEvidenceRequirementError(): WorkbenchCodedError {
   return new WorkbenchCodedError("improve_evidence_required", workbenchImproveEvidenceRequirementMessage(), {
-    remediation: "workbench eval --rerun",
+    remediation: workbenchImproveEvidenceRequirementRemediation(),
     exitCode: 2,
   });
 }

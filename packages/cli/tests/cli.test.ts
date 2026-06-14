@@ -14,6 +14,7 @@ import {
   createWorkbenchReadOnlyInspectionSnapshot,
   hashJson,
   prepareWorkbenchCloudEvalRequest,
+  withWorkbenchProjectLock,
   WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
   type WorkbenchPreparedCloudEvalRequest,
 } from "@workbench-ai/workbench-core";
@@ -92,6 +93,12 @@ async function writeRef(root: string, name: string, value: string): Promise<void
   const refPath = path.join(root, ".workbench", "refs", ...name.split("/"));
   await fs.mkdir(path.dirname(refPath), { recursive: true });
   await fs.writeFile(refPath, `${value}\n`);
+}
+
+async function currentVersionIdFor(root: string): Promise<string> {
+  const status = await invoke(["status", "--dir", root, "--json"]);
+  expect(status.code, status.stdout || status.stderr).toBe(0);
+  return stdoutJson<{ project: { currentVersionId: string } }>(status).project.currentVersionId;
 }
 
 afterEach(async () => {
@@ -2195,8 +2202,7 @@ describe("workbench skill-first CLI", () => {
       "    kind: workbench-cloud",
       "",
     ].join("\n"));
-    const versionLog = await invoke(["log", "--versions", "--dir", root, "--json"]);
-    const versionId = stdoutJson<{ entries: Array<{ id: string }> }>(versionLog).entries[0]!.id;
+    const versionId = await currentVersionIdFor(root);
     const createdAt = "2026-06-11T00:00:00.000Z";
     const runningRun = {
       id: "run_cloud",
@@ -2391,9 +2397,7 @@ describe("workbench skill-first CLI", () => {
       "    kind: workbench-cloud",
       "",
     ].join("\n"));
-    const versionId = stdoutJson<{ entries: Array<{ id: string }> }>(
-      await invoke(["log", "--versions", "--dir", root, "--json"]),
-    ).entries[0]!.id;
+    const versionId = await currentVersionIdFor(root);
     const createdAt = "2026-06-11T00:00:00.000Z";
     const runningRun = {
       id: "run_detach",
@@ -2574,9 +2578,7 @@ describe("workbench skill-first CLI", () => {
     const ownerSlug = "alice-user";
     const baseSkillName = normalizeTestHandlePart(path.basename(root));
     const skillName = `${baseSkillName}-2`;
-    const versionId = stdoutJson<{ entries: Array<{ id: string }> }>(
-      await invoke(["log", "--versions", "--dir", root, "--json"]),
-    ).entries[0]!.id;
+    const versionId = await currentVersionIdFor(root);
     const createdAt = "2026-06-11T00:00:00.000Z";
     const runningRun = {
       id: "run_autolink",
@@ -4269,6 +4271,43 @@ describe("workbench skill-first CLI", () => {
     await expect(fs.stat(path.join(root, ".workbench", "locks", "project.lock"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("keeps log reads available while a project command holds the local lock", async () => {
+    const root = await makeTempRoot("workbench-cli-read-lock-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+
+    let releaseLock!: () => void;
+    let holdingLock!: Promise<void>;
+    const lockReady = new Promise<void>((resolve, reject) => {
+      holdingLock = withWorkbenchProjectLock(root, async () => {
+        resolve();
+        await new Promise<void>((release) => {
+          releaseLock = release;
+        });
+      });
+      holdingLock.catch(reject);
+    });
+    await lockReady;
+
+    const logInvocation = invoke(["log", "--runs", "--dir", root, "--json"]);
+    let logResult: Awaited<ReturnType<typeof invoke>> | "timed-out" = "timed-out";
+    try {
+      logResult = await Promise.race([
+        logInvocation,
+        new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 1_000)),
+      ]);
+    } finally {
+      releaseLock();
+      await holdingLock;
+      await logInvocation.catch(() => undefined);
+    }
+
+    expect(logResult).not.toBe("timed-out");
+    if (logResult !== "timed-out") {
+      expect(logResult.code, logResult.stdout || logResult.stderr).toBe(0);
+      expect(stdoutJson<{ entries: unknown[] }>(logResult).entries).toHaveLength(0);
+    }
+  });
+
   test("serves the inspection shell for local deep links", async () => {
     const root = await makeTempRoot("workbench-cli-open-");
     await invoke(["new", root, "--agent", "local"]);
@@ -4992,10 +5031,12 @@ describe("workbench skill-first CLI", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
 
     await writePassingCaseTest(root);
+    const version = { id: await currentVersionIdFor(root) };
+    expect(version.id).toMatch(/^v_[a-f0-9]{64}$/u);
     const versions = await invoke(["log", "--versions", "--json", "--dir", root]);
     expect(versions.stderr).toBe("");
-    const [version] = stdoutJson<{ entries: Array<{ id: string }> }>(versions).entries;
-    expect(version.id).toMatch(/^v_[a-f0-9]{64}$/u);
+    expect(stdoutJson<{ entries: Array<{ id: string }> }>(versions).entries)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: version.id })]));
 
     const evalResult = await invoke(["eval", "--dir", root, "--json"]);
     const runs = stdoutJson<{ result: Array<{ id: string; versionId: string; score?: number; jobIds: string[]; traceIds: string[] }> }>(evalResult).result;
