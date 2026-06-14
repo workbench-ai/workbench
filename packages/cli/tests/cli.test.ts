@@ -15,6 +15,7 @@ import {
   hashJson,
   prepareWorkbenchCloudEvalRequest,
   withWorkbenchProjectLock,
+  workbenchStatus,
   WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
   type WorkbenchPreparedCloudEvalRequest,
 } from "@workbench-ai/workbench-core";
@@ -96,9 +97,11 @@ async function writeRef(root: string, name: string, value: string): Promise<void
 }
 
 async function currentVersionIdFor(root: string): Promise<string> {
-  const status = await invoke(["status", "--dir", root, "--json"]);
-  expect(status.code, status.stdout || status.stderr).toBe(0);
-  return stdoutJson<{ project: { currentVersionId: string } }>(status).project.currentVersionId;
+  const status = await workbenchStatus({ dir: root });
+  if (!status.currentVersionId) {
+    throw new Error(`Expected current version id for ${root}.`);
+  }
+  return status.currentVersionId;
 }
 
 afterEach(async () => {
@@ -1152,9 +1155,7 @@ describe("workbench skill-first CLI", () => {
     const baseVersionId = stdoutJson<{ result: Array<{ versionId: string }> }>(evalResult).result[0]!.versionId;
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nPublished descendant edit.\n");
-    const descendantStatus = await invoke(["status", "--dir", root, "--json"]);
-    expect(descendantStatus.code, descendantStatus.stdout || descendantStatus.stderr).toBe(0);
-    const descendantVersionId = stdoutJson<{ project: { currentVersionId: string } }>(descendantStatus).project.currentVersionId;
+    const descendantVersionId = await currentVersionIdFor(root);
     expect(descendantVersionId).not.toBe(baseVersionId);
     expect((await invoke(["switch", baseVersionId, "--dir", root])).code).toBe(0);
 
@@ -1256,10 +1257,12 @@ describe("workbench skill-first CLI", () => {
     }));
 
     await writePassingCaseTest(root, "case-002");
+    const currentVersionId = await currentVersionIdFor(root);
     const status = await invoke(["status", "--dir", root, "--json"]);
 
     expect(status.code, status.stdout || status.stderr).toBe(0);
     const statusJson = stdoutJson<{ project: { currentVersionId: string }; next: string | null }>(status);
+    expect(currentVersionId).not.toBe(firstVersionId);
     expect(statusJson.project.currentVersionId).not.toBe(firstVersionId);
     expect(statusJson.next).toBe("workbench eval");
   });
@@ -1276,6 +1279,7 @@ describe("workbench skill-first CLI", () => {
       "",
     ].join("\n"));
 
+    await currentVersionIdFor(root);
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(status).next)
@@ -1699,7 +1703,7 @@ describe("workbench skill-first CLI", () => {
     }));
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await writePassingCaseTest(root);
-    expect((await invoke(["status", "--dir", root, "--json"])).code).toBe(0);
+    const versionId = await currentVersionIdFor(root);
     await fs.writeFile(path.join(root, ".workbench", "remotes.yaml"), [
       "schema: workbench.remotes.v1",
       "remotes:",
@@ -1708,9 +1712,6 @@ describe("workbench skill-first CLI", () => {
       "    kind: workbench-cloud",
       "",
     ].join("\n"));
-    const versionId = stdoutJson<{ entries: Array<{ id: string }> }>(
-      await invoke(["log", "--versions", "--dir", root, "--json"]),
-    ).entries[0]!.id;
     const createdAt = "2026-06-11T00:00:00.000Z";
     const runningRun = {
       id: "run_cloud",
@@ -4241,9 +4242,11 @@ describe("workbench skill-first CLI", () => {
     });
   });
 
-  test("serializes concurrent project commands through the local project lock", async () => {
+  test("read commands return committed state without reconciling source edits", async () => {
     const root = await makeTempRoot("workbench-cli-lock-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const initialStatus = await invoke(["status", "--dir", root, "--json"]);
+    const initialVersionId = stdoutJson<{ project: { currentVersionId: string } }>(initialStatus).project.currentVersionId;
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual CLI concurrent edit.\n");
 
     const [status, versions, runs, shown] = await Promise.all([
@@ -4259,19 +4262,20 @@ describe("workbench skill-first CLI", () => {
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
     const statusJson = stdoutJson<{ project: { currentVersionId: string }; worktree: { latestVersionId: string } }>(status);
     expect(statusJson.project.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
+    expect(statusJson.project.currentVersionId).toBe(initialVersionId);
     expect(statusJson.worktree.latestVersionId).toBe(statusJson.project.currentVersionId);
     expect(stdoutJson<{ entries: Array<{ id: string }> }>(versions).entries.length).toBeGreaterThan(0);
     expect(stdoutJson<{ entries: unknown[] }>(runs).entries).toHaveLength(0);
     expect(stdoutJson(shown)).toMatchObject({
       result: {
       path: "SKILL.md",
-      content: expect.stringContaining("Manual CLI concurrent edit."),
+      content: expect.not.stringContaining("Manual CLI concurrent edit."),
       },
     });
     await expect(fs.stat(path.join(root, ".workbench", "locks", "project.lock"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  test("keeps log reads available while a project command holds the local lock", async () => {
+  test("keeps read commands available while a project command holds the local lock", async () => {
     const root = await makeTempRoot("workbench-cli-read-lock-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
 
@@ -4288,23 +4292,37 @@ describe("workbench skill-first CLI", () => {
     });
     await lockReady;
 
-    const logInvocation = invoke(["log", "--runs", "--dir", root, "--json"]);
-    let logResult: Awaited<ReturnType<typeof invoke>> | "timed-out" = "timed-out";
+    const readInvocation = Promise.all([
+      invoke(["log", "--runs", "--dir", root, "--json"]),
+      invoke(["status", "--dir", root, "--json"]),
+      invoke(["show", "current:SKILL.md", "--dir", root, "--json"]),
+    ]);
+    let readResult: Awaited<typeof readInvocation> | "timed-out" = "timed-out";
     try {
-      logResult = await Promise.race([
-        logInvocation,
+      readResult = await Promise.race([
+        readInvocation,
         new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 1_000)),
       ]);
     } finally {
       releaseLock();
       await holdingLock;
-      await logInvocation.catch(() => undefined);
+      await readInvocation.catch(() => undefined);
     }
 
-    expect(logResult).not.toBe("timed-out");
-    if (logResult !== "timed-out") {
+    expect(readResult).not.toBe("timed-out");
+    if (readResult !== "timed-out") {
+      const [logResult, statusResult, showResult] = readResult;
       expect(logResult.code, logResult.stdout || logResult.stderr).toBe(0);
+      expect(statusResult.code, statusResult.stdout || statusResult.stderr).toBe(0);
+      expect(showResult.code, showResult.stdout || showResult.stderr).toBe(0);
       expect(stdoutJson<{ entries: unknown[] }>(logResult).entries).toHaveLength(0);
+      expect(stdoutJson<{ project: { initialized: boolean } }>(statusResult).project.initialized).toBe(true);
+      expect(stdoutJson(showResult)).toMatchObject({
+        result: {
+          path: "SKILL.md",
+          content: expect.stringContaining("# "),
+        },
+      });
     }
   });
 

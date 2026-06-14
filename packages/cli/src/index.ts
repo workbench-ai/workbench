@@ -781,9 +781,10 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const core = await coreOptions(parsed);
   const [objectRef, requestedPath] = splitShowRef(ref);
   if (requestedPath) {
-    const runOrJobFile = await fileForRunOrJobRef(core, objectRef, requestedPath);
-    if (runOrJobFile) {
-      return output(runOrJobFile, parsed, io, () => formatShow(runOrJobFile));
+    const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+    const file = fileForSnapshotRef(snapshot, objectRef, requestedPath);
+    if (file) {
+      return output(file, parsed, io, () => formatShow(file));
     }
     const value = await showWorkbenchRef(ref, core);
     return output(value, parsed, io, () => formatShow(value));
@@ -4144,15 +4145,13 @@ async function statusWithCausalNext(
   }
   const failedRemote = status.remotes.find((remote) => remote.sync.status === "error");
   const hasWorkflowCase = snapshot ? snapshotHasWorkflowCase(snapshot) : false;
-  const hasCurrentScoredProofRun = snapshot?.runs.some((run) =>
+  const hasCurrentScoredEvalRun = snapshot?.runs.some((run) =>
     currentVersionId !== undefined &&
     scoredRunValue(run) !== undefined &&
-    (
-      (run.kind === "eval" && run.versionId === currentVersionId) ||
-      (run.kind === "improve" && run.outputVersionId === currentVersionId)
-    )
+    run.kind === "eval" &&
+    run.versionId === currentVersionId
   ) ?? false;
-  const canPublish = hasWorkflowCase && hasCurrentScoredProofRun;
+  const canPublish = hasWorkflowCase && hasCurrentScoredEvalRun;
   const cloudAuthMissing = auth.workbenchCloud.status !== "authenticated";
   const cloudRemoteNeedsAuth = status.remotes.some((remote) =>
     remote.kind === "workbench-cloud" &&
@@ -4170,7 +4169,7 @@ async function statusWithCausalNext(
   if ((snapshot?.runs.length ?? status.runs.total) === 0) {
     return { ...status, next: "workbench eval" };
   }
-  if (!hasCurrentScoredProofRun) {
+  if (!hasCurrentScoredEvalRun) {
     return { ...status, next: "workbench eval" };
   }
   const cloudRemote = status.remotes.find((remote) => remote.kind === "workbench-cloud");
@@ -4583,12 +4582,55 @@ function splitShowRef(ref: string): [string, string | null] {
   return [ref.slice(0, index), ref.slice(index + 1)];
 }
 
-async function fileForRunOrJobRef(
-  core: { dir?: string; authToken?: string },
+function fileForSnapshotRef(
+  snapshot: InspectionSnapshot,
   objectRef: string,
   requestedPath: string,
-): Promise<SurfaceSnapshotFile | null> {
-  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+): unknown | null {
+  const version = snapshotVersionByRef(snapshot, objectRef);
+  if (version) {
+    const file = version.files.find((entry) => entry.path === requestedPath);
+    if (file) {
+      return file;
+    }
+    throw new WorkbenchCodedError("ref_not_found", `File not found in ${version.id}: ${requestedPath}`, {
+      remediation: `workbench show ${version.id}`,
+      subject: { ref: version.id, path: requestedPath },
+      exitCode: 1,
+    });
+  }
+  const trace = snapshotObjectByRef(snapshot.traces, objectRef, "trace");
+  if (trace) {
+    const file = trace.files.filter(isUserFacingTraceEvidenceFile).find((entry) => entry.path === requestedPath);
+    if (file) {
+      return file;
+    }
+    throw new WorkbenchCodedError("ref_not_found", `File not found in ${trace.id}: ${requestedPath}`, {
+      remediation: `workbench show ${trace.id}`,
+      subject: { ref: trace.id, path: requestedPath },
+      exitCode: 1,
+    });
+  }
+  const artifact = snapshotObjectByRef(snapshot.artifacts, objectRef, "artifact");
+  if (artifact) {
+    const file = artifact.files.find((entry) => entry.path === requestedPath);
+    if (file) {
+      return file;
+    }
+    throw new WorkbenchCodedError("ref_not_found", `File not found in ${artifact.id}: ${requestedPath}`, {
+      remediation: `workbench show ${artifact.id}`,
+      subject: { ref: artifact.id, path: requestedPath },
+      exitCode: 1,
+    });
+  }
+  return fileForRunOrJobSnapshotRef(snapshot, objectRef, requestedPath);
+}
+
+function fileForRunOrJobSnapshotRef(
+  snapshot: InspectionSnapshot,
+  objectRef: string,
+  requestedPath: string,
+): SurfaceSnapshotFile | null {
   const selection = runOrJobEvidenceSelection(snapshot, objectRef);
   if (!selection.run && selection.jobs.length === 0) {
     return null;

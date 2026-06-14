@@ -3298,68 +3298,58 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
       next: "workbench new .",
     };
   }
-  return withWorkbenchProjectLockRoot(root, async () => {
-    const [state, agents, skillSources, syncStates] = await Promise.all([
-      loadState(root),
-      readAgents(root),
-      readSkillSources(root),
-      readRemoteSyncStates(root),
-    ]);
-    const version = await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
-    await saveState(root, state);
-    const defaultSkill = await readDefaultSkillSelection(root, skillSources);
-    const defaultAgent = await readDefaultAgentSelection(root, agents);
-    const latestVersionId = version.id;
-    const lastRun = [...state.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-    const syncByRemote = new Map(syncStates.map((entry) => [entry.remote, entry]));
-    const remotes = Object.values(state.remotes)
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .map((remote) => {
-        const syncRecord = syncByRemote.get(remote.name);
-        const sync = syncRecord && syncRecord.url === remote.url ? syncRecord : undefined;
-        const syncStatus: WorkbenchStatusSnapshot["remotes"][number]["sync"] = sync
-          ? {
-              status: sync.status === "error" ? "error" : "up_to_date",
-              ...(sync.lastSyncedAt ? { lastSyncedAt: sync.lastSyncedAt } : {}),
-              lastAttemptAt: sync.lastAttemptAt,
-              ...(sync.lastError ? { lastError: sync.lastError } : { lastError: null }),
-            }
-          : { status: "never", lastError: null };
-        return {
-          name: remote.name,
-          kind: remote.kind,
-          url: remote.url,
-          sync: syncStatus,
-          publication: remote.kind === "workbench-cloud"
-            ? publicationStatusFromRefs(state.refs, remote.name)
-            : unpublishedPublicationStatus(),
-        };
-      });
+  const [snapshot, syncStates] = await Promise.all([
+    createWorkbenchReadOnlyInspectionSnapshot(options),
+    readRemoteSyncStates(root).catch(() => []),
+  ]);
+  const currentVersionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+  const lastRun = [...snapshot.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  const syncByRemote = new Map(syncStates.map((entry) => [entry.remote, entry]));
+  const remotes = snapshot.remotes.map((remote) => {
+    const syncRecord = syncByRemote.get(remote.name);
+    const sync = syncRecord && syncRecord.url === remote.url ? syncRecord : undefined;
+    const syncStatus: WorkbenchStatusSnapshot["remotes"][number]["sync"] = sync
+      ? {
+          status: sync.status === "error" ? "error" : "up_to_date",
+          ...(sync.lastSyncedAt ? { lastSyncedAt: sync.lastSyncedAt } : {}),
+          lastAttemptAt: sync.lastAttemptAt,
+          ...(sync.lastError ? { lastError: sync.lastError } : { lastError: null }),
+        }
+      : { status: "never", lastError: null };
     return {
-      schema: "workbench.status.v1",
-      ok: true,
-      project: {
-        root,
-        initialized: true,
-        currentVersionId: version.id,
-        defaultSkill,
-        defaultAgent,
-      },
-      worktree: {
-        latestVersionId,
-      },
-      runs: {
-        total: state.runs.length,
-        ...(lastRun ? {
-          lastRunId: lastRun.id,
-          lastStatus: lastRun.status,
-          ...(lastRun.score !== undefined ? { lastScore: lastRun.score } : {}),
-        } : {}),
-      },
-      remotes,
-      next: null,
+      name: remote.name,
+      kind: remote.kind,
+      url: remote.url,
+      sync: syncStatus,
+      publication: remote.kind === "workbench-cloud"
+        ? publicationStatusFromRefs(snapshot.refs, remote.name)
+        : unpublishedPublicationStatus(),
     };
   });
+  return {
+    schema: "workbench.status.v1",
+    ok: true,
+    project: {
+      root,
+      initialized: true,
+      ...(currentVersionId ? { currentVersionId } : {}),
+      ...(snapshot.status.defaultSkill ? { defaultSkill: snapshot.status.defaultSkill } : {}),
+      ...(snapshot.status.defaultAgent ? { defaultAgent: snapshot.status.defaultAgent } : {}),
+    },
+    worktree: {
+      ...(currentVersionId ? { latestVersionId: currentVersionId } : {}),
+    },
+    runs: {
+      total: snapshot.runs.length,
+      ...(lastRun ? {
+        lastRunId: lastRun.id,
+        lastStatus: lastRun.status,
+        ...(lastRun.score !== undefined ? { lastScore: lastRun.score } : {}),
+      } : {}),
+    },
+    remotes,
+    next: null,
+  };
 }
 
 async function workbenchStatusUnlocked(root: string, options: WorkbenchCommandOptions = {}): Promise<WorkbenchStatus> {
