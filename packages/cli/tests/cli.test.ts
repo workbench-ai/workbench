@@ -3113,6 +3113,206 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
+  test("status points detached hosted improve output at switch before publish", async () => {
+    const root = await makeTempRoot("workbench-cli-cloud-improve-detached-status-");
+    const previousConfig = process.env.WORKBENCH_CONFIG;
+    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
+    process.env.WORKBENCH_CONFIG = configPath;
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "cloud-token",
+      username: "alice",
+    }));
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await fs.writeFile(path.join(root, ".workbench", "remotes.yaml"), [
+      "schema: workbench.remotes.v1",
+      "remotes:",
+      "  cloud:",
+      "    url: https://cloud.test/skills/alice/cloud-skill",
+      "    kind: workbench-cloud",
+      "",
+    ].join("\n"));
+    await addCommandImproveAgent(root);
+    const { prepared } = await seedFailedImproveEvidence(root, "patcher");
+    const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    const baseVersion = snapshot.versions.find((version) => version.id === prepared.versionId) ?? snapshot.versions[0]!;
+    const skillFile = stdoutJson<{ result: { path: string; content: string; kind?: string; encoding?: string; executable?: boolean } }>(
+      await invoke(["show", `${baseVersion.id}:SKILL.md`, "--dir", root, "--json"]),
+    ).result;
+    const improvedVersionId = "v_cbd027340000000000000000000000000000000000000000000000000000000000";
+    const improvedVersion = {
+      id: improvedVersionId,
+      hash: "cbd027340000000000000000000000000000000000000000000000000000000000",
+      message: "Hosted improvement",
+      parentIds: [baseVersion.id],
+      createdAt: "2026-06-11T00:00:02.000Z",
+      files: [skillFile, ...baseVersion.files.filter((file) => file.path !== "SKILL.md").map((file) => ({ ...file }))].map((file) =>
+        file.path === "SKILL.md"
+          ? { ...file, content: `${file.content}\nIMPROVED_MARKER\n` }
+          : file
+      ),
+    };
+    const createdAt = "2026-06-11T00:00:00.000Z";
+    const evalRun = {
+      id: "run_detached_eval",
+      kind: "eval",
+      versionId: baseVersion.id,
+      skillName: prepared.skill,
+      skillBundleHash: prepared.skillBundleHash,
+      evalHash: prepared.evalHash,
+      agentName: prepared.agent,
+      agentHash: prepared.agentHash,
+      status: "succeeded",
+      score: 1,
+      jobIds: ["job_detached_eval"],
+      traceIds: ["trace_detached_eval"],
+      createdAt,
+      finishedAt: "2026-06-11T00:00:01.000Z",
+    };
+    const evalJob = {
+      id: "job_detached_eval",
+      runId: evalRun.id,
+      kind: "eval",
+      versionId: baseVersion.id,
+      skillName: prepared.skill,
+      skillBundleHash: prepared.skillBundleHash,
+      evalHash: prepared.evalHash,
+      agentName: prepared.agent,
+      agentHash: prepared.agentHash,
+      caseId: "case-001",
+      sample: 0,
+      status: "succeeded",
+      score: 1,
+      artifactIds: [],
+      traceIds: ["trace_detached_eval"],
+      createdAt,
+      finishedAt: "2026-06-11T00:00:01.000Z",
+    };
+    const evalTrace = {
+      id: "trace_detached_eval",
+      runId: evalRun.id,
+      jobId: evalJob.id,
+      versionId: baseVersion.id,
+      skillName: prepared.skill,
+      skillBundleHash: prepared.skillBundleHash,
+      evalHash: prepared.evalHash,
+      agentName: prepared.agent,
+      agentHash: prepared.agentHash,
+      createdAt,
+      request: {},
+      result: { status: "succeeded", score: 1 },
+      files: [],
+    };
+    const improveRun = {
+      id: "run_detached_improve",
+      kind: "improve",
+      versionId: baseVersion.id,
+      skillName: prepared.skill,
+      skillBundleHash: prepared.skillBundleHash,
+      evalHash: prepared.evalHash,
+      agentName: prepared.agent,
+      agentHash: prepared.agentHash,
+      status: "succeeded",
+      score: 1,
+      outputVersionId: improvedVersionId,
+      jobIds: ["job_detached_improve"],
+      traceIds: ["trace_detached_improve"],
+      createdAt: "2026-06-11T00:00:02.000Z",
+      finishedAt: "2026-06-11T00:00:03.000Z",
+    };
+    const improveJob = {
+      id: "job_detached_improve",
+      runId: improveRun.id,
+      kind: "improve",
+      versionId: baseVersion.id,
+      skillName: prepared.skill,
+      skillBundleHash: prepared.skillBundleHash,
+      evalHash: prepared.evalHash,
+      agentName: prepared.agent,
+      agentHash: prepared.agentHash,
+      caseId: "current",
+      sample: 0,
+      status: "succeeded",
+      score: 1,
+      artifactIds: [],
+      traceIds: ["trace_detached_improve"],
+      createdAt: "2026-06-11T00:00:02.000Z",
+      finishedAt: "2026-06-11T00:00:03.000Z",
+    };
+    const improveTrace = {
+      id: "trace_detached_improve",
+      runId: improveRun.id,
+      jobId: improveJob.id,
+      versionId: baseVersion.id,
+      skillName: prepared.skill,
+      skillBundleHash: prepared.skillBundleHash,
+      evalHash: prepared.evalHash,
+      agentName: prepared.agent,
+      agentHash: prepared.agentHash,
+      createdAt: "2026-06-11T00:00:03.000Z",
+      request: {},
+      result: { status: "succeeded", score: 1 },
+      files: [],
+    };
+    const remotePack = mergeObjectPacks(emptyObjectPack(createdAt), {
+      ...emptyObjectPack(createdAt),
+      refs: {
+        current: improvedVersionId,
+        published: baseVersion.id,
+        [`releases/${baseVersion.id}`]: baseVersion.id,
+        "publication/install-url": "https://cloud.test/skills/alice/cloud-skill",
+        "publication/pinned-install-url": `https://cloud.test/skills/alice/cloud-skill/releases/${baseVersion.id}`,
+        "publication/visibility": "public",
+      },
+      versions: [improvedVersion],
+      runs: [evalRun, improveRun],
+      jobs: [evalJob, improveJob],
+      traces: [evalTrace, improveTrace],
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
+      if (url.pathname === "/api/workbench/skills" && method === "GET") {
+        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
+        return jsonResponse({ objectPack: remotePack });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "PUT") {
+        return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
+      }
+      return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
+    }));
+    try {
+      const synced = await invoke(["sync", "cloud", "--dir", root, "--json"]);
+      expect(synced.code, synced.stdout || synced.stderr).toBe(0);
+      expect(stdoutJson(synced)).toMatchObject({
+        ok: true,
+      });
+      expect(stdoutJson<{ next: string | null }>(synced).next).toMatch(/^workbench show run_/u);
+      await expect(fs.readFile(path.join(root, "SKILL.md"), "utf8"))
+        .resolves.not.toContain("IMPROVED_MARKER");
+      const candidate = await invoke(["show", `${improvedVersionId}:SKILL.md`, "--dir", root, "--json"]);
+      expect(candidate.code, candidate.stdout || candidate.stderr).toBe(0);
+      expect(stdoutJson<{ result: { content: string } }>(candidate).result.content).toContain("IMPROVED_MARKER");
+      const status = await invoke(["status", "--dir", root, "--json"]);
+      expect(status.code, status.stdout || status.stderr).toBe(0);
+      expect(stdoutJson<{ project: { currentVersionId?: string }; next: string | null }>(status))
+        .toMatchObject({
+          project: { currentVersionId: baseVersion.id },
+          next: "workbench switch cbd02734",
+        });
+    } finally {
+      if (previousConfig === undefined) {
+        delete process.env.WORKBENCH_CONFIG;
+      } else {
+        process.env.WORKBENCH_CONFIG = previousConfig;
+      }
+    }
+  });
+
   test("hosted improve refuses to overwrite local edits made while cloud is running", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-improve-conflict-");
     const previousConfig = process.env.WORKBENCH_CONFIG;

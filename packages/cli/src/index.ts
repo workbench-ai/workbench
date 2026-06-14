@@ -4152,6 +4152,12 @@ async function statusWithCausalNext(
     run.versionId === currentVersionId
   ) ?? false;
   const canPublish = hasWorkflowCase && hasCurrentScoredEvalRun;
+  const promotedImproveVersionId = snapshot && currentVersionId
+    ? latestUnsourcedPromotedImproveVersion(snapshot, currentVersionId)
+    : undefined;
+  if (promotedImproveVersionId) {
+    return { ...status, next: `workbench switch ${displayRef(promotedImproveVersionId)}` };
+  }
   const cloudAuthMissing = auth.workbenchCloud.status !== "authenticated";
   const cloudRemoteNeedsAuth = status.remotes.some((remote) =>
     remote.kind === "workbench-cloud" &&
@@ -4207,6 +4213,26 @@ async function statusWithCausalNext(
     ...status,
     next: canPublish ? "workbench compare" : null,
   };
+}
+
+function latestUnsourcedPromotedImproveVersion(
+  snapshot: WorkbenchInspectionSnapshot,
+  currentVersionId: string,
+): string | undefined {
+  const latestRun = snapshot.runs
+    .filter((run) => run.kind === "improve" && run.status === "succeeded" && Boolean(run.outputVersionId))
+    .sort((left, right) => runEvidenceTime(right).localeCompare(runEvidenceTime(left)))[0];
+  const outputVersionId = latestRun?.outputVersionId;
+  if (!outputVersionId || outputVersionId === currentVersionId) {
+    return undefined;
+  }
+  if (!snapshot.versions.some((version) => version.id === outputVersionId)) {
+    return undefined;
+  }
+  if (versionHasAncestor(snapshot, currentVersionId, outputVersionId)) {
+    return undefined;
+  }
+  return outputVersionId;
 }
 
 function versionHasAncestor(snapshot: WorkbenchInspectionSnapshot, versionId: string, ancestorId: string): boolean {
