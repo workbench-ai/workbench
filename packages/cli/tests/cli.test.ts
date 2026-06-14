@@ -1267,17 +1267,17 @@ describe("workbench skill-first CLI", () => {
     expect(statusJson.next).toBe("workbench eval");
   });
 
-  test("status routes below-perfect current evidence to improve before publish", async () => {
+  test("status routes below-perfect current evidence to improve before cloud login or publish", async () => {
     const root = await makeTempRoot("workbench-cli-status-below-perfect-");
-    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
-    vi.stubEnv("WORKBENCH_CONFIG", configPath);
-    await fs.writeFile(configPath, JSON.stringify({
-      schema: "workbench.cli.config.v1",
-      baseUrl: "https://cloud.test",
-      accessToken: "cloud-token",
-      username: "alice",
-    }));
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await fs.writeFile(path.join(root, ".workbench", "remotes.yaml"), [
+      "schema: workbench.remotes.v1",
+      "remotes:",
+      "  cloud:",
+      "    url: https://cloud.test/skills/alice/partial-skill",
+      "    kind: workbench-cloud",
+      "",
+    ].join("\n"));
     await writePassingCaseTest(root);
     const currentVersionId = await currentVersionIdFor(root);
     await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
@@ -1298,10 +1298,25 @@ describe("workbench skill-first CLI", () => {
       finishedAt: "2026-06-11T00:00:01.000Z",
     }));
 
-    const status = await invoke(["status", "--dir", root, "--json"]);
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(await makeTempRoot("workbench-cli-missing-config-"), "missing.json"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
+    const unauthenticatedStatus = await invoke(["status", "--dir", root, "--json"]);
 
-    expect(status.code, status.stdout || status.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench improve");
+    expect(unauthenticatedStatus.code, unauthenticatedStatus.stdout || unauthenticatedStatus.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(unauthenticatedStatus).next).toBe("workbench improve");
+
+    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
+    vi.stubEnv("WORKBENCH_CONFIG", configPath);
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "cloud-token",
+      username: "alice",
+    }));
+    const authenticatedStatus = await invoke(["status", "--dir", root, "--json"]);
+
+    expect(authenticatedStatus.code, authenticatedStatus.stdout || authenticatedStatus.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(authenticatedStatus).next).toBe("workbench improve");
   });
 
   test("status suggests a fresh case id when only smoke cases exist", async () => {

@@ -4162,9 +4162,6 @@ async function statusWithCausalNext(
     remote.kind === "workbench-cloud" &&
     (remote.sync.status !== "up_to_date" || remote.publication.status === "unpublished")
   );
-  if (cloudAuthMissing && (canPublish || cloudRemoteNeedsAuth)) {
-    return { ...status, next: "workbench login" };
-  }
   if (failedRemote) {
     return { ...status, next: `workbench sync ${failedRemote.name}` };
   }
@@ -4179,6 +4176,9 @@ async function statusWithCausalNext(
   }
   if (belowPerfectCurrentEvalRuns.length > 0) {
     return { ...status, next: belowPerfectEvalNextCommand(belowPerfectCurrentEvalRuns) };
+  }
+  if (cloudAuthMissing && (canPublish || cloudRemoteNeedsAuth)) {
+    return { ...status, next: "workbench login" };
   }
   const cloudRemote = status.remotes.find((remote) => remote.kind === "workbench-cloud");
   if (canPublish && !cloudRemote) {
