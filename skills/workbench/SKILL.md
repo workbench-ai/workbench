@@ -5,7 +5,7 @@ description: Use this skill for creating, evaluating, improving, inspecting, ver
 
 # Workbench
 
-Workbench is a local-first skill management runtime. It versions skill source automatically, runs evals with agents, records trace and artifact evidence, improves the mutable primary skill from failed or reviewed traces, syncs Workbench object remotes, and publishes installable source explicitly.
+Workbench is a local-first skill management runtime. It versions skill source automatically, runs evals with agents, records run/job/trace and artifact evidence, improves the mutable primary skill from scored below-perfect, failed, or reviewed eval evidence, syncs Workbench object remotes, and publishes installable source explicitly.
 
 Assume the user is chatting with an agent that can edit files and run commands. Keep workflow-specific behavior in the managed skill. Use Workbench core for durable source versions, skill bundles, eval cases, agents, runs, traces, artifacts, lineage, object sync, source publication, and read-only inspection.
 
@@ -16,13 +16,14 @@ Use the small loop first:
 ```bash
 workbench new ./earnings-prep
 cd ./earnings-prep
+# write .workbench/cases/case-001/case.yaml
 workbench eval --agents default -n 1
 workbench compare
 workbench log --versions
 workbench show current:SKILL.md
 ```
 
-The init case is only a smoke check. Replace it with representative workflow cases before treating scores as skill quality. Workbench creates source versions automatically when commands observe changed source.
+`workbench new` creates an empty `.workbench/cases/` directory. Write representative workflow cases before running `workbench eval`; no-case evals fail with `no_eval_cases`. Workbench creates source versions automatically when commands observe changed source.
 
 Use selector flags only when the user intentionally wants a broader or narrower matrix:
 
@@ -31,10 +32,13 @@ workbench eval --skills all --agents all -n 1
 workbench compare --skills all --agents all --versions all
 ```
 
-Run `workbench improve` only after failed or reviewed trace evidence exists. Passing smoke traces are not enough. `improve` edits one skill with one agent, so use plural selector flags to narrow defaults to one skill and one agent when needed:
+Run `workbench improve` only after scored below-perfect, failed, or reviewed eval evidence exists. Perfect eval runs and unscored runtime/auth failures are not enough. `improve` edits one skill and proves the candidate with one explicitly selected improvement-capable agent; there is no implicit provider scan or fallback improver. Evidence is selected by skill lineage and eval definition, not by exact eval-agent hash. Workbench checks evidence before asking users to configure an improver, and a switched one-sample proof should be followed by the printed higher-sample rerun before publishing. Use plural selector flags to narrow defaults when needed:
 
 ```bash
-workbench improve --skills primary --agents patcher --budget 1 -n 1
+codex login --device-auth
+workbench login codex --method oauth
+workbench agent add default --adapter codex --model gpt-5.4-mini --with auth=default
+workbench improve --skills primary --agents default --budget 1 -n 1
 ```
 
 ## Source Shape
@@ -46,7 +50,7 @@ Use the skill-first layout:
 - `.workbench/cases/*/case.yaml` contains representative workflow cases.
 - `.workbench/agents.yaml` names runtime configurations and has top-level `default`.
 - `.workbench/skills.yaml` is optional; add it only for multiple measured skills, `baseline: none`, or included skills.
-- `.workbench/remotes.yaml` is ignored local remote configuration and is not versioned skill source.
+- `.agents/` and `.workbench/remotes.yaml` are ignored local machine metadata and are not versioned skill source.
 - `.workbench/objects`, `.workbench/refs`, `.workbench/sync`, `.workbench/tmp`, `.workbench/logs`, and `.workbench/locks` are Workbench-owned runtime directories ignored by Git.
 
 Do not point local skill paths outside the project folder. Use `baseline: none` for a true no-skill baseline instead of creating a fake local no-skill directory. For external skills, use explicit remote refs in `.workbench/skills.yaml` or vendor the files into the project.
@@ -62,27 +66,32 @@ workbench show TRACE_ID:stderr.log
 workbench show VERSION_ID:SKILL.md
 workbench diff BASE_VERSION_ID..IMPROVED_VERSION_ID
 workbench switch VERSION_ID
-workbench open --json
+workbench open
 ```
 
-`switch` materializes a recorded version into the working folder and does not invoke Git. The web view is read-only. Use `open --json` when the agent needs the inspection snapshot without starting the browser server. Use `show REF:PATH` for stdout, stderr, result files, captured artifacts, version files, and read-only native sessions such as `codex:SESSION_ID` or `claude:SESSION_ID`.
+`switch` materializes a recorded version into the working folder and does not invoke Git. The web view is read-only. Use `log` and `show REF` for summary inspection. Use `show REF:PATH` for stdout, stderr, result files, captured artifacts, version files, and read-only native sessions such as `codex:SESSION_ID` or `claude:SESSION_ID`. Run/job evidence uses canonical user-facing paths; internal `.workbench/` runtime paths and raw trace metadata files are not inspection targets.
 
 ## Agents And Skills
 
 Use agents to compare runtime configurations. `local` and `command` agents run Docker-style case tests directly. `codex` and `claude` agents run the provider as the skill executor and score the same cases through the configured score adapter.
 
 ```bash
-workbench agent add default --adapter local
 workbench agent add strict --adapter command --with command='sh "$CASE_DIR/tests/test.sh"'
-workbench agent add codex --adapter codex --model gpt-5.3-codex-spark --with auth=default
-workbench login codex --method api-key
+codex login --device-auth
+workbench login codex --method oauth
+workbench agent add default --adapter codex --model gpt-5.4-mini --with auth=default
+claude setup-token
+CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth
+workbench agent add opus --adapter claude --model opus --with auth=default
 workbench eval --agents all -n 1
 workbench compare --agents all --versions all
 ```
 
+Use single quotes around command-valued `--with` assignments so `$CASE_DIR`, `$OUTPUT_DIR`, and `$SKILL_DIR` remain Workbench runtime variables instead of being expanded by the outer shell.
+
 Top-level entries in `.workbench/skills.yaml` are measured skills. Nested `includes` are installed alongside one measured local or remote skill and are hashed into that bundle, but they are not comparison rows.
 
-If an eval adapter, command, auth materialization, or runtime fails, Workbench records failed run evidence with the error. Use `workbench compare` after failed runs because it shows failure evidence instead of treating the row as absent score data.
+If an eval adapter, command, auth materialization, or runtime fails, Workbench records failed run evidence with the error. Use `workbench compare` after failed runs because it shows recorded failure evidence instead of treating failures as absent score data; human compare output omits selected agent/version cells that have no run yet.
 
 ## Remotes, Publish, Auth
 
@@ -90,20 +99,24 @@ If an eval adapter, command, auth materialization, or runtime fails, Workbench r
 workbench login
 workbench eval --cloud
 workbench improve --cloud
-workbench publish --as acme/earnings-prep
+workbench publish --as OWNER/SKILL
 workbench publish
 workbench publish --public
-workbench install acme/earnings-prep --to codex --yes
+workbench install test/workbench-smoke
+workbench skills
+workbench new smoke --from test/workbench-smoke
 workbench sync cloud
 ```
 
-Remotes exchange Workbench object packs; they are not Git remotes. A logged-in `eval --cloud` or `improve --cloud` auto-links an unpublished Cloud skill project when needed, syncs objects before scheduling, and syncs evidence back after the hosted run. `publish` is the only command that exposes installable source; `publish --as OWNER/SKILL` sets or replaces the persisted handle when the derived one is wrong. `sync` is plumbing for repair and portability checks. `install HANDLE_OR_URL` installs published source into detected native targets or explicit targets such as `--to codex`, `--to claude`, or `--to local`.
+Remotes exchange Workbench object packs; they are not Git remotes. A logged-in `eval --cloud` or evidence-ready `improve --cloud` auto-links an unpublished Cloud skill project when needed, syncs objects before scheduling, syncs once after Cloud accepts the run so `workbench show RUN_ID` works, reports hosted run state transitions with elapsed seconds while waiting, and syncs terminal evidence back once after the hosted run finishes. `improve --cloud` validates local target and evidence before auto-linking or hosted progress. Ctrl-C detaches with the run still hosted; `workbench show RUN_ID` reads the last local state, and `workbench sync cloud` refreshes a run that completed after detaching. `publish` is the only command that exposes source for install or editable acquisition; `publish --as OWNER/SKILL` sets or replaces the persisted handle when the derived one is wrong, and bare `publish` preserves the last explicit audience such as `--public`. `sync` is explicit repair and portability plumbing. Cloud skill deletion is not part of the taught CLI lifecycle.
 
-Use `workbench login` before authenticated Workbench Cloud operations. For headless use, `workbench login --start-only` records a pending device authorization and `workbench login --wait --timeout N` polls it. Use `workbench login PROVIDER` and `workbench logout PROVIDER` when provider-backed agents need explicit adapter auth.
+`install OWNER/SKILL` or `install URL` requires a source and writes only the agent skill package for the current coding agent and folder by default. Use `--global` for global access, `--for codex`, `--for claude`, or `--for all` to select supported coding-agent targets explicitly, and `--yes` only when overwriting changed or unmanaged destination content. `install` never copies `.workbench` controls into agent skill roots. Use `workbench skills` for read-only inventory: default is current coding agent in the current folder, `--global` is current-agent global access, `--for all` is Codex plus Claude in the folder, and `--for all --global` is Codex plus Claude global access. Use `workbench new DIR --from OWNER/SKILL` to get editable source with authored `.workbench` controls for eval or improve.
+
+Use `workbench login` before authenticated Workbench Cloud operations. The production Cloud URL is the default; `--base-url` is for development or self-hosted targets. For headless use, `workbench login --start-only` or `workbench login --no-open` records a pending device authorization and `workbench login --wait --timeout 120` resumes it with an explicit bound. For provider-backed validation, use OAuth only: run `codex login --device-auth` when `~/.codex/auth.json` is missing, then `workbench login codex --method oauth`. For Claude, run `claude setup-token` in an interactive shell, complete browser authorization, copy the OAuth token it prints, then run `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth`. For isolated capture, `--profile-root DIR` reads native provider state from an alternate home root: Codex reads `DIR/.codex/auth.json`; Claude reads `DIR/.claude.json` plus `CLAUDE_CODE_OAUTH_TOKEN`. Use `workbench logout PROVIDER` before `workbench logout` when cleaning up provider-backed validation; native provider CLI auth is separate and must be removed separately for clean-room tests.
 
 ## What Belongs In The Skill Layer
 
-Keep these in skills unless core runtime support is required: discovering cases from conversations or traces, drafting rubrics, choosing examples, writing workflow-specific checks, deciding improvement strategy, and explaining whether the evidence is good enough.
+Keep these in skills unless core runtime support is required: discovering cases from conversations or traces, drafting `.workbench/cases/*` files, drafting rubrics, choosing examples, writing workflow-specific checks, deciding improvement strategy, and explaining whether the evidence is good enough.
 
 ## References
 

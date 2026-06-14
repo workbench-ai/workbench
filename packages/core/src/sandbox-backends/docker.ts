@@ -106,6 +106,7 @@ export function createDockerSandboxPlane(
         importNodeModule<typeof import("node:util")>(nodeBuiltin("util")),
       ]);
       const execFileAsync = promisify(execFile);
+      await assertDockerSandboxAvailable(execFileAsync);
       const templateImage = await prepareDockerTemplateImage(execution, args, execFileAsync);
       await ensureDockerExecutionImage(templateImage, execFileAsync);
       return {
@@ -211,6 +212,7 @@ async function prepareDockerSandboxWorkspace(
     importNodeModule<typeof import("node:util")>(nodeBuiltin("util")),
   ]);
   const execFileAsync = promisify(execFile);
+  await assertDockerSandboxAvailable(execFileAsync);
   const sandboxUser = dockerSandboxUser();
   const workdir = args.workdir ?? os.tmpdir();
   const sandboxRoot = path.join(workdir, "workbench-docker", request.allocation.sandboxId);
@@ -246,6 +248,43 @@ async function prepareDockerSandboxWorkspace(
     network: network as unknown as Json,
     ...(args.progress ? { progressTarget: args.progress as unknown as Json } : {}),
   };
+}
+
+async function assertDockerSandboxAvailable(
+  execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
+): Promise<void> {
+  try {
+    await execFileAsync("docker", ["info", "--format", "{{json .ServerVersion}}"], { maxBuffer: 1024 * 1024 });
+  } catch (error) {
+    throw new Error(`Docker sandbox unavailable: Docker must be installed and running before Workbench can execute this eval. ${dockerUnavailableDetail(error)}`);
+  }
+}
+
+function dockerUnavailableDetail(error: unknown): string {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const code = typeof record.code === "string" ? record.code : "";
+  if (code === "ENOENT") {
+    return "The docker CLI was not found on PATH.";
+  }
+  const stderr = bufferLikeToString(record.stderr).trim();
+  if (stderr) {
+    return stderr.split(/\r?\n/u)[0] ?? stderr;
+  }
+  const stdout = bufferLikeToString(record.stdout).trim();
+  if (stdout) {
+    return stdout.split(/\r?\n/u)[0] ?? stdout;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function bufferLikeToString(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  return "";
 }
 
 async function runDockerSandboxExecution(
@@ -621,9 +660,9 @@ function hasRegistryHost(image: string): boolean {
 }
 
 function resolveLocalDockerRuntimePayload(): DockerRuntimePayload {
-  const sourceRoot = findDockerSourceRoot();
-  if (sourceRoot) {
-    return monorepoDockerPayload(sourceRoot);
+  const monorepoRoot = findDockerMonorepoRoot();
+  if (monorepoRoot) {
+    return monorepoDockerPayload(monorepoRoot);
   }
   const packagePayload = findInstalledPackageDockerPayload();
   if (packagePayload) {
@@ -636,7 +675,7 @@ function monorepoDockerPayload(root: string): DockerRuntimePayload {
   return {
     mounts: monorepoDockerRuntimeMounts(root),
     runnerPath: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/worker/sandbox-adapter-runner.cjs`,
-    runtimeImport: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/src/index.ts`,
+    runtimeImport: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/dist/index.js`,
     builtInDockerfileRoot: path.join(root, "products/workbench/environments"),
   };
 }
@@ -716,7 +755,7 @@ function findAncestorNamed(start: string, name: string): string | null {
   }
 }
 
-function findDockerSourceRoot(): string | null {
+function findDockerMonorepoRoot(): string | null {
   const configured = process.env.WORKBENCH_DOCKER_SOURCE_ROOT?.trim();
   if (configured) {
     return configured;
@@ -733,7 +772,7 @@ function findDockerSourceRoot(): string | null {
   for (const root of roots) {
     if (
       existsSync(path.join(root, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
-      existsSync(path.join(root, "products/workbench/packages/core/src/index.ts"))
+      existsSync(path.join(root, "products/workbench/packages/core/dist/index.js"))
     ) {
       return root;
     }

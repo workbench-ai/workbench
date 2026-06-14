@@ -20,8 +20,9 @@ import {
   type JsonValue,
   type WorkflowHarness,
 } from "@workbench-ai/agent-driver";
-import type {
-  WorkbenchExecutionEventPublisher,
+import {
+  workbenchProviderAuthSetupCommand,
+  type WorkbenchExecutionEventPublisher,
 } from "@workbench-ai/workbench-core";
 
 import { importWorkbenchRuntime } from "./runtime.ts";
@@ -106,6 +107,10 @@ export async function executeWorkbenchAgentTurn(
       return await executor(request);
     } catch (error) {
       lastError = error;
+      const authError = providerAuthRequiredError(request.provider?.use, error);
+      if (authError) {
+        throw authError;
+      }
       if (attempt >= maxAttempts || !isTransientAgentTurnError(error)) {
         throw error;
       }
@@ -487,6 +492,54 @@ function isTransientAgentTurnError(error: unknown): boolean {
     return false;
   }
   return /\b(fetch failed|error sending request|stream disconnected before completion|turn stalled after \d+ms|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ECONNREFUSED|socket hang up|network error|UND_ERR_|signal SIGTERM)/iu.test(message);
+}
+
+function providerAuthRequiredError(providerName: string | undefined, error: unknown): Error | null {
+  if (!providerName) {
+    return null;
+  }
+  const message = error instanceof Error
+    ? `${error.message}\n${error.stack ?? ""}\n${String(error.cause ?? "")}`
+    : String(error);
+  if (!providerAuthErrorPatterns(providerName).some((pattern) => pattern.test(message))) {
+    return null;
+  }
+  return new Error(`ADAPTER_AUTH_REQUIRED: ${providerName} disconnected. Next: ${workbenchProviderAuthSetupCommand(providerName)}.`);
+}
+
+function providerAuthErrorPatterns(providerName: string): RegExp[] {
+  if (providerName === "claude") {
+    return [
+      /not logged in/iu,
+      /login required/iu,
+      /authentication required/iu,
+      /failed to authenticate/iu,
+      /authentication_error/iu,
+      /api error:\s*401/iu,
+      /invalid.*session/iu,
+      /invalid bearer token/iu,
+      /session.*expired/iu,
+      /oauth.*expired/iu,
+      /unauthorized/iu,
+      /claude_code_oauth_token/iu,
+    ];
+  }
+  if (providerName === "codex") {
+    return [
+      /not logged in/iu,
+      /login required/iu,
+      /authentication required/iu,
+      /failed to authenticate/iu,
+      /authentication_error/iu,
+      /api error:\s*401/iu,
+      /invalid.*session/iu,
+      /invalid bearer token/iu,
+      /session.*expired/iu,
+      /oauth.*expired/iu,
+      /unauthorized/iu,
+    ];
+  }
+  return [];
 }
 
 function isNativeCaCertificateFailure(message: string): boolean {

@@ -309,7 +309,7 @@ function comparisonCellForRun(run: WorkbenchRun): WorkbenchComparisonCell {
     agentHash: run.agentHash,
     runId: run.id,
     status: run.status,
-    ...(run.score !== undefined ? { score: run.score } : {}),
+    ...(run.status === "succeeded" && run.score !== undefined ? { score: run.score } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
     ...(run.error ? { error: run.error } : {}),

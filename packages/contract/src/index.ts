@@ -181,7 +181,7 @@ export interface WorkbenchEvalSnapshot {
 }
 
 export type WorkbenchRunKind = "eval" | "improve" | "compare";
-export type WorkbenchRunStatus = "running" | "succeeded" | "failed" | "canceled";
+export type WorkbenchRunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type WorkbenchArtifactKind = "file" | "directory" | "log" | "scorecard";
 
@@ -302,6 +302,8 @@ export interface WorkbenchProjectState {
 export interface WorkbenchStatus {
   root: string;
   initialized: boolean;
+  createdPaths?: string[];
+  defaultAgentSelection?: WorkbenchDefaultAgentSelection;
   currentSkillHash?: string;
   currentVersionId?: string;
   defaultSkill?: string;
@@ -313,6 +315,23 @@ export interface WorkbenchStatus {
   remoteCount: number;
   pendingSyncCount?: number;
   lastScore?: number;
+}
+
+export interface WorkbenchDefaultAgentSelection {
+  name: string;
+  adapter: string;
+  model?: string;
+  auth?: string;
+  kind: "provider" | "deterministic";
+  reason: string;
+  readiness: {
+    state: "ready" | "partial" | "missing" | "deterministic";
+    executable?: boolean;
+    workbenchAuth?: "connected" | "missing";
+    nativeAuth?: "present" | "partial" | "missing";
+    setupCommands: string[];
+    warnings: string[];
+  };
 }
 
 export interface WorkbenchRemoteSyncState {
@@ -341,7 +360,6 @@ export interface WorkbenchStatusSnapshot {
     defaultAgent?: string;
   };
   worktree: {
-    hasUnversionedChanges: boolean;
     latestVersionId?: string;
   };
   runs: {
@@ -362,7 +380,6 @@ export interface WorkbenchStatusSnapshot {
         code: string;
         message: string;
       } | null;
-      nextCommand?: string;
     };
     publication: {
       status: "published" | "unpublished";
@@ -387,7 +404,7 @@ export interface WorkbenchStatusSnapshot {
       updatedAt?: string;
     }>;
   };
-  next: string[];
+  next: string | null;
 }
 
 export interface WorkbenchComparisonCell {

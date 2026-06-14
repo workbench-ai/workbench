@@ -8,7 +8,6 @@ import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
-  addWorkbenchCase,
   addWorkbenchAgent,
   addWorkbenchRemote,
   buildWorkbenchComparisonFromState,
@@ -109,21 +108,19 @@ function parseStubFetchJson(init: RequestInit | undefined): Record<string, unkno
 afterEach(async () => {
   vi.unstubAllGlobals();
   await Promise.all(tempRoots.splice(0).map((root) =>
-    fs.rm(root, { recursive: true, force: true })
+    fs.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 })
   ));
 });
 
 describe("skill-first Workbench runtime", () => {
   dockerTest("versions, evaluates, improves, compares, and switches a skill with Docker jobs", async () => {
     const root = await makeTempRoot("workbench-skill-runtime-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
 
-    const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
     const runs = await evalWorkbenchSkill({ dir: root });
-    await expect(improveWorkbenchSkill({ dir: root, budget: 1 })).rejects.toThrow(/needs failed or reviewed trace evidence/u);
-    await writeFailingCaseTest(root, "missing workflow-specific output");
-    const defaultFailingRuns = await evalWorkbenchSkill({ dir: root });
-    await expect(improveWorkbenchSkill({ dir: root, budget: 1 })).rejects.toThrow(/no skill-improvement adapter/u);
+    const initial = (await listWorkbenchVersions({ dir: root })).find((version) => version.id === runs[0]?.versionId)!;
+    await expect(improveWorkbenchSkill({ dir: root, budget: 1 })).rejects.toThrow(/needs scored below-perfect, failed, or reviewed eval evidence/u);
     await addWorkbenchAgent({
       dir: root,
       name: "patcher",
@@ -132,6 +129,10 @@ describe("skill-first Workbench runtime", () => {
         improveCommand: "printf '\\nCommand-backed improvement from trace evidence.\\n' >> \"$SKILL_DIR/SKILL.md\"",
       },
     });
+    await expect(improveWorkbenchSkill({ dir: root, agent: "patcher", budget: 1 })).rejects.toThrow(/needs scored below-perfect, failed, or reviewed eval evidence/u);
+    await writeFailingCaseTest(root, "missing workflow-specific output");
+    const defaultFailingRuns = await evalWorkbenchSkill({ dir: root });
+    await expect(improveWorkbenchSkill({ dir: root, budget: 1 })).rejects.toThrow(/no skill-improvement adapter/u);
     const failingRuns = await evalWorkbenchSkill({ dir: root, agent: "patcher" });
     await expect(improveWorkbenchSkill({ dir: root, agent: "patcher", budget: 1 }))
       .rejects.toThrow(/Improve proof eval failed/u);
@@ -142,38 +143,36 @@ describe("skill-first Workbench runtime", () => {
       throw new Error("Expected failed improve proof run and candidate version.");
     }
     const diff = await diffWorkbenchVersions(`${initial.id}..${improvedVersion.id}`, { dir: root });
-    const traceCase = await addWorkbenchCase({ dir: root, fromTraceId: failingRuns[0]!.traceIds[0] });
 
     expect(initial.id).toMatch(/^v_[a-f0-9]{64}$/u);
     expect(runs[0]).toMatchObject({ versionId: initial.id, status: "succeeded" });
-    expect(runs[0]?.score).toBeUndefined();
+    expect(runs[0]?.score).toBe(1);
     expect(runs[0]?.costUsd).toBeUndefined();
     expect(runs[0]?.jobIds).toHaveLength(1);
-    const smokeTrace = snapshot.traces.find((trace) => trace.runId === runs[0]?.id);
-    expect((smokeTrace?.result as Record<string, unknown> | undefined)?.score).toBeUndefined();
-    expect(((smokeTrace?.result as { metrics?: Record<string, unknown> } | undefined)?.metrics)?.score).toBeUndefined();
-    expect(((smokeTrace?.result as { cases?: Array<{ metrics?: Record<string, unknown> }> } | undefined)?.cases?.[0]?.metrics)?.score).toBeUndefined();
-    const smokeExecution = (smokeTrace?.request as { execution?: {
+    const runTrace = snapshot.traces.find((trace) => trace.runId === runs[0]?.id);
+    expect((runTrace?.result as Record<string, unknown> | undefined)?.score).toBe(1);
+    expect(((runTrace?.result as { metrics?: Record<string, unknown> } | undefined)?.metrics)?.score).toBe(1);
+    expect(((runTrace?.result as { cases?: Array<{ metrics?: Record<string, unknown> }> } | undefined)?.cases?.[0]?.metrics)?.score).toBe(1);
+    const runExecution = (runTrace?.request as { execution?: {
       id?: string;
       versionId?: string;
       inputs?: Array<{ name?: string; ref?: string }>;
       metadata?: Record<string, unknown>;
     } } | undefined)?.execution;
-    expect(smokeExecution?.id).toContain("case_case_001");
-    expect(smokeExecution?.versionId).toBe(initial.id);
-    expect(smokeExecution?.inputs).toEqual(expect.arrayContaining([
+    expect(runExecution?.id).toContain("case_case_001");
+    expect(runExecution?.versionId).toBe(initial.id);
+    expect(runExecution?.inputs).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "skills", ref: `workbench://skills/local/versions/${initial.id}` }),
       expect.objectContaining({ name: "case", ref: "workbench://skills/local/cases/case-001" }),
     ]));
-    expect(smokeExecution?.metadata).toMatchObject({
+    expect(runExecution?.metadata).toMatchObject({
       skillEval: true,
       skillName: "primary",
       agentName: "default",
       executionAdapter: "command",
-      smoke: true,
     });
-    expect(defaultFailingRuns[0]).toMatchObject({ status: "failed", score: 0 });
-    expect(failingRuns[0]).toMatchObject({ agentName: "patcher", status: "failed", score: 0 });
+    expect(defaultFailingRuns[0]).toMatchObject({ status: "failed" });
+    expect(failingRuns[0]).toMatchObject({ agentName: "patcher", status: "failed" });
     expect(proofRun).toMatchObject({ status: "failed", outputVersionId: improvedVersion.id });
     expect(improvedVersion.parentIds).toEqual([failingRuns[0]!.versionId]);
     expect(improvedVersion.id).not.toBe(failingRuns[0]!.versionId);
@@ -182,9 +181,6 @@ describe("skill-first Workbench runtime", () => {
     expect(improvedSkill).toContain("Command-backed improvement from trace evidence.");
     expect(improvedSkill).not.toContain("Workbench Improvement Notes");
     expect(diff.map((entry) => entry.path)).toContain("SKILL.md");
-    expect(traceCase.content).toContain("sourceTraceId");
-    expect(await fs.readFile(path.join(root, ".workbench", "cases", traceCase.id, "trace", "result.json"), "utf8")).toContain("missing workflow-specific output");
-    expect(await fs.readFile(path.join(root, ".workbench", "cases", traceCase.id, "tests", "test.sh"), "utf8")).toContain("needs expert acceptance criteria");
     expect(snapshot.jobs).toEqual(expect.arrayContaining([
       expect.objectContaining({ runId: runs[0]?.id, caseId: "case-001", status: "succeeded" }),
     ]));
@@ -197,9 +193,26 @@ describe("skill-first Workbench runtime", () => {
     expect((await workbenchStatus({ dir: root })).currentVersionId).toBe(initial.id);
   }, 60_000);
 
+  dockerTest("rejects improve when the selected agent has no improvement adapter", async () => {
+    const root = await makeTempRoot("workbench-improve-agent-requirement-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writeFailingCaseTest(root, "selected agent cannot improve");
+    const [failingRun] = await evalWorkbenchSkill({ dir: root, agent: "default" });
+
+    await expect(improveWorkbenchSkill({
+      dir: root,
+      agent: "default",
+    })).rejects.toThrow(/Agent default cannot run improve because it has no skill-improvement adapter/u);
+
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(failingRun).toMatchObject({ agentName: "default", status: "failed" });
+    expect(snapshot.runs.some((run) => run.kind === "improve")).toBe(false);
+    expect(snapshot.status.currentVersionId).toBe(failingRun?.versionId);
+  }, 60_000);
+
   dockerTest("preserves command-provided Workbench result payloads in sandbox evals", async () => {
     const root = await makeTempRoot("workbench-command-result-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchAgent({
       dir: root,
       name: "scored-command",
@@ -249,9 +262,54 @@ describe("skill-first Workbench runtime", () => {
     });
   }, 60_000);
 
+  dockerTest("lets OUTPUT_DIR result.json mark an exit-zero shell test as failed evidence", async () => {
+    const root = await makeTempRoot("workbench-public-result-status-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+      "version: 1",
+      "id: case-001",
+      "prompt: Exercise a workflow-specific result payload.",
+      "command: sh \"$CASE_DIR/tests/test.sh\"",
+      "",
+    ].join("\n"));
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
+      "#!/bin/sh",
+      "set -eu",
+      "mkdir -p \"$OUTPUT_DIR\"",
+      "printf '{\"ok\":false,\"score\":0,\"message\":\"missing marker\"}\\n' > \"$OUTPUT_DIR/result.json\"",
+      "exit 0",
+      "",
+    ].join("\n"));
+    await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+
+    const [run] = await evalWorkbenchSkill({ dir: root, rerun: true });
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const trace = snapshot.traces.find((entry) => entry.runId === run?.id);
+
+    expect(run).toMatchObject({
+      status: "failed",
+      score: 0,
+      error: "missing marker",
+    });
+    expect(trace?.result).toMatchObject({
+      status: "failed",
+      score: 0,
+      summary: "missing marker",
+      cases: [
+        expect.objectContaining({
+          id: "case-001",
+          status: "error",
+          metrics: { score: 0 },
+        }),
+      ],
+    });
+    expect(workbenchImprovementEvidenceTraces(snapshot.traces).map((entry) => entry.id)).toContain(trace?.id);
+  }, 60_000);
+
   dockerTest("read-only inspection exposes active local eval state while the eval is running", async () => {
     const root = await makeTempRoot("workbench-active-eval-snapshot-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchAgent({
       dir: root,
       name: "slow-command",
@@ -310,7 +368,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("compares active, no-skill, and dummy-skill configurations through real eval runs", async () => {
     const root = await makeTempRoot("workbench-skill-comparison-baselines-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.mkdir(path.join(root, "baselines", "dummy-skill"), { recursive: true });
     await fs.writeFile(path.join(root, "baselines", "dummy-skill", "SKILL.md"), "# Dummy skill\n\nDo not use the active skill workflow.\n");
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
@@ -418,11 +476,86 @@ describe("skill-first Workbench runtime", () => {
     ]));
   }, 60_000);
 
+  dockerTest("bare compare uses the current version and manifest default agent", async () => {
+    const root = await makeTempRoot("workbench-compare-default-agent-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    await addWorkbenchAgent({
+      dir: root,
+      name: "default",
+      adapter: "command",
+      config: { command: scoreCommand(0.4) },
+    });
+    await setDefaultWorkbenchAgent("default", { dir: root });
+    const [defaultRun] = await evalWorkbenchSkill({ dir: root, agent: "default", rerun: true });
+
+    await addWorkbenchAgent({
+      dir: root,
+      name: "patcher",
+      adapter: "command",
+      config: { command: scoreCommand(0.9) },
+    });
+    await setDefaultWorkbenchAgent("patcher", { dir: root });
+    const [patcherRun] = await evalWorkbenchSkill({ dir: root, agent: "patcher", rerun: true });
+
+    const comparison = await compareWorkbench({ dir: root });
+
+    expect(defaultRun?.agentName).toBe("default");
+    expect(comparison.versions.map((version) => version.id)).toEqual([patcherRun?.versionId]);
+    expect(comparison.agents.map((agent) => agent.agent.name)).toEqual(["patcher"]);
+    expect(comparison.cells).toHaveLength(1);
+    expect(comparison.cells[0]).toMatchObject({
+      runId: patcherRun?.id,
+      agentName: "patcher",
+      score: 0.9,
+    });
+
+    const broadened = await compareWorkbench({ dir: root, versions: "all", agents: "all" });
+    expect(broadened.cells.map((cell) => cell.agentName)).toEqual(
+      expect.arrayContaining(["default", "patcher"]),
+    );
+  }, 60_000);
+
+  dockerTest("compare fills unrun cells for valid selected versions when recorded evidence exists", async () => {
+    const root = await makeTempRoot("workbench-compare-selected-matrix-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    const [initialRun] = await evalWorkbenchSkill({ dir: root });
+    const initialVersionId = initialRun?.versionId;
+    if (!initialRun || !initialVersionId) {
+      throw new Error("Expected the initial eval to record a run.");
+    }
+
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nCurrent source edit without an eval run.\n");
+    const comparison = await compareWorkbench({ dir: root, versions: `${initialVersionId}..current` });
+    const currentVersionId = comparison.versions.find((version) => version.id !== initialVersionId)?.id;
+    if (!currentVersionId) {
+      throw new Error("Expected compare to reconcile a second selected version.");
+    }
+    const initialCell = comparison.cells.find((cell) => cell.versionId === initialVersionId);
+    const currentCell = comparison.cells.find((cell) => cell.versionId === currentVersionId);
+
+    expect(comparison.versions.map((version) => version.id)).toEqual([initialVersionId, currentVersionId]);
+    expect(initialCell).toMatchObject({
+      versionId: initialVersionId,
+      agentName: "default",
+      runId: initialRun.id,
+      status: "succeeded",
+    });
+    expect(currentCell).toMatchObject({
+      versionId: currentVersionId,
+      agentName: "default",
+    });
+    expect(currentCell?.runId).toBeUndefined();
+    expect(currentCell?.status).toBeUndefined();
+  }, 60_000);
+
   dockerTest("runs explicit version evals from the selected version source snapshot", async () => {
     const root = await makeTempRoot("workbench-selected-version-eval-");
-    await initWorkbenchSkill({ dir: root });
-    const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
     const initialRuns = await evalWorkbenchSkill({ dir: root });
+    const initial = (await listWorkbenchVersions({ dir: root })).find((version) => version.id === initialRuns[0]?.versionId)!;
     expect(initialRuns[0]).toMatchObject({ versionId: initial.id, status: "succeeded" });
 
     await writeFailingCaseTest(root, "current case should not be used by v001");
@@ -444,7 +577,8 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("does not reuse eval runs when the same-name agent hash differs", async () => {
     const root = await makeTempRoot("workbench-agent-hash-reuse-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
     const [firstRun] = await evalWorkbenchSkill({ dir: root });
     expect(firstRun).toBeDefined();
 
@@ -455,11 +589,11 @@ describe("skill-first Workbench runtime", () => {
     const [secondRun] = await evalWorkbenchSkill({ dir: root });
     expect(secondRun?.id).not.toBe(firstRun!.id);
     expect(secondRun?.agentHash).not.toBe("stale_agent_hash");
-  });
+  }, 60_000);
 
   test("fails on corrupt Workbench objects instead of starting from empty history", async () => {
     const root = await makeTempRoot("workbench-corrupt-state-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
     const versionPath = path.join(root, ".workbench", "objects", "version", `${initial.id}.json`);
     const validVersion = await fs.readFile(versionPath, "utf8");
@@ -496,7 +630,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("show and files reconcile manual edits before resolving current", async () => {
     const root = await makeTempRoot("workbench-show-files-current-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const initial = await workbenchStatus({ dir: root });
     expect(initial.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
 
@@ -516,12 +650,21 @@ describe("skill-first Workbench runtime", () => {
   test("remote configuration is local metadata, not versioned skill source", async () => {
     const root = await makeTempRoot("workbench-remote-config-source-");
     const remote = await makeTempRoot("workbench-remote-config-source-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const workbenchGitignore = await fs.readFile(path.join(root, ".workbench", ".gitignore"), "utf8");
     expect(workbenchGitignore).toContain("/.gitignore");
     expect(workbenchGitignore).toContain("/remotes.yaml");
     await expect(fs.stat(path.join(root, ".workbench", "environment", "Dockerfile"))).rejects.toThrow(/ENOENT/u);
     const before = await workbenchStatus({ dir: root });
+
+    await fs.mkdir(path.join(root, ".agents", "skills", "local-dummy"), { recursive: true });
+    await fs.writeFile(path.join(root, ".agents", "skills", "local-dummy", "SKILL.md"), "# Local dummy\n");
+    const afterLocalAgentState = await workbenchStatus({ dir: root });
+    const localAgentStateVersion = await showWorkbenchRef("current", { dir: root }) as { files?: Array<{ path: string }> };
+
+    expect(afterLocalAgentState.currentVersionId).toBe(before.currentVersionId);
+    expect(afterLocalAgentState.currentSkillHash).toBe(before.currentSkillHash);
+    expect(localAgentStateVersion.files?.map((file) => file.path)).not.toContain(".agents/skills/local-dummy/SKILL.md");
 
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
 
@@ -537,7 +680,7 @@ describe("skill-first Workbench runtime", () => {
   test("switching versions preserves local remote configuration", async () => {
     const root = await makeTempRoot("workbench-switch-remotes-");
     const remote = await makeTempRoot("workbench-switch-remotes-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual branch edit.\n");
     const edited = await workbenchStatus({ dir: root });
@@ -565,7 +708,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("project commands recreate the local metadata ignore guard before lock writes", async () => {
     const root = await makeTempRoot("workbench-local-ignore-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.rm(path.join(root, ".workbench", ".gitignore"), { force: true });
 
     await checkWorkbenchSkill({ dir: root });
@@ -584,7 +727,7 @@ describe("skill-first Workbench runtime", () => {
   test("file remotes reject installable source publication", async () => {
     const root = await makeTempRoot("workbench-file-publish-reject-");
     const remote = await makeTempRoot("workbench-file-publish-reject-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
 
     await expect(publishWorkbenchVersion({ dir: root })).rejects.toMatchObject({
@@ -596,7 +739,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("serializes concurrent project commands and keeps object state intact", async () => {
     const root = await makeTempRoot("workbench-project-lock-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual concurrent edit.\n");
 
     let active = 0;
@@ -628,7 +771,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("recovers previous object state after an interrupted directory swap", async () => {
     const root = await makeTempRoot("workbench-object-recover-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const objects = path.join(root, ".workbench", "objects");
     const previous = path.join(root, ".workbench", "tmp", "objects.previous");
     await fs.rm(previous, { recursive: true, force: true });
@@ -641,13 +784,29 @@ describe("skill-first Workbench runtime", () => {
     expect(await exists(previous)).toBe(false);
   });
 
+  test("discards stale previous refs when current refs already exist", async () => {
+    const root = await makeTempRoot("workbench-refs-recover-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    const currentRef = (await listWorkbenchVersions({ dir: root }))[0]!.id;
+    const previous = path.join(root, ".workbench", "tmp", "refs.previous");
+    await fs.rm(previous, { recursive: true, force: true });
+    await fs.mkdir(previous, { recursive: true });
+    await fs.writeFile(path.join(previous, "current"), "v_stale\n");
+
+    const status = await workbenchStatus({ dir: root });
+
+    expect(status.currentVersionId).toBe(currentRef);
+    expect(await exists(path.join(root, ".workbench", "refs"))).toBe(true);
+    expect(await exists(previous)).toBe(false);
+  });
+
   test("explicit-version improve reconciles manual edits before resolving the base version", async () => {
     const root = await makeTempRoot("workbench-improve-explicit-dirty-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty edit before explicit-version improve.\n");
-    await expect(improveWorkbenchSkill({ dir: root, version: initial.id })).rejects.toThrow(/needs failed or reviewed trace evidence/u);
+    await expect(improveWorkbenchSkill({ dir: root, version: initial.id })).rejects.toThrow(/No eval cases found/u);
 
     const dirtyCurrentVersion = (await listWorkbenchVersions({ dir: root }))
       .find((version) => version.files.some((file) =>
@@ -659,7 +818,7 @@ describe("skill-first Workbench runtime", () => {
   test("keeps local current refs out of ordinary remote sync", async () => {
     const root = await makeTempRoot("workbench-ref-sync-");
     const remote = await makeTempRoot("workbench-ref-sync-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
     const before = await workbenchStatus({ dir: root });
@@ -682,8 +841,10 @@ describe("skill-first Workbench runtime", () => {
     const localRoot = await makeTempRoot("workbench-evidenced-local-");
     const peerRoot = await makeTempRoot("workbench-evidenced-peer-");
     const remote = await makeTempRoot("workbench-unevidenced-remote-");
-    await initWorkbenchSkill({ dir: localRoot });
-    await initWorkbenchSkill({ dir: peerRoot });
+    await initWorkbenchSkill({ dir: localRoot, agent: "local" });
+    await initWorkbenchSkill({ dir: peerRoot, agent: "local" });
+    await writePassingCaseTest(localRoot);
+    await writePassingCaseTest(peerRoot);
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: localRoot });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: peerRoot });
 
@@ -698,11 +859,11 @@ describe("skill-first Workbench runtime", () => {
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: localRoot });
     expect(snapshot.runs.map((run) => run.id)).toEqual(expect.arrayContaining([localRun!.id, peerRun!.id]));
     expect(new Set(snapshot.versions.map((version) => version.id)).size).toBe(snapshot.versions.length);
-  });
+  }, 60_000);
 
   test("preserves historical agent snapshots by hash", async () => {
     const root = await makeTempRoot("workbench-agent-snapshots-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const agentObjectDir = path.join(root, ".workbench", "objects", "agent");
     const initialAgents = await fs.readdir(agentObjectDir);
 
@@ -720,7 +881,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("keeps agent manifest writes canonical around reserved names and defaults", async () => {
     const root = await makeTempRoot("workbench-agent-manifest-canonical-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
 
     await expect(addWorkbenchAgent({
       dir: root,
@@ -823,8 +984,8 @@ describe("skill-first Workbench runtime", () => {
     });
   });
 
-  test("keeps failed unscored runs in persisted comparison cells", () => {
-    const agent = { name: "codex", adapter: "codex", model: "gpt-5.3-codex-spark", config: { auth: "default" } };
+  test("keeps failed scored runs in persisted comparison cells", () => {
+    const agent = { name: "codex", adapter: "codex", model: "gpt-5.4-mini", config: { auth: "default" } };
     const agentHash = hashJson(agent);
     const source = { name: "primary", kind: "local" as const, path: "." };
     const state: WorkbenchProjectState = {
@@ -862,6 +1023,7 @@ describe("skill-first Workbench runtime", () => {
         agentName: "codex",
         agentHash,
         status: "failed",
+        score: 1,
         error: "ADAPTER_AUTH_REQUIRED: codex disconnected",
         traceIds: [],
         createdAt: "2026-06-09T00:01:00.000Z",
@@ -880,14 +1042,237 @@ describe("skill-first Workbench runtime", () => {
       agentName: "codex",
       runId: "run_failed",
       status: "failed",
+      score: 1,
+      error: "ADAPTER_AUTH_REQUIRED: codex disconnected",
+    });
+  });
+
+  test("keeps failed unscored runs in persisted comparison cells", () => {
+    const agent = { name: "codex", adapter: "codex", model: "gpt-5.4-mini", config: { auth: "default" } };
+    const agentHash = hashJson(agent);
+    const source = { name: "primary", kind: "local" as const, path: "." };
+    const state: WorkbenchProjectState = {
+      schema: "workbench.skill.state.v1",
+      root: "/tmp/comparison-failed-unscored-run",
+      refs: { current: "v001" },
+      remotes: {},
+      versions: [{
+        id: "v001",
+        hash: "version_hash",
+        message: "Initial",
+        parentIds: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+        files: [],
+      }],
+      skillSources: [source],
+      skillBundles: [{
+        hash: "bundle_hash",
+        skillName: "primary",
+        entryName: "primary",
+        source,
+        files: [],
+        includedSkills: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+      }],
+      evals: [evalFixture()],
+      agents: [agent],
+      runs: [{
+        id: "run_failed_unscored",
+        kind: "eval",
+        versionId: "v001",
+        skillName: "primary",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "codex",
+        agentHash,
+        status: "failed",
+        error: "ADAPTER_AUTH_REQUIRED: codex disconnected",
+        traceIds: [],
+        createdAt: "2026-06-09T00:01:00.000Z",
+      }],
+      jobs: [],
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+
+    const comparison = buildWorkbenchComparisonFromState(state);
+
+    expect(comparison.cells).toHaveLength(1);
+    expect(comparison.cells[0]).toMatchObject({
+      agentName: "codex",
+      runId: "run_failed_unscored",
+      status: "failed",
       error: "ADAPTER_AUTH_REQUIRED: codex disconnected",
     });
     expect(comparison.cells[0]?.score).toBeUndefined();
   });
 
+  test("keeps scored terminal evidence ahead of newer active unscored runs", () => {
+    const agent = { name: "default", adapter: "command", config: { command: "true" } };
+    const agentHash = hashJson(agent);
+    const source = { name: "primary", kind: "local" as const, path: "." };
+    const state: WorkbenchProjectState = {
+      schema: "workbench.skill.state.v1",
+      root: "/tmp/comparison-active-unscored-run",
+      refs: { current: "v001" },
+      remotes: {},
+      versions: [{
+        id: "v001",
+        hash: "version_hash",
+        message: "Initial",
+        parentIds: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+        files: [],
+      }],
+      skillSources: [source],
+      skillBundles: [{
+        hash: "bundle_hash",
+        skillName: "primary",
+        entryName: "primary",
+        source,
+        files: [],
+        includedSkills: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+      }],
+      evals: [evalFixture()],
+      agents: [agent],
+      runs: [{
+        id: "run_scored",
+        kind: "eval",
+        versionId: "v001",
+        skillName: "primary",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash,
+        status: "failed",
+        score: 0.5,
+        traceIds: [],
+        createdAt: "2026-06-09T00:01:00.000Z",
+      }, {
+        id: "run_running",
+        kind: "eval",
+        versionId: "v001",
+        skillName: "primary",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash,
+        status: "running",
+        traceIds: [],
+        createdAt: "2026-06-09T00:02:00.000Z",
+      }],
+      jobs: [],
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+
+    const comparison = buildWorkbenchComparisonFromState(state);
+
+    expect(comparison.cells).toHaveLength(1);
+    expect(comparison.cells[0]).toMatchObject({
+      agentName: "default",
+      runId: "run_scored",
+      status: "failed",
+      score: 0.5,
+    });
+  });
+
+  test("comparison ignores invalid historical manifests that have no recorded evidence", () => {
+    const agent = { name: "patcher", adapter: "command", config: { command: "true" } };
+    const agentHash = hashJson(agent);
+    const source = { name: "primary", kind: "local" as const, path: "." };
+    const state: WorkbenchProjectState = {
+      schema: "workbench.skill.state.v1",
+      root: "/tmp/comparison-invalid-history",
+      refs: { current: "v002" },
+      remotes: {},
+      versions: [{
+        id: "v001",
+        hash: "version_hash_bad",
+        message: "Broken agent edit",
+        parentIds: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+        files: [textFixture(".workbench/agents.yaml", [
+          "default: patcher",
+          "agents:",
+          "  patcher:",
+          "    adapter: command",
+          "    with:",
+          "      command: true",
+          "  patcher:",
+          "    adapter: command",
+          "    with:",
+          "      command: true",
+          "",
+        ].join("\n"))],
+      }, {
+        id: "v002",
+        hash: "version_hash_good",
+        message: "Fixed",
+        parentIds: ["v001"],
+        createdAt: "2026-06-09T00:10:00.000Z",
+        files: [textFixture(".workbench/agents.yaml", [
+          "default: patcher",
+          "agents:",
+          "  patcher:",
+          "    adapter: command",
+          "    with:",
+          "      command: true",
+          "",
+        ].join("\n"))],
+      }],
+      skillSources: [source],
+      skillBundles: [{
+        hash: "bundle_hash",
+        skillName: "primary",
+        entryName: "primary",
+        source,
+        files: [],
+        includedSkills: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+      }],
+      evals: [evalFixture()],
+      agents: [agent],
+      runs: [{
+        id: "run_good",
+        kind: "eval",
+        versionId: "v002",
+        skillName: "primary",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "patcher",
+        agentHash,
+        status: "succeeded",
+        score: 1,
+        traceIds: [],
+        createdAt: "2026-06-09T00:11:00.000Z",
+      }],
+      jobs: [],
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+
+    const comparison = buildWorkbenchComparisonFromState(state, { versions: "all", agents: "all" });
+
+    expect(comparison.cells.map((cell) => cell.versionId)).not.toContain("v001");
+    expect(comparison.cells).toEqual(expect.arrayContaining([expect.objectContaining({
+      versionId: "v002",
+      agentName: "patcher",
+      runId: "run_good",
+      score: 1,
+    })]));
+  });
+
   test("scopes persisted comparison agents to the selected version source", () => {
     const oldAgent = { name: "old-agent", adapter: "codex", model: "old-model", config: { auth: "default" } };
-    const sparkAgent = { name: "gpt-5.3-codex-spark", adapter: "codex", model: "gpt-5.3-codex-spark", config: { auth: "default" } };
+    const sparkAgent = { name: "gpt-5.4-mini", adapter: "codex", model: "gpt-5.4-mini", config: { auth: "default" } };
     const oldAgentHash = hashJson(oldAgent);
     const sparkAgentHash = hashJson(sparkAgent);
     const source = { name: "primary", kind: "local" as const, path: "." };
@@ -919,11 +1304,11 @@ describe("skill-first Workbench runtime", () => {
         parentIds: ["v001"],
         createdAt: "2026-06-09T00:10:00.000Z",
         files: [textFixture(".workbench/agents.yaml", [
-          "default: gpt-5.3-codex-spark",
+          "default: gpt-5.4-mini",
           "agents:",
-          "  gpt-5.3-codex-spark:",
+          "  gpt-5.4-mini:",
           "    adapter: codex",
-          "    model: gpt-5.3-codex-spark",
+          "    model: gpt-5.4-mini",
           "    with:",
           "      auth: default",
           "",
@@ -968,14 +1353,14 @@ describe("skill-first Workbench runtime", () => {
     expect(comparison.cells).toHaveLength(1);
     expect(comparison.cells[0]).toMatchObject({
       versionId: "v002",
-      agentName: "gpt-5.3-codex-spark",
+      agentName: "gpt-5.4-mini",
       agentHash: sparkAgentHash,
     });
   });
 
   test("skips historical versions that cannot define explicit compare axes", async () => {
     const root = await makeTempRoot("workbench-compare-axis-history-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
     await addWorkbenchAgent({
       dir: root,
@@ -1003,10 +1388,10 @@ describe("skill-first Workbench runtime", () => {
     expect(comparison.cells[0]?.runId).toBeUndefined();
   });
 
-  test("status post-syncs automatic versions created by read-only inspection", async () => {
+  test("status records automatic versions locally without syncing them", async () => {
     const root = await makeTempRoot("workbench-status-sync-");
     const remote = await makeTempRoot("workbench-status-sync-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
 
@@ -1014,12 +1399,14 @@ describe("skill-first Workbench runtime", () => {
     const status = await workbenchStatus({ dir: root });
 
     expect(status.currentVersionId).toBeTruthy();
+    await expect(fs.stat(path.join(remote, "objects", "version", `${status.currentVersionId}.json`))).rejects.toMatchObject({ code: "ENOENT" });
+    await syncWorkbenchRemote({ dir: root });
     await expect(fs.stat(path.join(remote, "objects", "version", `${status.currentVersionId}.json`))).resolves.toBeTruthy();
   });
 
   test("rejects unpinned remote skill sources", async () => {
     const root = await makeTempRoot("workbench-unpinned-skill-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: upstream",
       "skills:",
@@ -1033,7 +1420,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("accepts only the built-in none baseline for no-skill comparisons", async () => {
     const root = await makeTempRoot("workbench-none-baseline-source-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: no-skill",
       "skills:",
@@ -1060,7 +1447,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("requires canonical top-level skill defaults for explicit skill manifests", async () => {
     const root = await makeTempRoot("workbench-skill-default-required-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "skills:",
       "  primary:",
@@ -1089,7 +1476,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("reserves all as a selector name for skills and agents", async () => {
     const root = await makeTempRoot("workbench-all-selector-reserved-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: all",
       "skills:",
@@ -1116,7 +1503,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("resolves Workbench Cloud source URLs as pinned remote skill sources", async () => {
     const root = await makeTempRoot("workbench-cloud-source-skill-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: cloud",
       "skills:",
@@ -1167,7 +1554,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("rejects unsafe Workbench source snapshot file paths", async () => {
     const root = await makeTempRoot("workbench-unsafe-cloud-source-skill-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: cloud",
       "skills:",
@@ -1203,7 +1590,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("uses the command auth token when resolving private Workbench skill URLs", async () => {
     const root = await makeTempRoot("workbench-private-cloud-source-skill-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: private_cloud",
       "skills:",
@@ -1247,7 +1634,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("fails on missing or incomplete agent files instead of creating implicit agents", async () => {
     const root = await makeTempRoot("workbench-agent-required-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
 
     await fs.rm(path.join(root, ".workbench", "agents.yaml"), { force: true });
     await expect(workbenchStatus({ dir: root })).rejects.toThrow(/Missing \.workbench\/agents\.yaml/u);
@@ -1261,7 +1648,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("reports zero eval cases without inflating project readiness", async () => {
     const root = await makeTempRoot("workbench-zero-cases-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.rm(path.join(root, ".workbench", "cases"), { recursive: true, force: true });
 
     const check = await checkWorkbenchSkill({ dir: root });
@@ -1358,10 +1745,12 @@ describe("skill-first Workbench runtime", () => {
 
   test("qualifies improve evidence before building worker trace inputs", () => {
     const traces: WorkbenchTrace[] = [
-      testTrace("trace_smoke_failed", { request: { smoke: true, caseId: "case-smoke" }, result: { status: "failed", error: "smoke failure" } }),
+      testTrace("trace_smoke_failed", { request: { smoke: true, caseId: "case-smoke" }, result: { status: "failed", score: 0, error: "smoke failure" } }),
       testTrace("trace_passed", { request: { caseId: "case-pass" }, result: { status: "succeeded", score: 1 } }),
       testTrace("trace_low_score_passed", { request: { caseId: "case-low-score" }, result: { status: "succeeded", score: 0.4 } }),
       testTrace("trace_failed", { request: { caseId: "case-fail" }, result: { status: "failed", score: 0, error: "workflow failure" } }),
+      testTrace("trace_auth_failed", { request: { caseId: "case-auth" }, result: { status: "failed", error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth." } }),
+      testTrace("trace_runtime_error", { request: { caseId: "case-runtime" }, result: { status: "error", error: "Runtime-control step host exited with status 1." } }),
       testTrace("trace_reviewed", { request: { caseId: "case-review" }, result: { status: "succeeded", score: 1, feedback: { review: "Needs clearer citation." } } }),
       testTrace("trace_case_failed", { request: { caseId: "case-structured" }, result: { status: "succeeded", cases: [{ id: "step-1", status: "failed" }] } }),
     ];
@@ -1390,17 +1779,27 @@ describe("skill-first Workbench runtime", () => {
     });
     const traceIndex = input.traceFiles?.find((file) => file.path === "index.json");
 
-    expect(qualified.map((trace) => trace.id)).toEqual(["trace_failed", "trace_reviewed", "trace_case_failed"]);
+    expect(qualified.map((trace) => trace.id)).toEqual([
+      "trace_smoke_failed",
+      "trace_low_score_passed",
+      "trace_failed",
+      "trace_reviewed",
+      "trace_case_failed",
+    ]);
     expect(JSON.parse(traceIndex?.content ?? "{}")).toMatchObject({
       traces: [
+        expect.objectContaining({ id: "trace_smoke_failed" }),
+        expect.objectContaining({ id: "trace_low_score_passed" }),
         expect.objectContaining({ id: "trace_failed" }),
         expect.objectContaining({ id: "trace_reviewed" }),
         expect.objectContaining({ id: "trace_case_failed" }),
       ],
     });
-    expect(input.traceFiles?.some((file) => file.path.startsWith("trace_smoke_failed/"))).toBe(false);
+    expect(input.traceFiles?.some((file) => file.path.startsWith("trace_smoke_failed/"))).toBe(true);
     expect(input.traceFiles?.some((file) => file.path.startsWith("trace_passed/"))).toBe(false);
-    expect(input.traceFiles?.some((file) => file.path.startsWith("trace_low_score_passed/"))).toBe(false);
+    expect(input.traceFiles?.some((file) => file.path.startsWith("trace_low_score_passed/"))).toBe(true);
+    expect(input.traceFiles?.some((file) => file.path.startsWith("trace_auth_failed/"))).toBe(false);
+    expect(input.traceFiles?.some((file) => file.path.startsWith("trace_runtime_error/"))).toBe(false);
   });
 
   test("keeps all qualifying improve evidence traces for worker input", () => {
@@ -1408,7 +1807,7 @@ describe("skill-first Workbench runtime", () => {
       Array.from({ length: 25 }, (_entry, index) =>
         testTrace(`trace_${String(index + 1).padStart(2, "0")}`, {
           request: { caseId: `case-${index + 1}` },
-          result: { status: "failed", error: `failure ${index + 1}` },
+          result: { status: "failed", score: 0, error: `failure ${index + 1}` },
         })
       ),
     );
@@ -1444,7 +1843,7 @@ describe("skill-first Workbench runtime", () => {
     expect(traceIndex.traces?.at(-1)?.id).toBe("trace_25");
   });
 
-  test("scopes improve evidence to the selected version lineage and agent hash", () => {
+  test("scopes improve evidence to the selected version lineage and only filters by agent when requested", () => {
     const agent = {
       name: "patcher",
       adapter: "command",
@@ -1477,10 +1876,10 @@ describe("skill-first Workbench runtime", () => {
         jobFixture("job_wrong_agent", "run_wrong_agent", "v003", "different_agent_hash"),
       ],
       traces: [
-        testTrace("trace_ancestor", { runId: "run_ancestor", jobId: "job_ancestor", versionId: "v001" }),
-        testTrace("trace_sibling", { runId: "run_sibling", jobId: "job_sibling", versionId: "v002" }),
-        testTrace("trace_wrong_agent", { runId: "run_wrong_agent", jobId: "job_wrong_agent", versionId: "v003" }),
-        testTrace("trace_orphan", { runId: "missing_run", jobId: "missing_job", versionId: "v001" }),
+        testTrace("trace_ancestor", { runId: "run_ancestor", jobId: "job_ancestor", versionId: "v001", result: { status: "failed", score: 0, error: "ancestor failure" } }),
+        testTrace("trace_sibling", { runId: "run_sibling", jobId: "job_sibling", versionId: "v002", result: { status: "failed", score: 0, error: "sibling failure" } }),
+        testTrace("trace_wrong_agent", { runId: "run_wrong_agent", jobId: "job_wrong_agent", versionId: "v003", result: { status: "failed", score: 0, error: "wrong agent failure" } }),
+        testTrace("trace_orphan", { runId: "missing_run", jobId: "missing_job", versionId: "v001", result: { status: "failed", score: 0, error: "orphan failure" } }),
       ],
       executionEvents: [],
       artifacts: [],
@@ -1490,6 +1889,10 @@ describe("skill-first Workbench runtime", () => {
       ],
     };
 
+    expect(workbenchImprovementEvidenceTracesForVersion(state, {
+      versionId: "v003",
+      skillName: "primary",
+    }).map((trace) => trace.id)).toEqual(["trace_ancestor", "trace_wrong_agent", "trace_orphan"]);
     expect(workbenchImprovementEvidenceTracesForVersion(state, {
       versionId: "v003",
       skillName: "primary",
@@ -1754,7 +2157,7 @@ describe("skill-first Workbench runtime", () => {
     const temp = await makeTempRoot("workbench-object-sync-");
     const remote = path.join(temp, "remote");
     const root = path.join(temp, "source");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.mkdir(path.join(root, "assets"), { recursive: true });
     const binaryAsset = Buffer.from([0, 255, 1, 2, 3, 0, 128]);
     await fs.writeFile(path.join(root, "assets", "template.bin"), binaryAsset);
@@ -1787,30 +2190,18 @@ describe("skill-first Workbench runtime", () => {
       dir: root,
       name: "codex",
       adapter: "codex",
-      model: "gpt-5.3-codex-spark",
+      model: "gpt-5.4-mini",
     });
     await setDefaultWorkbenchAgent("default", { dir: root });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
     await evalWorkbenchSkill({ dir: root });
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nCommand-backed sync improvement.\n");
     await writeFailingCaseTest(root, "sync workflow failure");
-    await addWorkbenchAgent({
-      dir: root,
-      name: "patcher",
-      adapter: "command",
-      config: {
-        improveCommand: "printf '\\nCommand-backed sync improvement.\\n' >> \"$SKILL_DIR/SKILL.md\"",
-      },
-    });
-    await evalWorkbenchSkill({ dir: root, agent: "patcher" });
-    await expect(improveWorkbenchSkill({ dir: root, agent: "patcher" }))
-      .rejects.toThrow(/Improve proof eval failed/u);
-    const snapshotAfterImprove = await createWorkbenchInspectionSnapshot({ dir: root });
-    const proofRun = [...snapshotAfterImprove.runs].reverse()
-      .find((run) => run.kind === "improve" && run.agentName === "patcher");
-    if (!proofRun?.outputVersionId) {
-      throw new Error("Expected failed improve proof run to retain its candidate version.");
+    const [candidateRun] = await evalWorkbenchSkill({ dir: root, rerun: true });
+    const candidateVersionId = candidateRun?.versionId;
+    if (!candidateVersionId) {
+      throw new Error("Expected edited skill eval to record a candidate version.");
     }
-    const candidateVersionId = proofRun.outputVersionId;
     const remoteUrl = pathToFileURL(remote).toString();
     await addWorkbenchRemote("origin", remoteUrl, { dir: root });
 
@@ -1829,7 +2220,7 @@ describe("skill-first Workbench runtime", () => {
     expect(await fs.readFile(path.join(remote, "indexes", "measurements.jsonl"), "utf8")).toContain("run_");
 
     const portableRoot = path.join(temp, "portable");
-    await initWorkbenchSkill({ dir: portableRoot });
+    await initWorkbenchSkill({ dir: portableRoot, agent: "local" });
     await addWorkbenchRemote("origin", remoteUrl, { dir: portableRoot });
     const pulled = await syncWorkbenchRemote({ dir: portableRoot });
     const portableSnapshot = await createWorkbenchInspectionSnapshot({ dir: portableRoot });
@@ -1857,7 +2248,7 @@ describe("skill-first Workbench runtime", () => {
     const temp = await makeTempRoot("workbench-publication-ref-");
     const remote = path.join(temp, "remote");
     const root = path.join(temp, "source");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
     const currentVersionId = (await workbenchStatus({ dir: root })).currentVersionId!;
@@ -2098,7 +2489,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("fails check when a case.yaml is malformed", async () => {
     const root = await makeTempRoot("workbench-broken-case-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const caseDir = path.join(root, ".workbench", "cases", "broken");
     await fs.mkdir(caseDir, { recursive: true });
     await fs.writeFile(path.join(caseDir, "case.yaml"), "id: [unterminated\ncommand: 'echo ok\n");
@@ -2108,7 +2499,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("fails check when a case.yaml is not a mapping", async () => {
     const root = await makeTempRoot("workbench-non-mapping-case-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const caseDir = path.join(root, ".workbench", "cases", "listy");
     await fs.mkdir(caseDir, { recursive: true });
     await fs.writeFile(path.join(caseDir, "case.yaml"), "- not\n- a\n- mapping\n");
@@ -2118,7 +2509,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("HTTP sync writes only missing objects for remote-present skill bundles", async () => {
     const root = await makeTempRoot("workbench-http-delta-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const bundle = {
       hash: hashJson({ bundle: "same-content" }),
       skillName: "primary",
@@ -2222,6 +2613,7 @@ describe("skill-first Workbench runtime", () => {
       dir: root,
       authToken: "test-token",
     });
+    await syncWorkbenchRemote({ dir: root, authToken: "test-token" });
 
     expect(putPacks.length).toBeGreaterThan(0);
     expect(putPacks.every((pack) =>
@@ -2234,9 +2626,9 @@ describe("skill-first Workbench runtime", () => {
     )).toBe(true);
   });
 
-  test("HTTP sync still writes changed lifecycle objects for remote-present ids", async () => {
+  test("HTTP sync treats remote-present lifecycle ids as Cloud-owned", async () => {
     const root = await makeTempRoot("workbench-http-lifecycle-delta-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     const run: WorkbenchProjectState["runs"][number] = {
       id: "run_delta",
       kind: "eval",
@@ -2346,16 +2738,27 @@ describe("skill-first Workbench runtime", () => {
       dir: root,
       authToken: "test-token",
     });
+    await syncWorkbenchRemote({ dir: root, authToken: "test-token" });
 
-    expect(putPacks.some((pack) =>
-      pack.runs.some((entry) => entry.id === run.id && entry.status === "succeeded") &&
-      pack.jobs.some((entry) => entry.id === job.id && entry.status === "succeeded")
+    expect(putPacks.length).toBeGreaterThan(0);
+    expect(putPacks.every((pack) =>
+      pack.runs.every((entry) => entry.id !== run.id) &&
+      pack.jobs.every((entry) => entry.id !== job.id)
     )).toBe(true);
+    const after = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(after.runs.find((entry) => entry.id === run.id)).toMatchObject({
+      status: "running",
+      traceIds: [],
+    });
+    expect(after.jobs.find((entry) => entry.id === job.id)).toMatchObject({
+      status: "running",
+      traceIds: [],
+    });
   });
 
   test("syncs and publishes through an HTTP Workbench remote", async () => {
     const root = await makeTempRoot("workbench-http-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/http-skill", { dir: root });
     let storedState: WorkbenchProjectState | null = null;
     let visibility = "private";
@@ -2438,8 +2841,7 @@ describe("skill-first Workbench runtime", () => {
     expect(storedState?.refs.current).toBeUndefined();
     expect(storedState?.refs["remotes/origin/current"]).toBeUndefined();
     const statusAfterSync = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
-    expect(statusAfterSync.next).toContain("workbench publish");
-    expect(statusAfterSync.next).not.toContain("workbench publish --private");
+    expect(statusAfterSync.next).toBeNull();
 
     const published = await publishWorkbenchVersion({
       dir: root,
@@ -2476,9 +2878,11 @@ describe("skill-first Workbench runtime", () => {
       visibility: "public",
       authToken: "test-token",
     });
+    expect(publicPublished.visibility).toBe("public");
     expect(publicPublished.installHandle).toBe("alice/http-skill");
     expect(publicPublished.installUrl).toBe("https://cloud.test/skills/alice/http-skill");
     expect(publicPublished.pinnedInstallUrl).toBe(`https://cloud.test/skills/alice/http-skill/releases/${currentVersionId}`);
+    expect(visibility).toBe("public");
     const publicPublicationSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     expect(publicPublicationSnapshot.publication).toMatchObject({
       versionId: currentVersionId,
@@ -2487,13 +2891,85 @@ describe("skill-first Workbench runtime", () => {
     });
     expect(publicPublicationSnapshot.refs["remotes/origin/publication/install-url"])
       .toBe("https://cloud.test/skills/alice/http-skill");
+    expect(publicPublicationSnapshot.refs["publication/visibility"]).toBe("public");
+    expect(publicPublicationSnapshot.refs["remotes/origin/publication/visibility"]).toBe("public");
+
+    const barePublished = await publishWorkbenchVersion({
+      dir: root,
+      authToken: "test-token",
+    });
+    expect(barePublished.visibility).toBe("public");
+    const barePublishPut = [...putBodies].reverse()
+      .find((body) => body.publishVersionId === currentVersionId);
+    expect(barePublishPut?.visibility).toBe("public");
+    expect(visibility).toBe("public");
     const statusAfterPublish = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
-    expect(statusAfterPublish.next).toContain("workbench install alice/http-skill --list");
+    expect(statusAfterPublish.next).toBeNull();
+  });
+
+  test("retries retryable HTTP Workbench object writes", async () => {
+    const root = await makeTempRoot("workbench-http-retry-put-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/http-skill", { dir: root });
+    let putCalls = 0;
+    let storedState: WorkbenchProjectState = {
+      schema: "workbench.skill.state.v1",
+      root: "/cloud/http-skill",
+      refs: {},
+      remotes: {},
+      versions: [],
+      skillSources: [],
+      skillBundles: [],
+      evals: [],
+      agents: [],
+      runs: [],
+      jobs: [],
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const method = init?.method ?? "GET";
+      if (url.pathname === "/api/workbench/skills" && method === "GET") {
+        return Response.json({ skills: [{ id: "skill_http", ownerSlug: "alice", name: "http-skill" }] });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_http/objects" && method === "GET") {
+        return Response.json({ objectPack: exportObjectPack(storedState) });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_http/objects" && method === "PUT") {
+        putCalls += 1;
+        if (putCalls === 1) {
+          return Response.json({
+            schema: "workbench.cloud.error.v1",
+            code: "service_unavailable",
+            message: "Workbench backend is temporarily unavailable.",
+            retryable: true,
+          }, { status: 503 });
+        }
+        const body = JSON.parse(String(init?.body)) as { objectPack: ReturnType<typeof exportObjectPack> };
+        storedState = {
+          ...storedState,
+          refs: { ...storedState.refs, ...body.objectPack.refs },
+          versions: [...storedState.versions, ...body.objectPack.versions],
+          skillSources: [...storedState.skillSources, ...body.objectPack.skillSources],
+          skillBundles: [...storedState.skillBundles, ...body.objectPack.skillBundles],
+        };
+        return Response.json({ skill: { id: "skill_http" } });
+      }
+      throw new Error(`Unexpected fetch ${method} ${url.pathname}`);
+    }));
+
+    const synced = await syncWorkbenchRemote({ dir: root, authToken: "test-token" });
+    expect(synced.pushed).toBeGreaterThan(0);
+    expect(putCalls).toBe(2);
+    expect(storedState.versions).toHaveLength(1);
   });
 
   test("resolves HTTP Workbench owner remotes by exact namespace", async () => {
     const root = await makeTempRoot("workbench-http-remote-exact-owner-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", "https://cloud.test/skills/me/http-skill", { dir: root });
     let storedState: WorkbenchProjectState | null = null;
     let createdOwnerSlug: string | undefined;
@@ -2557,7 +3033,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("gzips large HTTP remote object-pack writes", async () => {
     const root = await makeTempRoot("workbench-http-remote-gzip-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, "large-source.txt"), "x".repeat(1024 * 1024 + 1));
     await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/large-http-skill", { dir: root });
     const encodings: string[] = [];
@@ -2597,7 +3073,8 @@ describe("skill-first Workbench runtime", () => {
   dockerTest("detects divergent remote objects and records pending sync failures", async () => {
     const root = await makeTempRoot("workbench-sync-conflict-");
     const remote = await makeTempRoot("workbench-sync-conflict-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
     await evalWorkbenchSkill({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
@@ -2620,7 +3097,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("runs command-backed improve through a bounded skill patch", async () => {
     const root = await makeTempRoot("workbench-command-improve-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
     await addWorkbenchAgent({
       dir: root,
       name: "patcher",
@@ -2934,7 +3411,7 @@ describe("skill-first Workbench runtime", () => {
             operation: "skill.run",
             invocation: {
               use: "codex",
-              with: { model: "gpt-5.3-codex-spark" },
+              with: { model: "gpt-5.4-mini" },
               command: failingCommand,
             },
           },
@@ -2949,12 +3426,16 @@ describe("skill-first Workbench runtime", () => {
     const errorFile = output.files?.find((file) =>
       file.path === ".workbench/traces/job_runtime_control_failure/runner/error.json"
     );
+    const stderrFile = output.files?.find((file) => file.path === "stderr.log");
 
     expect(completed.status).toBe("failed");
-    expect(completed.error).toBe("Runtime-control step runner (skill.run via codex model gpt-5.3-codex-spark) timed out after 1234ms.");
+    expect(completed.error).toBe("Runtime-control step runner (skill.run via codex model gpt-5.4-mini) timed out after 1234ms.");
     expect(output.ok).toBe(false);
     expect(output.error).toBe(completed.error);
+    expect(stderrFile?.content).toContain(completed.error);
     expect(output.files?.map((file) => file.path)).toEqual(expect.arrayContaining([
+      "stderr.log",
+      "stdout.log",
       ".workbench/traces/job_runtime_control_failure/runner/request.json",
       ".workbench/traces/job_runtime_control_failure/runner/stdout.log",
       ".workbench/traces/job_runtime_control_failure/runner/stderr.log",
@@ -2964,10 +3445,91 @@ describe("skill-first Workbench runtime", () => {
       label: "runner",
       operation: "skill.run",
       adapter: "codex",
-      model: "gpt-5.3-codex-spark",
+      model: "gpt-5.4-mini",
       status: 1,
-      error: "Runtime-control step runner (skill.run via codex model gpt-5.3-codex-spark) timed out after 1234ms.",
+      error: "Runtime-control step runner (skill.run via codex model gpt-5.4-mini) timed out after 1234ms.",
     });
+  });
+
+  test("summarizes plain provider Error lines before Node uncaught frames", async () => {
+    const createdAt = new Date().toISOString();
+    const failingCommand = nodeCommand([
+      "console.error('node:internal/modules/run_main:123');",
+      "console.error('    triggerUncaughtException(');",
+      "console.error('    ^');",
+      "console.error('');",
+      "console.error('Error: Quota exceeded. Check your plan and billing details.');",
+      "console.error('    at CodexHarnessAdapter.handleLine (file:///workspace/index.js:1030:45)');",
+      "process.exit(1);",
+    ]);
+    const execution = {
+      id: "exec_runtime_control_plain_error",
+      projectId: "local",
+      runId: "run_runtime_control_plain_error",
+      versionId: "v001",
+      purpose: "attempt" as const,
+      adapter: { use: "workbench", with: {} },
+      sandbox: { kind: "oci" as const, ref: "docker://workbench/workbench-node-22:envv_node_22" },
+      inputs: [],
+      outputs: [{ name: "result", schema: "workbench.result.v1" as const, required: true }],
+      policy: {
+        tenantId: "local",
+        resources: { cpu: 1, memoryGb: 1, diskGb: 1, timeoutMinutes: 1 },
+        network: { egress: "none" as const },
+      },
+      metadata: { caseId: "case-001" },
+    };
+    const completed = await executeRuntimeControlOperationSequenceInCurrentRuntime({
+      job: {
+        id: "job_runtime_control_plain_error",
+        projectId: "local",
+        runId: "run_runtime_control_plain_error",
+        kind: "execute",
+        status: "queued",
+        attempt: 0,
+        createdAt,
+        updatedAt: createdAt,
+        input: {
+          execution,
+          versionId: "v001",
+          attemptIndex: 0,
+          sampleIndex: 0,
+          caseId: "case-001",
+        },
+      },
+      spec: runtimeControlSpec(),
+      baseFiles: [textFixture("primary/SKILL.md", "# Runtime Control Skill\n")],
+      engineResolveFiles: [textFixture("prompt.md", "Public case.\n")],
+      engineCases: [runtimeControlCase()],
+      runtimeControlOperation: {
+        prepare: true,
+        operations: [
+          {
+            label: "runner",
+            operation: "skill.run",
+            invocation: {
+              use: "codex",
+              with: { model: "gpt-5.4-mini" },
+              command: failingCommand,
+            },
+          },
+        ],
+      },
+    }, execution, createdAt);
+    const output = completed.output as {
+      ok?: boolean;
+      error?: string;
+      files?: Array<{ path: string; content: string }>;
+    };
+    const stderrFile = output.files?.find((file) => file.path === "stderr.log");
+
+    expect(completed.status).toBe("failed");
+    expect(completed.error).toBe("Runtime-control step runner (skill.run via codex model gpt-5.4-mini) exited with status 1: Error: Quota exceeded. Check your plan and billing details.");
+    expect(completed.error).not.toContain("triggerUncaughtException");
+    expect(output.ok).toBe(false);
+    expect(output.error).toBe(completed.error);
+    expect(stderrFile?.content).toContain(completed.error);
+    expect(stderrFile?.content).not.toContain("triggerUncaughtException");
   });
 
   test("serves runtime-control callbacks for host adapter execution", async () => {
@@ -3183,6 +3745,8 @@ describe("skill-first Workbench runtime", () => {
     expect(completed.error).toContain("Runtime-control step host (engine.run via host-engine) exited with status 42: host failed with dangling callback");
     expect(output.ok).toBe(false);
     expect(output.files?.map((file) => file.path)).toEqual(expect.arrayContaining([
+      "stderr.log",
+      "stdout.log",
       "callback-started.txt",
       ".workbench/traces/job_host_runtime_control_dangling/host/stderr.log",
       ".workbench/traces/job_host_runtime_control_dangling/host/error.json",
@@ -3343,7 +3907,7 @@ describe("skill-first Workbench runtime", () => {
       agent: {
         name: "codex",
         adapter: "codex",
-        model: "gpt-5.3-codex-spark",
+        model: "gpt-5.4-mini",
         config: {
           auth: "default",
           instructions: "Run the skill against the case.",
@@ -3380,7 +3944,7 @@ describe("skill-first Workbench runtime", () => {
       use: "codex",
       auth: "default",
       with: {
-        model: "gpt-5.3-codex-spark",
+        model: "gpt-5.4-mini",
         instructions: "Run the skill against the case.",
       },
     });
@@ -3393,6 +3957,7 @@ describe("skill-first Workbench runtime", () => {
     expect(input.environmentDockerfile).toContain("npm install --global @openai/codex@0.125.0");
     expect(input.environmentVersion?.sourceHash).toBeDefined();
     expect(input.environmentVersion?.spec.network).toBe("on");
+    expect(input.engineCases[0]?.case.prompt).toBe("Produce a concise result.");
     expect(input.engineResolveFiles.map((file) => file.path)).toEqual(["fixture.txt"]);
     expect(input.engineCases[0]?.files.private?.map((file) => file.path)).toEqual(["test.sh"]);
     expect(requiredWorkbenchAdapterAuthTargetsForRuntimeInput(input)).toEqual([
@@ -3478,6 +4043,61 @@ describe("skill-first Workbench runtime", () => {
     });
   });
 
+  test("plans explicit later eval samples for multi-sample runs", () => {
+    const createdAt = new Date().toISOString();
+    for (const sample of [1, 4]) {
+      const input = createWorkbenchSkillEvalRuntimeInput({
+        ownerUserId: "local",
+        projectId: "local",
+        runId: `run_sample_${sample}`,
+        jobId: `job_sample_${sample}`,
+        versionId: "v001",
+        evalHash: "eval_hash",
+        evalSnapshot: evalFixture({
+          hash: "eval_hash",
+          files: [
+            textFixture("eval.yaml", "version: 1\nname: samples\ndescription: Multi-sample eval.\nscore:\n  adapter: tests\n"),
+          ],
+        }),
+        agent: {
+          name: "default",
+          adapter: "local",
+          config: {},
+        },
+        skillName: "primary",
+        skillBundleHash: "skill_bundle_hash",
+        versionFiles: [textFixture("SKILL.md", "# Sample Skill\n")],
+        runtimeCase: {
+          id: "case-001",
+          path: "case-001",
+          content: "version: 1\nid: case-001\nprompt: Exercise sample planning.\n",
+          files: [
+            textFixture("case.yaml", "version: 1\nid: case-001\nprompt: Exercise sample planning.\n"),
+            textFixture("tests/test.sh", "exit 0\n"),
+          ],
+        },
+        sample,
+        createdAt,
+      });
+      const execution = (input.job.input as { execution?: { metadata?: { sampleIndex?: number } } }).execution;
+      expect(execution?.metadata?.sampleIndex).toBe(sample);
+      expect(input.job.input).toMatchObject({ sampleIndex: sample });
+    }
+  });
+
+  dockerTest("persists multi-sample eval jobs without racing state commits", async () => {
+    const root = await makeTempRoot("workbench-samples-persist-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+
+    const [run] = await evalWorkbenchSkill({ dir: root, samples: 5 });
+
+    expect(run?.status).toBe("succeeded");
+    expect(run?.jobIds).toHaveLength(5);
+    expect(run?.traceIds).toHaveLength(5);
+    await expect(listWorkbenchVersions({ dir: root })).resolves.toHaveLength(2);
+  }, 15_000);
+
   test("rejects provider-backed skill eval agents with explicit isolated network", () => {
     expect(() => createWorkbenchSkillEvalRuntimeInput({
       ownerUserId: "local",
@@ -3495,7 +4115,7 @@ describe("skill-first Workbench runtime", () => {
       agent: {
         name: "codex",
         adapter: "codex",
-        model: "gpt-5.3-codex-spark",
+        model: "gpt-5.4-mini",
         config: {
           auth: "default",
           network: "off",
@@ -3601,17 +4221,21 @@ describe("skill-first Workbench runtime", () => {
     expect(input.environmentDockerfile).toContain("npm install --global @anthropic-ai/claude-code@2.1.119");
     expect(input.environmentVersion?.sourceHash).toBeDefined();
     expect(input.spec.environment.dockerfile).toMatch(/^dockerfile:\/\//u);
+    expect(input.engineCases[0]?.case.prompt).toBe("Produce a concise result.");
+    expect(input.engineCases[0]?.case.prompt).not.toContain("rubric");
+    expect(input.engineCases[0]?.case.prompt).not.toContain("Writes a reviewable output");
     expect(input.engineCases[0]?.files.private?.map((file) => file.path)).toEqual([]);
   });
 
   dockerTest("fails provider-backed skill evals through adapter auth when disconnected", async () => {
     const root = await makeTempRoot("workbench-skill-adapter-");
-    await initWorkbenchSkill({ dir: root });
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
     await addWorkbenchAgent({
       dir: root,
       name: "codex",
       adapter: "codex",
-      model: "gpt-5.3-codex-spark",
+      model: "gpt-5.4-mini",
       config: { auth: `missing-${Date.now()}` },
     });
     await setDefaultWorkbenchAgent("codex", { dir: root });
@@ -3819,7 +4443,7 @@ function testTrace(
     agentName: "patcher",
     createdAt: "2026-06-08T00:00:00.000Z",
     request: { caseId: "case-001" },
-    result: { status: "failed", error: "failed" },
+    result: { status: "failed", score: 0, error: "failed" },
     files: [],
     ...overrides,
   };
@@ -3965,6 +4589,7 @@ function createQueuedEvalState(): WorkbenchProjectState {
 }
 
 async function writeFailingCaseTest(root: string, message: string): Promise<void> {
+  await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
   await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
     "version: 1",
     "id: case-001",
@@ -3979,8 +4604,29 @@ async function writeFailingCaseTest(root: string, message: string): Promise<void
     "set -eu",
     "mkdir -p \"$OUTPUT_DIR\"",
     `printf '%s\\n' ${shellQuote(message)} >&2`,
-    `printf '{"ok":false,"message":%s}\\n' ${shellQuote(JSON.stringify(message))} > "$OUTPUT_DIR/result.json"`,
-    "exit 2",
+    `printf '{"ok":false,"score":0,"metrics":{"score":0},"message":%s}\\n' ${shellQuote(JSON.stringify(message))} > "$OUTPUT_DIR/result.json"`,
+    "exit 0",
+    "",
+  ].join("\n"));
+  await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+}
+
+async function writePassingCaseTest(root: string): Promise<void> {
+  await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
+  await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+    "version: 1",
+    "id: case-001",
+    "prompt: Exercise a workflow-specific success path.",
+    "rubric:",
+    "  - Captures workflow-specific success evidence.",
+    "command: sh \"$CASE_DIR/tests/test.sh\"",
+    "",
+  ].join("\n"));
+  await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
+    "#!/bin/sh",
+    "set -eu",
+    "mkdir -p \"$OUTPUT_DIR\"",
+    "printf '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}\\n' > \"$OUTPUT_DIR/result.json\"",
     "",
   ].join("\n"));
   await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
@@ -3992,6 +4638,15 @@ function shellQuote(value: string): string {
 
 function nodeCommand(lines: readonly string[]): string {
   return `node -e ${shellQuote(lines.join("\n"))}`;
+}
+
+function scoreCommand(score: number): string {
+  return nodeCommand([
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
+    `fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'result.json'), ${JSON.stringify(JSON.stringify({ ok: true, score }) + "\n")});`,
+  ]);
 }
 
 async function waitForValue<T>(

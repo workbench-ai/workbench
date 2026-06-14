@@ -18,6 +18,9 @@ export function applyWorkbenchSkillPatch(input: ApplyWorkbenchSkillPatchInput): 
     if (!isSafeRelativePath(filePath)) {
       issues.push(`Skill patch contains unsafe path ${file.path}.`);
     }
+    if (isWorkbenchControlPath(filePath)) {
+      issues.push(`Skill patch contains Workbench control path ${file.path}.`);
+    }
     if (!isAllowedEditPath(filePath, edits)) {
       issues.push(`Skill patch contains path outside improve edits: ${file.path}.`);
     }
@@ -27,6 +30,9 @@ export function applyWorkbenchSkillPatch(input: ApplyWorkbenchSkillPatchInput): 
     const filePath = normalizeRelativePath(fileChange);
     if (!isSafeRelativePath(filePath)) {
       issues.push(`Skill patch fileChanges contains unsafe path ${fileChange}.`);
+    }
+    if (isWorkbenchControlPath(filePath)) {
+      issues.push(`Skill patch fileChanges contains Workbench control path ${fileChange}.`);
     }
     if (!isAllowedEditPath(filePath, edits)) {
       issues.push(`Skill patch fileChanges contains path outside improve edits: ${fileChange}.`);
@@ -63,8 +69,16 @@ function isAllowedEditPath(filePath: string, edits: readonly string[]): boolean 
   const normalizedPath = normalizeRelativePath(filePath);
   return edits.some((entry) => {
     const normalizedEditPath = normalizeRelativePath(entry).replace(/\/+$/u, "");
+    if (normalizedEditPath === ".") {
+      return true;
+    }
     return normalizedPath === normalizedEditPath || normalizedPath.startsWith(`${normalizedEditPath}/`);
   });
+}
+
+function isWorkbenchControlPath(filePath: string): boolean {
+  const normalized = normalizeRelativePath(filePath);
+  return normalized === ".workbench" || normalized.startsWith(".workbench/");
 }
 
 function isSafeRelativePath(filePath: string): boolean {

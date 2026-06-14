@@ -17,6 +17,7 @@ import {
   normalizeRelativePath,
   publishCommandStepEvent,
   readSurfaceFiles,
+  workbenchProviderAuthSetupCommand,
   writeSurfaceFiles,
   type WorkbenchExecutionEventPublisher,
 } from "@workbench-ai/workbench-core";
@@ -319,9 +320,6 @@ async function executeTestsEngineRequest(
   }
   await ensureRunSkillDirectories(request);
   const testsRoot = requiredRequestPath(request.paths.enginePrivate, "paths.enginePrivate");
-  const verifierRoot = testsVerifierOutputDir(request.paths.output);
-  await fs.rm(verifierRoot, { recursive: true, force: true }).catch(() => undefined);
-  await fs.mkdir(verifierRoot, { recursive: true });
   const script = await firstExistingFile([
     path.join(testsRoot, "test.sh"),
     path.join(testsRoot, "run.sh"),
@@ -329,17 +327,23 @@ async function executeTestsEngineRequest(
   if (!script) {
     throw new Error(`Tests engine requires ${path.join(testsRoot, "test.sh")}.`);
   }
-  await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.workspace, {
+  const shellFailure = await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.workspace, {
     SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "primary"),
     SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
     CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
     OUTPUT_DIR: request.paths.output,
-    WORKBENCH_TESTS_VERIFIER_DIR: verifierRoot,
     WORKBENCH_CASE_ID: request.context?.attempt?.caseId ?? "current",
-  });
+  }).then(() => null, (error: unknown) => error);
   const result = await readTestsResult({
-    verifierRoot,
+    outputRoot: request.paths.output,
     caseId: request.context?.attempt?.caseId ?? "current",
+  }).catch((error: unknown) => {
+    if (shellFailure) {
+      const shellMessage = shellFailure instanceof Error ? shellFailure.message : String(shellFailure);
+      const resultMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`${shellMessage}; ${resultMessage}`);
+    }
+    throw error;
   });
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
@@ -532,8 +536,8 @@ async function readEditableSkillWorkspaceFiles(
   edits: readonly string[],
 ): Promise<SurfaceSnapshotFile[]> {
   const editPaths = edits
-    .map(normalizeRelativePath)
-    .filter((filePath) => !isRuntimeWorkspacePath(filePath));
+    .map(normalizeSkillEditPath)
+    .filter((filePath) => filePath === "." || !isRuntimeWorkspacePath(filePath));
   if (editPaths.length === 0) {
     return [];
   }
@@ -542,6 +546,15 @@ async function readEditableSkillWorkspaceFiles(
     isAllowedSkillEditPath(file.path, editPaths) &&
     !isRuntimeWorkspacePath(file.path)
   ));
+}
+
+function normalizeSkillEditPath(filePath: string): string {
+  const normalized = filePath
+    .replace(/\\/gu, "/")
+    .replace(/^\/+/u, "")
+    .replace(/^\.\/+/u, "")
+    .replace(/\/+$/u, "");
+  return normalized === "." ? "." : normalizeRelativePath(normalized);
 }
 
 async function firstExistingFile(files: readonly string[]): Promise<string | null> {
@@ -701,35 +714,17 @@ async function fileExists(filePath: string): Promise<boolean> {
 }
 
 async function readTestsResult(args: {
-  verifierRoot: string;
+  outputRoot: string;
   caseId: string;
 }): Promise<WorkbenchResult> {
-  const rewardJson = await readOptionalJson(path.join(args.verifierRoot, "reward.json"));
-  if (rewardJson) {
-    return normalizeTestsResult(rewardJson, args.caseId);
-  }
-  const rewardText = await fs.readFile(path.join(args.verifierRoot, "reward.txt"), "utf8").catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  });
-  if (rewardText !== null) {
-    const score = Number.parseFloat(rewardText.trim());
-    if (!Number.isFinite(score)) {
-      throw new Error("Tests engine reward.txt must contain a finite numeric reward.");
-    }
-    return normalizeTestsResult({ reward: score }, args.caseId);
+  const resultJson = await readOptionalJson(path.join(args.outputRoot, "result.json"));
+  if (resultJson) {
+    return normalizeTestsResult(resultJson, args.caseId);
   }
   throw new Error(
-    "Tests engine did not find reward.json or reward.txt under its verifier output directory " +
-      `(${args.verifierRoot}). The tests script must write a reward to ` +
-      "$WORKBENCH_TESTS_VERIFIER_DIR/reward.json or $WORKBENCH_TESTS_VERIFIER_DIR/reward.txt.",
+    `Tests engine did not find result.json under OUTPUT_DIR (${args.outputRoot}). ` +
+      "The tests script must write a result to $OUTPUT_DIR/result.json.",
   );
-}
-
-function testsVerifierOutputDir(outputRoot: string): string {
-  return path.join(outputRoot, ".workbench", "internal", "verifier");
 }
 
 async function readOptionalJson(filePath: string): Promise<Record<string, unknown> | null> {
@@ -753,13 +748,20 @@ function normalizeTestsResult(
   record: Record<string, unknown>,
   caseId: string,
 ): WorkbenchResult {
+  const rawPassed = typeof record.ok === "boolean"
+    ? record.ok
+    : typeof record.passed === "boolean"
+      ? record.passed
+      : typeof record.pass === "boolean"
+        ? record.pass
+        : undefined;
   const rawScore = typeof record.score === "number"
     ? record.score
-    : typeof record.reward === "number"
-      ? record.reward
+    : rawPassed !== undefined
+      ? rawPassed ? 1 : 0
       : undefined;
   if (rawScore === undefined || !Number.isFinite(rawScore)) {
-    throw new Error("Tests engine reward must include a finite numeric score or reward.");
+    throw new Error("Tests engine result must include a finite numeric score or boolean ok/passed/pass.");
   }
   const metrics = normalizeTestsMetrics(record, rawScore);
   return {
@@ -767,12 +769,19 @@ function normalizeTestsResult(
     metrics,
     cases: [{
       id: caseId,
-      status: "completed",
+      status: rawPassed === false ? "error" : "completed",
       metrics,
+      ...(rawPassed === false
+        ? { feedback: { message: typeof record.message === "string" ? record.message : "Test failed." } }
+        : {}),
     }],
-    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+    ...(typeof record.summary === "string"
+      ? { summary: record.summary }
+      : typeof record.message === "string"
+        ? { summary: record.message }
+        : {}),
     feedback: {
-      reward: record as Json,
+      result: record as Json,
     },
   };
 }
@@ -781,10 +790,10 @@ function normalizeTestsMetrics(record: Record<string, unknown>, score: number): 
   const metrics: Record<string, number> = { score };
   const source = record.metrics && typeof record.metrics === "object" && !Array.isArray(record.metrics)
     ? record.metrics as Record<string, unknown>
-    : record;
+    : {};
   for (const [key, value] of Object.entries(source)) {
     if (typeof value === "number" && Number.isFinite(value)) {
-      metrics[key === "reward" ? "score" : key] = value;
+      metrics[key] = value;
     }
   }
   return metrics;
@@ -926,11 +935,41 @@ async function executeBuiltInAgentTurn(
   executor: WorkbenchAgentTurnExecutor | undefined,
   request: WorkbenchAgentTurnRequest,
 ): Promise<WorkbenchAgentTurnResult> {
+  requireWorkbenchAdapterAuthForProviderTurn(request.provider, request.adapterAuthRequest);
   const {
     defaultWorkbenchAgentTurnExecutor,
     executeWorkbenchAgentTurn,
   } = await import("./agent-turn.ts");
   return await executeWorkbenchAgentTurn(executor ?? defaultWorkbenchAgentTurnExecutor, request);
+}
+
+function requireWorkbenchAdapterAuthForProviderTurn(
+  provider: AgentProviderSpec,
+  auth: unknown,
+): void {
+  if (providerAuthRequestEntry(auth, provider.use)) {
+    return;
+  }
+  throw new Error(`ADAPTER_AUTH_REQUIRED: ${provider.use} disconnected. Next: ${workbenchProviderAuthSetupCommand(provider.use)}.`);
+}
+
+function providerAuthRequestEntry(
+  auth: unknown,
+  providerName: string,
+): Record<string, unknown> | null {
+  const record = authObject(auth);
+  const self = authObject(record?.self);
+  const adapters = authObject(record?.adapters);
+  const provider = authObject(adapters?.[providerName]);
+  return authObject(self?.default) ??
+    authObject(provider?.default) ??
+    authObject(record?.default);
+}
+
+function authObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 async function writeAgentSkillOutput(
@@ -1371,8 +1410,8 @@ function buildRubricCriterionJudgePrompt(
     "- The skill already ran in this same working directory.",
     "- Skill outputs are available in the current working directory.",
     "- Public case files are mounted at /workspace/input/case.",
-    "- Verifier-private files are mounted at /workspace/private/engine when the case provides them.",
-    "- Score only from the current working directory, public case files, verifier-private files, and the criterion above.",
+    "- Private case files are mounted at /workspace/private/engine when the case provides them.",
+    "- Score only from the current working directory, public case files, private case files, and the criterion above.",
     "",
     "Output:",
     "Return only a JSON object. Do not wrap it in Markdown.",
@@ -1649,7 +1688,10 @@ function isRuntimeWorkspacePath(filePath: string): boolean {
 function isAllowedSkillEditPath(filePath: string, edits: readonly string[]): boolean {
   const normalized = normalizeRelativePath(filePath);
   return edits.some((entry) => {
-    const editPath = normalizeRelativePath(entry).replace(/\/+$/u, "");
+    const editPath = normalizeSkillEditPath(entry);
+    if (editPath === ".") {
+      return true;
+    }
     return normalized === editPath || normalized.startsWith(`${editPath}/`);
   });
 }

@@ -2,7 +2,7 @@
 
 This product-local catalog checks whether the Workbench skill drives the hard-cut skill runtime correctly.
 
-It rewards:
+It checks:
 
 - using `SKILL.md`, `.workbench/eval.yaml`, `.workbench/cases`, `.workbench/agents.yaml`, and optional `.workbench/skills.yaml`
 - running `workbench`, `workbench status`, `workbench log`, `workbench show`, `workbench eval`, `workbench improve`, and `workbench compare`

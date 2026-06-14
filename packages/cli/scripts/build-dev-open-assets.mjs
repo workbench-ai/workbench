@@ -9,6 +9,9 @@ import postcss from "postcss";
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outdir = path.join(packageRoot, "dist", "dev-open");
 const fontOutdir = path.join(outdir, "fonts");
+const workspaceSourceAliases = new Map([
+  ["@workbench-ai/workbench-contract", path.resolve(packageRoot, "..", "contract", "src", "index.ts")],
+]);
 
 await fs.rm(outdir, { force: true, recursive: true });
 await fs.mkdir(outdir, { recursive: true });
@@ -24,6 +27,7 @@ await build({
   legalComments: "none",
   minify: true,
   platform: "browser",
+  plugins: [workspaceSourceAliasPlugin()],
   target: ["es2022"],
   jsx: "automatic",
   logLevel: "silent",
@@ -67,4 +71,15 @@ async function copyStylesheetAssets({ css, fromDir, toDir }) {
     rewritten = rewritten.replaceAll(rawUrl, asset.publicUrl);
   }
   return rewritten;
+}
+
+function workspaceSourceAliasPlugin() {
+  return {
+    name: "workbench-workspace-source-alias",
+    setup(buildContext) {
+      buildContext.onResolve({ filter: /^@workbench-ai\/workbench-contract$/ }, (args) => ({
+        path: workspaceSourceAliases.get(args.path),
+      }));
+    },
+  };
 }

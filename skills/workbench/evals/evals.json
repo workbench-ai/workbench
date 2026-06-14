@@ -12,8 +12,8 @@
       "id": "author-minimal-skill-eval",
       "title": "Author a minimal skill eval",
       "category": "skill_authoring",
-      "prompt": "Create a Workbench-managed skill for earnings prep, run the local smoke loop, and explain how source versions are created.",
-      "expected_output": "The response uses the Workbench skill, writes or scaffolds SKILL.md, .workbench/eval.yaml, .workbench/cases/case-001/case.yaml, and .workbench/agents.yaml, runs or proposes workbench eval --agents default -n 1, and explains that Workbench versions are automatic.",
+      "prompt": "Create a Workbench-managed skill for earnings prep, add a representative eval case, run the default eval loop, and explain how source versions are created.",
+      "expected_output": "The response uses the Workbench skill, creates SKILL.md, .workbench/eval.yaml, .workbench/agents.yaml, and at least one .workbench/cases/*/case.yaml file, runs or proposes workbench eval --agents default -n 1 after the case exists, and explains that Workbench versions are automatic.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -37,7 +37,7 @@
           "value": "(?:^|\\s)workbench\\s+new\\b|SKILL\\.md|\\.workbench/eval\\.yaml"
         },
         {
-          "text": "runs the smoke eval",
+          "text": "runs the authored-case eval",
           "kind": "matches",
           "path": "tool_commands",
           "value": "(?:^|\\s)workbench\\s+eval\\b"
@@ -133,7 +133,7 @@
       "title": "Publish and install a Workbench skill",
       "category": "sharing",
       "prompt": "Share a Workbench-managed skill through Workbench Cloud and explain what gets published.",
-      "expected_output": "The response uses workbench publish and workbench install OWNER/SKILL. It explains that Workbench Cloud publishes installable source while Workbench object sync stores source versions, evidence, refs, traces, and artifacts.",
+      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench new DIR --from OWNER/SKILL. It explains that publish exposes an installable agent skill package for use and editable Workbench source for evaluation or improvement, while object sync stores versions, evidence, refs, traces, and artifacts.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -155,6 +155,18 @@
           "kind": "matches",
           "path": "tool_commands",
           "value": "(?:^|\\s)workbench\\s+install\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\b"
+        },
+        {
+          "text": "lists accessible skills",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+skills\\b"
+        },
+        {
+          "text": "hydrates editable source",
+          "kind": "matches",
+          "path": "tool_commands",
+          "value": "(?:^|\\s)workbench\\s+new\\s+\\S+\\s+--from\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\b"
         },
         {
           "text": "describes object remote",

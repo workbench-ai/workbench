@@ -568,28 +568,6 @@ function versionNameFor(snapshot: WorkbenchInspectionSnapshot, versionId: string
     : "none";
 }
 
-function VerdictBanner({ snapshot }: { snapshot: WorkbenchInspectionSnapshot }) {
-  const bestRun = bestScoredRun(snapshot);
-  if (!bestRun) {
-    return null;
-  }
-  const metrics = [
-    `score ${formatScore(bestRun.score)}`,
-    ...(bestRun.latencyMs !== undefined ? [formatDurationMs(bestRun.latencyMs)] : []),
-    ...(bestRun.costUsd !== undefined ? [formatRunCost(bestRun)] : []),
-  ].join(", ");
-  return (
-    <div data-testid="workbench-verdict-banner" className="grid min-w-0 gap-1 rounded-lg border border-border/70 bg-muted/25 px-4 py-4">
-      <span className="min-w-0 break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">
-        Best setup: {versionNameFor(snapshot, bestRun.versionId)} with {bestRun.agentName}
-      </span>
-      <p className="min-w-0 break-words text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">
-        {metrics}
-      </p>
-    </div>
-  );
-}
-
 function ScorecardSurface({
   navigate,
   route,
@@ -601,7 +579,6 @@ function ScorecardSurface({
 }) {
   return (
     <div className="grid min-w-0 gap-5">
-      <VerdictBanner snapshot={snapshot} />
       <CompareSurface route={route} snapshot={snapshot} navigate={navigate} />
     </div>
   );
@@ -2264,15 +2241,6 @@ function currentVersion(snapshot: WorkbenchInspectionSnapshot): WorkbenchVersion
 
 function publishedVersionId(snapshot: WorkbenchInspectionSnapshot): string | null {
   return snapshot.publication?.versionId ?? snapshot.refs.published ?? null;
-}
-
-function bestScoredRun(snapshot: WorkbenchInspectionSnapshot): WorkbenchRun | null {
-  return snapshot.runs.reduce<WorkbenchRun | null>(
-    (best, run) => typeof run.score === "number" && (best === null || run.score > (best.score ?? Number.NEGATIVE_INFINITY))
-      ? run
-      : best,
-    null,
-  );
 }
 
 function jobEvidenceApiPath(apiBasePath: string, runId: string, jobId: string): string {

@@ -109,9 +109,7 @@ describe("skill-first Workbench UI helpers", () => {
     expect(html).toContain("Scorecard");
     expect(html).toContain("Versions");
     expect(html).toContain("Skill");
-    expect(html).toContain("data-testid=\"workbench-verdict-banner\"");
-    expect(html).toContain("Best setup:");
-    expect(html).toContain("score 0.920");
+    expect(html).toContain("0.920");
     expect(html).not.toContain("readiness");
     expect(html).not.toContain("Runtime posture");
     expect(html).not.toContain("Improve Runs");

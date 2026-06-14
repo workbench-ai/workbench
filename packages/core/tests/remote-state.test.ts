@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   addWorkbenchRemote,
@@ -15,6 +15,8 @@ import {
   syncWorkbenchRemote,
   WorkbenchCodedError,
   workbenchStatusSnapshot,
+  type WorkbenchObjectPack,
+  type WorkbenchRun,
 } from "../src/index.ts";
 
 const tempRoots: string[] = [];
@@ -48,6 +50,7 @@ async function codedErrorFrom(promise: Promise<unknown>): Promise<WorkbenchCoded
 }
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await Promise.all(tempRoots.splice(0).map((root) =>
     fs.rm(root, { recursive: true, force: true })
   ));
@@ -142,9 +145,8 @@ describe("remote state lifecycle", () => {
     expect(origin?.publication.status).toBe("unpublished");
     // Zero runs: eval comes first; synced-but-unpublished remote gets a publish suggestion.
     expect(snapshot.runs.total).toBe(0);
-    expect(snapshot.next[0]).toBe("workbench eval");
-    expect(snapshot.next.some((command) => command.startsWith("workbench publish"))).toBe(false);
-    expect(snapshot.worktree.hasUnversionedChanges).toBe(false);
+    expect(snapshot.next).toBeNull();
+    expect(snapshot.worktree).not.toHaveProperty("hasUnversionedChanges");
   });
 
   test("file remotes are sync-only and reject publication", async () => {
@@ -177,9 +179,8 @@ describe("remote state lifecycle", () => {
     const origin = snapshot.remotes.find((entry) => entry.name === "origin");
     expect(origin?.sync.status).toBe("error");
     expect(origin?.sync.lastError).toMatchObject({ code: "sync_failed" });
-    expect(origin?.sync.nextCommand).toBe("workbench sync origin");
-    expect(snapshot.next).toContain("workbench sync origin");
-    expect(snapshot.next.some((command) => command.startsWith("workbench publish"))).toBe(false);
+    expect(origin?.sync).not.toHaveProperty("nextCommand");
+    expect(snapshot.next).toBeNull();
   });
 
   test("a sync record for a different URL is ignored and the remote reads as never synced", async () => {
@@ -199,24 +200,25 @@ describe("remote state lifecycle", () => {
     const origin = snapshot.remotes.find((entry) => entry.name === "origin");
     expect(origin?.sync.status).toBe("never");
     expect(origin?.sync.lastError).toBeNull();
-    expect(origin?.sync.nextCommand).toBe("workbench sync origin");
-    expect(snapshot.next.some((command) => command.startsWith("workbench publish"))).toBe(false);
+    expect(origin?.sync).not.toHaveProperty("nextCommand");
+    expect(snapshot.next).toBeNull();
   });
 
-  test("status snapshot reports unversioned worktree changes only when reconcile creates a version", async () => {
+  test("status snapshot reports the reconciled current version without stale dirty flags", async () => {
     const root = await makeTempRoot("workbench-status-worktree-");
     await initWorkbenchSkill({ dir: root });
 
     const clean = await workbenchStatusSnapshot({ dir: root });
-    expect(clean.worktree.hasUnversionedChanges).toBe(false);
+    expect(clean.worktree).not.toHaveProperty("hasUnversionedChanges");
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual snapshot edit.\n");
-    const dirty = await workbenchStatusSnapshot({ dir: root });
-    expect(dirty.worktree.hasUnversionedChanges).toBe(true);
-    expect(dirty.project.currentVersionId).toBe(dirty.worktree.latestVersionId);
+    const reconciled = await workbenchStatusSnapshot({ dir: root });
+    expect(reconciled.worktree).not.toHaveProperty("hasUnversionedChanges");
+    expect(reconciled.project.currentVersionId).toBe(reconciled.worktree.latestVersionId);
 
     const settled = await workbenchStatusSnapshot({ dir: root });
-    expect(settled.worktree.hasUnversionedChanges).toBe(false);
+    expect(settled.worktree).not.toHaveProperty("hasUnversionedChanges");
+    expect(settled.project.currentVersionId).toBe(reconciled.project.currentVersionId);
   });
 
   test("invalid remote names are rejected with remote_invalid_name", async () => {
@@ -248,4 +250,137 @@ describe("remote state lifecycle", () => {
       },
     });
   });
+
+  test("cloud sync does not push lifecycle objects already owned by the remote", async () => {
+    const root = await makeTempRoot("workbench-cloud-lifecycle-owner-");
+    await initWorkbenchSkill({ dir: root });
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+    if (!versionId) {
+      throw new Error("Expected initialized project to have a current version.");
+    }
+
+    const createdAt = "2026-06-12T23:00:00.000Z";
+    const localCloudRun = fakeRun("run_cloud_owned", versionId, "queued", createdAt);
+    const localOnlyRun = fakeRun("run_local_only", versionId, "failed", createdAt);
+    await writeWorkbenchObject(root, "run", localCloudRun.id, localCloudRun);
+    await writeWorkbenchObject(root, "run", localOnlyRun.id, localOnlyRun);
+    await writeWorkbenchObject(root, "execution-event", "evt_local_progress", {
+      jobId: "job_cloud",
+      executionId: "exec_cloud",
+      emittedAt: createdAt,
+      seqStart: 1,
+      runId: localCloudRun.id,
+      projectId: "skill_cloud",
+      attempt: 1,
+      seqEnd: 1,
+      events: [{
+        schema: "workbench.execution.step.v1",
+        at: createdAt,
+        source: "command",
+        role: "runner",
+        payload: { step: "command.run", status: "started" },
+        seq: 1,
+      }],
+    });
+
+    const remotePack = {
+      ...emptyPack(createdAt),
+      runs: [{
+        ...localCloudRun,
+        status: "running",
+        jobIds: ["job_cloud"],
+        traceIds: ["trace_cloud"],
+      }],
+    } satisfies WorkbenchObjectPack;
+    const putPacks: WorkbenchObjectPack[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname === "/api/workbench/skills") {
+        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "smoke" }] });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && (init?.method ?? "GET") === "GET") {
+        return jsonResponse({ objectPack: remotePack });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { objectPack: WorkbenchObjectPack };
+        putPacks.push(body.objectPack);
+        return jsonResponse({ skill: { id: "skill_cloud" }, objectPack: remotePack });
+      }
+      return jsonResponse({ message: `Unexpected ${init?.method ?? "GET"} ${url.pathname}` }, 404);
+    }));
+
+    await addWorkbenchRemote("cloud", "https://cloud.test/skills/alice/smoke", {
+      dir: root,
+      authToken: "token",
+    });
+    await syncWorkbenchRemote({ dir: root, authToken: "token" });
+
+    expect(putPacks.length).toBeGreaterThan(0);
+    const pushedRuns = putPacks.flatMap((pack) => pack.runs.map((run) => run.id));
+    expect(pushedRuns).toContain("run_local_only");
+    expect(pushedRuns).not.toContain("run_cloud_owned");
+    expect(putPacks.flatMap((pack) => pack.executionEvents)).toEqual([]);
+
+    const after = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(after.runs.find((run) => run.id === "run_cloud_owned")).toMatchObject({
+      status: "running",
+      jobIds: ["job_cloud"],
+      traceIds: ["trace_cloud"],
+    });
+  });
 });
+
+function fakeRun(
+  id: string,
+  versionId: string,
+  status: WorkbenchRun["status"],
+  createdAt: string,
+): WorkbenchRun {
+  return {
+    id,
+    kind: "eval",
+    versionId,
+    skillName: "primary",
+    skillBundleHash: "skill_hash",
+    evalHash: "eval_hash",
+    agentName: "default",
+    agentHash: "agent_hash",
+    status,
+    jobIds: [],
+    traceIds: [],
+    createdAt,
+  };
+}
+
+function emptyPack(createdAt: string): WorkbenchObjectPack {
+  return {
+    schema: "workbench.object-pack.v1",
+    createdAt,
+    refs: {},
+    versions: [],
+    skillSources: [],
+    skillBundles: [],
+    evals: [],
+    agents: [],
+    runs: [],
+    jobs: [],
+    traces: [],
+    executionEvents: [],
+    artifacts: [],
+    lineage: [],
+  };
+}
+
+async function writeWorkbenchObject(root: string, type: string, id: string, value: unknown): Promise<void> {
+  const dir = path.join(root, ".workbench", "objects", type);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, `${id}.json`), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}

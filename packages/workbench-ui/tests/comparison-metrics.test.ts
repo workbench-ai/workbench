@@ -410,13 +410,13 @@ describe("comparison metric helpers", () => {
       ],
       agents: [
         agentSnapshot("agent_a", "patcher"),
-        agentSnapshot("agent_b", "gpt-5.3-codex-spark"),
+        agentSnapshot("agent_b", "gpt-5.4-mini"),
       ],
       runs: [
         run({ id: "run_old", versionId: "v001", skillBundleHash: "old_bundle", score: 0.4, createdAt: "2026-06-06T00:10:00.000Z" }),
-        run({ id: "run_active", versionId: "v002", skillBundleHash: "active_bundle", agentName: "gpt-5.3-codex-spark", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:20:00.000Z" }),
-        run({ id: "run_no_skill", versionId: "v002", skillName: "no-skill", skillBundleHash: "no_skill_bundle_hash", agentName: "gpt-5.3-codex-spark", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:21:00.000Z" }),
-        run({ id: "run_dummy", versionId: "v002", skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash", agentName: "gpt-5.3-codex-spark", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:22:00.000Z" }),
+        run({ id: "run_active", versionId: "v002", skillBundleHash: "active_bundle", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:20:00.000Z" }),
+        run({ id: "run_no_skill", versionId: "v002", skillName: "no-skill", skillBundleHash: "no_skill_bundle_hash", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:21:00.000Z" }),
+        run({ id: "run_dummy", versionId: "v002", skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:22:00.000Z" }),
       ],
       comparison: {
         versions: [version("v002")],
@@ -442,9 +442,9 @@ describe("comparison metric helpers", () => {
       agentName: entry.agentName,
       runId: entry.runId,
     }))).toEqual([
-      { skillName: "dummy-skill", agentName: "gpt-5.3-codex-spark", runId: "run_dummy" },
-      { skillName: "no-skill", agentName: "gpt-5.3-codex-spark", runId: "run_no_skill" },
-      { skillName: "primary", agentName: "gpt-5.3-codex-spark", runId: "run_active" },
+      { skillName: "dummy-skill", agentName: "gpt-5.4-mini", runId: "run_dummy" },
+      { skillName: "no-skill", agentName: "gpt-5.4-mini", runId: "run_no_skill" },
+      { skillName: "primary", agentName: "gpt-5.4-mini", runId: "run_active" },
       { skillName: "primary", agentName: "patcher", runId: "run_old" },
     ]);
   });
@@ -590,7 +590,7 @@ describe("comparison metric helpers", () => {
         versionId: "v001",
         runId: "run_failed",
         status: "failed",
-        error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench login codex.",
+        error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth.",
       }),
     ]);
 
@@ -604,8 +604,8 @@ describe("comparison metric helpers", () => {
     expect(rows[0]).toMatchObject({
       status: "failed",
       statusLabel: "Failed",
-      evidenceLabel: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench login codex.",
-      error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Run workbench login codex.",
+      evidenceLabel: expect.stringContaining("ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth"),
+      error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth.",
       runId: "run_failed",
     });
     expect(rows[0]?.score).toBeUndefined();

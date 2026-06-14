@@ -56,7 +56,7 @@ describe("built-in Workbench adapters", () => {
       invocation: {
         use: "codex",
         with: {
-          model: "gpt-5.3-codex-spark",
+          model: "gpt-5.4-mini",
           instructions: "Write one durable output file.",
         },
       },
@@ -118,7 +118,7 @@ describe("built-in Workbench adapters", () => {
         usage: {
           total: {
             provider: "openai/codex",
-            model: "gpt-5.3-codex-spark",
+            model: "gpt-5.4-mini",
             totalTokens: 3,
             costUsd: 0,
             costSource: "provider",
@@ -138,7 +138,7 @@ describe("built-in Workbench adapters", () => {
       role: "runner",
       provider: {
         use: "codex",
-        model: "gpt-5.3-codex-spark",
+        model: "gpt-5.4-mini",
       },
       adapterAuthRequest: {
         self: {
@@ -157,10 +157,63 @@ describe("built-in Workbench adapters", () => {
     expect(result.usage.runner.provider).toBe("openai/codex");
   });
 
+  test("requires Workbench adapter auth before provider agent turns", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-agent-missing-auth-"));
+    await fs.mkdir(path.join(root, "input", "skill"), { recursive: true });
+    await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(path.join(root, "input", "skill", "SKILL.md"), "Do the case.\n");
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_agent_missing_auth",
+      jobId: "job_agent_missing_auth",
+      operation: "skill.run",
+      invocation: {
+        use: "codex",
+        with: {
+          model: "gpt-5.4-mini",
+        },
+      },
+      context: {
+        eval: {
+          name: "adapter-auth",
+          description: "Provider auth guidance.",
+        },
+        skill: {
+          id: "skill_123",
+          path: "skill/files",
+        },
+        improve: {
+          edits: ["SKILL.md"],
+        },
+        attempt: {
+          attemptIndex: 0,
+          sampleIndex: 0,
+          caseId: "case-001",
+        },
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+    const agentExecutor = vi.fn(async () => ({
+      output: "should not run",
+      traceFiles: [],
+      metadata: {},
+    }));
+
+    await expect(executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "codex",
+      requestPath,
+      agentExecutor,
+    })).rejects.toThrow("ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth.");
+    expect(agentExecutor).not.toHaveBeenCalled();
+  });
+
   test("defaults Codex agent turns to the supported Workbench model", async () => {
     const { codexHarness } = await import("@workbench-ai/agent-driver-openai-codex");
 
-    expect(codexHarness().manifest.defaults.model).toBe("gpt-5.3-codex-spark");
+    expect(codexHarness().manifest.defaults.model).toBe("gpt-5.4-mini");
   });
 
   test("keeps agent stall timeout shorter than the full turn timeout", () => {
@@ -210,6 +263,26 @@ describe("built-in Workbench adapters", () => {
       metadata: { retried: true },
     });
     expect(executor).toHaveBeenCalledTimes(2);
+  });
+
+  test("normalizes provider auth failures before retrying agent turns", async () => {
+    const request = {
+      role: "runner" as const,
+      provider: { use: "claude" },
+      workspaceRoot: "/workspace",
+      cwd: "/workspace",
+      prompt: "Run the case.",
+      traceRoot: "/workspace/.workbench/trace",
+      jobId: "job_auth_failure",
+    };
+    const executor = vi.fn(async () => {
+      throw new Error("API Error: 401 {\"error\":\"invalid bearer token\"}");
+    });
+
+    await expect(executeWorkbenchAgentTurn(executor, request)).rejects.toThrow(
+      "ADAPTER_AUTH_REQUIRED: claude disconnected. Next: claude setup-token.",
+    );
+    expect(executor).toHaveBeenCalledTimes(1);
   });
 
   test("executes rubric criteria as bounded parallel judge turns and aggregates weighted metrics", async () => {
@@ -272,7 +345,7 @@ describe("built-in Workbench adapters", () => {
       role: "engine",
       provider: {
         use: "codex",
-        model: "gpt-5.3-codex-spark",
+        model: "gpt-5.4-mini",
       },
       adapterAuthRequest: {
         adapters: {
@@ -538,20 +611,20 @@ describe("built-in Workbench adapters", () => {
     })).rejects.toThrow("Command engine must write workbench-result.json for engine.run.");
   });
 
-  test("reads tests engine rewards from the verifier output directory", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-reward-"));
+  test("reads tests engine results from OUTPUT_DIR/result.json", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-result-"));
     const enginePrivate = path.join(root, "private", "engine");
     await fs.mkdir(enginePrivate, { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
     await fs.writeFile(
       path.join(enginePrivate, "test.sh"),
-      "printf 0.5 > \"$WORKBENCH_TESTS_VERIFIER_DIR/reward.txt\"\n",
+      "printf '{\"score\":0.5,\"summary\":\"half credit\",\"metrics\":{\"score\":0.5,\"coverage\":0.75}}\\n' > \"$OUTPUT_DIR/result.json\"\n",
     );
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
-      id: "exec_tests_reward",
+      id: "exec_tests_result",
       operation: "engine.run",
       invocation: {
         use: "tests",
@@ -566,7 +639,77 @@ describe("built-in Workbench adapters", () => {
 
     const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
     expect(result.ok).toBe(true);
-    expect(result.value).toMatchObject({ score: 0.5 });
+    expect(result.value).toMatchObject({ score: 0.5, summary: "half credit", metrics: { score: 0.5, coverage: 0.75 } });
+  });
+
+  test("turns failed test result files into scored improvement evidence", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-failed-result-"));
+    const enginePrivate = path.join(root, "private", "engine");
+    await fs.mkdir(enginePrivate, { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(
+      path.join(enginePrivate, "test.sh"),
+      "printf '{\"ok\":false,\"message\":\"missing checklist\"}\\n' > \"$OUTPUT_DIR/result.json\"\nexit 1\n",
+    );
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_tests_failed_result",
+      operation: "engine.run",
+      invocation: {
+        use: "tests",
+      },
+      context: {
+        attempt: {
+          caseId: "case-checklist",
+        },
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    await executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "tests",
+      requestPath,
+    });
+
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    expect(result.ok).toBe(true);
+    expect(result.value).toMatchObject({
+      score: 0,
+      summary: "missing checklist",
+      cases: [expect.objectContaining({
+        id: "case-checklist",
+        status: "error",
+      })],
+    });
+  });
+
+  test("rejects tests engine result files that omit score and pass flag", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-missing-score-"));
+    const enginePrivate = path.join(root, "private", "engine");
+    await fs.mkdir(enginePrivate, { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(
+      path.join(enginePrivate, "test.sh"),
+      "printf '{\"message\":\"missing score\"}\\n' > \"$OUTPUT_DIR/result.json\"\n",
+    );
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_tests_missing_score",
+      operation: "engine.run",
+      invocation: {
+        use: "tests",
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    await expect(executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "tests",
+      requestPath,
+    })).rejects.toThrow("finite numeric score or boolean ok/passed/pass");
   });
 
   test("publishes direct adapter step progress", async () => {
@@ -577,7 +720,7 @@ describe("built-in Workbench adapters", () => {
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
     await fs.writeFile(
       path.join(enginePrivate, "test.sh"),
-      "printf 1 > \"$WORKBENCH_TESTS_VERIFIER_DIR/reward.txt\"\n",
+      "printf '{\"ok\":true}\\n' > \"$OUTPUT_DIR/result.json\"\n",
     );
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
@@ -635,8 +778,8 @@ describe("built-in Workbench adapters", () => {
     ]);
   });
 
-  test("fails tests engine runs whose verifier writes no reward output", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-no-reward-"));
+  test("fails tests engine runs that write no result output", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-no-result-"));
     const enginePrivate = path.join(root, "private", "engine");
     await fs.mkdir(enginePrivate, { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
@@ -645,7 +788,7 @@ describe("built-in Workbench adapters", () => {
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
-      id: "exec_tests_no_reward",
+      id: "exec_tests_no_result",
       operation: "engine.run",
       invocation: {
         use: "tests",
@@ -656,7 +799,7 @@ describe("built-in Workbench adapters", () => {
     await expect(executeWorkbenchBuiltInAdapterCommand({
       adapterId: "tests",
       requestPath,
-    })).rejects.toThrow("did not find reward.json or reward.txt");
+    })).rejects.toThrow("did not find result.json");
   });
 
   test("rejects skill patches with malformed entries instead of dropping them", async () => {
@@ -709,7 +852,7 @@ describe("built-in Workbench adapters", () => {
         traceFiles: [],
         metadata: { attempts },
       };
-    }, {} as Parameters<typeof executeWorkbenchAgentTurn>[1]);
+    }, testAgentTurnRequest("claude"));
 
     expect(result.output).toBe("ok");
     expect(attempts).toBe(2);
@@ -724,12 +867,25 @@ describe("built-in Workbench adapters", () => {
         throw new Error(
           "Codex could not verify TLS certificates because the runtime image has no native root CA certificates. Install ca-certificates in environment/Dockerfile. Original error: stream disconnected before completion: error sending request",
         );
-      }, {} as Parameters<typeof executeWorkbenchAgentTurn>[1]),
+      }, testAgentTurnRequest("codex")),
     ).rejects.toThrow("ca-certificates");
 
     expect(attempts).toBe(1);
   });
 });
+
+function testAgentTurnRequest(provider: string): WorkbenchAgentTurnRequest {
+  const root = os.tmpdir();
+  return {
+    role: "runner",
+    provider: { use: provider },
+    workspaceRoot: root,
+    cwd: root,
+    prompt: "Run the test request.",
+    traceRoot: root,
+    jobId: "job_test_agent_turn",
+  };
+}
 
 function adapterCommandPaths(root: string) {
   return {
@@ -774,7 +930,7 @@ async function writeRubricRequest(
         judge: {
           use: "codex",
           with: {
-            model: "gpt-5.3-codex-spark",
+            model: "gpt-5.4-mini",
           },
         },
         criteria: options.criteria.map((criterion) => ({

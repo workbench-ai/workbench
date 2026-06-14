@@ -210,6 +210,35 @@ describe("applyWorkbenchSkillPatch", () => {
     expect(files[0]?.content).toBe("v2\n");
   });
 
+  test("allows package-root edits while rejecting Workbench control files", () => {
+    const files = applyWorkbenchSkillPatch({
+      baseFiles,
+      patch: {
+        files: [
+          { path: "reference/usage.md", content: "improved usage\n" },
+          { path: "scripts/helper.sh", content: "echo improved\n" },
+        ],
+        fileChanges: ["reference/usage.md", "scripts/helper.sh"],
+      },
+      edits: ["."],
+    });
+
+    expect(files.map((file) => file.path)).toEqual([
+      "SKILL.md",
+      "reference/usage.md",
+      "scripts/helper.sh",
+    ]);
+    expect(files.find((file) => file.path === "reference/usage.md")?.content).toBe("improved usage\n");
+    expect(() => applyWorkbenchSkillPatch({
+      baseFiles,
+      patch: {
+        files: [{ path: ".workbench/eval.yaml", content: "version: 1\n" }],
+        fileChanges: [".workbench/eval.yaml"],
+      },
+      edits: ["."],
+    })).toThrow(/Workbench control path/u);
+  });
+
   test("rejects unsafe traversal paths", () => {
     expect(() => applyWorkbenchSkillPatch({
       baseFiles,

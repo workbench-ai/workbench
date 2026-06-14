@@ -60,8 +60,7 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
           oauth: {
             files: [
               { path: ".claude.json" },
-              { path: ".claude/oauth-token", required: false },
-              { path: ".claude/.credentials.json", required: false },
+              { path: ".claude/oauth-token" },
             ],
           },
           "api-key": { env: [{ name: "ANTHROPIC_API_KEY" }] },

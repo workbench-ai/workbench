@@ -443,6 +443,9 @@ function isAllowedEditPath(filePath: string, edits: string[]): boolean {
   const normalizedPath = normalizeRelativePath(filePath);
   return edits.some((entry) => {
     const normalizedEditPath = normalizeRelativePath(entry).replace(/\/+$/u, "");
+    if (normalizedEditPath === ".") {
+      return true;
+    }
     return normalizedPath === normalizedEditPath || normalizedPath.startsWith(`${normalizedEditPath}/`);
   });
 }
