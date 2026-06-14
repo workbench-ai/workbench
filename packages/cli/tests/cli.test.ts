@@ -1267,6 +1267,43 @@ describe("workbench skill-first CLI", () => {
     expect(statusJson.next).toBe("workbench eval");
   });
 
+  test("status routes below-perfect current evidence to improve before publish", async () => {
+    const root = await makeTempRoot("workbench-cli-status-below-perfect-");
+    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
+    vi.stubEnv("WORKBENCH_CONFIG", configPath);
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "cloud-token",
+      username: "alice",
+    }));
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+    const currentVersionId = await currentVersionIdFor(root);
+    await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "objects", "run", "run_partial.json"), JSON.stringify({
+      id: "run_partial",
+      kind: "eval",
+      versionId: currentVersionId,
+      skillName: "primary",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      status: "succeeded",
+      score: 0.5,
+      jobIds: [],
+      traceIds: [],
+      createdAt: "2026-06-11T00:00:00.000Z",
+      finishedAt: "2026-06-11T00:00:01.000Z",
+    }));
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench improve");
+  });
+
   test("status suggests a fresh case id when only smoke cases exist", async () => {
     const root = await makeTempRoot("workbench-cli-status-smoke-case-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);

@@ -4145,13 +4145,12 @@ async function statusWithCausalNext(
   }
   const failedRemote = status.remotes.find((remote) => remote.sync.status === "error");
   const hasWorkflowCase = snapshot ? snapshotHasWorkflowCase(snapshot) : false;
-  const hasCurrentScoredEvalRun = snapshot?.runs.some((run) =>
-    currentVersionId !== undefined &&
-    scoredRunValue(run) !== undefined &&
-    run.kind === "eval" &&
-    run.versionId === currentVersionId
-  ) ?? false;
-  const canPublish = hasWorkflowCase && hasCurrentScoredEvalRun;
+  const currentScoredEvalRuns = snapshot && currentVersionId
+    ? latestScoredEvalRunsForVersion(snapshot, currentVersionId)
+    : [];
+  const hasCurrentScoredEvalRun = currentScoredEvalRuns.length > 0;
+  const belowPerfectCurrentEvalRuns = currentScoredEvalRuns.filter(scoredRunIsBelowPerfect);
+  const canPublish = hasWorkflowCase && hasCurrentScoredEvalRun && belowPerfectCurrentEvalRuns.length === 0;
   const promotedImproveVersionId = snapshot && currentVersionId
     ? latestUnsourcedPromotedImproveVersion(snapshot, currentVersionId)
     : undefined;
@@ -4177,6 +4176,9 @@ async function statusWithCausalNext(
   }
   if (!hasCurrentScoredEvalRun) {
     return { ...status, next: "workbench eval" };
+  }
+  if (belowPerfectCurrentEvalRuns.length > 0) {
+    return { ...status, next: belowPerfectEvalNextCommand(belowPerfectCurrentEvalRuns) };
   }
   const cloudRemote = status.remotes.find((remote) => remote.kind === "workbench-cloud");
   if (canPublish && !cloudRemote) {
@@ -4213,6 +4215,30 @@ async function statusWithCausalNext(
     ...status,
     next: canPublish ? "workbench compare" : null,
   };
+}
+
+function latestScoredEvalRunsForVersion(
+  snapshot: WorkbenchInspectionSnapshot,
+  versionId: string,
+): WorkbenchRun[] {
+  const latestBySelection = new Map<string, WorkbenchRun>();
+  for (const run of snapshot.runs) {
+    if (run.kind !== "eval" || run.versionId !== versionId || scoredRunValue(run) === undefined) {
+      continue;
+    }
+    const key = `${run.skillName}\0${run.agentName}\0${run.evalHash}`;
+    const existing = latestBySelection.get(key);
+    if (!existing || runEvidenceTime(run).localeCompare(runEvidenceTime(existing)) > 0) {
+      latestBySelection.set(key, run);
+    }
+  }
+  return [...latestBySelection.values()];
+}
+
+function belowPerfectEvalNextCommand(runs: readonly WorkbenchRun[]): string {
+  const skillNames = new Set(runs.map((run) => run.skillName));
+  const agentNames = new Set(runs.map((run) => run.agentName));
+  return skillNames.size === 1 && agentNames.size === 1 ? "workbench improve" : "workbench compare";
 }
 
 function latestUnsourcedPromotedImproveVersion(
