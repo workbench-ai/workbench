@@ -7942,7 +7942,7 @@ function resolveNamedSelection<T extends { name: string }>(
     if (!entry) {
       const configured = entries.map((candidate) => candidate.name).sort();
       throw new WorkbenchCodedError("usage", `${capitalize(noun)} not found: ${name}. Configured ${noun}s: ${configuredSelectionNames(entries)}.`, {
-        remediation: namedSelectionRemediation(noun, configured, remediationCommand),
+        remediation: namedSelectionRemediation(noun, entries, remediationCommand),
         subject: noun === "agent"
           ? { configuredAgents: configured }
           : { configuredSkills: configured },
@@ -7962,20 +7962,45 @@ function configuredSelectionNames(entries: readonly { name: string }[]): string 
   return `${visible.join(", ")}${names.length > visible.length ? ", ..." : ""}`;
 }
 
-function namedSelectionRemediation(
+function namedSelectionRemediation<T extends { name: string }>(
   noun: "skill" | "agent",
-  configured: readonly string[],
+  entries: readonly T[],
   command: WorkbenchSelectorCommand = "eval",
 ): string {
   const flag = noun === "agent" ? "--agents" : "--skills";
+  const configured = entries.map((entry) => entry.name).sort();
   if (configured.length === 0) {
     return noun === "agent"
       ? providerAgentSetupCommand("codex", "default")
       : "workbench new";
   }
-  const first = configured[0];
-  const selection = configured.length > 1 ? ALL_SELECTOR : first;
+  const firstConfigured = configured[0];
+  if (!firstConfigured) {
+    return noun === "agent"
+      ? providerAgentSetupCommand("codex", "default")
+      : "workbench new";
+  }
+  const improvementAgent = command === "improve" && noun === "agent"
+    ? firstImprovementCapableAgentName(entries)
+    : undefined;
+  if (command === "improve" && noun === "agent" && !improvementAgent) {
+    return providerAgentSetupCommand("codex", "default");
+  }
+  const first = improvementAgent ?? firstConfigured;
+  const selection = command === "improve" || configured.length === 1 ? first : ALL_SELECTOR;
   return `workbench ${command} ${flag} ${selection}`;
+}
+
+function firstImprovementCapableAgentName(entries: readonly { name: string }[]): string | undefined {
+  return entries
+    .filter(isWorkbenchAgent)
+    .filter(workbenchSkillImproveCanUseQueuedAdapter)
+    .map((agent) => agent.name)
+    .sort()[0];
+}
+
+function isWorkbenchAgent(entry: { name: string }): entry is WorkbenchAgent {
+  return typeof (entry as Partial<WorkbenchAgent>).adapter === "string";
 }
 
 function readManifestDefaultSelection<T extends { name: string }>(

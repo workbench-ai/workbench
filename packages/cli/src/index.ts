@@ -1109,7 +1109,7 @@ async function handleLogin(parsed: ParsedArgs, io: CliIo): Promise<number> {
   }
   let token: DeviceToken;
   try {
-    token = await pollDeviceToken(baseUrl, record, timeoutSeconds);
+    token = await pollDeviceToken(baseUrl, record, timeoutSeconds, { json: parsed.flags.json === true });
   } catch (error) {
     const denied = error instanceof WorkbenchCodedError && error.code === "login_denied";
     const expired = Date.parse(record.expiresAt) <= Date.now();
@@ -2195,7 +2195,7 @@ function cloudExecutionRequestBody(
 }
 
 function cloudImproveNextCommand(runs: readonly WorkbenchRun[]): string | null {
-  return cloudExecutionNextCommand(runs, "workbench eval");
+  return cloudExecutionNextCommand(runs, "workbench eval --rerun -n 5");
 }
 
 function cloudDetachedNextCommand(runs: readonly WorkbenchRun[]): string | null {
@@ -2646,6 +2646,7 @@ async function pollDeviceToken(
   baseUrl: string,
   authorization: DeviceAuthorizationRecord,
   timeoutSeconds: number | undefined,
+  options: { json?: boolean } = {},
 ): Promise<DeviceToken> {
   const expiresAtMs = Date.parse(authorization.expiresAt);
   const expiryDeadline = Number.isFinite(expiresAtMs) ? expiresAtMs : Date.now() + 15 * 60 * 1000;
@@ -2666,7 +2667,7 @@ async function pollDeviceToken(
       return JSON.parse(text) as DeviceToken;
     }
     if (isRetryableHttpStatus(response.status)) {
-      throw deviceLoginUnavailableError("wait", response.status, response.statusText, text);
+      throw deviceLoginUnavailableError("wait", response.status, response.statusText, text, options);
     }
     const error = readResponseError(text) ?? "authorization_pending";
     if (error === "slow_down") {
@@ -2680,7 +2681,7 @@ async function pollDeviceToken(
   }
   throw new WorkbenchCodedError("login_pending", "Device login is still waiting for browser authorization.", {
     retryable: true,
-    remediation: `workbench login --wait --timeout ${LOGIN_WAIT_TIMEOUT_SECONDS}`,
+    remediation: loginWaitRemediation(options.json === true),
     subject: {
       retryAfterSeconds: Math.max(1, Math.ceil(intervalMs / 1000)),
       verificationUri: authorization.verification_uri,
@@ -2697,17 +2698,22 @@ function deviceLoginUnavailableError(
   status: number,
   statusText: string,
   text: string,
+  options: { json?: boolean } = {},
 ): WorkbenchCodedError {
   const excerpt = readResponseError(text);
   const detail = `${status}${excerpt ? ` ${excerpt}` : statusText ? ` ${statusText}` : ""}`;
   const command = phase === "start"
     ? "workbench login --start-only --no-open"
-    : `workbench login --wait --timeout ${LOGIN_WAIT_TIMEOUT_SECONDS}`;
+    : loginWaitRemediation(options.json === true);
   return new WorkbenchCodedError("service_unavailable", `Workbench Cloud login is temporarily unavailable: ${detail}`, {
     retryable: true,
     remediation: command,
     exitCode: 1,
   });
+}
+
+function loginWaitRemediation(json: boolean): string {
+  return `workbench login --wait --timeout ${LOGIN_WAIT_TIMEOUT_SECONDS}${json ? " --json" : ""}`;
 }
 
 async function fetchWorkbenchUsername(baseUrl: string, accessToken: string): Promise<string | undefined> {
@@ -4556,7 +4562,7 @@ async function statusWithCausalNext(
     return { ...status, next: authorEvalCaseCommand(snapshot, liveCases.caseIds) };
   }
   if (!hasCurrentScoredEvalRun) {
-    return { ...status, next: "workbench eval" };
+    return { ...status, next: postImproveProofEvalNextCommand(snapshot, currentVersionId) ?? "workbench eval" };
   }
   if (belowPerfectCurrentEvalRuns.length > 0) {
     return { ...status, next: belowPerfectEvalNextCommand(belowPerfectCurrentEvalRuns) };
@@ -4623,6 +4629,23 @@ function belowPerfectEvalNextCommand(runs: readonly WorkbenchRun[]): string {
   const skillNames = new Set(runs.map((run) => run.skillName));
   const agentNames = new Set(runs.map((run) => run.agentName));
   return skillNames.size === 1 && agentNames.size === 1 ? "workbench improve" : "workbench compare";
+}
+
+function postImproveProofEvalNextCommand(
+  snapshot: WorkbenchInspectionSnapshot | null,
+  currentVersionId: string | undefined,
+): string | undefined {
+  if (!snapshot || !currentVersionId) {
+    return undefined;
+  }
+  const latestImproveForCurrent = snapshot.runs
+    .filter((run) =>
+      run.kind === "improve" &&
+      run.status === "succeeded" &&
+      run.outputVersionId === currentVersionId
+    )
+    .sort((left, right) => runEvidenceTime(right).localeCompare(runEvidenceTime(left)))[0];
+  return latestImproveForCurrent ? "workbench eval --rerun -n 5" : undefined;
 }
 
 function latestUnsourcedPromotedImproveVersion(

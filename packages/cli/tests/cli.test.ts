@@ -1403,6 +1403,36 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(authenticatedStatus).next).toBe("workbench improve");
   });
 
+  dockerTest("status preserves the higher-sample rerun guidance after a promoted one-sample improve", async () => {
+    const root = await makeTempRoot("workbench-cli-status-post-improve-");
+    const marker = "Improved by status guidance.";
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writeSkillDependentCaseTest(root, marker);
+    const added = await invoke([
+      "agent",
+      "add",
+      "patcher",
+      "--dir",
+      root,
+      "--adapter",
+      "command",
+      "--with",
+      `improveCommand=printf '\\n${marker}\\n' >> "$SKILL_DIR/SKILL.md"`,
+    ]);
+    expect(added.code, added.stdout || added.stderr).toBe(0);
+
+    const failingEval = await invoke(["eval", "--dir", root, "--agents", "patcher", "--json"]);
+    expect(failingEval.code, failingEval.stdout || failingEval.stderr).toBe(1);
+    const improve = await invoke(["improve", "--dir", root, "--agents", "patcher", "--budget", "1", "-n", "1", "--json"]);
+    expect(improve.code, improve.stdout || improve.stderr).toBe(0);
+    expect(stdoutJson<{ result: { next: string; switched: boolean } }>(improve).result)
+      .toMatchObject({ switched: true, next: "workbench eval --rerun -n 5" });
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench eval --rerun -n 5");
+  }, 60_000);
+
   test("status evaluates smoke cases before suggesting a fresh workflow case", async () => {
     const root = await makeTempRoot("workbench-cli-status-smoke-case-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -3261,7 +3291,7 @@ describe("workbench skill-first CLI", () => {
       expect(improveJson).toMatchObject({
         schema: "workbench.cli.improve.v1",
         ok: true,
-        next: "workbench eval",
+        next: "workbench eval --rerun -n 5",
         result: {
           switched: true,
           promoted: true,
@@ -3284,7 +3314,7 @@ describe("workbench skill-first CLI", () => {
       expect(status.code, status.stdout || status.stderr).toBe(0);
       expect(stdoutJson<{ next: string | null; remotes: Array<{ publication: { versionId?: string } }> }>(status))
         .toMatchObject({
-          next: "workbench eval",
+          next: "workbench eval --rerun -n 5",
           remotes: [
             expect.objectContaining({
               publication: expect.objectContaining({ versionId: baseVersion.id }),
@@ -4504,6 +4534,17 @@ describe("workbench skill-first CLI", () => {
   test("improve selector errors include command-shaped remediation", async () => {
     const root = await makeTempRoot("workbench-cli-improve-selector-");
     await invoke(["new", root, "--agent", "local"]);
+    expect((await invoke([
+      "agent",
+      "add",
+      "patcher",
+      "--dir",
+      root,
+      "--adapter",
+      "command",
+      "--with",
+      "improveCommand=printf improved >> \"$SKILL_DIR/SKILL.md\"",
+    ])).code).toBe(0);
 
     const result = await invoke(["improve", "--dir", root, "--agents", "missing", "--json"]);
 
@@ -4511,9 +4552,9 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(result)).toMatchObject({
       ok: false,
       code: "usage",
-      message: "Agent not found: missing. Configured agents: default.",
-      remediation: "workbench improve --agents default",
-      subject: { configuredAgents: ["default"] },
+      message: "Agent not found: missing. Configured agents: default, patcher.",
+      remediation: "workbench improve --agents patcher",
+      subject: { configuredAgents: ["default", "patcher"] },
     });
   });
 
@@ -5018,6 +5059,7 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "login_pending",
       retryable: true,
+      remediation: "workbench login --wait --timeout 120 --json",
       subject: {
         verificationUri: "https://cloud.test/device",
         verificationUriComplete: "https://cloud.test/device?user_code=WXYZ-1234",
@@ -5086,7 +5128,7 @@ describe("workbench skill-first CLI", () => {
       code: "service_unavailable",
       message: expect.stringContaining("503 temporary gateway failure"),
       retryable: true,
-      remediation: "workbench login --wait --timeout 120",
+      remediation: "workbench login --wait --timeout 120 --json",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(JSON.parse(await fs.readFile(devicePath, "utf8"))).toMatchObject({ device_code: "device-pending" });
@@ -5813,6 +5855,33 @@ async function writeFailingCaseTest(root: string, message: string): Promise<void
     `printf '%s\\n' ${shellQuote(message)} >&2`,
     `printf '{"ok":false,"message":%s}\\n' ${shellQuote(JSON.stringify(message))} > "$OUTPUT_DIR/result.json"`,
     "exit 2",
+    "",
+  ].join("\n"));
+  await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+}
+
+async function writeSkillDependentCaseTest(root: string, marker: string): Promise<void> {
+  await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
+  await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+    "version: 1",
+    "id: case-001",
+    "prompt: Exercise an improvement that changes the skill package.",
+    "rubric:",
+    "  - The skill source contains the expected improvement marker.",
+    "command: sh \"$CASE_DIR/tests/test.sh\"",
+    "",
+  ].join("\n"));
+  await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
+    "#!/bin/sh",
+    "set -eu",
+    "mkdir -p \"$OUTPUT_DIR\"",
+    `if grep -q ${shellQuote(marker)} "$SKILL_DIR/SKILL.md"; then`,
+    "  printf '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}\\n' > \"$OUTPUT_DIR/result.json\"",
+    "else",
+    `  printf '%s\\n' ${shellQuote(`Missing ${marker}`)} >&2`,
+    `  printf '{"ok":false,"score":0,"message":%s}\\n' ${shellQuote(JSON.stringify(`Missing ${marker}`))} > "$OUTPUT_DIR/result.json"`,
+    "  exit 2",
+    "fi",
     "",
   ].join("\n"));
   await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
