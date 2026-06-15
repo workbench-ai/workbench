@@ -68,6 +68,7 @@ import {
   installSnapshotToSkillTargets,
   normalizeInstallSnapshotPath,
   readInstalledSkillsInventory,
+  type WorkbenchInstallTargetResult,
   type WorkbenchInstallTargetsResult,
   type WorkbenchSkillAccessInventory,
   type WorkbenchInstalledSkill,
@@ -609,8 +610,6 @@ export async function runCli(argv: readonly string[], io: CliIo = {
           version: versionSummary(preview.version),
           visibility: audience,
           installHandle: preview.installHandle,
-          installUrl: preview.installUrl,
-          pinnedInstallUrl: preview.pinnedInstallUrl,
           dryRun: true,
         }, parsed, io, () => [
           `Would publish ${displayRef(preview.version.id)} as ${preview.installHandle} (${audience}).`,
@@ -641,13 +640,9 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         version: versionSummary(result.version),
         visibility: audience,
         installHandle: result.installHandle,
-        installUrl: result.installUrl,
-        pinnedInstallUrl: result.pinnedInstallUrl,
         ...(result.dryRun ? { dryRun: true } : {}),
       }, parsed, io, () => [
         `${result.dryRun ? "Would publish" : "Published"} ${displayRef(result.version.id)} as ${result.installHandle} (${audience}).`,
-        `Install URL: ${result.installUrl}`,
-        `Pinned release URL: ${result.pinnedInstallUrl}`,
         `next: workbench install ${result.installHandle}`,
       ].join("\n"));
     }
@@ -818,6 +813,7 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
     return output({
       jobs: selection.jobs.map(jobEvidenceSummary),
       details: details.map(evidenceDetailSummary),
+      highlights: evidenceHighlights(evidenceFiles) as unknown as Json,
       files: evidenceFiles.map(fileSummary),
     }, parsed, io, () => formatRunOrJobEvidence(selection.jobs, details, evidenceFiles));
   }
@@ -887,11 +883,11 @@ async function handleAdapterLogin(provider: string, parsed: ParsedArgs, io: CliI
         version: saved.version,
         updatedAt: saved.updatedAt,
       } as unknown as Json,
-      workbenchCloud: remote as unknown as Json,
+      remoteAdapterAuth: remote as unknown as Json,
     },
     parsed,
     io,
-    () => `Connected ${formatAuthTarget(saved)} ${saved.method} auth v${saved.version}; Workbench Cloud: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
+    () => `Connected ${formatAuthTarget(saved)} ${saved.method} auth v${saved.version}; remote provider auth: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
   );
 }
 
@@ -919,12 +915,12 @@ async function handleAdapterLogout(provider: string, parsed: ParsedArgs, io: Cli
         profile: target.profile,
         status: "disconnected",
       } as unknown as Json,
-      workbenchCloud: remote as unknown as Json,
+      remoteAdapterAuth: remote as unknown as Json,
     },
     parsed,
     io,
     () => [
-      `Disconnected ${formatAuthTarget(target)}; Workbench Cloud: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
+      `Disconnected ${formatAuthTarget(target)}; remote provider auth: ${remote.sync}${remote.reason ? ` (${remote.reason})` : ""}.`,
       `Native ${target.adapterId} CLI auth unchanged; remove native provider auth separately for clean-room validation when needed.`,
     ].join("\n"),
   );
@@ -1483,6 +1479,7 @@ function formatInstallOutcome(
   const targetSummary = result.targets.length === 1
     ? `${firstTarget.target} ${result.scope}`
     : result.targets.map((target) => `${target.target} ${target.scope}`).join(", ");
+  const perTargetSummary = result.targets.map(formatInstallTargetOutcome).join("; ");
   if (dryRun) {
     if (result.targets.every((target) => target.previous === "unchanged")) {
       return `Already installed ${result.skill} for ${targetSummary} (unchanged; dry run made no changes).`;
@@ -1498,6 +1495,9 @@ function formatInstallOutcome(
   if (result.result === "unchanged") {
     return `Already installed ${result.skill} for ${targetSummary} (unchanged).`;
   }
+  if (result.targets.length > 1 && new Set(result.targets.map((target) => target.result)).size > 1) {
+    return `${sentenceVerb(result.result)} ${result.skill}: ${perTargetSummary}.`;
+  }
   if (result.targets.some((target) => target.previous === "updated")) {
     return `Updated ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
   }
@@ -1505,6 +1505,24 @@ function formatInstallOutcome(
     ? `overwrote existing copy, ${formatFileCount(result.filesCopied)}`
     : formatFileCount(result.filesCopied);
   return `Installed ${result.skill} for ${targetSummary} (${detail}).`;
+}
+
+function formatInstallTargetOutcome(target: WorkbenchInstallTargetResult): string {
+  const targetName = `${target.target} ${target.scope}`;
+  if (target.result === "unchanged") {
+    return `${targetName} unchanged`;
+  }
+  if (target.previous === "updated") {
+    return `${targetName} updated (${formatFileCount(target.filesCopied)})`;
+  }
+  if (target.previous === "overwritten") {
+    return `${targetName} overwritten (${formatFileCount(target.filesCopied)})`;
+  }
+  return `${targetName} installed (${formatFileCount(target.filesCopied)})`;
+}
+
+function sentenceVerb(result: WorkbenchInstallTargetsResult["result"]): string {
+  return result === "planned" ? "Would install" : result === "unchanged" ? "Already installed" : "Installed";
 }
 
 function formatFileCount(count: number): string {
@@ -2344,14 +2362,12 @@ function workbenchInstallSourceSummary(
   source: ParsedWorkbenchInstallSource,
   snapshot: WorkbenchInstallSourceSnapshot,
 ): Json {
-  const installUrl = `${source.baseUrl}/skills/${encodeURIComponent(source.owner)}/${encodeURIComponent(source.skill)}`;
   return {
     kind: "workbench-cloud",
     owner: snapshot.owner,
     skill: snapshot.name,
     versionId: snapshot.versionId,
-    installUrl,
-    pinnedInstallUrl: `${installUrl}/releases/${encodeURIComponent(snapshot.versionId)}`,
+    installHandle: `${snapshot.owner}/${snapshot.name}`,
   };
 }
 
@@ -3774,8 +3790,6 @@ async function previewPublishWithDerivedRemote(parsed: ParsedArgs): Promise<{
   version: WorkbenchVersion;
   visibility: "private" | "internal" | "public";
   installHandle: string;
-  installUrl: string;
-  pinnedInstallUrl: string;
 } | undefined> {
   const root = path.resolve(dirFlag(parsed) ?? process.cwd());
   const reconciledSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
@@ -3801,8 +3815,6 @@ async function previewPublishWithDerivedRemote(parsed: ParsedArgs): Promise<{
       normalizePublishVisibility(reconciledSnapshot.refs["publication/visibility"]) ??
       "private",
     installHandle: installHandleFromCloudRemote(remote),
-    installUrl: remote.url,
-    pinnedInstallUrl: `${remote.url}/releases/${encodeURIComponent(version.id)}`,
   };
 }
 
@@ -4958,8 +4970,126 @@ function formatRunOrJobEvidence(
   ]);
   const jobLines = jobs.length > 0 ? ["Jobs:", ...jobs.map((job) => formatJobEvidenceSummary(job, jobRefs))] : [];
   const detailLines = details.map((detail) => formatTraceDetail(detail, { jobRefs, runRefs })).filter(Boolean);
+  const highlightLines = formatEvidenceHighlights(evidenceHighlights(files));
   const fileLines = files.length > 0 ? ["Files:", ...files.map((file) => file.path)] : [];
-  return [...jobLines, ...detailLines, ...fileLines].join("\n") || "No evidence.";
+  return [...jobLines, ...detailLines, ...highlightLines, ...fileLines].join("\n") || "No evidence.";
+}
+
+type EvidenceHighlight =
+  | { kind: "agent_output"; path: string; preview: string }
+  | { kind: "agent_session"; path: string; provider?: string; ref?: string; sessionId?: string }
+  | {
+    kind: "rubric_scorecard";
+    path: string;
+    score?: number;
+    summary?: string;
+    criteria: Array<{ id?: string; score?: number; rationale?: string }>;
+  };
+
+function evidenceHighlights(files: readonly SurfaceSnapshotFile[]): EvidenceHighlight[] {
+  const highlights: EvidenceHighlight[] = [];
+  for (const file of files) {
+    const basename = path.basename(file.path.replace(/\\/gu, "/"));
+    if (file.encoding !== "utf8") {
+      continue;
+    }
+    if (basename === "skill-summary.md" && file.content.trim()) {
+      highlights.push({
+        kind: "agent_output",
+        path: file.path,
+        preview: previewBlock(file.content, 1200, 12),
+      });
+      continue;
+    }
+    if (basename === "agent-session.json") {
+      const record = parseJsonRecord(file.content);
+      if (record) {
+        const provider = typeof record.provider === "string" ? record.provider : undefined;
+        const ref = typeof record.ref === "string" ? record.ref : undefined;
+        const sessionId = typeof record.sessionId === "string" ? record.sessionId : undefined;
+        if (provider || ref || sessionId) {
+          highlights.push({ kind: "agent_session", path: file.path, provider, ref, sessionId });
+        }
+      }
+      continue;
+    }
+    if (basename === "rubric-scorecard.json") {
+      const record = parseJsonRecord(file.content);
+      if (record) {
+        const criteria = Array.isArray(record.criteria)
+          ? record.criteria.flatMap((entry): EvidenceHighlightRubricCriterion[] => {
+              const criterion = entry && typeof entry === "object" && !Array.isArray(entry)
+                ? entry as Record<string, unknown>
+                : null;
+              if (!criterion) {
+                return [];
+              }
+              return [{
+                id: typeof criterion.id === "string" ? criterion.id : undefined,
+                score: typeof criterion.score === "number" ? criterion.score : undefined,
+                rationale: typeof criterion.rationale === "string" && criterion.rationale.trim()
+                  ? singleLine(criterion.rationale)
+                  : undefined,
+              }];
+            })
+          : [];
+        highlights.push({
+          kind: "rubric_scorecard",
+          path: file.path,
+          score: typeof record.score === "number" ? record.score : undefined,
+          summary: typeof record.summary === "string" && record.summary.trim() ? singleLine(record.summary) : undefined,
+          criteria,
+        });
+      }
+    }
+  }
+  return highlights;
+}
+
+type EvidenceHighlightRubricCriterion = Extract<EvidenceHighlight, { kind: "rubric_scorecard" }>["criteria"][number];
+
+function formatEvidenceHighlights(highlights: readonly EvidenceHighlight[]): string[] {
+  if (highlights.length === 0) {
+    return [];
+  }
+  const lines: string[] = ["Evidence:"];
+  for (const highlight of highlights) {
+    if (highlight.kind === "agent_output") {
+      lines.push(`Output ${highlight.path}:`);
+      lines.push(...highlight.preview.split("\n").map((line) => `  ${line}`));
+      continue;
+    }
+    if (highlight.kind === "agent_session") {
+      lines.push(`Session ${highlight.path}: ${highlight.ref ?? highlight.sessionId ?? highlight.provider ?? "unknown"}`);
+      continue;
+    }
+    const score = highlight.score === undefined ? "n/a" : highlight.score.toFixed(3);
+    lines.push(`Rubric ${highlight.path}: score=${score}${highlight.summary ? ` summary=${highlight.summary}` : ""}`);
+    for (const criterion of highlight.criteria) {
+      lines.push(`  ${criterion.id ?? "criterion"} score=${criterion.score === undefined ? "n/a" : criterion.score.toFixed(3)}${criterion.rationale ? ` rationale=${criterion.rationale}` : ""}`);
+    }
+  }
+  return lines;
+}
+
+function parseJsonRecord(content: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function previewBlock(content: string, maxChars: number, maxLines: number): string {
+  const lines = content.trimEnd().split(/\r?\n/u).slice(0, maxLines);
+  const preview = lines.join("\n");
+  if (preview.length <= maxChars) {
+    return preview;
+  }
+  return `${preview.slice(0, maxChars - 3).trimEnd()}...`;
 }
 
 function jobEvidenceSummary(job: WorkbenchJob): Json {
@@ -5387,8 +5517,7 @@ function formatStatusSnapshot(status: Awaited<ReturnType<typeof workbenchStatusS
             "publication=published",
             remote.publication.visibility ? `visibility=${remote.publication.visibility}` : undefined,
             remote.publication.versionId ? `version=${displayRef(remote.publication.versionId)}` : undefined,
-            remote.publication.installUrl ? `install=${remote.publication.installUrl}` : undefined,
-            remote.publication.pinnedInstallUrl ? `pinned=${remote.publication.pinnedInstallUrl}` : undefined,
+            remote.publication.installHandle ? `handle=${remote.publication.installHandle}` : undefined,
           ].filter(Boolean).join("\t")
         : "publication=unpublished";
       return [

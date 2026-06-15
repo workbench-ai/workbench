@@ -32,7 +32,7 @@ workbench eval --skills all --agents all -n 1
 workbench compare --skills all --agents all --versions all
 ```
 
-Run `workbench improve` only after scored below-perfect, failed, or reviewed eval evidence exists. Perfect eval runs and unscored runtime/auth failures are not enough. `improve` edits one skill and proves the candidate with one explicitly selected improvement-capable agent; there is no implicit provider scan or fallback improver. Evidence is selected by skill lineage and eval definition, not by exact eval-agent hash. Workbench checks evidence before asking users to configure an improver, and a switched one-sample proof should be followed by the printed higher-sample rerun before publishing. Use plural selector flags to narrow defaults when needed:
+Run `workbench improve` only after scored below-perfect, failed, or reviewed eval evidence exists. Perfect eval runs and unscored runtime/auth failures are not enough. `improve` edits one skill and proves the candidate with one explicitly selected improvement-capable agent; there is no implicit provider scan or fallback improver. Evidence is selected by skill lineage and eval definition, not by exact eval-agent hash. Empty or perfect-only projects get evidence remediation first; once actionable evidence exists, or a non-perfect terminal eval attempt already shows the selected agent is on the improve path, a non-improvement-capable selected agent gets setup remediation. A switched one-sample proof should be followed by the printed higher-sample rerun before publishing. Use plural selector flags to narrow defaults when needed:
 
 ```bash
 codex login --device-auth

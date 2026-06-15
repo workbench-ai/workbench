@@ -46,7 +46,9 @@ describe("built-in Workbench adapters", () => {
     await fs.mkdir(path.join(root, "input", "case"), { recursive: true });
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench", "runtime-control"), { recursive: true });
     await fs.writeFile(path.join(root, "input", "skill", "SKILL.md"), "Do the case.\n");
+    await fs.writeFile(path.join(root, ".workbench", "runtime-control", "skill.json"), "{\"secret\":\"BLUE-712\"}\n");
     const requestPath = path.join(root, ".workbench", "request.json");
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
@@ -104,6 +106,7 @@ describe("built-in Workbench adapters", () => {
     const seenRequests: WorkbenchAgentTurnRequest[] = [];
     const agentExecutor = vi.fn(async (request: WorkbenchAgentTurnRequest) => {
       seenRequests.push(request);
+      await expect(fs.stat(path.join(request.workspaceRoot, ".workbench"))).rejects.toMatchObject({ code: "ENOENT" });
       await fs.writeFile(path.join(request.workspaceRoot, "output", "answer.md"), "agent output\n");
       return {
         output: "agent output",
@@ -114,7 +117,7 @@ describe("built-in Workbench adapters", () => {
           executable: false,
           content: "{\"ok\":true}\n",
         }],
-        metadata: { mocked: true },
+        metadata: { mocked: true, sessionId: "session-test", model: "gpt-5.4-mini" },
         usage: {
           total: {
             provider: "openai/codex",
@@ -153,6 +156,8 @@ describe("built-in Workbench adapters", () => {
       .resolves.toBe("agent output\n");
     await expect(fs.readFile(path.join(root, "output", "skill-summary.md"), "utf8"))
       .resolves.toBe("agent output");
+    await expect(fs.readFile(path.join(root, "output", "agent-session.json"), "utf8"))
+      .resolves.toContain("\"ref\": \"codex:session-test\"");
     const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "skill.run");
     expect(result.usage.runner.provider).toBe("openai/codex");
   });
@@ -380,6 +385,11 @@ describe("built-in Workbench adapters", () => {
     ) as { safeForImprover?: boolean; criteria?: Array<{ id?: string; rationale?: string }> };
     expect(evidenceScorecard.safeForImprover).toBe(true);
     expect(evidenceScorecard.criteria?.map((criterion) => criterion.id).sort()).toEqual(["accuracy", "completeness", "style"]);
+    const publicScorecard = JSON.parse(
+      await fs.readFile(path.join(root, "output", "rubric-scorecard.json"), "utf8"),
+    ) as { safeForImprover?: boolean; criteria?: Array<{ id?: string; rationale?: string }> };
+    expect(publicScorecard.safeForImprover).toBe(true);
+    expect(publicScorecard.criteria?.map((criterion) => criterion.rationale)).toContain("accuracy rationale");
     await expect(fs.readFile(
       path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "result.json"),
       "utf8",

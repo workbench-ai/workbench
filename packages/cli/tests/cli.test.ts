@@ -1038,8 +1038,7 @@ describe("workbench skill-first CLI", () => {
           owner: "alice",
           skill: "private-skill",
           versionId: "v007",
-          installUrl: "https://cloud.test/skills/alice/private-skill",
-          pinnedInstallUrl: "https://cloud.test/skills/alice/private-skill/releases/v007",
+          installHandle: "alice/private-skill",
         },
         result: "planned",
         dryRun: true,
@@ -1069,7 +1068,7 @@ describe("workbench skill-first CLI", () => {
         source: {
           owner: "alice",
           skill: "private-skill",
-          installUrl: "https://cloud.test/skills/alice/private-skill",
+          installHandle: "alice/private-skill",
         },
       });
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -1259,8 +1258,7 @@ describe("workbench skill-first CLI", () => {
     await writeRef(root, "remotes/cloud/published", descendantVersionId);
     await writeRef(root, `remotes/cloud/releases/${descendantVersionId}`, descendantVersionId);
     await writeRef(root, "remotes/cloud/publication/visibility", "private");
-    await writeRef(root, "remotes/cloud/publication/install-url", remoteUrl);
-    await writeRef(root, "remotes/cloud/publication/pinned-install-url", `${remoteUrl}/releases/${descendantVersionId}`);
+    await writeRef(root, "remotes/cloud/publication/install-handle", "alice/lineage-skill");
 
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
@@ -1299,8 +1297,7 @@ describe("workbench skill-first CLI", () => {
     await writeRef(root, "remotes/cloud/published", currentVersionId);
     await writeRef(root, `remotes/cloud/releases/${currentVersionId}`, currentVersionId);
     await writeRef(root, "remotes/cloud/publication/visibility", "private");
-    await writeRef(root, "remotes/cloud/publication/install-url", remoteUrl);
-    await writeRef(root, "remotes/cloud/publication/pinned-install-url", `${remoteUrl}/releases/${currentVersionId}`);
+    await writeRef(root, "remotes/cloud/publication/install-handle", "alice/published-skill");
 
     const rerun = await invoke(["eval", "--rerun", "--dir", root, "--json"]);
     expect(rerun.code, rerun.stdout || rerun.stderr).toBe(0);
@@ -1570,7 +1567,12 @@ describe("workbench skill-first CLI", () => {
       kind: "directory",
       path: "artifacts/job_surface",
       createdAt,
-      files: [{ path: "result.json", kind: "text", encoding: "utf8", content: "user result\n" }],
+      files: [
+        { path: "result.json", kind: "text", encoding: "utf8", content: "user result\n" },
+        { path: "skill-summary.md", kind: "text", encoding: "utf8", content: "Provider answer line one.\nProvider answer line two.\n" },
+        { path: "agent-session.json", kind: "text", encoding: "utf8", content: `${JSON.stringify({ schema: "workbench.agent.session.v1", provider: "codex", sessionId: "session-surface", ref: "codex:session-surface" }, null, 2)}\n` },
+        { path: "rubric-scorecard.json", kind: "text", encoding: "utf8", content: `${JSON.stringify({ schema: "workbench.engine.rubric.evidence.v1", safeForImprover: true, score: 0.75, summary: "Useful answer.", criteria: [{ id: "accuracy", score: 0.5, rationale: "Missed one fact." }] }, null, 2)}\n` },
+      ],
     }));
     await fs.writeFile(path.join(root, ".workbench", "objects", "trace", "trace_job_surface.json"), JSON.stringify({
       id: "trace_job_surface",
@@ -1635,11 +1637,17 @@ describe("workbench skill-first CLI", () => {
       message: "Workbench object not found: job_orphan",
     });
 
-    const listing = stdoutJson<{ result: { files: Array<{ path: string }> } }>(
+    const listing = stdoutJson<{ result: { highlights: Array<{ kind: string; preview?: string; ref?: string; score?: number }>; files: Array<{ path: string }> } }>(
       await invoke(["show", "run_surface", "--dir", root, "--json"]),
     );
     const paths = listing.result.files.map((file) => file.path);
     expect(paths).toContain("cases/case-001/jobs/job_surface/result.json");
+    expect(paths).toContain("cases/case-001/jobs/job_surface/skill-summary.md");
+    expect(listing.result.highlights).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "agent_output", preview: expect.stringContaining("Provider answer line one.") }),
+      expect.objectContaining({ kind: "agent_session", ref: "codex:session-surface" }),
+      expect.objectContaining({ kind: "rubric_scorecard", score: 0.75 }),
+    ]));
     expect(paths.filter((entry) => entry.endsWith("/result.json"))).toEqual([
       "cases/case-001/jobs/job_surface/result.json",
     ]);
@@ -1648,6 +1656,10 @@ describe("workbench skill-first CLI", () => {
     const human = await invoke(["show", "run_surface", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
     expect(human.stdout).toContain("evidence\trun=run_surface\tjobs=job_surface\tstatus=succeeded");
+    expect(human.stdout).toContain("Output cases/case-001/jobs/job_surface/skill-summary.md:");
+    expect(human.stdout).toContain("Provider answer line one.");
+    expect(human.stdout).toContain("Session cases/case-001/jobs/job_surface/agent-session.json: codex:session-surface");
+    expect(human.stdout).toContain("Rubric cases/case-001/jobs/job_surface/rubric-scorecard.json: score=0.750 summary=Useful answer.");
     expect(human.stdout).not.toContain("job:run_surface:job_surface");
   });
 
@@ -3219,8 +3231,7 @@ describe("workbench skill-first CLI", () => {
     const publishedRefs = {
       published: baseVersion.id,
       [`releases/${baseVersion.id}`]: baseVersion.id,
-      "publication/install-url": "https://cloud.test/skills/alice/cloud-skill",
-      "publication/pinned-install-url": `https://cloud.test/skills/alice/cloud-skill/releases/${baseVersion.id}`,
+      "publication/install-handle": "alice/cloud-skill",
       "publication/visibility": "public",
     };
     let remotePack = { ...emptyObjectPack(createdAt), refs: publishedRefs };
@@ -3488,8 +3499,7 @@ describe("workbench skill-first CLI", () => {
         current: improvedVersionId,
         published: baseVersion.id,
         [`releases/${baseVersion.id}`]: baseVersion.id,
-        "publication/install-url": "https://cloud.test/skills/alice/cloud-skill",
-        "publication/pinned-install-url": `https://cloud.test/skills/alice/cloud-skill/releases/${baseVersion.id}`,
+        "publication/install-handle": "alice/cloud-skill",
         "publication/visibility": "public",
       },
       versions: [improvedVersion],
@@ -3921,8 +3931,9 @@ describe("workbench skill-first CLI", () => {
           url: "https://cloud.test/skills/acme/earnings-prep",
         }),
         installHandle: "acme/earnings-prep",
-        installUrl: "https://cloud.test/skills/acme/earnings-prep",
       });
+      expect(stdoutJson(first)).not.toHaveProperty("installUrl");
+      expect(stdoutJson(first)).not.toHaveProperty("pinnedInstallUrl");
       const remotesYaml = await fs.readFile(path.join(root, ".workbench", "remotes.yaml"), "utf8");
       expect(remotesYaml).toContain(fileRemoteUrl);
       expect(remotesYaml).not.toContain("cloud-1:");
@@ -3939,8 +3950,9 @@ describe("workbench skill-first CLI", () => {
           url: "https://cloud.test/skills/acme/earnings-prep",
         }),
         installHandle: "acme/earnings-prep",
-        installUrl: "https://cloud.test/skills/acme/earnings-prep",
       });
+      expect(stdoutJson(second)).not.toHaveProperty("installUrl");
+      expect(stdoutJson(second)).not.toHaveProperty("pinnedInstallUrl");
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -4048,9 +4060,10 @@ describe("workbench skill-first CLI", () => {
       const publishHuman = await invoke(["publish", "--dir", root]);
       expect(publishHuman.code, publishHuman.stdout || publishHuman.stderr).toBe(0);
       expect(publishHuman.stdout).toContain("Published ");
-      expect(publishHuman.stdout).toContain("Install URL: https://cloud.test/skills/alice/progress-skill");
-      expect(publishHuman.stdout).toContain("Pinned release URL: https://cloud.test/skills/alice/progress-skill/releases/");
       expect(publishHuman.stdout).toContain("next: workbench install alice/progress-skill");
+      expect(publishHuman.stdout).not.toContain("Install URL:");
+      expect(publishHuman.stdout).not.toContain("Pinned release URL:");
+      expect(publishHuman.stdout).not.toContain("https://cloud.test/skills/alice/progress-skill");
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -4317,6 +4330,53 @@ describe("workbench skill-first CLI", () => {
       ]));
   });
 
+  test("install --for all reports mixed unchanged and installed targets", async () => {
+    const root = await makeTempRoot("workbench-cli-install-all-mixed-");
+    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
+    const previousCwd = process.cwd();
+    vi.stubEnv("WORKBENCH_CONFIG", configPath);
+    vi.stubEnv("WORKBENCH_CURRENT_AGENT", "codex");
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "install-token",
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      schema: "workbench.source.snapshot.v1",
+      owner: "alice",
+      name: "private-skill",
+      versionId: "v009",
+      files: [{
+        path: "SKILL.md",
+        kind: "text",
+        encoding: "utf8",
+        executable: false,
+        content: privateSkillMarkdown,
+      }],
+    })));
+
+    process.chdir(root);
+    try {
+      const codexOnly = await invoke(["install", "alice/private-skill", "--for", "codex", "--json"]);
+      expect(codexOnly.code, codexOnly.stdout || codexOnly.stderr).toBe(0);
+      expect(stdoutJson(codexOnly)).toMatchObject({
+        result: "installed",
+        targets: [expect.objectContaining({ target: "codex", result: "installed", filesCopied: 1 })],
+      });
+
+      const mixed = await invoke(["install", "alice/private-skill", "--for", "all"]);
+      expect(mixed.code, mixed.stdout || mixed.stderr).toBe(0);
+      expect(mixed.stdout).toContain("Installed private-skill: codex folder unchanged; claude folder installed (1 file).");
+      expect(mixed.stdout).not.toContain("Installed private-skill for codex folder, claude folder");
+      await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8"))
+        .resolves.toBe(privateSkillMarkdown);
+      await expect(fs.readFile(path.join(root, ".claude", "skills", "private-skill", "SKILL.md"), "utf8"))
+        .resolves.toBe(privateSkillMarkdown);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
   test("login no-open and wait emit one structured document per command", async () => {
     const root = await makeTempRoot("workbench-cli-login-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
@@ -4400,7 +4460,7 @@ describe("workbench skill-first CLI", () => {
     const provider = await invoke(["login", "codex", "--method", "api-key", "--json"]);
     expect(provider.code, provider.stdout || provider.stderr).toBe(0);
     expect(stdoutJson(provider)).toMatchObject({
-      workbenchCloud: {
+      remoteAdapterAuth: {
         sync: "skipped",
         reason: "not_authenticated",
       },
@@ -4691,7 +4751,7 @@ describe("workbench skill-first CLI", () => {
           method: "api-key",
           status: "connected",
         },
-        workbenchCloud: { status: "authenticated", sync: "uploaded" },
+        remoteAdapterAuth: { status: "authenticated", sync: "uploaded" },
       });
       expect(fetchMock).toHaveBeenCalledOnce();
     } finally {
@@ -5216,8 +5276,8 @@ describe("workbench skill-first CLI", () => {
       tokenRemoved: false,
       adapterAuth: "unchanged",
     });
-	    expect(fetchMock).toHaveBeenCalledTimes(1);
-	  });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 
   test("provider logout keeps local disconnect successful when remote auth is gone", async () => {
     const root = await makeTempRoot("workbench-cli-provider-logout-auth-");
@@ -5255,7 +5315,7 @@ describe("workbench skill-first CLI", () => {
       ok: true,
       provider: "codex",
       localAdapter: { adapter: "codex", profile: "default", status: "disconnected" },
-      workbenchCloud: {
+      remoteAdapterAuth: {
         status: "not_authenticated",
         sync: "skipped",
         reason: "not_authenticated",
@@ -5767,7 +5827,7 @@ describe("workbench skill-first CLI", () => {
           method: "api-key",
           status: "connected",
         },
-        workbenchCloud: {
+        remoteAdapterAuth: {
           status: "not_authenticated",
           sync: "skipped",
           reason: "not_authenticated",

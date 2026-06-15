@@ -386,8 +386,7 @@ export interface WorkbenchStatusSnapshot {
       status: "published" | "unpublished";
       visibility?: string;
       versionId?: string;
-      installUrl?: string;
-      pinnedInstallUrl?: string;
+      installHandle?: string;
     };
   }>;
   auth?: {
@@ -453,8 +452,7 @@ export interface WorkbenchInspectionSnapshot {
 
 export interface WorkbenchPublication {
   versionId: string;
-  installUrl: string;
-  pinnedInstallUrl: string;
+  installHandle: string;
 }
 
 export interface WorkbenchObjectPack {

@@ -128,6 +128,33 @@ describe("Workbench CLI progress projection", () => {
       "",
     ].join("\n"));
   });
+
+  test("prints local inspection guidance while provider-backed work is running", () => {
+    const stream = new MemoryStream();
+    const renderer = createProgressRenderer({ stderr: stream, heartbeatMs: 60_000 });
+    const running = progressSnapshotFromRuns({
+      command: "eval",
+      location: "local",
+      phase: "running",
+      runs: [run({ id: "run_local", status: "running" })],
+      jobs: [job({ id: "job_local", runId: "run_local", status: "running" })],
+      startedAtMs: 0,
+      nowMs: 0,
+    });
+    const heartbeat = { ...running, elapsedMs: 60_000 };
+
+    renderer.render(running);
+    renderer.render({ ...running, elapsedMs: 30_000 });
+    renderer.render(heartbeat);
+
+    expect(stream.value).toBe([
+      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, elapsed 0s.",
+      "workbench eval: inspect current evidence with workbench show run_local.",
+      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, elapsed 1m.",
+      "workbench eval: inspect current evidence with workbench show run_local.",
+      "",
+    ].join("\n"));
+  });
 });
 
 function run(overrides: Partial<WorkbenchRun>): WorkbenchRun {

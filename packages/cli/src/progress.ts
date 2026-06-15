@@ -67,6 +67,7 @@ export function createProgressRenderer(input: {
   let last: ProgressSnapshot | undefined;
   let lastPrintedAtMs: number | undefined;
   let queuedGuidanceRunId: string | undefined;
+  let localGuidanceRunId: string | undefined;
   return {
     render(snapshot, options = {}) {
       const reason = progressRenderReason(last, snapshot, lastPrintedAtMs, heartbeatMs, options.force === true);
@@ -78,6 +79,12 @@ export function createProgressRenderer(input: {
         if (reason === "heartbeat" || queuedGuidanceRunId !== snapshot.runIds[0]) {
           input.stderr.write(`${formatQueuedCloudGuidance(snapshot.command, snapshot.runIds[0])}\n`);
           queuedGuidanceRunId = snapshot.runIds[0];
+        }
+      }
+      if (snapshot.location === "local" && isInspectableLocalPhase(snapshot.phase) && snapshot.runIds[0]) {
+        if (reason === "heartbeat" || localGuidanceRunId !== snapshot.runIds[0]) {
+          input.stderr.write(`${formatInspectableLocalGuidance(snapshot.command, snapshot.runIds[0])}\n`);
+          localGuidanceRunId = snapshot.runIds[0];
         }
       }
       last = snapshot;
@@ -97,6 +104,14 @@ export function formatProgressSnapshot(snapshot: ProgressSnapshot): string {
 
 export function formatQueuedCloudGuidance(command: WorkbenchProgressCommand, runId: string): string {
   return `workbench ${command}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench show ${runId}.`;
+}
+
+export function formatInspectableLocalGuidance(command: WorkbenchProgressCommand, runId: string): string {
+  return `workbench ${command}: inspect current evidence with workbench show ${runId}.`;
+}
+
+function isInspectableLocalPhase(phase: WorkbenchProgressPhase): boolean {
+  return phase === "running" || phase === "improving" || phase === "proof_eval";
 }
 
 function progressPhaseForRuns(

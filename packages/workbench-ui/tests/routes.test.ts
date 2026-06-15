@@ -373,7 +373,7 @@ describe("skill-first Workbench UI helpers", () => {
     expect(html).toContain("SKILL.md");
     expect(html).toContain("What this skill tells the agent to do.");
     // Release and sources live on the versions surface now.
-    expect(html).not.toContain("Install URL");
+    expect(html).not.toContain("Install handle");
     expect(html).not.toContain("Advanced");
   });
 
@@ -385,9 +385,9 @@ describe("skill-first Workbench UI helpers", () => {
     }));
 
     expect(html).toContain("Release");
-    expect(html).toContain("Install URL");
-    expect(html).toContain("/skills/acme/skill");
-    expect(html).toContain("/skills/acme/skill/releases/v002");
+    expect(html).toContain("Install handle");
+    expect(html).toContain("acme/skill");
+    expect(html).not.toContain("Pinned install URL");
     expect(html).toContain("Advanced");
     // Published equals current, so no drift warning.
     expect(html).not.toContain("ahead of the published release");
@@ -774,8 +774,7 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
     },
     publication: {
       versionId: "v002",
-      installUrl: "/skills/acme/skill",
-      pinnedInstallUrl: "/skills/acme/skill/releases/v002",
+      installHandle: "acme/skill",
     },
   };
 }

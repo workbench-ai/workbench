@@ -2819,9 +2819,7 @@ describe("skill-first Workbench runtime", () => {
         if (body.publishVersionId) {
           nextState.refs.published = body.publishVersionId;
           nextState.refs[`releases/${body.publishVersionId}`] = body.publishVersionId;
-          nextState.refs["publication/install-url"] = `${url.origin}/skills/alice/http-skill`;
-          nextState.refs["publication/pinned-install-url"] =
-            `${url.origin}/skills/alice/http-skill/releases/${body.publishVersionId}`;
+          nextState.refs["publication/install-handle"] = "alice/http-skill";
           visibility = body.visibility ?? visibility;
         }
         storedState = nextState;
@@ -2851,8 +2849,8 @@ describe("skill-first Workbench runtime", () => {
     expect(published.version.id).toBe(currentVersionId);
     expect(published.visibility).toBe("private");
     expect(published.installHandle).toBe("alice/http-skill");
-    expect(published.installUrl).toBe("https://cloud.test/skills/alice/http-skill");
-    expect(published.pinnedInstallUrl).toBe(`https://cloud.test/skills/alice/http-skill/releases/${currentVersionId}`);
+    expect(published).not.toHaveProperty("installUrl");
+    expect(published).not.toHaveProperty("pinnedInstallUrl");
     const privatePublishPut = [...putBodies].reverse()
       .find((body) => body.publishVersionId === currentVersionId && body.visibility === "private");
     expect(privatePublishPut?.objectPack.versions).toHaveLength(0);
@@ -2861,17 +2859,16 @@ describe("skill-first Workbench runtime", () => {
     expect(visibility).toBe("private");
     expect(storedState?.refs.published).toBe(currentVersionId);
     expect(storedState?.refs[`releases/${currentVersionId}`]).toBe(currentVersionId);
-    expect(storedState?.refs["publication/install-url"]).toBe("https://cloud.test/skills/alice/http-skill");
+    expect(storedState?.refs["publication/install-handle"]).toBe("alice/http-skill");
     const privateSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     expect(privateSnapshot.publication).toMatchObject({
       versionId: currentVersionId,
-      installUrl: "https://cloud.test/skills/alice/http-skill",
-      pinnedInstallUrl: `https://cloud.test/skills/alice/http-skill/releases/${currentVersionId}`,
+      installHandle: "alice/http-skill",
     });
     expect(privateSnapshot.refs["remotes/origin/published"]).toBe(currentVersionId);
     expect(privateSnapshot.refs[`remotes/origin/releases/${currentVersionId}`]).toBe(currentVersionId);
-    expect(privateSnapshot.refs["remotes/origin/publication/install-url"])
-      .toBe("https://cloud.test/skills/alice/http-skill");
+    expect(privateSnapshot.refs["remotes/origin/publication/install-handle"])
+      .toBe("alice/http-skill");
 
     const publicPublished = await publishWorkbenchVersion({
       dir: root,
@@ -2880,17 +2877,16 @@ describe("skill-first Workbench runtime", () => {
     });
     expect(publicPublished.visibility).toBe("public");
     expect(publicPublished.installHandle).toBe("alice/http-skill");
-    expect(publicPublished.installUrl).toBe("https://cloud.test/skills/alice/http-skill");
-    expect(publicPublished.pinnedInstallUrl).toBe(`https://cloud.test/skills/alice/http-skill/releases/${currentVersionId}`);
+    expect(publicPublished).not.toHaveProperty("installUrl");
+    expect(publicPublished).not.toHaveProperty("pinnedInstallUrl");
     expect(visibility).toBe("public");
     const publicPublicationSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     expect(publicPublicationSnapshot.publication).toMatchObject({
       versionId: currentVersionId,
-      installUrl: "https://cloud.test/skills/alice/http-skill",
-      pinnedInstallUrl: `https://cloud.test/skills/alice/http-skill/releases/${currentVersionId}`,
+      installHandle: "alice/http-skill",
     });
-    expect(publicPublicationSnapshot.refs["remotes/origin/publication/install-url"])
-      .toBe("https://cloud.test/skills/alice/http-skill");
+    expect(publicPublicationSnapshot.refs["remotes/origin/publication/install-handle"])
+      .toBe("alice/http-skill");
     expect(publicPublicationSnapshot.refs["publication/visibility"]).toBe("public");
     expect(publicPublicationSnapshot.refs["remotes/origin/publication/visibility"]).toBe("public");
 

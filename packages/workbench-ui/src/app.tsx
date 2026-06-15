@@ -773,8 +773,7 @@ function ReleaseCard({ snapshot }: { snapshot: WorkbenchInspectionSnapshot }) {
         </div>
         {snapshot.publication ? (
           <div className="grid min-w-0 gap-2">
-            <CopyField label="Install URL" value={snapshot.publication.installUrl} />
-            <CopyField label="Pinned install URL" value={snapshot.publication.pinnedInstallUrl} />
+            <CopyField label="Install handle" value={snapshot.publication.installHandle} />
           </div>
         ) : null}
       </div>

@@ -981,6 +981,7 @@ async function writeAgentSkillOutput(
   if (request.operation !== "skill.run") {
     throw new Error("Agent skill execution results can only complete skill.run operations.");
   }
+  await sealProviderSkillRunWorkspace(request);
   const traceRoot = path.join(request.paths.output, ".workbench", "internal", "agent-skill");
   const agentResult = await executeBuiltInAgentTurn(options.agentExecutor, {
     role: "runner",
@@ -1013,7 +1014,11 @@ async function writeAgentSkillOutput(
       metadata: agentResult.metadata,
     }, null, 2)}\n`,
   };
-  await writeSurfaceFiles(request.paths.output, [trace, ...agentResult.traceFiles]);
+  await writeSurfaceFiles(request.paths.output, [
+    ...agentSessionEvidenceFiles(workload.job.id, adapter.agent.use, agentResult.metadata),
+    trace,
+    ...agentResult.traceFiles,
+  ]);
   const runtime = await importWorkbenchRuntime();
   const usage = runtime.assignUsageRole("runner", agentResult.usage);
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
@@ -1028,6 +1033,55 @@ async function writeAgentSkillOutput(
     },
     ...(usage ? { usage } : {}),
   });
+}
+
+async function sealProviderSkillRunWorkspace(
+  request: WorkbenchAdapterOperationRequest,
+): Promise<void> {
+  await Promise.all([
+    fs.rm(path.join(request.paths.workspace, ".workbench"), { recursive: true, force: true }),
+    request.paths.enginePrivate
+      ? fs.rm(request.paths.enginePrivate, { recursive: true, force: true })
+      : Promise.resolve(),
+    request.paths.traces
+      ? fs.rm(request.paths.traces, { recursive: true, force: true })
+      : Promise.resolve(),
+  ]);
+}
+
+function agentSessionEvidenceFiles(
+  jobId: string,
+  provider: string,
+  metadata: WorkbenchAgentTurnResult["metadata"],
+): SurfaceSnapshotFile[] {
+  const record = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? metadata as Record<string, unknown>
+    : {};
+  const sessionId = typeof record.sessionId === "string" && record.sessionId.trim()
+    ? record.sessionId.trim()
+    : undefined;
+  const providerId = typeof record.providerId === "string" && record.providerId.trim()
+    ? record.providerId.trim()
+    : provider;
+  const model = typeof record.model === "string" && record.model.trim()
+    ? record.model.trim()
+    : undefined;
+  if (!sessionId && !providerId && !model) {
+    return [];
+  }
+  return [
+    jsonSurfaceFile("agent-session.json", {
+      schema: "workbench.agent.session.v1",
+      jobId,
+      provider,
+      providerId,
+      ...(model ? { model } : {}),
+      ...(sessionId ? {
+        sessionId,
+        ref: `${provider}:${sessionId}`,
+      } : {}),
+    }),
+  ];
 }
 
 function buildAgentSkillPrompt(
@@ -1253,6 +1307,7 @@ async function writeRubricEvidenceFiles(args: {
     ...(args.usage ? { usage: args.usage } : {}),
   };
   await writeSurfaceFiles(args.request.paths.output, [
+    jsonSurfaceFile("rubric-scorecard.json", scorecard),
     jsonSurfaceFile(`${root}/scorecard.json`, scorecard),
     ...args.criterionRuns.map((run) =>
       jsonSurfaceFile(`${root}/criteria/${safeInternalPathSegment(run.result.criterion_id)}/result.json`, {

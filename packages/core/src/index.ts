@@ -2783,8 +2783,6 @@ export interface WorkbenchPublishResult {
   version: WorkbenchVersion;
   visibility: WorkbenchPublishVisibility;
   installHandle: string;
-  installUrl: string;
-  pinnedInstallUrl: string;
   dryRun?: boolean;
 }
 
@@ -2809,8 +2807,7 @@ export interface WorkbenchSyncResult {
     status: "published" | "unpublished";
     visibility?: string;
     versionId?: string;
-    installUrl?: string;
-    pinnedInstallUrl?: string;
+    installHandle?: string;
   };
 }
 
@@ -3676,7 +3673,20 @@ export async function prepareWorkbenchCloudImproveRequest(
       skillName: skillBundle.skillName,
       evalHash: runtime.evalSnapshot.hash,
     });
-    if (improvementEvidenceFromTraces(historicalTraces).length === 0) {
+    const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
+    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && (
+      improvementEvidence.length > 0 ||
+      hasNonPerfectTerminalEvalRunForImprove(state, {
+        versionId: base.id,
+        skillName: skillBundle.skillName,
+        skillBundleHash: skillBundle.hash,
+        evalHash: runtime.evalSnapshot.hash,
+        agent: evalAgent,
+      })
+    )) {
+      throw workbenchSkillImproveAdapterRequirementError(evalAgent);
+    }
+    if (improvementEvidence.length === 0) {
       throw workbenchImproveEvidenceRequirementError();
     }
     requireWorkbenchImproveAgentAdapter(evalAgent);
@@ -4467,10 +4477,21 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
   });
   const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
+  if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && (
+    improvementEvidence.length > 0 ||
+    hasNonPerfectTerminalEvalRunForImprove(state, {
+      versionId: base.id,
+      skillName: skillBundle.skillName,
+      skillBundleHash: skillBundle.hash,
+      evalHash: runtime.evalSnapshot.hash,
+      agent: evalAgent,
+    })
+  )) {
+    throw workbenchSkillImproveAdapterRequirementError(evalAgent);
+  }
   if (improvementEvidence.length === 0) {
     throw workbenchImproveEvidenceRequirementError();
   }
-  requireWorkbenchImproveAgentAdapter(evalAgent);
   const evalSnapshot = runtime.evalSnapshot;
   upsertEvalSnapshotObject(state.evals, evalSnapshot);
   const incumbentRun = latestScoredRun({
@@ -5415,8 +5436,6 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
         version,
         visibility,
         installHandle: workbenchRemoteInstallHandle(sync.remote),
-        installUrl: workbenchRemoteSourceUrl(sync.remote),
-        pinnedInstallUrl: workbenchRemoteReleaseSourceUrl(sync.remote, version.id),
         dryRun: true,
       };
     }
@@ -5438,8 +5457,6 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
       version,
       visibility,
       installHandle: publication.installHandle,
-      installUrl: publication.installUrl,
-      pinnedInstallUrl: publication.pinnedInstallUrl,
     };
   });
 }
@@ -6084,8 +6101,7 @@ function workbenchPublicationForSnapshot(
     return {
       publication: {
         versionId,
-        installUrl: `${parsed.baseUrl}/skills/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}`,
-        pinnedInstallUrl: `${parsed.baseUrl}/skills/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}/releases/${encodeURIComponent(versionId)}`,
+        installHandle: `${parsed.owner}/${parsed.name}`,
       },
     };
   }
@@ -6173,14 +6189,13 @@ function withMergedRemoteTrackingRefs(
 
 function publicationRefsForVersion(
   versionId: string,
-  publication?: { installUrl: string; pinnedInstallUrl: string },
+  publication?: { installHandle: string },
   visibility?: WorkbenchPublishVisibility,
 ): WorkbenchRefs {
   return {
     published: versionId,
     [`releases/${versionId}`]: versionId,
-    ...(publication?.installUrl ? { "publication/install-url": publication.installUrl } : {}),
-    ...(publication?.pinnedInstallUrl ? { "publication/pinned-install-url": publication.pinnedInstallUrl } : {}),
+    ...(publication?.installHandle ? { "publication/install-handle": publication.installHandle } : {}),
     ...(visibility ? { "publication/visibility": visibility } : {}),
   };
 }
@@ -6189,15 +6204,13 @@ function publicationFromRefs(
   refs: WorkbenchRefs,
   versionId: string,
 ): WorkbenchInspectionSnapshot["publication"] | undefined {
-  const installUrl = refs["publication/install-url"];
-  const pinnedInstallUrl = refs["publication/pinned-install-url"];
-  if (!installUrl || !pinnedInstallUrl) {
+  const installHandle = refs["publication/install-handle"];
+  if (!installHandle) {
     return undefined;
   }
   return {
     versionId,
-    installUrl,
-    pinnedInstallUrl,
+    installHandle,
   };
 }
 
@@ -6214,8 +6227,7 @@ function publicationStatusFromRefs(
     status: "published",
     versionId,
     ...(refs[`${prefix}publication/visibility`] ? { visibility: refs[`${prefix}publication/visibility`] } : {}),
-    ...(refs[`${prefix}publication/install-url`] ? { installUrl: refs[`${prefix}publication/install-url`] } : {}),
-    ...(refs[`${prefix}publication/pinned-install-url`] ? { pinnedInstallUrl: refs[`${prefix}publication/pinned-install-url`] } : {}),
+    ...(refs[`${prefix}publication/install-handle`] ? { installHandle: refs[`${prefix}publication/install-handle`] } : {}),
   };
 }
 
@@ -9198,7 +9210,7 @@ async function writeRemotePublishedSource(
   remote: WorkbenchRemote,
   version: WorkbenchVersion,
   options: WorkbenchRemoteWriteOptions,
-): Promise<{ installHandle: string; installUrl: string; pinnedInstallUrl: string }> {
+): Promise<{ installHandle: string }> {
   if (isHttpRemote(remote)) {
     const target = await resolveHttpRemoteSkill(remote, options, options.state);
     if (!target.owner || !target.name) {
@@ -9206,8 +9218,6 @@ async function writeRemotePublishedSource(
     }
     const publication = {
       installHandle: `${target.owner}/${target.name}`,
-      installUrl: `${target.baseUrl}/skills/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}`,
-      pinnedInstallUrl: `${target.baseUrl}/skills/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/releases/${encodeURIComponent(version.id)}`,
     };
     await httpRemoteJson<{ skill: unknown }>(
       target.baseUrl,
@@ -9981,6 +9991,31 @@ function latestScoredRun(args: {
   agentHash: string;
 }): WorkbenchRun | undefined {
   return latestMatchingRun(args, (run) => run.status === "succeeded" && typeof run.score === "number");
+}
+
+function hasNonPerfectTerminalEvalRunForImprove(
+  state: WorkbenchProjectState,
+  args: {
+    versionId: string;
+    skillName: string;
+    skillBundleHash: string;
+    evalHash: string;
+    agent: WorkbenchAgent;
+  },
+): boolean {
+  return latestMatchingRun({
+    runs: state.runs,
+    versionId: args.versionId,
+    skillName: args.skillName,
+    skillBundleHash: args.skillBundleHash,
+    evalHash: args.evalHash,
+    agentName: args.agent.name,
+    agentHash: hashJson(args.agent),
+  }, (run) =>
+    run.kind === "eval" &&
+    isTerminalRunStatus(run.status) &&
+    (run.status !== "succeeded" || (typeof run.score === "number" && run.score < 1))
+  ) !== undefined;
 }
 
 function latestComparableRun(args: {
