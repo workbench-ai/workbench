@@ -597,6 +597,10 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(newStatus).next).toBe(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
     await expect(fs.access(path.join(root, ".workbench", "cases", "case-001", "case.yaml")))
       .rejects.toMatchObject({ code: "ENOENT" });
+    await writePassingCaseTest(root);
+    const caseStatus = await invoke(["status", "--dir", root, "--json"]);
+    expect(caseStatus.code, caseStatus.stdout || caseStatus.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(caseStatus).next).toBe("workbench eval");
     await expect(fs.readFile(path.join(root, ".workbench", "eval.yaml"), "utf8"))
       .resolves.toContain("adapter: rubric");
     await expect(fs.readFile(path.join(root, ".workbench", "agents.yaml"), "utf8"))
@@ -926,6 +930,10 @@ describe("workbench skill-first CLI", () => {
     expect(codexRetry.code, codexRetry.stdout || codexRetry.stderr).toBe(1);
     expect(stdoutJson<{ failedRuns: Array<{ runId: string }> }>(codexRetry).failedRuns[0]?.runId)
       .not.toBe(stdoutJson<{ failedRuns: Array<{ runId: string }> }>(codexResult).failedRuns[0]?.runId);
+    const improveAfterUnscoredAuthFailure = await invoke(["improve", "--dir", codexRoot, "--json"]);
+    expect(improveAfterUnscoredAuthFailure.code, improveAfterUnscoredAuthFailure.stdout || improveAfterUnscoredAuthFailure.stderr).toBe(2);
+    expect(stdoutJson<{ message: string }>(improveAfterUnscoredAuthFailure).message)
+      .toContain("Unscored runtime or auth failures do not qualify.");
 
     const claudeRoot = await makeTempRoot("workbench-cli-eval-claude-auth-");
     expect((await invoke(["new", claudeRoot, "--agent", "claude", "--json"])).code).toBe(0);

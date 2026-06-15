@@ -4439,12 +4439,12 @@ function snapshotHasAnyEvalCase(snapshot: InspectionSnapshot): boolean {
   return (currentVersion?.files ?? []).some(isEvalCaseFile);
 }
 
-function authorEvalCaseCommand(snapshot: InspectionSnapshot | null): string {
+function authorEvalCaseCommand(snapshot: InspectionSnapshot | null, caseIds: ReadonlySet<string> = new Set()): string {
   const currentVersion = snapshot ? snapshotVersionByRef(snapshot, snapshot.status.currentVersionId ?? snapshot.refs.current ?? "") : undefined;
-  const existingCaseIds = new Set((currentVersion?.files ?? []).flatMap((file) => {
+  const existingCaseIds = new Set([...caseIds, ...(currentVersion?.files ?? []).flatMap((file) => {
     const match = isEvalCaseFile(file) ? file.path.match(/^\.workbench\/cases\/([^/]+)\/case\.ya?ml$/u) : null;
     return match?.[1] ? [match[1]] : [];
-  }));
+  })]);
   for (let index = 1; ; index += 1) {
     const id = `case-${String(index).padStart(3, "0")}`;
     if (!existingCaseIds.has(id)) {
@@ -4455,6 +4455,51 @@ function authorEvalCaseCommand(snapshot: InspectionSnapshot | null): string {
 
 function isEvalCaseFile(file: SurfaceSnapshotFile): boolean {
   return file.encoding !== "base64" && /^\.workbench\/cases\/[^/]+\/case\.ya?ml$/u.test(file.path);
+}
+
+interface LiveEvalCaseSummary {
+  any: boolean;
+  workflow: boolean;
+  caseIds: Set<string>;
+}
+
+async function liveEvalCaseSummary(root: string): Promise<LiveEvalCaseSummary> {
+  const casesDir = path.join(root, ".workbench", "cases");
+  const entries = await fs.readdir(casesDir, { withFileTypes: true }).catch(() => []);
+  const caseIds = new Set<string>();
+  let workflow = false;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const caseId = entry.name;
+    const casePath = await firstExistingPath([
+      path.join(casesDir, caseId, "case.yaml"),
+      path.join(casesDir, caseId, "case.yml"),
+    ]);
+    if (!casePath) {
+      continue;
+    }
+    caseIds.add(caseId);
+    const content = await fs.readFile(casePath, "utf8").catch(() => "");
+    if (!/\n\s*smoke:\s*true(?:\s|$)/u.test(`\n${content}`)) {
+      workflow = true;
+    }
+  }
+  return {
+    any: caseIds.size > 0,
+    workflow,
+    caseIds,
+  };
+}
+
+async function firstExistingPath(paths: readonly string[]): Promise<string | null> {
+  for (const filePath of paths) {
+    if (await fs.stat(filePath).then((stat) => stat.isFile(), () => false)) {
+      return filePath;
+    }
+  }
+  return null;
 }
 
 async function statusWithCausalNext(
@@ -4478,8 +4523,9 @@ async function statusWithCausalNext(
     return { ...status, next: `workbench show ${displayRef(lastRun.id)}` };
   }
   const failedRemote = status.remotes.find((remote) => remote.sync.status === "error");
-  const hasWorkflowCase = snapshot ? snapshotHasWorkflowCase(snapshot) : false;
-  const hasAnyEvalCase = snapshot ? snapshotHasAnyEvalCase(snapshot) : false;
+  const liveCases = await liveEvalCaseSummary(status.project.root);
+  const hasWorkflowCase = liveCases.workflow || (snapshot ? snapshotHasWorkflowCase(snapshot) : false);
+  const hasAnyEvalCase = liveCases.any || (snapshot ? snapshotHasAnyEvalCase(snapshot) : false);
   const currentScoredEvalRuns = snapshot && currentVersionId
     ? latestScoredEvalRunsForVersion(snapshot, currentVersionId)
     : [];
@@ -4501,13 +4547,13 @@ async function statusWithCausalNext(
     return { ...status, next: `workbench sync ${failedRemote.name}` };
   }
   if (!hasAnyEvalCase) {
-    return { ...status, next: authorEvalCaseCommand(snapshot) };
+    return { ...status, next: authorEvalCaseCommand(snapshot, liveCases.caseIds) };
   }
   if ((snapshot?.runs.length ?? status.runs.total) === 0) {
     return { ...status, next: "workbench eval" };
   }
   if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
-    return { ...status, next: authorEvalCaseCommand(snapshot) };
+    return { ...status, next: authorEvalCaseCommand(snapshot, liveCases.caseIds) };
   }
   if (!hasCurrentScoredEvalRun) {
     return { ...status, next: "workbench eval" };

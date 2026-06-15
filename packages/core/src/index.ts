@@ -4629,7 +4629,7 @@ function requireWorkbenchImproveAgentAdapter(agent: WorkbenchAgent): void {
 }
 
 export function workbenchImproveEvidenceRequirementMessage(): string {
-  return "workbench improve needs scored below-perfect, failed, or reviewed eval evidence for the selected skill on this eval. Run `workbench eval --rerun` until actionable evidence is recorded, or edit the package source directly.";
+  return "workbench improve needs scored below-perfect, failed, or reviewed eval evidence for the selected skill on this eval. Unscored runtime or auth failures do not qualify. Run `workbench eval --rerun` until actionable evidence is recorded, or edit the package source directly.";
 }
 
 export function workbenchImproveEvidenceRequirementRemediation(): string {
