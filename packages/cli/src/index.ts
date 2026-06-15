@@ -1534,7 +1534,11 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
           budget: intFlag(parsed, "budget"),
         }))
       : undefined;
-    const remote = await cloudPreScheduleStep(command, interrupt, ensureCloudRemoteForExecution(root, parsed));
+    const remote = await cloudPreScheduleStep(
+      command,
+      interrupt,
+      ensureCloudRemoteForExecution(root, parsed, () => renderCloudProgress("preflight")),
+    );
     const source = parseWorkbenchInstallSource(remote.url);
     if (!source) {
       throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote is not a Cloud skill URL: ${remote.url}`, {
@@ -1553,20 +1557,20 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     renderCloudProgress("preflight");
     const core = { dir: root, authToken: token };
     const request = command === "eval"
-      ? await cloudPreScheduleStep(command, interrupt, prepareWorkbenchCloudEvalRequest({
+      ? await cloudPreScheduleStepWithProgress(command, interrupt, prepareWorkbenchCloudEvalRequest({
           ...core,
           skill: stringFlag(parsed, "skills"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
-        }))
+        }), () => renderCloudProgress("preflight"))
       : preparedImproveRequest!;
-    const adapterAuthTargets = await cloudPreScheduleStep(command, interrupt, resolveCloudAdapterAuthTargets({
+    const adapterAuthTargets = await cloudPreScheduleStepWithProgress(command, interrupt, resolveCloudAdapterAuthTargets({
       root,
       command,
       versionId: request.versionId,
       parsed,
       authToken: token,
-    }));
+    }), () => renderCloudProgress("preflight"));
     if (adapterAuthTargets.length > 0) {
       await cloudPreScheduleStepWithProgress(command, interrupt, assertCloudAdapterAuthConnected({
         baseUrl: source.baseUrl,
@@ -1599,10 +1603,29 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     const renderScheduledRunProgress = (): void => {
       renderCloudProgress(cloudProgressPhase(command, runs, []), runs, []);
     };
-    const syncAfterSchedule = await withCloudProgressRendering(
-      syncWorkbenchRemote({ ...core, remote: remote.name }),
-      renderScheduledRunProgress,
-    );
+    const syncAfterSchedule = await Promise.race([
+      withCloudProgressRendering(
+        syncWorkbenchRemote({ ...core, remote: remote.name }),
+        renderScheduledRunProgress,
+      ),
+      interrupt.signal.then(() => null),
+    ]);
+    if (!syncAfterSchedule) {
+      return {
+        core,
+        remote,
+        skillId,
+        initialRunIds,
+        runs,
+        detached: true,
+        startVersionId: request.versionId,
+        source,
+        sync: {
+          before: { pushed: syncBefore.pushed, pulled: syncBefore.pulled, upToDate: syncBefore.upToDate },
+          after: { pushed: syncBefore.pushed, pulled: syncBefore.pulled, upToDate: syncBefore.upToDate },
+        },
+      };
+    }
     const completed = await waitForCloudRuns({
       command,
       core,
@@ -1890,10 +1913,17 @@ async function waitForCloudRuns(input: {
     }));
   };
   while (true) {
-    details = await withCloudProgressRendering(
-      fetchCloudRunDetails(input.source.baseUrl, input.skillId, runIds, details),
-      renderCurrentProgress,
-    );
+    const fetchedDetails = await Promise.race([
+      withCloudProgressRendering(
+        fetchCloudRunDetails(input.source.baseUrl, input.skillId, runIds, details),
+        renderCurrentProgress,
+      ),
+      input.interrupt.signal.then(() => null),
+    ]);
+    if (!fetchedDetails) {
+      return { runs, sync, detached: true };
+    }
+    details = fetchedDetails;
     runs = details.map((detail) => detail.run);
     const jobs = details.flatMap((detail) => detail.jobs);
     input.renderer.render(progressSnapshotFromRuns({
@@ -1904,12 +1934,25 @@ async function waitForCloudRuns(input: {
       jobs,
       startedAtMs: input.startedAtMs,
     }));
-    if (runs.length === runIds.length && runs.every(isTerminalRun)) {
-      sync = await syncWorkbenchRemote({ ...input.core, remote: input.remote.name });
-      return { runs, sync };
-    }
     if (input.interrupt.interrupted) {
       return { runs, sync, detached: true };
+    }
+    if (runs.length === runIds.length && runs.every(isTerminalRun)) {
+      const terminalSync = await Promise.race([
+        withCloudProgressRendering(
+          syncWorkbenchRemote({ ...input.core, remote: input.remote.name }),
+          renderCurrentProgress,
+        ),
+        input.interrupt.signal.then(() => null),
+      ]);
+      if (!terminalSync) {
+        return { runs, sync, detached: true };
+      }
+      sync = terminalSync;
+      if (input.interrupt.interrupted) {
+        return { runs, sync, detached: true };
+      }
+      return { runs, sync };
     }
     if (Date.now() >= deadline) {
       throw new WorkbenchCodedError("cloud_run_pending", "Hosted Workbench run is still queued or running; no terminal result has been reported yet.", {
@@ -2026,7 +2069,11 @@ async function fetchCloudObjectRefs(started: StartedCloudExecution): Promise<Rec
   return response.objectPack?.refs ?? {};
 }
 
-async function ensureCloudRemoteForExecution(root: string, parsed: ParsedArgs): Promise<WorkbenchRemote> {
+async function ensureCloudRemoteForExecution(
+  root: string,
+  parsed: ParsedArgs,
+  renderProgress?: () => void,
+): Promise<WorkbenchRemote> {
   const linked = await linkedCloudRemote(root);
   if (linked) {
     return linked;
@@ -2048,7 +2095,9 @@ async function ensureCloudRemoteForExecution(root: string, parsed: ParsedArgs): 
       exitCode: 1,
     });
   }
+  renderProgress?.();
   remote = await availableCloudRemoteForHostedAutoLink(remote);
+  renderProgress?.();
   const result = await addWorkbenchRemote(remote.name, remote.url, {
     dir: root,
     authToken: token,

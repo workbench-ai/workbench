@@ -2539,9 +2539,10 @@ describe("workbench skill-first CLI", () => {
         runPolls += 1;
         if (runPolls >= 2 && !signalScheduled) {
           signalScheduled = true;
-          setTimeout(() => process.emit("SIGINT"), 0);
+          process.emit("SIGINT");
+          return jsonResponse({ run: succeededRun, jobs: [succeededJob] });
         }
-        return jsonResponse({ run: runningRun });
+        return jsonResponse({ run: runningRun, jobs: [runningJob] });
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         return jsonResponse({ objectPack: remotePack });

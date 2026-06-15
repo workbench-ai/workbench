@@ -88,10 +88,10 @@ Local or command-backed test cases additionally need either a top-level `command
     workbench                     # bare invocation = status + the next useful command
     workbench log                 # one reverse-chronological timeline of versions and runs
     workbench show r4f2           # any object id: run, job, trace, version, artifact, session
-    workbench show r4f2:stderr.log
+    workbench show job_abc:stderr.log
     workbench open                # read-only browser UI over the same snapshot
 
-Three universal read verbs cover all inspection: `status` (where am I — worktree, runs, publication, sync health, auth), `log` (what happened, filterable with `--runs` or `--versions`), and `show` (give me the thing — interpreted run/job evidence, file listings for file-backed objects, or one file via `REF:PATH`). All reads use local committed Workbench state and work without the project write lock, so they remain usable while an eval or improve is running. Network freshness is explicit through `workbench sync cloud`, `publish`, `install`, and hosted command scheduling.
+Three universal read verbs cover all inspection: `status` (where am I — worktree, runs, publication, sync health, auth), `log` (what happened, filterable with `--runs` or `--versions`), and `show` (give me the thing — interpreted run/job evidence, file listings for file-backed objects, or one file via `REF:PATH`). Use `workbench show RUN_ID` first for multi-sample runs; then open a specific job or trace file such as `workbench show JOB_ID:stderr.log`. All reads use local committed Workbench state and work without the project write lock, so they remain usable while an eval or improve is running. Network freshness is explicit through `workbench sync cloud`, `publish`, `install`, and hosted command scheduling.
 
 ## Ergonomic invariants
 
