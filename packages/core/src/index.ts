@@ -3167,14 +3167,15 @@ async function providerReadiness(
   if (state !== "ready") {
     warnings.push(`${capitalize(adapter)} is not ready for provider-backed Workbench runs yet.`);
   }
+  const effectiveNativeAuth = workbenchAuth === "connected" ? "not_required" : nativeAuth;
   return {
     state,
     executable,
     workbenchAuth,
-    nativeAuth,
+    nativeAuth: effectiveNativeAuth,
     setupCommands: providerSetupCommands(adapter, {
       executable,
-      nativeAuth,
+      nativeAuth: effectiveNativeAuth,
       workbenchAuth,
       profile,
       env,
@@ -3203,7 +3204,7 @@ function providerSetupCommands(
   adapter: WorkbenchProviderAgentAdapter,
   readiness: {
     executable: boolean;
-    nativeAuth: "present" | "partial" | "missing";
+    nativeAuth: "present" | "partial" | "missing" | "not_required";
     workbenchAuth: "connected" | "missing";
     profile: string;
     env: Record<string, string | undefined>;
@@ -4128,7 +4129,7 @@ function workbenchSkillImproveAdapterRemediation(agent: WorkbenchAgent): string 
   if (adapter === "codex" || adapter === "claude") {
     return providerAgentSetupCommand(adapter, agent.name);
   }
-  return "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver";
+  return "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver";
 }
 
 function workbenchSkillImproveAdapterRequirementError(agent: WorkbenchAgent): WorkbenchCodedError {

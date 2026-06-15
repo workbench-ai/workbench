@@ -653,7 +653,7 @@ describe("workbench skill-first CLI", () => {
       adapter: "codex",
       readiness: {
         workbenchAuth: "connected",
-        nativeAuth: "missing",
+        nativeAuth: "not_required",
       },
     });
     expect(connectedCodexJson.result.defaultAgentSelection.readiness.setupCommands)
@@ -685,7 +685,7 @@ describe("workbench skill-first CLI", () => {
     }>(connectedClaude);
     expect(connectedClaudeJson.result.defaultAgentSelection.readiness).toMatchObject({
       workbenchAuth: "connected",
-      nativeAuth: "missing",
+      nativeAuth: "not_required",
     });
     expect(connectedClaudeJson.result.defaultAgentSelection.readiness.setupCommands)
       .not.toContain("claude setup-token");
@@ -1180,14 +1180,14 @@ describe("workbench skill-first CLI", () => {
 
     const second = await invoke(["sync", "origin", "--dir", root, "--json"]);
     expect(second.code, second.stdout || second.stderr).toBe(0);
-	    expect(stdoutJson(second)).toMatchObject({
-	      schema: "workbench.cli.sync.v1",
-	      ok: true,
-	      status: "synced",
-	      changed: false,
-	      pushed: 0,
-	      pulled: 0,
-	    });
+    expect(stdoutJson(second)).toMatchObject({
+      schema: "workbench.cli.sync.v1",
+      ok: true,
+      status: "synced",
+      changed: false,
+      pushed: 0,
+      pulled: 0,
+    });
 
     const versionId = stdoutJson<{ entries: Array<{ id: string }> }>(
       await invoke(["log", "--versions", "--dir", root, "--json"]),
@@ -1207,6 +1207,21 @@ describe("workbench skill-first CLI", () => {
       traceIds: [],
       createdAt: "2026-06-11T00:00:00.000Z",
     }));
+    const dryRunActive = await invoke(["sync", "origin", "--dir", root, "--dry-run", "--json"]);
+    expect(dryRunActive.code, dryRunActive.stdout || dryRunActive.stderr).toBe(0);
+    expect(stdoutJson(dryRunActive)).toMatchObject({
+      schema: "workbench.cli.sync.v1",
+      ok: true,
+      status: "dry_run",
+      changed: true,
+      dryRun: true,
+      next: "workbench sync origin",
+      note: "Dry-run checked the remote without updating local sync status; run the next command to reconcile.",
+    });
+    const dryRunActiveHuman = await invoke(["sync", "origin", "--dir", root, "--dry-run"]);
+    expect(dryRunActiveHuman.code, dryRunActiveHuman.stdout || dryRunActiveHuman.stderr).toBe(0);
+    expect(dryRunActiveHuman.stdout).toContain("Dry-run checked the remote without updating local sync status");
+    expect(dryRunActiveHuman.stdout).not.toContain("(up to date)");
     const active = await invoke(["sync", "origin", "--dir", root, "--json"]);
     expect(active.code, active.stdout || active.stderr).toBe(0);
     expect(stdoutJson(active)).toMatchObject({
@@ -1217,7 +1232,7 @@ describe("workbench skill-first CLI", () => {
     const activeHuman = await invoke(["sync", "origin", "--dir", root]);
     expect(activeHuman.code, activeHuman.stdout || activeHuman.stderr).toBe(0);
     expect(activeHuman.stdout).toContain("next: workbench show run_sync_que");
-	  });
+  });
 
   test("diff without a range compares current source to its parent", async () => {
     const root = await makeTempRoot("workbench-cli-diff-default-");
@@ -2189,7 +2204,7 @@ describe("workbench skill-first CLI", () => {
         ok: false,
         code: "usage",
         message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter."),
-        remediation: "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --cloud --agents improver",
+        remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --cloud --agents improver",
       });
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
@@ -4042,7 +4057,11 @@ describe("workbench skill-first CLI", () => {
         ok: false,
         code: "publish_handle_conflict",
         message: `Cloud skill alice-user/${derivedSkill} already exists; refusing to auto-link this local project to it.`,
-        remediation: `workbench publish --as alice-user/${derivedSkill}-2`,
+        remediation: `workbench publish --as alice-user/${derivedSkill}-$(date +%s)`,
+        subject: {
+          suggestedSkill: `${derivedSkill}-2`,
+          suggestedHandle: `alice-user/${derivedSkill}-$(date +%s)`,
+        },
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       await expect(fs.access(path.join(root, ".workbench", "remotes.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -5756,7 +5775,7 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "usage",
       message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter"),
-        remediation: "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver",
+        remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver",
     });
 
     const agentAdd = await invoke([

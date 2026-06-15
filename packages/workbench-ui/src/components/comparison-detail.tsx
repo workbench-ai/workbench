@@ -121,7 +121,7 @@ export function ComparisonDetail({
       <Card size="sm" className="min-w-0">
         <CardHeader>
           <div className="grid min-w-0 gap-1">
-            <CardTitle>Scorecard</CardTitle>
+            <CardTitle>Compare</CardTitle>
             {evaluation ? (
               <p className="text-xs text-muted-foreground">
                 {evaluation.label} / {evaluation.subtitle}

@@ -328,7 +328,7 @@ export interface WorkbenchDefaultAgentSelection {
     state: "ready" | "partial" | "missing" | "deterministic";
     executable?: boolean;
     workbenchAuth?: "connected" | "missing";
-    nativeAuth?: "present" | "partial" | "missing";
+    nativeAuth?: "present" | "partial" | "missing" | "not_required";
     setupCommands: string[];
     warnings: string[];
   };

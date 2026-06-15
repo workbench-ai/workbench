@@ -168,7 +168,7 @@ const PRIMARY_SURFACE_ITEMS: Array<{
   label: string;
   icon: typeof WorkflowIcon;
 }> = [
-  { value: "scorecard", label: "Scorecard", icon: ChartColumnIcon },
+  { value: "scorecard", label: "Compare", icon: ChartColumnIcon },
   { value: "versions", label: "Versions", icon: HistoryIcon },
   { value: "files", label: "Files", icon: FolderOpenIcon },
 ];
@@ -1919,7 +1919,7 @@ function surfaceLabel(surface: WorkbenchSurfaceRoute): string {
   if (surface.kind === "files") {
     return "Files";
   }
-  return "Scorecard";
+  return "Compare";
 }
 
 function useJobEvidence({

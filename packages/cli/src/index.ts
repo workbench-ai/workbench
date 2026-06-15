@@ -584,7 +584,12 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         }),
         { hint: syncDryRun ? "No files have been written." : "Read commands remain available: workbench log --runs." },
       );
-      const next = result.dryRun ? null : await syncNextCommand(core, beforeRuns);
+      const next = result.dryRun
+        ? syncChanged(result) ? `workbench sync ${result.remote.name}` : null
+        : await syncNextCommand(core, beforeRuns);
+      const dryRunNote = result.dryRun && syncChanged(result)
+        ? "Dry-run checked the remote without updating local sync status; run the next command to reconcile."
+        : undefined;
       return emitResult("workbench.cli.sync.v1", {
         remote: result.remote as unknown as Json,
         status: result.dryRun ? "dry_run" : "synced",
@@ -594,8 +599,10 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         publication: result.publication as unknown as Json,
         next: next as Json,
         ...(result.dryRun ? { dryRun: true } : {}),
+        ...(dryRunNote ? { note: dryRunNote } : {}),
       }, parsed, io, () => [
-        `${result.dryRun ? "Would sync" : "Synced"} ${result.remote.name}: pushed ${result.pushed}, pulled ${result.pulled}${result.upToDate ? " (up to date)" : ""}.`,
+        `${result.dryRun ? "Would sync" : "Synced"} ${result.remote.name}: pushed ${result.pushed}, pulled ${result.pulled}${result.upToDate && !result.dryRun ? " (up to date)" : ""}.`,
+        ...(dryRunNote ? [dryRunNote] : []),
         ...(next ? [`next: ${next}`] : []),
       ].join("\n"));
     }
@@ -3933,12 +3940,14 @@ async function assertDerivedCloudHandleAvailable(
     return;
   }
   const suggestedSkill = suggestedAvailableCloudSkillName(source.owner, source.skill, listed.skills ?? []);
+  const collisionResistantSkill = `${source.skill}-$(date +%s)`;
   throw new WorkbenchCodedError(options.code, `Cloud skill ${source.owner}/${source.skill} already exists; refusing to auto-link this local project to it.`, {
-    remediation: options.remediation ?? `workbench publish --as ${source.owner}/${suggestedSkill}`,
+    remediation: options.remediation ?? `workbench publish --as ${source.owner}/${collisionResistantSkill}`,
     subject: {
       owner: source.owner,
       skill: source.skill,
       suggestedSkill,
+      suggestedHandle: `${source.owner}/${collisionResistantSkill}`,
       url: `${source.baseUrl}/skills/${encodeURIComponent(source.owner)}/${encodeURIComponent(source.skill)}`,
     },
     exitCode: 2,

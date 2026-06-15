@@ -106,7 +106,7 @@ describe("skill-first Workbench UI helpers", () => {
     expect(html).toContain(">Workbench</span>");
     expect(html).toContain("Account navigation");
     expect(html).toContain("Workbench views");
-    expect(html).toContain("Scorecard");
+    expect(html).toContain("Compare");
     expect(html).toContain("Versions");
     expect(html).toContain("Skill");
     expect(html).toContain("0.920");
@@ -212,7 +212,7 @@ describe("skill-first Workbench UI helpers", () => {
       routeBasePath: "/skills/alice/earnings",
     }));
 
-    expect(html).toContain("Scorecard");
+    expect(html).toContain("Compare");
     expect(html).toContain("Evaluation 1");
     expect(html).toContain("2 cases / rubric grader");
     expect(html).toContain("Skill version");
@@ -434,7 +434,7 @@ describe("skill-first Workbench UI helpers", () => {
       initialRoute: createScorecardRoute({ kind: "run", runId: "run_eval" }),
       routeBasePath: "/skills/alice/earnings",
     }));
-    expect(runHtml).toContain("Scorecard");
+    expect(runHtml).toContain("Compare");
     expect(runHtml).toContain("Active skill Version 2 run");
     expect(runHtml).toContain("data-testid=\"workbench-detail-pane\"");
     expect(runHtml).toContain("Case results");
@@ -444,7 +444,7 @@ describe("skill-first Workbench UI helpers", () => {
     expect(runHtml).not.toContain("Parent run");
     expect(runHtml).not.toContain("/traces/");
     expect(runHtml).not.toContain("/artifacts/");
-    expect(runHtml).toContain("href=\"/skills/alice/earnings\">Scorecard</a>");
+    expect(runHtml).toContain("href=\"/skills/alice/earnings\">Compare</a>");
   });
 
   test("renders cases as dedicated panes with a run breadcrumb", () => {
