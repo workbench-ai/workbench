@@ -14,6 +14,7 @@ import {
   removeWorkbenchRemote,
   syncWorkbenchRemote,
   WorkbenchCodedError,
+  workbenchStatus,
   workbenchStatusSnapshot,
   type WorkbenchObjectPack,
   type WorkbenchRun,
@@ -135,6 +136,7 @@ describe("remote state lifecycle", () => {
     expect(record.remote).toBe("origin");
     expect(record.status).toBe("synced");
     expect(record.lastError).toBeNull();
+    expect(typeof record.localHash).toBe("string");
     expect(typeof record.lastSyncedAt).toBe("string");
     expect(typeof record.lastAttemptAt).toBe("string");
 
@@ -147,6 +149,29 @@ describe("remote state lifecycle", () => {
     expect(snapshot.runs.total).toBe(0);
     expect(snapshot.next).toBeNull();
     expect(snapshot.worktree).not.toHaveProperty("hasUnversionedChanges");
+  });
+
+  test("status reports local changes after a successful sync when local objects move", async () => {
+    const root = await makeTempRoot("workbench-sync-local-changes-");
+    const remote = await makeTempRoot("workbench-sync-local-changes-remote-");
+    await initWorkbenchSkill({ dir: root });
+    await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    await syncWorkbenchRemote({ dir: root });
+
+    const synced = await workbenchStatusSnapshot({ dir: root });
+    expect(synced.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("up_to_date");
+
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nUnsynced local edit.\n");
+    await workbenchStatus({ dir: root });
+
+    const changed = await workbenchStatusSnapshot({ dir: root });
+    expect(changed.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("local_changes");
+    const dryRun = await syncWorkbenchRemote({ dir: root, dryRun: true });
+    expect(dryRun.pushed).toBeGreaterThan(0);
+
+    await syncWorkbenchRemote({ dir: root });
+    const resynced = await workbenchStatusSnapshot({ dir: root });
+    expect(resynced.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("up_to_date");
   });
 
   test("file remotes are sync-only and reject publication", async () => {

@@ -1126,12 +1126,18 @@ async function handleLogin(parsed: ParsedArgs, io: CliIo): Promise<number> {
     ...(username ? { username } : {}),
   });
   await clearPendingDeviceAuthorization();
+  const adapterAuth = await uploadConnectedAdapterConnections(parsed);
   return emitResult("workbench.cli.login.v1", {
     status: "authenticated",
     baseUrl,
     ...(username ? { username } : {}),
     ...(token.expires_in !== undefined ? { expiresIn: token.expires_in } : {}),
-  }, parsed, io, () => `Workbench Cloud: authenticated${username ? ` as ${username}` : ""}\nWorkbench API: ${baseUrl}`);
+    adapterAuth: adapterAuth as unknown as Json,
+  }, parsed, io, () => [
+    `Workbench Cloud: authenticated${username ? ` as ${username}` : ""}`,
+    `Workbench API: ${baseUrl}`,
+    formatAdapterAuthUploadSummary(adapterAuth),
+  ].filter(Boolean).join("\n"));
 }
 
 async function handleLogout(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -2887,6 +2893,72 @@ async function uploadAdapterConnection(bundle: WorkbenchAdapterAuthBundle, parse
   return { status: "authenticated", sync: "uploaded" };
 }
 
+interface AdapterAuthUploadSummary {
+  uploaded: Array<{ adapter: string; slot?: string; profile: string; version: number }>;
+  skipped: Array<{ adapter: string; slot?: string; profile: string; reason: string }>;
+}
+
+async function uploadConnectedAdapterConnections(parsed: ParsedArgs): Promise<AdapterAuthUploadSummary> {
+  const store = localWorkbenchAdapterAuthStore(adapterAuthStoreRoot());
+  const uploaded: AdapterAuthUploadSummary["uploaded"] = [];
+  const skipped: AdapterAuthUploadSummary["skipped"] = [];
+  const statuses = await store.listStatus().catch(() => []);
+  for (const status of statuses) {
+    if (status.status !== "connected") {
+      continue;
+    }
+    const target = {
+      adapterId: status.adapterId,
+      ...(status.slot ? { slot: status.slot } : {}),
+      profile: status.profile,
+    };
+    const bundle = await store.get(target);
+    if (!bundle) {
+      skipped.push({
+        adapter: status.adapterId,
+        ...(status.slot ? { slot: status.slot } : {}),
+        profile: status.profile,
+        reason: "unavailable",
+      });
+      continue;
+    }
+    const remote = await uploadAdapterConnection(bundle, parsed);
+    if (remote.sync === "uploaded") {
+      uploaded.push({
+        adapter: bundle.adapterId,
+        ...(bundle.slot ? { slot: bundle.slot } : {}),
+        profile: bundle.profile,
+        version: bundle.version,
+      });
+    } else {
+      skipped.push({
+        adapter: bundle.adapterId,
+        ...(bundle.slot ? { slot: bundle.slot } : {}),
+        profile: bundle.profile,
+        reason: remote.reason ?? "skipped",
+      });
+    }
+  }
+  return { uploaded, skipped };
+}
+
+function formatAdapterAuthUploadSummary(summary: AdapterAuthUploadSummary): string | null {
+  if (summary.uploaded.length === 0 && summary.skipped.length === 0) {
+    return null;
+  }
+  const uploaded = summary.uploaded.length > 0
+    ? `uploaded ${summary.uploaded.map(formatAdapterAuthUploadTarget).join(", ")}`
+    : "";
+  const skipped = summary.skipped.length > 0
+    ? `skipped ${summary.skipped.map((entry) => `${formatAdapterAuthUploadTarget(entry)} (${entry.reason})`).join(", ")}`
+    : "";
+  return `Provider auth: ${[uploaded, skipped].filter(Boolean).join("; ")}.`;
+}
+
+function formatAdapterAuthUploadTarget(target: { adapter: string; slot?: string; profile: string }): string {
+  return `${target.adapter}${target.slot ? `/${target.slot}` : ""}/${target.profile}`;
+}
+
 async function deleteAdapterConnectionRemote(target: ReturnType<typeof parseWorkbenchAdapterAuthTarget>, parsed: ParsedArgs): Promise<{
   status: "authenticated" | "not_authenticated";
   sync: "deleted" | "skipped";
@@ -3581,10 +3653,11 @@ function dirFlag(parsed: ParsedArgs): string | undefined {
   return stringFlag(parsed, "dir");
 }
 
-async function coreOptions(parsed: ParsedArgs): Promise<{ dir?: string; authToken?: string }> {
+async function coreOptions(parsed: ParsedArgs): Promise<{ dir?: string; authToken?: string; adapterAuthStoreRoot?: string }> {
   return {
     dir: dirFlag(parsed),
     authToken: await workbenchCloudToken(),
+    adapterAuthStoreRoot: adapterAuthStoreRoot(),
   };
 }
 
@@ -4406,6 +4479,7 @@ async function statusWithCausalNext(
   }
   const failedRemote = status.remotes.find((remote) => remote.sync.status === "error");
   const hasWorkflowCase = snapshot ? snapshotHasWorkflowCase(snapshot) : false;
+  const hasAnyEvalCase = snapshot ? snapshotHasAnyEvalCase(snapshot) : false;
   const currentScoredEvalRuns = snapshot && currentVersionId
     ? latestScoredEvalRunsForVersion(snapshot, currentVersionId)
     : [];
@@ -4426,11 +4500,14 @@ async function statusWithCausalNext(
   if (failedRemote) {
     return { ...status, next: `workbench sync ${failedRemote.name}` };
   }
-  if (!hasWorkflowCase) {
+  if (!hasAnyEvalCase) {
     return { ...status, next: authorEvalCaseCommand(snapshot) };
   }
   if ((snapshot?.runs.length ?? status.runs.total) === 0) {
     return { ...status, next: "workbench eval" };
+  }
+  if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
+    return { ...status, next: authorEvalCaseCommand(snapshot) };
   }
   if (!hasCurrentScoredEvalRun) {
     return { ...status, next: "workbench eval" };

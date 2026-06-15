@@ -444,6 +444,7 @@ export interface WorkbenchCheckResult {
 export interface WorkbenchExecutionJobOptions {
   sandboxBackend: string;
   loadLocalAdapterAuthProfiles?: boolean;
+  adapterAuthStoreRoot?: string;
   adapterAuthUpdateSink?: (profiles: readonly WorkbenchAdapterAuthBundle[]) => Promise<void>;
   createSandboxPlaneForBackend?: (
     backend: string,
@@ -464,11 +465,12 @@ export async function executeWorkbenchExecutionJob(
       execution,
       args,
       Boolean(options.loadLocalAdapterAuthProfiles),
+      options.adapterAuthStoreRoot,
     );
     const adapterAuthUpdateSink =
       options.adapterAuthUpdateSink ??
       (options.loadLocalAdapterAuthProfiles
-        ? persistLocalAdapterAuthProfileUpdates
+        ? async (profiles) => await persistLocalAdapterAuthProfileUpdates(profiles, options.adapterAuthStoreRoot)
         : undefined);
     const runtimeArgs =
       adapterAuthProfiles.length > 0
@@ -483,7 +485,7 @@ export async function executeWorkbenchExecutionJob(
         return await executeWorkbenchExecutionJobWithResolvedAuth(runtimeArgs, options, startedAt);
       } catch (error) {
         if (options.loadLocalAdapterAuthProfiles) {
-          await markAdapterAuthProfilesReauthRequired(adapterAuthProfiles, error);
+          await markAdapterAuthProfilesReauthRequired(adapterAuthProfiles, error, options.adapterAuthStoreRoot);
         }
         throw error;
       }
@@ -956,6 +958,7 @@ async function explicitAdapterAuthProfilesForExecution(
   execution: WorkbenchExecutionSpec,
   args: WorkbenchExecutionRuntimeInput,
   loadLocalAdapterProfiles: boolean,
+  adapterAuthStoreRoot?: string,
 ): Promise<WorkbenchAdapterAuthBundle[]> {
   const required = requiredAdapterAuthTargetsForExecution(execution, args);
   if (required.length === 0) {
@@ -969,7 +972,7 @@ async function explicitAdapterAuthProfilesForExecution(
   ]));
   const missing = required.filter((target) => !providedByTarget.has(adapterAuthTargetKey(target)));
   if (missing.length > 0 && loadLocalAdapterProfiles) {
-    const store = localWorkbenchAdapterAuthStore();
+    const store = localWorkbenchAdapterAuthStore(adapterAuthStoreRoot);
     const loaded = await Promise.all(required.map(async (target) => await store.get(target)));
     const missingLoaded = loaded.findIndex((bundle) => !bundle);
     if (missingLoaded >= 0) {
@@ -986,6 +989,7 @@ async function explicitAdapterAuthProfilesForExecution(
 async function markAdapterAuthProfilesReauthRequired(
   profiles: readonly WorkbenchAdapterAuthBundle[],
   error: unknown,
+  adapterAuthStoreRoot?: string,
 ): Promise<void> {
   const adapterId = adapterAuthFailureAdapterId(error);
   if (!adapterId) {
@@ -995,7 +999,7 @@ async function markAdapterAuthProfilesReauthRequired(
   if (affected.length === 0) {
     return;
   }
-  const store = localWorkbenchAdapterAuthStore();
+  const store = localWorkbenchAdapterAuthStore(adapterAuthStoreRoot);
   await Promise.all(affected.map(async (profile) =>
     await store.markReauthRequired(profile, error instanceof Error ? error.message : String(error))
   ));
@@ -1083,8 +1087,9 @@ function adapterAuthTargetKey(target: {
 
 async function persistLocalAdapterAuthProfileUpdates(
   profiles: readonly WorkbenchAdapterAuthBundle[],
+  adapterAuthStoreRoot?: string,
 ): Promise<void> {
-  const store = localWorkbenchAdapterAuthStore();
+  const store = localWorkbenchAdapterAuthStore(adapterAuthStoreRoot);
   for (const profile of profiles) {
     await store.put(profile);
   }
@@ -3298,10 +3303,12 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
       next: "workbench new .",
     };
   }
-  const [snapshot, syncStates] = await Promise.all([
+  const [snapshot, syncStates, localState] = await Promise.all([
     createWorkbenchReadOnlyInspectionSnapshot(options),
     readRemoteSyncStates(root).catch(() => []),
+    loadStateReadOnlyWithRetry(root),
   ]);
+  const localSyncHash = remoteSyncLocalHash(localState);
   const currentVersionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
   const lastRun = [...snapshot.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   const syncByRemote = new Map(syncStates.map((entry) => [entry.remote, entry]));
@@ -3310,7 +3317,11 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
     const sync = syncRecord && syncRecord.url === remote.url ? syncRecord : undefined;
     const syncStatus: WorkbenchStatusSnapshot["remotes"][number]["sync"] = sync
       ? {
-          status: sync.status === "error" ? "error" : "up_to_date",
+          status: sync.status === "error"
+            ? "error"
+            : sync.localHash && sync.localHash !== localSyncHash
+              ? "local_changes"
+              : "up_to_date",
           ...(sync.lastSyncedAt ? { lastSyncedAt: sync.lastSyncedAt } : {}),
           lastAttemptAt: sync.lastAttemptAt,
           ...(sync.lastError ? { lastError: sync.lastError } : { lastError: null }),
@@ -3510,6 +3521,7 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
         const run = await executeWorkbenchEvaluationRun({
           root,
           state,
+          adapterAuthStoreRoot: options.adapterAuthStoreRoot,
           version,
           skillBundle,
           evalSnapshot,
@@ -4468,6 +4480,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
   const improvement = await createSkillImprovementPatch({
     root,
     state,
+    adapterAuthStoreRoot: options.adapterAuthStoreRoot,
     agent: evalAgent,
     base,
     evalHash: evalSnapshot.hash,
@@ -4502,6 +4515,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
   const run = await executeWorkbenchEvaluationRun({
     root,
     state,
+    adapterAuthStoreRoot: options.adapterAuthStoreRoot,
     version,
     skillBundle: outputSkillBundle,
     evalSnapshot,
@@ -5353,6 +5367,7 @@ export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}):
         remote: remote.name,
         url: remote.url,
         status: "synced",
+        localHash: remoteSyncLocalHash(state),
         lastSyncedAt: now(),
         lastAttemptAt: attemptAt,
         lastError: null,
@@ -6344,6 +6359,15 @@ function objectPackSize(pack: WorkbenchObjectPack): number {
     pack.lineage.length;
 }
 
+function objectPackSyncHash(pack: WorkbenchObjectPack): string {
+  const { createdAt: _createdAt, ...stablePack } = pack;
+  return hashJson(stablePack);
+}
+
+function remoteSyncLocalHash(state: WorkbenchProjectState): string {
+  return objectPackSyncHash(exportObjectPackForRemote(state));
+}
+
 function objectPackDeltaForRemoteWrite(
   merged: WorkbenchObjectPack,
   remote: WorkbenchObjectPack,
@@ -6463,6 +6487,7 @@ function localWorkbenchExecutionProgressTarget(args: {
 async function executeWorkbenchEvaluationRun(args: {
   root: string;
   state: WorkbenchProjectState;
+  adapterAuthStoreRoot?: string;
   version: WorkbenchVersion;
   skillBundle: WorkbenchSkillBundleSnapshot;
   evalSnapshot: WorkbenchEvalSnapshot;
@@ -6631,6 +6656,7 @@ async function executeWorkbenchEvaluationRun(args: {
         }, {
           sandboxBackend: DOCKER_SANDBOX_BACKEND,
           loadLocalAdapterAuthProfiles: isProviderBackedSkillEvalAgent(args.agent),
+          adapterAuthStoreRoot: args.adapterAuthStoreRoot,
         });
       },
     });
@@ -7486,6 +7512,7 @@ interface SkillImprovementResult {
 async function createSkillImprovementPatch(args: {
   root: string;
   state: WorkbenchProjectState;
+  adapterAuthStoreRoot?: string;
   agent: WorkbenchAgent;
   base: WorkbenchVersion;
   evalHash: string;
@@ -7499,6 +7526,7 @@ async function createSkillImprovementPatch(args: {
   return executeAdapterBackedSkillImprovementPatch({
     root: args.root,
     state: args.state,
+    adapterAuthStoreRoot: args.adapterAuthStoreRoot,
     agent: args.agent,
     base: args.base,
     evalHash: args.evalHash,
@@ -7510,6 +7538,7 @@ async function createSkillImprovementPatch(args: {
 async function executeAdapterBackedSkillImprovementPatch(args: {
   root: string;
   state: WorkbenchProjectState;
+  adapterAuthStoreRoot?: string;
   agent: WorkbenchAgent;
   base: WorkbenchVersion;
   evalHash: string;
@@ -7533,6 +7562,7 @@ async function executeAdapterBackedSkillImprovementPatch(args: {
   const completed = await executeWorkbenchExecutionJob(runtimeInput, {
     sandboxBackend: DOCKER_SANDBOX_BACKEND,
     loadLocalAdapterAuthProfiles: isProviderBackedSkillEvalAgent(args.agent),
+    adapterAuthStoreRoot: args.adapterAuthStoreRoot,
   });
   if (completed.status !== "succeeded") {
     throw new WorkbenchCodedError("improve_failed", `Improve adapter failed: ${completed.error ? publicRuntimeErrorSummary(completed.error) : "no patch produced"}`, {
@@ -10746,6 +10776,7 @@ function parseRemoteSyncState(value: unknown): WorkbenchRemoteSyncState | null {
     url: record.url,
     status: record.status,
     ...(typeof record.lastSyncedAt === "string" ? { lastSyncedAt: record.lastSyncedAt } : {}),
+    ...(typeof record.localHash === "string" ? { localHash: record.localHash } : {}),
     lastAttemptAt: record.lastAttemptAt,
     lastError: lastError && typeof lastError.code === "string" && typeof lastError.message === "string"
       ? { code: lastError.code, message: lastError.message }

@@ -548,6 +548,9 @@ describe("workbench skill-first CLI", () => {
 
     expect(created.code, created.stdout || created.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(created).next).toBe("workbench eval");
+    const status = await invoke(["status", "--dir", root, "--json"]);
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench eval");
   });
 
   test("new defaults to provider-backed Codex and supports explicit provider/local selection", async () => {
@@ -899,6 +902,8 @@ describe("workbench skill-first CLI", () => {
     const authRoot = await makeTempRoot("workbench-cli-eval-provider-auth-");
     vi.stubEnv("WORKBENCH_CONFIG", path.join(authRoot, "config.json"));
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
+    vi.stubEnv("OPENAI_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "");
 
     const codexRoot = await makeTempRoot("workbench-cli-eval-codex-auth-");
@@ -944,6 +949,8 @@ describe("workbench skill-first CLI", () => {
     const authRoot = await makeTempRoot("workbench-cli-improve-provider-auth-");
     vi.stubEnv("WORKBENCH_CONFIG", path.join(authRoot, "config.json"));
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
+    vi.stubEnv("OPENAI_API_KEY", "");
+    vi.stubEnv("ANTHROPIC_API_KEY", "");
 
     const root = await makeTempRoot("workbench-cli-improve-codex-auth-");
     expect((await invoke(["new", root, "--agent", "codex", "--json"])).code).toBe(0);
@@ -1388,7 +1395,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(authenticatedStatus).next).toBe("workbench improve");
   });
 
-  test("status suggests a fresh case id when only smoke cases exist", async () => {
+  test("status evaluates smoke cases before suggesting a fresh workflow case", async () => {
     const root = await makeTempRoot("workbench-cli-status-smoke-case-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await fs.mkdir(path.join(root, ".workbench", "cases", "case-001"), { recursive: true });
@@ -1396,11 +1403,17 @@ describe("workbench skill-first CLI", () => {
       "version: 1",
       "id: case-001",
       "smoke: true",
-      "command: true",
+      "command: \"true\"",
       "",
     ].join("\n"));
 
     await currentVersionIdFor(root);
+    const preEvalStatus = await invoke(["status", "--dir", root, "--json"]);
+    expect(preEvalStatus.code, preEvalStatus.stdout || preEvalStatus.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(preEvalStatus).next).toBe("workbench eval");
+
+    const evalResult = await invoke(["eval", "--dir", root, "--json"]);
+    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(status).next)
@@ -4270,8 +4283,10 @@ describe("workbench skill-first CLI", () => {
     const root = await makeTempRoot("workbench-cli-login-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const previousDevice = process.env.WORKBENCH_DEVICE_AUTH;
+    const previousAdapterAuth = process.env.WORKBENCH_ADAPTER_AUTH_STORE;
     process.env.WORKBENCH_CONFIG = path.join(root, "config.json");
     process.env.WORKBENCH_DEVICE_AUTH = path.join(root, "device-auth.json");
+    process.env.WORKBENCH_ADAPTER_AUTH_STORE = path.join(root, "auth-store");
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       if (url.pathname === "/api/oauth/device/code") {
@@ -4326,7 +4341,75 @@ describe("workbench skill-first CLI", () => {
       } else {
         process.env.WORKBENCH_DEVICE_AUTH = previousDevice;
       }
+      if (previousAdapterAuth === undefined) {
+        delete process.env.WORKBENCH_ADAPTER_AUTH_STORE;
+      } else {
+        process.env.WORKBENCH_ADAPTER_AUTH_STORE = previousAdapterAuth;
+      }
     }
+  });
+
+  test("cloud login uploads already connected local provider auth", async () => {
+    const root = await makeTempRoot("workbench-cli-login-provider-sync-");
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(root, "config.json"));
+    vi.stubEnv("WORKBENCH_DEVICE_AUTH", path.join(root, "device-auth.json"));
+    vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", path.join(root, "auth-store"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", undefined);
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", undefined);
+    vi.stubEnv("WORKBENCH_API_URL", undefined);
+    vi.stubEnv("OPENAI_API_KEY", "sk-test-before-cloud");
+
+    const provider = await invoke(["login", "codex", "--method", "api-key", "--json"]);
+    expect(provider.code, provider.stdout || provider.stderr).toBe(0);
+    expect(stdoutJson(provider)).toMatchObject({
+      workbenchCloud: {
+        sync: "skipped",
+        reason: "not_authenticated",
+      },
+    });
+
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname === "/api/oauth/device/code") {
+        return jsonResponse({
+          device_code: "device-1",
+          user_code: "SYNC-0001",
+          verification_uri: "https://cloud.test/device",
+          verification_uri_complete: "https://cloud.test/device?user_code=SYNC-0001",
+          expires_in: 120,
+          interval: 1,
+        });
+      }
+      if (url.pathname === "/api/oauth/token") {
+        return jsonResponse({ access_token: "cloud-token", expires_in: 3600 });
+      }
+      if (url.pathname === "/api/workbench/profile") {
+        return jsonResponse({ profile: { username: "alice" } });
+      }
+      if (url.pathname === "/api/workbench/auth/adapters/codex") {
+        expect(url.searchParams.get("profile")).toBe("default");
+        expect(init?.method).toBe("PUT");
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
+        const body = JSON.parse(String(init?.body)) as { bundle?: { adapterId?: string; method?: string } };
+        expect(body.bundle).toMatchObject({ adapterId: "codex", method: "api-key" });
+        return jsonResponse({ ok: true, status: "uploaded" });
+      }
+      return jsonResponse({ message: `Unexpected path ${url.pathname}` }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const login = await invoke(["login", "--base-url", "https://cloud.test", "--wait", "--timeout", "120", "--json"]);
+    expect(login.code, login.stdout || login.stderr).toBe(0);
+    expect(stdoutJson(login)).toMatchObject({
+      schema: "workbench.cli.login.v1",
+      ok: true,
+      status: "authenticated",
+      adapterAuth: {
+        uploaded: [expect.objectContaining({ adapter: "codex", profile: "default" })],
+        skipped: [],
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   test("requires singular improve selectors when manifest defaults expand to sets", async () => {
@@ -4462,6 +4545,8 @@ describe("workbench skill-first CLI", () => {
 
   dockerTest("reports compact sample coverage and routes publish-ready status through login", async () => {
     const root = await makeTempRoot("workbench-cli-coverage-status-");
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(root, "missing-config.json"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
     expect((await invoke(["new", root, "--agent", "local"])).code).toBe(0);
     await writePassingCaseTest(root);
 
@@ -4471,8 +4556,6 @@ describe("workbench skill-first CLI", () => {
     expect(evalResult.stdout).toContain("coverage cases=1 samples=5 jobs=5");
     expect(evalResult.stdout).toContain("next: workbench login");
 
-    vi.stubEnv("WORKBENCH_CONFIG", path.join(root, "missing-config.json"));
-    vi.stubEnv("WORKBENCH_API_TOKEN", "");
     const status = await invoke(["status", "--dir", root, "--json"]);
 
     expect(status.code, status.stdout || status.stderr).toBe(0);

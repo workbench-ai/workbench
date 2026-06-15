@@ -339,6 +339,7 @@ export interface WorkbenchRemoteSyncState {
   remote: string;
   url: string;
   status: "synced" | "error";
+  localHash?: string;
   lastSyncedAt?: string;
   lastAttemptAt: string;
   lastError?: {
@@ -373,7 +374,7 @@ export interface WorkbenchStatusSnapshot {
     kind: WorkbenchRemoteKind;
     url: string;
     sync: {
-      status: "up_to_date" | "error" | "never";
+      status: "up_to_date" | "local_changes" | "error" | "never";
       lastSyncedAt?: string;
       lastAttemptAt?: string;
       lastError?: {
