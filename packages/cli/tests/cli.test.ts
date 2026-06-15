@@ -539,9 +539,6 @@ describe("workbench skill-first CLI", () => {
         },
         {
           path: ".workbench/cases/case-001/case.yaml",
-          kind: "text",
-          encoding: "utf8",
-          executable: false,
           content: "version: 1\nid: case-001\nsmoke: true\ncommand: true\n",
         },
       ],
@@ -1556,6 +1553,36 @@ describe("workbench skill-first CLI", () => {
     const jobStderr = await invoke(["show", "job_surface:stderr.log", "--dir", root]);
     expect(jobStderr.code, jobStderr.stdout || jobStderr.stderr).toBe(0);
     expect(jobStderr.stdout).toBe("trace stderr\n\n");
+    const traceListing = await invoke(["show", "trace_job_surface", "--dir", root]);
+    expect(traceListing.code, traceListing.stdout || traceListing.stderr).toBe(0);
+    expect(traceListing.stdout).toContain("trace\ttrace_job");
+    await fs.writeFile(path.join(root, ".workbench", "objects", "trace", "trace_job_orphan.json"), JSON.stringify({
+      id: "trace_job_orphan",
+      runId: "run_surface",
+      jobId: "job_orphan",
+      versionId,
+      skillName: "primary",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      createdAt,
+      request: {},
+      result: { status: "failed", error: "orphan trace" },
+      files: [{ path: "stderr.log", kind: "text", encoding: "utf8", content: "orphan stderr\n" }],
+    }));
+    const orphanJob = await invoke(["show", "job_orphan", "--dir", root, "--json"]);
+    expect(orphanJob.code).toBe(1);
+    expect(stdoutJson(orphanJob)).toMatchObject({
+      code: "ref_not_found",
+      message: "Workbench object not found: job_orphan",
+    });
+    const orphanJobFile = await invoke(["show", "job_orphan:stderr.log", "--dir", root, "--json"]);
+    expect(orphanJobFile.code).toBe(1);
+    expect(stdoutJson(orphanJobFile)).toMatchObject({
+      code: "ref_not_found",
+      message: "Workbench object not found: job_orphan",
+    });
 
     const listing = stdoutJson<{ result: { files: Array<{ path: string }> } }>(
       await invoke(["show", "run_surface", "--dir", root, "--json"]),

@@ -5085,6 +5085,9 @@ function objectIdRefMatches(id: string, ref: string): boolean {
   if (id === ref || id.startsWith(ref)) {
     return true;
   }
+  if (ref.includes("_")) {
+    return false;
+  }
   const separator = id.indexOf("_");
   return separator !== -1 && id.slice(separator + 1).startsWith(ref);
 }

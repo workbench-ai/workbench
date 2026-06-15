@@ -76,7 +76,6 @@ export interface WorkbenchSkillAccessInventory {
   dir?: string;
   requestedFor?: SkillAccessFor;
   currentAgent?: SkillAccessTargetId;
-  note?: string;
   targets: SkillAccessTargetView[];
   skills: WorkbenchInstalledSkill[];
   next: null;
@@ -113,13 +112,11 @@ export function resolveSkillAccessTargets(options: {
   write: boolean;
   env?: NodeJS.ProcessEnv;
   sourceForRemediation?: string;
-  requireCurrentAgent?: boolean;
 }): {
   scope: SkillAccessScope;
   dir?: string;
   requestedFor?: SkillAccessFor;
   currentAgent?: SkillAccessTargetId;
-  note?: string;
   targets: SkillAccessTargetView[];
 } {
   const env = options.env ?? process.env;
@@ -129,9 +126,7 @@ export function resolveSkillAccessTargets(options: {
     ? requestedFor === "all" ? ["codex", "claude"] as SkillAccessTargetId[] : [requestedFor]
     : detected.length === 1
       ? detected
-      : options.write || options.requireCurrentAgent === true
-        ? failUndetectedTarget(options.write ? "install" : "skills", options.sourceForRemediation)
-        : ["codex", "claude"] as SkillAccessTargetId[];
+      : failUndetectedTarget(options.write ? "install" : "skills", options.sourceForRemediation);
   const scope: SkillAccessScope = options.global === true ? "global" : "folder";
   const resolvedDir = scope === "folder" ? path.resolve(options.dir ?? process.cwd()) : undefined;
   return {
@@ -139,9 +134,6 @@ export function resolveSkillAccessTargets(options: {
     ...(resolvedDir ? { dir: resolvedDir } : {}),
     ...(requestedFor ? { requestedFor } : {}),
     ...(detected.length === 1 ? { currentAgent: detected[0] } : {}),
-    ...(!requestedFor && detected.length !== 1
-      ? { note: detected.length > 1 ? "Multiple current coding agents detected; showing Codex and Claude." : "No current coding agent detected; showing Codex and Claude." }
-      : {}),
     targets: targetIds.map((target) => targetView(target, scope, resolvedDir, env)),
   };
 }
@@ -151,7 +143,6 @@ export async function readInstalledSkillsInventory(options: {
   global?: boolean;
   dir?: string;
   env?: NodeJS.ProcessEnv;
-  requireCurrentAgent?: boolean;
 } = {}): Promise<WorkbenchSkillAccessInventory> {
   const request = resolveSkillAccessTargets({
     requestedFor: options.requestedFor,
@@ -159,7 +150,6 @@ export async function readInstalledSkillsInventory(options: {
     dir: options.dir,
     write: false,
     env: options.env,
-    requireCurrentAgent: options.requireCurrentAgent,
   });
   const skills: WorkbenchInstalledSkill[] = [];
   for (const target of request.targets) {
@@ -180,7 +170,6 @@ export async function readInstalledSkillsInventory(options: {
     ...(request.dir ? { dir: request.dir } : {}),
     ...(request.requestedFor ? { requestedFor: request.requestedFor } : {}),
     ...(request.currentAgent ? { currentAgent: request.currentAgent } : {}),
-    ...(request.note ? { note: request.note } : {}),
     targets: request.targets,
     skills,
     next: null,
@@ -253,7 +242,6 @@ export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventor
     ...(inventory.dir ? { dir: inventory.dir } : {}),
     ...(inventory.requestedFor ? { for: inventory.requestedFor } : {}),
     ...(inventory.currentAgent ? { currentAgent: inventory.currentAgent } : {}),
-    ...(inventory.note ? { note: inventory.note } : {}),
     targets: inventory.targets.map((target) => ({
       id: target.id,
       displayName: target.displayName,

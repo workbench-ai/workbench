@@ -1229,7 +1229,6 @@ async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
     requestedFor: stringFlag(parsed, "for"),
     global: parsed.flags.global === true,
     dir: dirFlag(parsed),
-    requireCurrentAgent: true,
   });
   return emitResult("workbench.cli.skills.v1", installedInventoryToJson(inventory), parsed, io, () => formatInstalledInventory(inventory));
 }
@@ -4357,25 +4356,20 @@ function scoredRunIsBelowPerfect(run: WorkbenchRun): boolean {
 
 function snapshotHasWorkflowCase(snapshot: InspectionSnapshot): boolean {
   const currentVersion = snapshotVersionByRef(snapshot, snapshot.status.currentVersionId ?? snapshot.refs.current ?? "");
-  const caseFiles = currentVersion?.files.filter((file) =>
-    file.kind === "text" &&
-    /^\.workbench\/cases\/[^/]+\/case\.ya?ml$/u.test(file.path)
-  ) ?? [];
-  return caseFiles.some((file) => file.kind === "text" && !/\n\s*smoke:\s*true(?:\s|$)/u.test(`\n${file.content}`));
+  return (currentVersion?.files ?? []).some((file) =>
+    isEvalCaseFile(file) && !/\n\s*smoke:\s*true(?:\s|$)/u.test(`\n${file.content}`)
+  );
 }
 
 function snapshotHasAnyEvalCase(snapshot: InspectionSnapshot): boolean {
   const currentVersion = snapshotVersionByRef(snapshot, snapshot.status.currentVersionId ?? snapshot.refs.current ?? "");
-  return (currentVersion?.files ?? []).some((file) =>
-    file.kind === "text" &&
-    /^\.workbench\/cases\/[^/]+\/case\.ya?ml$/u.test(file.path)
-  );
+  return (currentVersion?.files ?? []).some(isEvalCaseFile);
 }
 
 function authorEvalCaseCommand(snapshot: InspectionSnapshot | null): string {
   const currentVersion = snapshot ? snapshotVersionByRef(snapshot, snapshot.status.currentVersionId ?? snapshot.refs.current ?? "") : undefined;
   const existingCaseIds = new Set((currentVersion?.files ?? []).flatMap((file) => {
-    const match = file.path.match(/^\.workbench\/cases\/([^/]+)\/case\.ya?ml$/u);
+    const match = isEvalCaseFile(file) ? file.path.match(/^\.workbench\/cases\/([^/]+)\/case\.ya?ml$/u) : null;
     return match?.[1] ? [match[1]] : [];
   }));
   for (let index = 1; ; index += 1) {
@@ -4384,6 +4378,10 @@ function authorEvalCaseCommand(snapshot: InspectionSnapshot | null): string {
       return `mkdir -p .workbench/cases/${id} && \${EDITOR:-vi} .workbench/cases/${id}/case.yaml`;
     }
   }
+}
+
+function isEvalCaseFile(file: SurfaceSnapshotFile): boolean {
+  return file.encoding !== "base64" && /^\.workbench\/cases\/[^/]+\/case\.ya?ml$/u.test(file.path);
 }
 
 async function statusWithCausalNext(
@@ -4654,6 +4652,9 @@ function snapshotObjectByRef<T extends { id: string }>(
 function objectRefMatches(id: string, ref: string): boolean {
   if (id === ref || id.startsWith(ref)) {
     return true;
+  }
+  if (ref.includes("_")) {
+    return false;
   }
   const separator = id.indexOf("_");
   return separator > 0 && id.slice(separator + 1).startsWith(ref);
@@ -5262,13 +5263,11 @@ function formatStatusSnapshot(status: Awaited<ReturnType<typeof workbenchStatusS
 function formatInstalledInventory(inventory: WorkbenchSkillAccessInventory): string {
   if (inventory.skills.length === 0) {
     return [
-      inventory.note,
       `No skills accessible${inventory.scope === "global" ? " globally" : " in this folder"}.`,
       ...(inventory.next ? [`next: ${inventory.next}`] : []),
     ].filter(Boolean).join("\n");
   }
   const lines = [
-    ...(inventory.note ? [inventory.note] : []),
     "name\tavailable to\tstatus\tsource",
     ...inventory.skills.map(formatInstalledSkill),
     ...(inventory.next ? [`next: ${inventory.next}`] : []),
