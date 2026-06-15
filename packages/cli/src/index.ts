@@ -23,6 +23,7 @@ import {
   prepareWorkbenchCloudEvalRequest,
   prepareWorkbenchCloudImproveRequest,
   publishWorkbenchVersion,
+  markWorkbenchRemoteSyncDirty,
   removeWorkbenchAgent,
   showWorkbenchRef,
   switchWorkbenchVersion,
@@ -1424,6 +1425,9 @@ async function handleCloudImprove(parsed: ParsedArgs, io: CliIo): Promise<number
     });
   }
   const switchedVersion = await switchHostedImproveVersionIfPromoted(started);
+  if (switchedVersion) {
+    await markWorkbenchRemoteSyncDirty({ ...started.core, remote: started.remote.name });
+  }
   const next = cloudImproveNextCommand(started.runs);
   return emitResult("workbench.cli.improve.v1", {
     result: hostedImproveResult(started, artifactIds, switchedVersion),
@@ -4681,20 +4685,56 @@ function latestUnsourcedPromotedImproveVersion(
   snapshot: WorkbenchInspectionSnapshot,
   currentVersionId: string,
 ): string | undefined {
-  const latestRun = snapshot.runs
+  const latestRuns = snapshot.runs
     .filter((run) => run.kind === "improve" && run.status === "succeeded" && Boolean(run.outputVersionId))
+    .sort((left, right) => runEvidenceTime(right).localeCompare(runEvidenceTime(left)));
+  for (const run of latestRuns) {
+    const outputVersionId = run.outputVersionId;
+    if (!outputVersionId || outputVersionId === currentVersionId) {
+      continue;
+    }
+    if (!snapshot.versions.some((version) => version.id === outputVersionId)) {
+      continue;
+    }
+    if (versionHasAncestor(snapshot, currentVersionId, outputVersionId)) {
+      continue;
+    }
+    if (!remoteCurrentRefPromotesVersion(snapshot, outputVersionId) && !improveRunPromotedCandidate(snapshot, run)) {
+      continue;
+    }
+    return outputVersionId;
+  }
+  return undefined;
+}
+
+function remoteCurrentRefPromotesVersion(snapshot: WorkbenchInspectionSnapshot, versionId: string): boolean {
+  return Object.entries(snapshot.refs).some(([name, value]) =>
+    name.startsWith("remotes/") &&
+    name.endsWith("/current") &&
+    value === versionId
+  );
+}
+
+function improveRunPromotedCandidate(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): boolean {
+  if (run.status !== "succeeded" || typeof run.score !== "number") {
+    return false;
+  }
+  const outputVersion = run.outputVersionId
+    ? snapshot.versions.find((version) => version.id === run.outputVersionId)
+    : undefined;
+  const incumbentVersionId = outputVersion?.parentIds[0] ?? run.versionId;
+  const incumbent = snapshot.runs
+    .filter((candidate) =>
+      candidate.kind === "eval" &&
+      candidate.status === "succeeded" &&
+      candidate.versionId === incumbentVersionId &&
+      candidate.skillName === run.skillName &&
+      candidate.agentName === run.agentName &&
+      candidate.evalHash === run.evalHash &&
+      typeof candidate.score === "number"
+    )
     .sort((left, right) => runEvidenceTime(right).localeCompare(runEvidenceTime(left)))[0];
-  const outputVersionId = latestRun?.outputVersionId;
-  if (!outputVersionId || outputVersionId === currentVersionId) {
-    return undefined;
-  }
-  if (!snapshot.versions.some((version) => version.id === outputVersionId)) {
-    return undefined;
-  }
-  if (versionHasAncestor(snapshot, currentVersionId, outputVersionId)) {
-    return undefined;
-  }
-  return outputVersionId;
+  return !incumbent || run.score > incumbent.score!;
 }
 
 function versionHasAncestor(snapshot: WorkbenchInspectionSnapshot, versionId: string, ancestorId: string): boolean {
@@ -5121,9 +5161,9 @@ function jobEvidenceSummary(job: WorkbenchJob): Json {
   };
 }
 
-function formatJobEvidenceSummary(job: WorkbenchJob, refs: ReadonlyMap<string, string> = new Map()): string {
+function formatJobEvidenceSummary(job: WorkbenchJob, _refs: ReadonlyMap<string, string> = new Map()): string {
   return [
-    refs.get(job.id) ?? displayRef(job.id),
+    job.id,
     `case=${job.caseId}`,
     `sample=${job.sample}`,
     job.status,
@@ -5603,8 +5643,10 @@ function formatRun(run: WorkbenchRun): string {
 }
 
 function formatImproveResult(result: Awaited<ReturnType<typeof improveWorkbenchSkill>>): string {
+  const parent = result.version.parentIds[0] ? displayRef(result.version.parentIds[0]) : "current";
+  const candidate = displayRef(result.version.id);
   return [
-    `Improved ${result.version.parentIds[0] ? displayRef(result.version.parentIds[0]) : "current"} -> ${displayRef(result.version.id)}. ${formatRun(result.run)}`,
+    `${result.switched ? "Improved" : "Created candidate"} ${parent} -> ${candidate}. ${formatRun(result.run)}`,
     result.switched
       ? "Switched to improved version after proof eval; rerun eval with more samples before publishing."
       : `Did not switch: ${result.promotionReason}`,

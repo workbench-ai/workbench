@@ -5377,6 +5377,9 @@ export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}):
         ? objectPackSize(remoteWritePack)
         : Math.max(0, objectPackSize(merged) - objectPackSize(remotePack));
       const pulled = Math.max(0, objectPackSize(merged) - before);
+      const remoteTrackingRefs = remote.kind === "workbench-cloud"
+        ? remoteTrackingRefsForCloudSync(merged.refs, remotePack.refs)
+        : merged.refs;
       const result: WorkbenchSyncResult = {
         remote,
         pushed,
@@ -5384,14 +5387,14 @@ export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}):
         upToDate: pushed === 0 && pulled === 0,
         ...(options.dryRun === true ? { dryRun: true } : {}),
         publication: remote.kind === "workbench-cloud"
-          ? publicationStatusFromRefs(withRemoteTrackingRefs({ ...state.refs }, remote.name, merged.refs), remote.name)
+          ? publicationStatusFromRefs(withRemoteTrackingRefs({ ...state.refs }, remote.name, remoteTrackingRefs), remote.name)
           : unpublishedPublicationStatus(),
       };
       if (options.dryRun === true) {
         return result;
       }
       await writeRemoteObjectPack(remote, remoteWritePack, state, { authToken: options.authToken });
-      state.refs = withRemoteTrackingRefs(state.refs, remote.name, merged.refs);
+      state.refs = withRemoteTrackingRefs(state.refs, remote.name, remoteTrackingRefs);
       await saveState(root, state);
       await writeRemoteSyncState(root, {
         schema: "workbench.remote-sync-state.v1",
@@ -5418,6 +5421,24 @@ export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}):
       });
       throw syncError;
     }
+  });
+}
+
+export async function markWorkbenchRemoteSyncDirty(options: WorkbenchRemoteOptions = {}): Promise<void> {
+  const root = resolveRoot(options.dir);
+  return withWorkbenchProjectLockIfInitialized(root, async () => {
+    await requireInitialized(root);
+    const state = await loadState(root);
+    const remote = resolveRemote(state, options.remote);
+    const syncStates = await readRemoteSyncStates(root).catch(() => []);
+    const existing = syncStates.find((entry) => entry.remote === remote.name && entry.url === remote.url);
+    if (!existing || existing.status === "error") {
+      return;
+    }
+    await writeRemoteSyncState(root, {
+      ...existing,
+      localHash: `dirty:${now()}`,
+    });
   });
 }
 
@@ -6156,6 +6177,13 @@ function publicationRefs(refs: WorkbenchRefs): WorkbenchRefs {
       name.startsWith("releases/") ||
       name.startsWith("publication/")
     ));
+}
+
+function remoteTrackingRefsForCloudSync(mergedRefs: WorkbenchRefs, remoteRefs: WorkbenchRefs): WorkbenchRefs {
+  return {
+    ...mergedRefs,
+    ...(remoteRefs.current ? { current: remoteRefs.current } : {}),
+  };
 }
 
 function withRemoteTrackingRefs(
@@ -10317,13 +10345,13 @@ function improvementPromotionDecision(
   if (run.status !== "succeeded") {
     return {
       promoted: false,
-      reason: `Improved run ${run.id} finished ${run.status}.`,
+      reason: `Candidate run ${run.id} finished ${run.status}.`,
     };
   }
   if (typeof run.score !== "number") {
     return {
       promoted: false,
-      reason: `Improved run ${run.id} has no scored eval evidence.`,
+      reason: `Candidate run ${run.id} has no scored eval evidence.`,
     };
   }
   if (!incumbentRun || typeof incumbentRun.score !== "number") {
@@ -10335,7 +10363,7 @@ function improvementPromotionDecision(
   if (run.score <= incumbentRun.score) {
     return {
       promoted: false,
-      reason: `Improved run ${run.id} score ${run.score.toFixed(3)} did not beat incumbent ${incumbentRun.id} score ${incumbentRun.score.toFixed(3)}.`,
+      reason: `Candidate run ${run.id} score ${run.score.toFixed(3)} did not beat incumbent ${incumbentRun.id} score ${incumbentRun.score.toFixed(3)}.`,
     };
   }
   return {

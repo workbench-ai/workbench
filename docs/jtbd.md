@@ -35,7 +35,7 @@ To get editable source and Workbench controls for evaluation or improvement, use
 
     workbench new smoke --from test/workbench-smoke
 
-`workbench new DIR --from OWNER/SKILL` creates a Workbench project containing the package plus authored `.workbench` controls when the source has them. If the source is package-only, it creates the package plus the normal minimal `.workbench` scaffold. `workbench eval` and `workbench improve` operate on that project source; installed global or folder copies do not affect them unless explicitly vendored or referenced in `.workbench/skills.yaml`.
+`workbench new DIR --from OWNER/SKILL` creates a Workbench project containing the package plus authored `.workbench` controls when the source has them. It does not copy the source project's runtime objects, refs, sync state, logs, locks, remotes, install ledgers, or `.agents` directories, but it does initialize fresh local Workbench versioning state for the new project. If the source is package-only, it creates the package plus the normal minimal `.workbench` scaffold. `workbench eval` and `workbench improve` operate on that project source; installed global or folder copies do not affect them unless explicitly vendored or referenced in `.workbench/skills.yaml`.
 
 ## Job 3: Define what good means for this skill
 

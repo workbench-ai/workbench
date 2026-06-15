@@ -52,6 +52,7 @@ Use the skill-first layout:
 - `.workbench/skills.yaml` is optional; add it only for multiple measured skills, `baseline: none`, or included skills.
 - `.agents/` and `.workbench/remotes.yaml` are ignored local machine metadata and are not versioned skill source.
 - `.workbench/objects`, `.workbench/refs`, `.workbench/sync`, `.workbench/tmp`, `.workbench/logs`, and `.workbench/locks` are Workbench-owned runtime directories ignored by Git.
+- `workbench new DIR --from OWNER/SKILL` does not copy those runtime directories from the source project, but the new editable project initializes its own local objects and refs immediately.
 
 Do not point local skill paths outside the project folder. Use `baseline: none` for a true no-skill baseline instead of creating a fake local no-skill directory. For external skills, use explicit remote refs in `.workbench/skills.yaml` or vendor the files into the project.
 

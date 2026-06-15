@@ -1472,6 +1472,53 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench eval --rerun -n 5");
   }, 60_000);
 
+  dockerTest("status does not suggest switching a tied improve candidate", async () => {
+    const root = await makeTempRoot("workbench-cli-status-tied-improve-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+      "version: 1",
+      "id: case-001",
+      "prompt: Exercise a tied improvement candidate.",
+      "command: sh \"$CASE_DIR/tests/test.sh\"",
+      "",
+    ].join("\n"));
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
+      "#!/bin/sh",
+      "set -eu",
+      "mkdir -p \"$OUTPUT_DIR\"",
+      "printf '{\"ok\":true,\"score\":0.5,\"metrics\":{\"score\":0.5}}\\n' > \"$OUTPUT_DIR/result.json\"",
+      "",
+    ].join("\n"));
+    await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+    const added = await invoke([
+      "agent",
+      "add",
+      "patcher",
+      "--dir",
+      root,
+      "--adapter",
+      "command",
+      "--with",
+      "improveCommand=printf '\\nTied candidate.\\n' >> \"$SKILL_DIR/SKILL.md\"",
+    ]);
+    expect(added.code, added.stdout || added.stderr).toBe(0);
+
+    const evalResult = await invoke(["eval", "--dir", root, "--agents", "patcher", "--json"]);
+    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
+    const improve = await invoke(["improve", "--dir", root, "--agents", "patcher"]);
+    expect(improve.code, improve.stdout || improve.stderr).toBe(0);
+    expect(improve.stdout).toContain("Created candidate");
+    expect(improve.stdout).toContain("Did not switch:");
+    expect(improve.stdout).not.toContain("Improved ");
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    const next = stdoutJson<{ next: string | null }>(status).next;
+    expect(next).toBe("workbench improve");
+    expect(next).not.toMatch(/^workbench switch\b/u);
+  }, 60_000);
+
   test("status evaluates smoke cases before suggesting a fresh workflow case", async () => {
     const root = await makeTempRoot("workbench-cli-status-smoke-case-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -1648,6 +1695,32 @@ describe("workbench skill-first CLI", () => {
     const jobStderr = await invoke(["show", "job_surface:stderr.log", "--dir", root]);
     expect(jobStderr.code, jobStderr.stdout || jobStderr.stderr).toBe(0);
     expect(jobStderr.stdout).toBe("trace stderr\n\n");
+    const longJobId = "job_mqf3nijg_c3170a076e647cc9";
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${longJobId}.json`), JSON.stringify({
+      id: longJobId,
+      runId: "run_surface",
+      kind: "eval",
+      versionId,
+      skillName: "primary",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      caseId: "case-001",
+      sample: 0,
+      status: "succeeded",
+      score: 1,
+      artifactIds: [],
+      traceIds: [],
+      createdAt,
+      startedAt: createdAt,
+      finishedAt: createdAt,
+      durationMs: 0,
+    }));
+    const longJobHuman = await invoke(["show", "job_mqf3nijg_c", "--dir", root]);
+    expect(longJobHuman.code, longJobHuman.stdout || longJobHuman.stderr).toBe(0);
+    expect(longJobHuman.stdout).toContain(longJobId);
+    expect(longJobHuman.stdout).not.toContain("job_mqf3nijg\tcase=");
     const traceListing = await invoke(["show", "trace_job_surface", "--dir", root]);
     expect(traceListing.code, traceListing.stdout || traceListing.stderr).toBe(0);
     expect(traceListing.stdout).toContain("trace\ttrace_job");
@@ -1842,8 +1915,8 @@ describe("workbench skill-first CLI", () => {
 
     const human = await invoke(["show", "run_same_prefix", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toContain("job_mqcadtt1a\tcase=case-1");
-    expect(human.stdout).toContain("job_mqcadtt1b\tcase=case-2");
+    expect(human.stdout).toContain("job_mqcadtt1aaaa1111\tcase=case-1");
+    expect(human.stdout).toContain("job_mqcadtt1bbbb2222\tcase=case-2");
 
     const ambiguous = await invoke(["show", "run_same_prefix:stderr.log", "--dir", root, "--json"]);
     expect(ambiguous.code).toBe(2);
@@ -3389,6 +3462,7 @@ describe("workbench skill-first CLI", () => {
           next: "workbench eval --rerun -n 5",
           remotes: [
             expect.objectContaining({
+              sync: expect.objectContaining({ status: "local_changes" }),
               publication: expect.objectContaining({ versionId: baseVersion.id }),
             }),
           ],
