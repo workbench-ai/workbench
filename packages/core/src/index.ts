@@ -3303,13 +3303,19 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
       next: "workbench new .",
     };
   }
-  const [snapshot, syncStates, localState] = await Promise.all([
+  const [snapshot, syncStates, localState, worktreeSourceHash] = await Promise.all([
     createWorkbenchReadOnlyInspectionSnapshot(options),
     readRemoteSyncStates(root).catch(() => []),
     loadStateReadOnlyWithRetry(root),
+    readSkillFiles(root).then(hashFiles).catch(() => undefined),
   ]);
   const localSyncHash = remoteSyncLocalHash(localState);
   const currentVersionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+  const versionHashes = new Set(localState.versions.map((version) => version.hash));
+  const hasUnsyncedWorktreeSource = Boolean(
+    worktreeSourceHash &&
+    !versionHashes.has(worktreeSourceHash),
+  );
   const lastRun = [...snapshot.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   const syncByRemote = new Map(syncStates.map((entry) => [entry.remote, entry]));
   const remotes = snapshot.remotes.map((remote) => {
@@ -3319,7 +3325,7 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
       ? {
           status: sync.status === "error"
             ? "error"
-            : sync.localHash && sync.localHash !== localSyncHash
+            : hasUnsyncedWorktreeSource || (sync.localHash && sync.localHash !== localSyncHash)
               ? "local_changes"
               : "up_to_date",
           ...(sync.lastSyncedAt ? { lastSyncedAt: sync.lastSyncedAt } : {}),
@@ -6361,7 +6367,24 @@ function objectPackSize(pack: WorkbenchObjectPack): number {
 
 function objectPackSyncHash(pack: WorkbenchObjectPack): string {
   const { createdAt: _createdAt, ...stablePack } = pack;
-  return hashJson(stablePack);
+  return hashJson({
+    ...stablePack,
+    versions: stableSortByIdentity(stablePack.versions, (entry) => entry.id),
+    skillSources: stableSortByIdentity(stablePack.skillSources, (entry) => entry.name),
+    skillBundles: stableSortByIdentity(stablePack.skillBundles, (entry) => entry.hash),
+    evals: stableSortByIdentity(stablePack.evals, (entry) => entry.hash),
+    agents: stableSortByIdentity(stablePack.agents, (entry) => hashJson(entry)),
+    runs: stableSortByIdentity(stablePack.runs, (entry) => entry.id),
+    jobs: stableSortByIdentity(stablePack.jobs, (entry) => entry.id),
+    traces: stableSortByIdentity(stablePack.traces, (entry) => entry.id),
+    executionEvents: stableSortByIdentity(stablePack.executionEvents, workbenchExecutionEventBatchId),
+    artifacts: stableSortByIdentity(stablePack.artifacts, (entry) => entry.id),
+    lineage: stableSortByIdentity(stablePack.lineage, (entry) => hashJson(entry)),
+  });
+}
+
+function stableSortByIdentity<T>(entries: readonly T[], identity: (entry: T) => string): T[] {
+  return [...entries].sort((left, right) => identity(left).localeCompare(identity(right)));
 }
 
 function remoteSyncLocalHash(state: WorkbenchProjectState): string {

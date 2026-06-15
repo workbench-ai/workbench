@@ -14,7 +14,6 @@ import {
   removeWorkbenchRemote,
   syncWorkbenchRemote,
   WorkbenchCodedError,
-  workbenchStatus,
   workbenchStatusSnapshot,
   type WorkbenchObjectPack,
   type WorkbenchRun,
@@ -162,7 +161,6 @@ describe("remote state lifecycle", () => {
     expect(synced.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("up_to_date");
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nUnsynced local edit.\n");
-    await workbenchStatus({ dir: root });
 
     const changed = await workbenchStatusSnapshot({ dir: root });
     expect(changed.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("local_changes");
