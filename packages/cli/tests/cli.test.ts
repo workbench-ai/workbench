@@ -494,6 +494,65 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(hydratedStatus).next).toBe("workbench eval");
   });
 
+  test("new --from with published smoke cases points to eval", async () => {
+    const root = await makeTempRoot("workbench-cli-new-from-smoke-");
+    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
+    vi.stubEnv("WORKBENCH_CONFIG", configPath);
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "source-token",
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      schema: "workbench.source.snapshot.v1",
+      owner: "test",
+      name: "workbench-smoke",
+      versionId: "v010",
+      files: [
+        {
+          path: "SKILL.md",
+          kind: "text",
+          encoding: "utf8",
+          executable: false,
+          content: [
+            "---",
+            "name: workbench-smoke",
+            "description: Smoke fixture.",
+            "---",
+            "# Smoke",
+            "",
+          ].join("\n"),
+        },
+        {
+          path: ".workbench/eval.yaml",
+          kind: "text",
+          encoding: "utf8",
+          executable: false,
+          content: "schema: workbench.eval.v1\nscorer:\n  adapter: tests\n",
+        },
+        {
+          path: ".workbench/agents.yaml",
+          kind: "text",
+          encoding: "utf8",
+          executable: false,
+          content: "schema: workbench.agents.v1\ndefault: default\nagents:\n  default:\n    adapter: local\n",
+        },
+        {
+          path: ".workbench/cases/case-001/case.yaml",
+          kind: "text",
+          encoding: "utf8",
+          executable: false,
+          content: "version: 1\nid: case-001\nsmoke: true\ncommand: true\n",
+        },
+      ],
+    })));
+
+    const created = await invoke(["new", root, "--from", "test/workbench-smoke", "--agent", "local", "--json"]);
+
+    expect(created.code, created.stdout || created.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(created).next).toBe("workbench eval");
+  });
+
   test("new defaults to provider-backed Codex and supports explicit provider/local selection", async () => {
     const authRoot = await makeTempRoot("workbench-cli-new-provider-auth-");
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
@@ -1431,7 +1490,7 @@ describe("workbench skill-first CLI", () => {
       status: "succeeded",
       score: 1,
       jobIds: ["job_surface"],
-      traceIds: ["trace_surface"],
+      traceIds: ["trace_job_surface"],
       createdAt,
       finishedAt: createdAt,
     }));
@@ -1450,7 +1509,7 @@ describe("workbench skill-first CLI", () => {
       status: "succeeded",
       score: 1,
       artifactIds: ["artifact_surface"],
-      traceIds: ["trace_surface"],
+      traceIds: ["trace_job_surface"],
       createdAt,
       startedAt: createdAt,
       finishedAt: createdAt,
@@ -1465,8 +1524,8 @@ describe("workbench skill-first CLI", () => {
       createdAt,
       files: [{ path: "result.json", kind: "text", encoding: "utf8", content: "user result\n" }],
     }));
-    await fs.writeFile(path.join(root, ".workbench", "objects", "trace", "trace_surface.json"), JSON.stringify({
-      id: "trace_surface",
+    await fs.writeFile(path.join(root, ".workbench", "objects", "trace", "trace_job_surface.json"), JSON.stringify({
+      id: "trace_job_surface",
       runId: "run_surface",
       jobId: "job_surface",
       versionId,
@@ -1480,6 +1539,7 @@ describe("workbench skill-first CLI", () => {
       result: { status: "succeeded" },
       files: [
         { path: "result.json", kind: "text", encoding: "utf8", content: "user result\n" },
+        { path: "stderr.log", kind: "text", encoding: "utf8", content: "trace stderr\n" },
         { path: ".workbench/traces/job_surface/engine/result.json", kind: "text", encoding: "utf8", content: "internal result\n" },
       ],
     }));
@@ -1487,6 +1547,15 @@ describe("workbench skill-first CLI", () => {
     const shown = await invoke(["show", "run_surface:result.json", "--dir", root]);
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
     expect(shown.stdout).toBe("user result\n\n");
+
+    const jobListing = stdoutJson<{ result: { jobs: Array<{ id: string }>; files: Array<{ path: string }> } }>(
+      await invoke(["show", "job_surface", "--dir", root, "--json"]),
+    );
+    expect(jobListing.result.jobs).toEqual([expect.objectContaining({ id: "job_surface" })]);
+    expect(jobListing.result.files.map((file) => file.path)).toContain("cases/case-001/jobs/job_surface/result.json");
+    const jobStderr = await invoke(["show", "job_surface:stderr.log", "--dir", root]);
+    expect(jobStderr.code, jobStderr.stdout || jobStderr.stderr).toBe(0);
+    expect(jobStderr.stdout).toBe("trace stderr\n\n");
 
     const listing = stdoutJson<{ result: { files: Array<{ path: string }> } }>(
       await invoke(["show", "run_surface", "--dir", root, "--json"]),
@@ -5196,6 +5265,14 @@ describe("workbench skill-first CLI", () => {
     const previousCwd = process.cwd();
     vi.stubEnv("WORKBENCH_CONFIG", path.join(root, "config.json"));
     vi.stubEnv("HOME", root);
+    vi.stubEnv("WORKBENCH_CURRENT_AGENT", "");
+    vi.stubEnv("CODEX_SHELL", "");
+    vi.stubEnv("CODEX_THREAD_ID", "");
+    vi.stubEnv("CODEX_HOME", "");
+    vi.stubEnv("CODEX_CI", "");
+    vi.stubEnv("CLAUDE_CODE_SESSION_ID", "");
+    vi.stubEnv("CLAUDECODE", "");
+    vi.stubEnv("CLAUDE_CODE_ENTRYPOINT", "");
     await fs.writeFile(path.join(root, "config.json"), JSON.stringify({
       schema: "workbench.cli.config.v1",
       baseUrl: "https://cloud.test",
@@ -5233,6 +5310,16 @@ describe("workbench skill-first CLI", () => {
         code: "usage",
         message: "workbench install requires OWNER/SKILL or a Workbench Cloud skill URL.",
         remediation: "workbench install OWNER/SKILL",
+      });
+
+      const bareSkills = await invoke(["skills", "--json"]);
+      expect(bareSkills.code).toBe(2);
+      expect(stdoutJson(bareSkills)).toMatchObject({
+        ok: false,
+        code: "usage",
+        message: "workbench skills could not detect the current coding agent.",
+        remediation: "workbench skills --for codex",
+        subject: { supportedTargets: ["codex", "claude"] },
       });
 
       const empty = await invoke(["skills", "--for", "codex", "--global", "--json"]);

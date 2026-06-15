@@ -113,6 +113,7 @@ export function resolveSkillAccessTargets(options: {
   write: boolean;
   env?: NodeJS.ProcessEnv;
   sourceForRemediation?: string;
+  requireCurrentAgent?: boolean;
 }): {
   scope: SkillAccessScope;
   dir?: string;
@@ -128,8 +129,8 @@ export function resolveSkillAccessTargets(options: {
     ? requestedFor === "all" ? ["codex", "claude"] as SkillAccessTargetId[] : [requestedFor]
     : detected.length === 1
       ? detected
-      : options.write
-        ? failUndetectedWriteTarget(options.sourceForRemediation)
+      : options.write || options.requireCurrentAgent === true
+        ? failUndetectedTarget(options.write ? "install" : "skills", options.sourceForRemediation)
         : ["codex", "claude"] as SkillAccessTargetId[];
   const scope: SkillAccessScope = options.global === true ? "global" : "folder";
   const resolvedDir = scope === "folder" ? path.resolve(options.dir ?? process.cwd()) : undefined;
@@ -150,6 +151,7 @@ export async function readInstalledSkillsInventory(options: {
   global?: boolean;
   dir?: string;
   env?: NodeJS.ProcessEnv;
+  requireCurrentAgent?: boolean;
 } = {}): Promise<WorkbenchSkillAccessInventory> {
   const request = resolveSkillAccessTargets({
     requestedFor: options.requestedFor,
@@ -157,6 +159,7 @@ export async function readInstalledSkillsInventory(options: {
     dir: options.dir,
     write: false,
     env: options.env,
+    requireCurrentAgent: options.requireCurrentAgent,
   });
   const skills: WorkbenchInstalledSkill[] = [];
   for (const target of request.targets) {
@@ -363,10 +366,12 @@ function parseRequestedFor(value: string | undefined): SkillAccessFor | undefine
   });
 }
 
-function failUndetectedWriteTarget(source: string | undefined): never {
+function failUndetectedTarget(command: "install" | "skills", source: string | undefined): never {
   const remediationSource = source ?? "OWNER/SKILL";
-  throw new WorkbenchCodedError("usage", "workbench install could not detect the current coding agent.", {
-    remediation: `workbench install ${remediationSource} --for codex`,
+  throw new WorkbenchCodedError("usage", `workbench ${command} could not detect the current coding agent.`, {
+    remediation: command === "install"
+      ? `workbench install ${remediationSource} --for codex`
+      : "workbench skills --for codex",
     subject: { supportedTargets: ["codex", "claude"] },
     exitCode: 2,
   });

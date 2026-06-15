@@ -811,15 +811,6 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
   if (version) {
     return output(fileListing("version", version.id, version.files), parsed, io, () => formatFileListing("version", version.id, version.files));
   }
-  const trace = snapshotObjectByRef(snapshot.traces, objectRef, "trace");
-  if (trace) {
-    const files = trace.files.filter(isUserFacingTraceEvidenceFile);
-    return output(fileListing("trace", trace.id, files), parsed, io, () => formatFileListing("trace", trace.id, files));
-  }
-  const artifact = snapshotObjectByRef(snapshot.artifacts, objectRef, "artifact");
-  if (artifact) {
-    return output(fileListing("artifact", artifact.id, artifact.files), parsed, io, () => formatFileListing("artifact", artifact.id, artifact.files));
-  }
   const selection = runOrJobEvidenceSelection(snapshot, objectRef);
   const details = evidenceDetailsForSelection(snapshot, selection);
   const evidenceFiles = evidenceFilesForSelection(snapshot, selection);
@@ -829,6 +820,15 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
       details: details.map(evidenceDetailSummary),
       files: evidenceFiles.map(fileSummary),
     }, parsed, io, () => formatRunOrJobEvidence(selection.jobs, details, evidenceFiles));
+  }
+  const trace = snapshotObjectByRef(snapshot.traces, objectRef, "trace");
+  if (trace) {
+    const files = trace.files.filter(isUserFacingTraceEvidenceFile);
+    return output(fileListing("trace", trace.id, files), parsed, io, () => formatFileListing("trace", trace.id, files));
+  }
+  const artifact = snapshotObjectByRef(snapshot.artifacts, objectRef, "artifact");
+  if (artifact) {
+    return output(fileListing("artifact", artifact.id, artifact.files), parsed, io, () => formatFileListing("artifact", artifact.id, artifact.files));
   }
   const value = await showWorkbenchRef(ref, core);
   return output(value, parsed, io, () => formatShow(value));
@@ -1229,6 +1229,7 @@ async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
     requestedFor: stringFlag(parsed, "for"),
     global: parsed.flags.global === true,
     dir: dirFlag(parsed),
+    requireCurrentAgent: true,
   });
   return emitResult("workbench.cli.skills.v1", installedInventoryToJson(inventory), parsed, io, () => formatInstalledInventory(inventory));
 }
@@ -1289,7 +1290,7 @@ async function handleNewFrom(parsed: ParsedArgs, io: CliIo): Promise<number> {
     createdPaths: status.createdPaths ?? [],
   };
   const hydratedSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: status.root });
-  const next = snapshotHasWorkflowCase(hydratedSnapshot)
+  const next = snapshotHasAnyEvalCase(hydratedSnapshot)
     ? "workbench eval"
     : authorEvalCaseCommand(hydratedSnapshot);
   return emitResult("workbench.cli.new.v1", {
@@ -4363,6 +4364,14 @@ function snapshotHasWorkflowCase(snapshot: InspectionSnapshot): boolean {
   return caseFiles.some((file) => file.kind === "text" && !/\n\s*smoke:\s*true(?:\s|$)/u.test(`\n${file.content}`));
 }
 
+function snapshotHasAnyEvalCase(snapshot: InspectionSnapshot): boolean {
+  const currentVersion = snapshotVersionByRef(snapshot, snapshot.status.currentVersionId ?? snapshot.refs.current ?? "");
+  return (currentVersion?.files ?? []).some((file) =>
+    file.kind === "text" &&
+    /^\.workbench\/cases\/[^/]+\/case\.ya?ml$/u.test(file.path)
+  );
+}
+
 function authorEvalCaseCommand(snapshot: InspectionSnapshot | null): string {
   const currentVersion = snapshot ? snapshotVersionByRef(snapshot, snapshot.status.currentVersionId ?? snapshot.refs.current ?? "") : undefined;
   const existingCaseIds = new Set((currentVersion?.files ?? []).flatMap((file) => {
@@ -4904,6 +4913,10 @@ function fileForSnapshotRef(
       subject: { ref: version.id, path: requestedPath },
       exitCode: 1,
     });
+  }
+  const runOrJobFile = fileForRunOrJobSnapshotRef(snapshot, objectRef, requestedPath);
+  if (runOrJobFile) {
+    return runOrJobFile;
   }
   const trace = snapshotObjectByRef(snapshot.traces, objectRef, "trace");
   if (trace) {
