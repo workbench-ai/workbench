@@ -516,6 +516,33 @@ describe("skill-first Workbench runtime", () => {
     );
   }, 60_000);
 
+  dockerTest("compare prefers higher-sample scored evidence over a later smaller rerun", async () => {
+    const root = await makeTempRoot("workbench-compare-samples-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    await addWorkbenchAgent({
+      dir: root,
+      name: "default",
+      adapter: "command",
+      config: { command: scoreCommand(0.8) },
+    });
+    await setDefaultWorkbenchAgent("default", { dir: root });
+
+    const [fiveSampleRun] = await evalWorkbenchSkill({ dir: root, agent: "default", samples: 5, rerun: true });
+    const [oneSampleRun] = await evalWorkbenchSkill({ dir: root, agent: "default", samples: 1, rerun: true });
+    const comparison = await compareWorkbench({ dir: root });
+    const [cell] = comparison.cells;
+
+    expect(fiveSampleRun?.id).toBeTruthy();
+    expect(oneSampleRun?.id).toBeTruthy();
+    expect(fiveSampleRun?.versionId).toBe(oneSampleRun?.versionId);
+    expect(cell).toMatchObject({
+      runId: fiveSampleRun?.id,
+      score: 0.8,
+      samples: 5,
+    });
+  }, 60_000);
+
   dockerTest("compare fills unrun cells for valid selected versions when recorded evidence exists", async () => {
     const root = await makeTempRoot("workbench-compare-selected-matrix-");
     await initWorkbenchSkill({ dir: root, agent: "local" });

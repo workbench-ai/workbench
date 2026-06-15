@@ -600,8 +600,9 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       ].join("\n"));
     }
     if (command === "publish") {
+      const visibility = parsePublishVisibilityFlags(parsed);
       const preview = parsed.flags["dry-run"] === true
-        ? await previewPublishWithDerivedRemote(parsed)
+        ? await previewPublishWithDerivedRemote(parsed, visibility)
         : undefined;
       if (preview) {
         const audience = publishAudience(preview.visibility);
@@ -629,7 +630,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
           version: optionalPositional(parsed, 1),
           remote,
           dryRun: parsed.flags["dry-run"] === true,
-          visibility: parsePublishVisibilityFlags(parsed),
+          visibility,
         }));
       } catch (error) {
         throw await publishErrorWithCliContext(error, parsed, remote);
@@ -2425,6 +2426,13 @@ async function fetchWorkbenchInstallSourceSnapshot(
   const text = await response.text();
   const cloudError = parseWorkbenchCloudErrorBody(text);
   if (cloudError) {
+    if (cloudError.code === "source_not_available" && token) {
+      throw new WorkbenchCodedError(cloudError.code, `${cloudError.message} You are already logged in; verify the OWNER/SKILL handle or ask the owner for access.`, {
+        retryable: false,
+        ...(cloudError.subject ? { subject: { ...cloudError.subject, authenticated: true } } : { subject: { authenticated: true } }),
+        exitCode: response.status === 400 ? 2 : 1,
+      });
+    }
     throw new WorkbenchCodedError(cloudError.code, cloudError.message, {
       retryable: cloudError.retryable,
       ...(cloudError.remediation ? { remediation: cloudError.remediation } : {}),
@@ -3785,7 +3793,7 @@ function parsePublishVisibilityFlags(parsed: ParsedArgs): "private" | "internal"
   return selected[0];
 }
 
-async function previewPublishWithDerivedRemote(parsed: ParsedArgs): Promise<{
+async function previewPublishWithDerivedRemote(parsed: ParsedArgs, visibility: "private" | "internal" | "public" | undefined): Promise<{
   remote: WorkbenchRemote;
   version: WorkbenchVersion;
   visibility: "private" | "internal" | "public";
@@ -3811,7 +3819,7 @@ async function previewPublishWithDerivedRemote(parsed: ParsedArgs): Promise<{
   return {
     remote,
     version,
-    visibility: parsePublishVisibilityFlags(parsed) ??
+    visibility: visibility ??
       normalizePublishVisibility(reconciledSnapshot.refs["publication/visibility"]) ??
       "private",
     installHandle: installHandleFromCloudRemote(remote),
@@ -5602,7 +5610,7 @@ function formatJob(job: WorkbenchJob): string {
 }
 
 function formatComparison(comparison: WorkbenchComparison): string {
-  const lines = ["version\tskill\tagent\tstatus\tscore\tcost\tlatency\trun"];
+  const lines = ["version\tskill\tagent\tstatus\tscore\tsamples\tcost\tlatency\trun"];
   const evidenceCells = comparison.cells.filter((cell) => cell.runId || cell.status);
   for (const cell of evidenceCells) {
     lines.push([
@@ -5611,6 +5619,7 @@ function formatComparison(comparison: WorkbenchComparison): string {
       `${cell.agentName}@${shortObjectId(cell.agentHash)}`,
       cell.status ?? "not-run",
       cell.score === undefined ? "n/a" : cell.score.toFixed(3),
+      cell.samples === undefined ? "n/a" : String(cell.samples),
       cell.costUsd === undefined ? "n/a" : `$${cell.costUsd.toFixed(4)}`,
       cell.latencyMs === undefined ? "n/a" : `${cell.latencyMs}ms`,
       cell.runId ? displayRef(cell.runId) : "n/a",

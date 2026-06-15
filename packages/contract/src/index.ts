@@ -417,6 +417,7 @@ export interface WorkbenchComparisonCell {
   runId?: string;
   status?: WorkbenchRunStatus;
   score?: number;
+  samples?: number;
   costUsd?: number;
   latencyMs?: number;
   error?: string;

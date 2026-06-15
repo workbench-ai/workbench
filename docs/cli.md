@@ -112,14 +112,14 @@ workbench log
 workbench log --runs
 workbench log --versions
 workbench show <run-id>
-workbench show <job-id>:stderr.log
+workbench show <job-id>
 workbench show <version-id>:SKILL.md
 workbench diff <base-version-id>..<improved-version-id>
 workbench switch <version-id>
 workbench open
 ```
 
-Use `workbench show <run-id>` first after multi-sample runs. It lists the job ids and canonical file paths; then use a specific job or trace ref such as `workbench show <job-id>:stderr.log` to open one stream.
+Use `workbench show <run-id>` first after multi-sample runs. It lists the job ids and canonical file paths; then use a specific job or trace ref such as `workbench show <job-id>:stderr.log` when that file is present.
 
 Bare `workbench` is the same orientation view as `workbench status`. `log` shows one reverse-chronological timeline of versions and runs. `show REF` lists files for file-backed objects or shows interpreted run/job evidence; `show REF:PATH` reads one version, artifact, or run/job evidence file by exact path or unique canonical suffix. Internal `.workbench/` runtime files and raw trace metadata files such as `request.json`, `result.json`, and `trace.json` are not addressable evidence. Native read-only sessions such as `codex:SESSION_ID` and `claude:SESSION_ID` are also resolved through `show`.
 

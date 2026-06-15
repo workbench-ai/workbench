@@ -88,7 +88,7 @@ workbench log --versions
 workbench show current:SKILL.md
 ```
 
-Use scored below-perfect, failed, or reviewed eval evidence for better cases and skill edits. `workbench improve` refuses to create cosmetic versions from perfect eval history or unscored runtime/auth failures and requires the selected agent to have a skill-improvement adapter before execution starts. To create a regression case from a run, inspect it with `workbench show RUN_ID` and write the `.workbench/cases/*` files directly.
+Use scored below-perfect, failed, or reviewed eval evidence for better cases and skill edits. `workbench improve` refuses to create cosmetic versions from perfect eval history or unscored runtime/auth failures, and the selected agent must have a skill-improvement adapter once actionable evidence exists. To create a regression case from a run, inspect it with `workbench show RUN_ID` and write the `.workbench/cases/*` files directly.
 
 ```bash
 codex login --device-auth

@@ -1015,6 +1015,15 @@ describe("workbench skill-first CLI", () => {
           }],
         });
       }
+      if (url.pathname === "/api/workbench/source/skills/alice/missing-skill/source") {
+        return jsonResponse({
+          schema: "workbench.cloud.error.v1",
+          code: "source_not_available",
+          message: "No published source is available.",
+          retryable: false,
+          remediation: "workbench login",
+        }, 404);
+      }
       return jsonResponse({ message: `Unexpected path ${url.pathname}` }, 404);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -1071,7 +1080,25 @@ describe("workbench skill-first CLI", () => {
           installHandle: "alice/private-skill",
         },
       });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const missing = await invoke([
+        "install",
+        "alice/missing-skill",
+        "--for",
+        "codex",
+        "--global",
+        "--dry-run",
+        "--json",
+      ]);
+      expect(missing.code, missing.stdout || missing.stderr).toBe(1);
+      const missingJson = stdoutJson(missing);
+      expect(missingJson).toMatchObject({
+        ok: false,
+        code: "source_not_available",
+        message: "No published source is available. You are already logged in; verify the OWNER/SKILL handle or ask the owner for access.",
+        subject: { authenticated: true },
+      });
+      expect(missingJson).not.toHaveProperty("remediation");
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -2354,6 +2381,25 @@ describe("workbench skill-first CLI", () => {
         process.env.WORKBENCH_SMOKE_BEARER_TOKEN = previousSmokeToken;
       }
     }
+  });
+
+  test("publish rejects conflicting visibility flags before progress or remote work", async () => {
+    const root = await makeTempRoot("workbench-cli-publish-flags-");
+    const fetchMock = vi.fn(async () => jsonResponse({ message: "unexpected fetch" }, 500));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const publish = await invoke(["publish", "--public", "--team", "--dir", root, "--json"]);
+
+    expect(publish.code, publish.stdout || publish.stderr).toBe(2);
+    expect(publish.stderr).toBe("");
+    expect(publish.stdout).not.toContain("workbench publish:");
+    expect(stdoutJson(publish)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "workbench publish accepts only one visibility flag.",
+      remediation: "workbench publish --private",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   test("hosted execution preflights selected provider auth before syncing source", async () => {
@@ -5744,7 +5790,7 @@ describe("workbench skill-first CLI", () => {
     });
 
     const compare = await invoke(["compare", "--dir", root, "--agents", "patcher"]);
-    expect(compare.stdout).toContain("version\tskill\tagent\tstatus\tscore\tcost");
+    expect(compare.stdout).toContain("version\tskill\tagent\tstatus\tscore\tsamples\tcost");
     expect(compare.stdout).toContain(shortTestRef(patcherBaseVersionId));
     expect(compare.stdout).toContain("\tfailed\t");
     expect(compare.stdout).toContain("\t0.000\t");

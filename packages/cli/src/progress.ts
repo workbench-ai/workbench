@@ -20,12 +20,20 @@ export interface ProgressSnapshot {
   phase: WorkbenchProgressPhase;
   location: "local" | "cloud";
   runIds: string[];
+  active?: ProgressActiveWork;
   casesTotal?: number;
   casesDone?: number;
   samplesTotal?: number;
   samplesDone?: number;
   failed?: number;
   elapsedMs: number;
+}
+
+interface ProgressActiveWork {
+  jobId: string;
+  caseId: string;
+  sample: number;
+  runningCount: number;
 }
 
 export interface ProgressSnapshotInput {
@@ -49,11 +57,13 @@ export function progressSnapshotFromRuns(input: ProgressSnapshotInput): Progress
   const jobsForRuns = input.jobs.filter((job) => runIdSet.has(job.runId));
   const phase = progressPhaseForRuns(input.phase, input.runs, jobsForRuns);
   const counterJobs = progressCounterJobs(input.command, phase, jobsForRuns);
+  const activeJobs = progressActiveJobs(input.command, phase, jobsForRuns, counterJobs);
   return {
     command: input.command,
     phase,
     location: input.location,
     runIds,
+    ...progressActive(activeJobs),
     ...progressCounters(counterJobs),
     elapsedMs: Math.max(0, nowMs - input.startedAtMs),
   };
@@ -67,7 +77,7 @@ export function createProgressRenderer(input: {
   let last: ProgressSnapshot | undefined;
   let lastPrintedAtMs: number | undefined;
   let queuedGuidanceRunId: string | undefined;
-  let localGuidanceRunId: string | undefined;
+  let inspectionGuidanceKey: string | undefined;
   return {
     render(snapshot, options = {}) {
       const reason = progressRenderReason(last, snapshot, lastPrintedAtMs, heartbeatMs, options.force === true);
@@ -81,10 +91,11 @@ export function createProgressRenderer(input: {
           queuedGuidanceRunId = snapshot.runIds[0];
         }
       }
-      if (snapshot.location === "local" && isInspectableLocalPhase(snapshot.phase) && snapshot.runIds[0]) {
-        if (reason === "heartbeat" || localGuidanceRunId !== snapshot.runIds[0]) {
-          input.stderr.write(`${formatInspectableLocalGuidance(snapshot.command, snapshot.runIds[0])}\n`);
-          localGuidanceRunId = snapshot.runIds[0];
+      if (isInspectablePhase(snapshot.phase) && snapshot.runIds[0]) {
+        const guidanceKey = `${snapshot.location}:${snapshot.runIds[0]}`;
+        if (reason === "heartbeat" || inspectionGuidanceKey !== guidanceKey) {
+          input.stderr.write(`${formatInspectableGuidance(snapshot.command, snapshot.runIds[0], snapshot.location)}\n`);
+          inspectionGuidanceKey = guidanceKey;
         }
       }
       last = snapshot;
@@ -106,11 +117,18 @@ export function formatQueuedCloudGuidance(command: WorkbenchProgressCommand, run
   return `workbench ${command}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench show ${runId}.`;
 }
 
-export function formatInspectableLocalGuidance(command: WorkbenchProgressCommand, runId: string): string {
+export function formatInspectableGuidance(
+  command: WorkbenchProgressCommand,
+  runId: string,
+  location: ProgressSnapshot["location"],
+): string {
+  if (location === "cloud") {
+    return `workbench ${command}: press Ctrl-C to detach; inspect last local state with workbench show ${runId} and refresh later with workbench sync cloud.`;
+  }
   return `workbench ${command}: inspect current evidence with workbench show ${runId}.`;
 }
 
-function isInspectableLocalPhase(phase: WorkbenchProgressPhase): boolean {
+function isInspectablePhase(phase: WorkbenchProgressPhase): boolean {
   return phase === "running" || phase === "improving" || phase === "proof_eval";
 }
 
@@ -146,6 +164,36 @@ function progressCounterJobs(
     return [];
   }
   return jobs.filter((job) => job.caseId !== "current");
+}
+
+function progressActiveJobs(
+  command: WorkbenchProgressCommand,
+  phase: WorkbenchProgressPhase,
+  jobs: readonly WorkbenchJob[],
+  counterJobs: readonly WorkbenchJob[],
+): readonly WorkbenchJob[] {
+  if (command === "improve" && (phase === "running" || phase === "improving" || phase === "applying_patch")) {
+    return jobs;
+  }
+  return counterJobs;
+}
+
+function progressActive(jobs: readonly WorkbenchJob[]): Pick<ProgressSnapshot, "active"> {
+  const runningJobs = jobs
+    .filter((job) => job.status === "running")
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  const [active] = runningJobs;
+  if (!active) {
+    return {};
+  }
+  return {
+    active: {
+      jobId: active.id,
+      caseId: active.caseId,
+      sample: active.sample,
+      runningCount: runningJobs.length,
+    },
+  };
 }
 
 function progressCounters(jobs: readonly WorkbenchJob[]): Partial<ProgressSnapshot> {
@@ -213,6 +261,7 @@ function progressSignature(snapshot: ProgressSnapshot): string {
     samplesDone: snapshot.samplesDone,
     samplesTotal: snapshot.samplesTotal,
     failed: snapshot.failed,
+    active: snapshot.active,
   });
 }
 
@@ -240,16 +289,30 @@ function progressPhaseText(snapshot: ProgressSnapshot): string {
 }
 
 function progressCounterParts(snapshot: ProgressSnapshot): string[] {
+  const parts: Array<string | undefined> = [];
   if (snapshot.samplesTotal === undefined || snapshot.samplesDone === undefined) {
-    return [];
+    return activeProgressParts(snapshot);
   }
-  return [
+  parts.push(
     snapshot.casesTotal !== undefined && snapshot.casesDone !== undefined
       ? `cases ${snapshot.casesDone}/${snapshot.casesTotal}`
       : undefined,
     `samples ${snapshot.samplesDone}/${snapshot.samplesTotal} complete`,
     `failed ${snapshot.failed ?? 0}`,
-  ].filter((entry): entry is string => Boolean(entry));
+  );
+  parts.push(...activeProgressParts(snapshot));
+  return parts.filter((entry): entry is string => Boolean(entry));
+}
+
+function activeProgressParts(snapshot: ProgressSnapshot): string[] {
+  const active = snapshot.active;
+  if (!active) {
+    return [];
+  }
+  return [
+    `active case=${active.caseId} sample=${active.sample + 1} job=${active.jobId}`,
+    ...(active.runningCount > 1 ? [`running=${active.runningCount}`] : []),
+  ];
 }
 
 function formatElapsed(elapsedMs: number): string {

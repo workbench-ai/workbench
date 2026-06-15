@@ -41,6 +41,12 @@ describe("Workbench CLI progress projection", () => {
     expect(snapshot).toMatchObject({
       phase: "running",
       runIds: ["run_a", "run_b"],
+      active: {
+        jobId: "job_a_1",
+        caseId: "case-001",
+        sample: 1,
+        runningCount: 1,
+      },
       casesTotal: 2,
       casesDone: 1,
       samplesTotal: 3,
@@ -49,7 +55,7 @@ describe("Workbench CLI progress projection", () => {
       elapsedMs: 42_000,
     });
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench eval: running, cases 1/2, samples 2/3 complete, failed 1, elapsed 42s.");
+      .toBe("workbench eval: running, cases 1/2, samples 2/3 complete, failed 1, active case=case-001 sample=2 job=job_a_1, elapsed 42s.");
   });
 
   test("excludes improve adapter jobs from proof eval counters", () => {
@@ -123,7 +129,8 @@ describe("Workbench CLI progress projection", () => {
       "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench show run_cloud.",
       "workbench eval: queued on Workbench Cloud, cases 0/1, samples 0/1 complete, failed 0, elapsed 1m.",
       "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench show run_cloud.",
-      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, elapsed 1m 1s.",
+      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, active case=case-001 sample=1 job=job_cloud, elapsed 1m 1s.",
+      "workbench eval: press Ctrl-C to detach; inspect last local state with workbench show run_cloud and refresh later with workbench sync cloud.",
       "workbench eval: complete, cases 1/1, samples 1/1 complete, failed 0, elapsed 1m 20s.",
       "",
     ].join("\n"));
@@ -148,9 +155,9 @@ describe("Workbench CLI progress projection", () => {
     renderer.render(heartbeat);
 
     expect(stream.value).toBe([
-      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, elapsed 0s.",
+      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, active case=case-001 sample=1 job=job_local, elapsed 0s.",
       "workbench eval: inspect current evidence with workbench show run_local.",
-      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, elapsed 1m.",
+      "workbench eval: running, cases 0/1, samples 0/1 complete, failed 0, active case=case-001 sample=1 job=job_local, elapsed 1m.",
       "workbench eval: inspect current evidence with workbench show run_local.",
       "",
     ].join("\n"));

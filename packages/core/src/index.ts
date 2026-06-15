@@ -4762,8 +4762,9 @@ export async function compareWorkbench(options: WorkbenchCompareOptions = {}): P
     }
     for (const skill of runtime.skillBundles) {
       for (const agent of runtime.selectedAgents) {
-        const run = latestComparableRun({
+        const run = bestComparableRun({
           runs: state.runs,
+          jobs: state.jobs,
           versionId: version.id,
           skillName: skill.skillName,
           skillBundleHash: skill.hash,
@@ -4861,8 +4862,9 @@ async function completeRecordedComparisonSelectionMatrix(
         if (existingCellKeys.has(key)) {
           continue;
         }
-        const run = latestComparableRun({
+        const run = bestComparableRun({
           runs: state.runs,
+          jobs: state.jobs,
           versionId: version.id,
           skillName: skill.skillName,
           skillBundleHash: skill.hash,
@@ -4972,8 +4974,9 @@ export function buildWorkbenchComparisonFromState(
   for (const entry of entries) {
     const agents = agentsByVersionId.get(entry.version.id) ?? [];
     for (const agent of agents) {
-      const run = latestComparableRun({
+      const run = bestComparableRun({
         runs: state.runs,
+        jobs: state.jobs,
         versionId: entry.version.id,
         skillName: entry.bundle.skillName,
         skillBundleHash: entry.bundle.hash,
@@ -10018,8 +10021,9 @@ function hasNonPerfectTerminalEvalRunForImprove(
   ) !== undefined;
 }
 
-function latestComparableRun(args: {
+function bestComparableRun(args: {
   runs: readonly WorkbenchRun[];
+  jobs: readonly WorkbenchJob[];
   versionId: string;
   skillName: string;
   skillBundleHash: string;
@@ -10027,11 +10031,36 @@ function latestComparableRun(args: {
   agentName: string;
   agentHash: string;
 }): WorkbenchRun | undefined {
-  return latestMatchingRun(args, (run) =>
+  const terminalRuns = matchingRuns(args).filter((run) =>
     run.status !== "queued" &&
-    run.status !== "running" &&
-    typeof run.score === "number"
-  ) ?? latestMatchingRun(args);
+    run.status !== "running"
+  );
+  if (terminalRuns.length > 0) {
+    return terminalRuns.sort((left, right) =>
+      comparisonRunSamples(right, args.jobs) - comparisonRunSamples(left, args.jobs) ||
+      right.createdAt.localeCompare(left.createdAt)
+    )[0];
+  }
+  return latestMatchingRun(args);
+}
+
+function matchingRuns(args: {
+  runs: readonly WorkbenchRun[];
+  versionId: string;
+  skillName: string;
+  skillBundleHash: string;
+  evalHash: string;
+  agentName: string;
+  agentHash: string;
+}): WorkbenchRun[] {
+  return args.runs.filter((run) =>
+    run.versionId === args.versionId &&
+    run.skillName === args.skillName &&
+    run.skillBundleHash === args.skillBundleHash &&
+    run.evalHash === args.evalHash &&
+    run.agentName === args.agentName &&
+    run.agentHash === args.agentHash
+  );
 }
 
 function latestMatchingRun(
@@ -10046,17 +10075,17 @@ function latestMatchingRun(
   },
   predicate: (run: WorkbenchRun) => boolean = () => true,
 ): WorkbenchRun | undefined {
-  return args.runs
-    .filter((run) =>
-      run.versionId === args.versionId &&
-      run.skillName === args.skillName &&
-      run.skillBundleHash === args.skillBundleHash &&
-      run.evalHash === args.evalHash &&
-      run.agentName === args.agentName &&
-      run.agentHash === args.agentHash &&
-      predicate(run)
-    )
+  return matchingRuns(args)
+    .filter(predicate)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+}
+
+function comparisonRunSamples(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): number {
+  const runJobs = jobs.filter((job) => job.runId === run.id && job.caseId !== "current");
+  if (runJobs.length > 0) {
+    return new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
+  }
+  return run.jobIds?.length ?? 0;
 }
 
 function comparisonEntryKey(
@@ -10071,11 +10100,13 @@ function comparisonEntryKey(
 function comparisonCellRunFields(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
-): Pick<WorkbenchComparisonCell, "runId" | "status" | "score" | "costUsd" | "latencyMs" | "error"> {
+): Pick<WorkbenchComparisonCell, "runId" | "status" | "score" | "samples" | "costUsd" | "latencyMs" | "error"> {
+  const samples = comparisonRunSamples(run, jobs);
   return {
     runId: run.id,
     status: run.status,
     ...(run.score !== undefined ? { score: run.score } : {}),
+    ...(samples > 0 ? { samples } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
     ...(run.error ? { error: run.error } : {}),

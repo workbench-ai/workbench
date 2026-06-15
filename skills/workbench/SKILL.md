@@ -62,14 +62,14 @@ workbench status
 workbench log
 workbench log --runs
 workbench show RUN_ID
-workbench show JOB_ID:stderr.log
+workbench show JOB_ID
 workbench show VERSION_ID:SKILL.md
 workbench diff BASE_VERSION_ID..IMPROVED_VERSION_ID
 workbench switch VERSION_ID
 workbench open
 ```
 
-`switch` materializes a recorded version into the working folder and does not invoke Git. The web view is read-only. Use `log` and `show REF` for summary inspection. Use `show REF:PATH` for stdout, stderr, result files, captured artifacts, version files, and read-only native sessions such as `codex:SESSION_ID` or `claude:SESSION_ID`. Run/job evidence uses canonical user-facing paths; internal `.workbench/` runtime paths and raw trace metadata files are not inspection targets.
+`switch` materializes a recorded version into the working folder and does not invoke Git. The web view is read-only. Use `log` and `show REF` for summary inspection. Use `show REF:PATH` for listed stdout, stderr, result files, captured artifacts, version files, and read-only native sessions such as `codex:SESSION_ID` or `claude:SESSION_ID`. Run/job evidence uses canonical user-facing paths; internal `.workbench/` runtime paths and raw trace metadata files are not inspection targets.
 
 ## Agents And Skills
 
