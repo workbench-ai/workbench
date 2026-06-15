@@ -1005,6 +1005,7 @@ const API_REQUEST_MAX_ATTEMPTS = 3;
 const API_REQUEST_GZIP_THRESHOLD_BYTES = 1024 * 1024;
 const CLOUD_RUN_TIMEOUT_MS = 30 * 60 * 1000;
 const CLOUD_RUN_POLL_INTERVAL_MS = 3000;
+const CLOUD_PROGRESS_RENDER_INTERVAL_MS = 1000;
 const LOGIN_WAIT_TIMEOUT_SECONDS = 120;
 
 interface WorkbenchConfig {
@@ -1567,13 +1568,17 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       authToken: token,
     }));
     if (adapterAuthTargets.length > 0) {
-      await cloudPreScheduleStep(command, interrupt, assertCloudAdapterAuthConnected({
+      await cloudPreScheduleStepWithProgress(command, interrupt, assertCloudAdapterAuthConnected({
         baseUrl: source.baseUrl,
         targets: adapterAuthTargets,
-      }));
+      }), () => renderCloudProgress("provider_auth"));
     }
-    renderCloudProgress("sync");
-    const syncBefore = await cloudPreScheduleStep(command, interrupt, syncWorkbenchRemote({ ...core, remote: remote.name }));
+    const syncBefore = await cloudPreScheduleStepWithProgress(
+      command,
+      interrupt,
+      syncWorkbenchRemote({ ...core, remote: remote.name }),
+      () => renderCloudProgress("sync"),
+    );
     const skillId = await cloudPreScheduleStep(command, interrupt, resolveCloudSkillId(source));
     const response = await cloudPreScheduleStep(command, interrupt, apiRequest<{ runs?: WorkbenchRun[] }>(
       `/api/workbench/skills/${encodeURIComponent(skillId)}${command === "improve" ? "/improve" : "/runs"}`,
@@ -1591,7 +1596,13 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     }
     const initialRunIds = runs.map((run) => run.id);
     interrupt.setRunIds(initialRunIds);
-    const syncAfterSchedule = await syncWorkbenchRemote({ ...core, remote: remote.name });
+    const renderScheduledRunProgress = (): void => {
+      renderCloudProgress(cloudProgressPhase(command, runs, []), runs, []);
+    };
+    const syncAfterSchedule = await withCloudProgressRendering(
+      syncWorkbenchRemote({ ...core, remote: remote.name }),
+      renderScheduledRunProgress,
+    );
     const completed = await waitForCloudRuns({
       command,
       core,
@@ -1698,6 +1709,31 @@ async function cloudPreScheduleStep<T>(
       throw cloudCanceledBeforeRunIdError(command);
     }),
   ]);
+}
+
+async function cloudPreScheduleStepWithProgress<T>(
+  command: "eval" | "improve",
+  interrupt: CloudInterruptController,
+  step: Promise<T>,
+  renderProgress: () => void,
+): Promise<T> {
+  return await withCloudProgressRendering(
+    cloudPreScheduleStep(command, interrupt, step),
+    renderProgress,
+  );
+}
+
+async function withCloudProgressRendering<T>(
+  step: Promise<T>,
+  renderProgress: () => void,
+): Promise<T> {
+  renderProgress();
+  const interval = setInterval(renderProgress, CLOUD_PROGRESS_RENDER_INTERVAL_MS);
+  try {
+    return await step;
+  } finally {
+    clearInterval(interval);
+  }
 }
 
 function cloudCanceledBeforeRunIdError(command: "eval" | "improve"): WorkbenchCodedError {
@@ -1842,8 +1878,22 @@ async function waitForCloudRuns(input: {
   const deadline = Date.now() + timeoutMs;
   let details: CloudRunDetail[] = input.runs.map((run) => ({ run, jobs: [] }));
   let runs = details.map((detail) => detail.run);
+  const renderCurrentProgress = (): void => {
+    const currentJobs = details.flatMap((detail) => detail.jobs);
+    input.renderer.render(progressSnapshotFromRuns({
+      command: input.command,
+      location: "cloud",
+      phase: cloudProgressPhase(input.command, runs, currentJobs),
+      runs,
+      jobs: currentJobs,
+      startedAtMs: input.startedAtMs,
+    }));
+  };
   while (true) {
-    details = await fetchCloudRunDetails(input.source.baseUrl, input.skillId, runIds, details);
+    details = await withCloudProgressRendering(
+      fetchCloudRunDetails(input.source.baseUrl, input.skillId, runIds, details),
+      renderCurrentProgress,
+    );
     runs = details.map((detail) => detail.run);
     const jobs = details.flatMap((detail) => detail.jobs);
     input.renderer.render(progressSnapshotFromRuns({

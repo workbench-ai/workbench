@@ -6,6 +6,7 @@ import type {
 export type WorkbenchProgressCommand = "eval" | "improve";
 export type WorkbenchProgressPhase =
   | "preflight"
+  | "provider_auth"
   | "sync"
   | "queued"
   | "running"
@@ -106,7 +107,7 @@ function progressPhaseForRuns(
   if (runs.length > 0 && runs.every(isTerminalRun)) {
     return "complete";
   }
-  if (phase === "preflight" || phase === "sync" || phase === "improving" || phase === "applying_patch" || phase === "proof_eval") {
+  if (phase === "preflight" || phase === "provider_auth" || phase === "sync" || phase === "improving" || phase === "applying_patch" || phase === "proof_eval") {
     return phase;
   }
   if (runs.length > 0 && runs.every((run) => run.status === "queued") && jobs.every((job) => job.status === "queued")) {
@@ -204,6 +205,8 @@ function progressPhaseText(snapshot: ProgressSnapshot): string {
   switch (snapshot.phase) {
     case "preflight":
       return "preflight";
+    case "provider_auth":
+      return "checking provider auth";
     case "sync":
       return snapshot.location === "cloud" ? "sync with Workbench Cloud" : "sync";
     case "queued":

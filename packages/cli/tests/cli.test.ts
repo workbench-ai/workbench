@@ -2239,6 +2239,7 @@ describe("workbench skill-first CLI", () => {
         remediation: "codex login --device-auth && workbench login codex --method oauth",
       });
       expect(improved.stderr).toContain("workbench improve: preflight");
+      expect(improved.stderr).toContain("workbench improve: checking provider auth");
       expect(improved.stderr).not.toContain("workbench cloud:");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -2290,6 +2291,10 @@ describe("workbench skill-first CLI", () => {
       jobIds: ["job_cloud"],
       traceIds: [],
       createdAt,
+    };
+    const queuedRun = {
+      ...runningRun,
+      status: "queued",
     };
     const runningJob = {
       id: "job_cloud",
@@ -2398,7 +2403,7 @@ describe("workbench skill-first CLI", () => {
         };
         return jsonResponse({
           skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" },
-          runs: [runningRun],
+          runs: [queuedRun],
         });
       }
       return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
@@ -2417,6 +2422,8 @@ describe("workbench skill-first CLI", () => {
       });
       expect(startedJson.cloud.initialRunIds).toEqual(["run_cloud"]);
       expect(started.stderr).not.toContain("workbench cloud:");
+      expect(started.stderr).toContain("workbench eval: queued on Workbench Cloud");
+      expect(started.stderr).toContain("workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench show run_cloud.");
       expect(started.stderr).toContain("workbench eval: complete");
 
       const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
