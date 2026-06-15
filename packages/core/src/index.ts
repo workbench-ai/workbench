@@ -2737,7 +2737,7 @@ export interface WorkbenchImproveOptions extends WorkbenchCommandOptions {
   samples?: number;
   parentRunId?: string;
   evidenceTraceIds?: readonly string[];
-  progress?: (message: string) => void;
+  progress?: (phase: "improving" | "applying_patch" | "proof_eval") => void;
 }
 
 export interface WorkbenchImproveResult {
@@ -4464,7 +4464,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     agentName: evalAgent.name,
     agentHash: hashJson(evalAgent),
   });
-  options.progress?.(`workbench improve: running ${evalAgent.name} improvement adapter.`);
+  options.progress?.("improving");
   const improvement = await createSkillImprovementPatch({
     root,
     state,
@@ -4475,6 +4475,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     historicalTraces,
     improvementEvidence,
   });
+  options.progress?.("applying_patch");
   const applied = applyWorkbenchSkillImprovementPatch(state, {
     baseVersionId: base.id,
     agent: evalAgent,
@@ -4497,7 +4498,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     upsertByHash(state.skillBundles, bundle);
   }
   upsertAgentSnapshots(state.agents, outputRuntime.agents);
-  options.progress?.("workbench improve: running proof eval.");
+  options.progress?.("proof_eval");
   const run = await executeWorkbenchEvaluationRun({
     root,
     state,
@@ -8893,6 +8894,17 @@ async function loadState(root: string, options: { allowMissing?: boolean } = {})
       throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench new` first.");
     }
     return emptyWorkbenchState(root);
+  }
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await recoverAtomicStateCommit(root);
+      return await readStateFromObjectStore(root, <T>(type: WorkbenchStateObjectType) => readObjectTypeDir<T>(root, type));
+    } catch (error) {
+      if (!isTransientStateReadError(error) || attempt === 5) {
+        throw error;
+      }
+      await sleep(15 * (attempt + 1));
+    }
   }
   await recoverAtomicStateCommit(root);
   return readStateFromObjectStore(root, <T>(type: WorkbenchStateObjectType) => readObjectTypeDir<T>(root, type));

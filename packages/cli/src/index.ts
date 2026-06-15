@@ -56,6 +56,12 @@ import {
 import { normalizeWorkbenchSkillName } from "@workbench-ai/workbench-contract";
 import { emitError, emitResult } from "./output.js";
 import {
+  createProgressRenderer,
+  progressSnapshotFromRuns,
+  type WorkbenchProgressCommand,
+  type WorkbenchProgressPhase,
+} from "./progress.js";
+import {
   installedInventoryToJson,
   installPackageFiles,
   installResultToJson,
@@ -466,18 +472,20 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       if (parsed.flags.cloud === true) {
         return await handleCloudEval(parsed, io);
       }
-      const runs = await withProgressHeartbeat(
+      const runs = await withLocalCommandProgress({
+        command: "eval",
+        core,
         io,
-        "workbench eval: local eval",
-        async () => await evalWorkbenchSkill({
+        runKind: "eval",
+        initialPhase: "running",
+        run: async () => await evalWorkbenchSkill({
           ...core,
           skill: stringFlag(parsed, "skills"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           rerun: parsed.flags.rerun === true,
         }),
-        { hint: "Read commands remain available: workbench log --runs." },
-      );
+      });
       const artifactIds = await artifactIdsByRunId(core, runs);
       const failedRuns = runs.filter((run) => run.status === "failed" || run.status === "canceled");
       const coverage = await evalCoverageSummaries(core, runs);
@@ -507,13 +515,20 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       if (parsed.flags.cloud === true) {
         return await handleCloudImprove(parsed, io);
       }
-      const result = await improveWorkbenchSkill({
-        ...core,
-        skill: stringFlag(parsed, "skills"),
-        agent: stringFlag(parsed, "agents"),
-        budget: intFlag(parsed, "budget"),
-        samples: intFlag(parsed, "samples"),
-        progress: (message) => writeCliProgress(parsed, io, message, { json: true }),
+      const result = await withLocalCommandProgress({
+        command: "improve",
+        core,
+        io,
+        runKind: "improve",
+        initialPhase: "improving",
+        run: async (setPhase) => await improveWorkbenchSkill({
+          ...core,
+          skill: stringFlag(parsed, "skills"),
+          agent: stringFlag(parsed, "agents"),
+          budget: intFlag(parsed, "budget"),
+          samples: intFlag(parsed, "samples"),
+          progress: setPhase,
+        }),
       });
       const next = result.switched ? "workbench eval --rerun -n 5" : "workbench eval";
       return output({
@@ -1491,8 +1506,23 @@ function formatFileCount(count: number): string {
 
 async function startCloudExecution(command: "eval" | "improve", parsed: ParsedArgs, io: CliIo): Promise<StartedCloudExecution> {
   const root = dirFlag(parsed) ?? process.cwd();
-  const showProgress = true;
-  const interrupt = createCloudInterruptController(command, io, showProgress);
+  const startedAtMs = Date.now();
+  const renderer = createProgressRenderer({ stderr: io.stderr });
+  const renderCloudProgress = (
+    phase: WorkbenchProgressPhase,
+    runs: readonly WorkbenchRun[] = [],
+    jobs: readonly WorkbenchJob[] = [],
+  ): void => {
+    renderer.render(progressSnapshotFromRuns({
+      command,
+      location: "cloud",
+      phase,
+      runs,
+      jobs,
+      startedAtMs,
+    }));
+  };
+  const interrupt = createCloudInterruptController(command, io);
   try {
     const preparedImproveRequest = command === "improve"
       ? await cloudPreScheduleStep(command, interrupt, prepareWorkbenchCloudImproveRequest({
@@ -1519,9 +1549,8 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
         exitCode: 1,
       });
     }
+    renderCloudProgress("preflight");
     const core = { dir: root, authToken: token };
-    writeCloudProgress(io, `workbench cloud: preparing hosted ${command}.`, showProgress);
-    writeCloudProgress(io, "workbench cloud: preparing current source.", showProgress);
     const request = command === "eval"
       ? await cloudPreScheduleStep(command, interrupt, prepareWorkbenchCloudEvalRequest({
           ...core,
@@ -1538,15 +1567,13 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       authToken: token,
     }));
     if (adapterAuthTargets.length > 0) {
-      writeCloudProgress(io, "workbench cloud: checking provider auth.", showProgress);
       await cloudPreScheduleStep(command, interrupt, assertCloudAdapterAuthConnected({
         baseUrl: source.baseUrl,
         targets: adapterAuthTargets,
       }));
     }
-    writeCloudProgress(io, "workbench cloud: syncing source to cloud.", showProgress);
+    renderCloudProgress("sync");
     const syncBefore = await cloudPreScheduleStep(command, interrupt, syncWorkbenchRemote({ ...core, remote: remote.name }));
-    writeCloudProgress(io, `workbench cloud: scheduling hosted ${command}.`, showProgress);
     const skillId = await cloudPreScheduleStep(command, interrupt, resolveCloudSkillId(source));
     const response = await cloudPreScheduleStep(command, interrupt, apiRequest<{ runs?: WorkbenchRun[] }>(
       `/api/workbench/skills/${encodeURIComponent(skillId)}${command === "improve" ? "/improve" : "/runs"}`,
@@ -1565,19 +1592,17 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     const initialRunIds = runs.map((run) => run.id);
     interrupt.setRunIds(initialRunIds);
     const syncAfterSchedule = await syncWorkbenchRemote({ ...core, remote: remote.name });
-    writeCloudProgress(io, `workbench cloud: scheduled hosted ${command} on ${remote.url} (${formatCloudRunStatuses(runs)}).`, showProgress);
-    writeCloudProgress(io, `workbench cloud: waiting for terminal status; press Ctrl-C to detach and resume with workbench show ${displayRef(initialRunIds[0] ?? "run")}.`, showProgress);
     const completed = await waitForCloudRuns({
       command,
       core,
       interrupt,
-      io,
-      progress: showProgress,
+      renderer,
       remote,
       runs,
       source,
       skillId,
       initialSync: syncAfterSchedule,
+      startedAtMs,
     });
     return {
       core,
@@ -1627,7 +1652,6 @@ interface CloudInterruptController {
 function createCloudInterruptController(
   command: "eval" | "improve",
   io: CliIo,
-  progress: boolean,
 ): CloudInterruptController {
   let interrupted = false;
   let runIds: readonly string[] = [];
@@ -1638,7 +1662,7 @@ function createCloudInterruptController(
   const onSigint = (): void => {
     interrupted = true;
     if (runIds.length > 0) {
-      writeCloudProgress(io, `workbench cloud: detaching from hosted ${command} (${runIds.map(displayRef).join(", ")}).`, progress);
+      io.stderr.write(`workbench ${command}: detaching from hosted run (${runIds.map(displayRef).join(", ")}).\n`);
     }
     resolveSignal();
   };
@@ -1794,13 +1818,13 @@ async function waitForCloudRuns(input: {
   command: "eval" | "improve";
   core: { dir?: string; authToken?: string };
   interrupt: CloudInterruptController;
-  io: CliIo;
-  progress: boolean;
+  renderer: ReturnType<typeof createProgressRenderer>;
   remote: WorkbenchRemote;
   runs: readonly WorkbenchRun[];
   source: ParsedWorkbenchInstallSource;
   skillId: string;
   initialSync: Awaited<ReturnType<typeof syncWorkbenchRemote>>;
+  startedAtMs: number;
 }): Promise<{ runs: WorkbenchRun[]; sync: Awaited<ReturnType<typeof syncWorkbenchRemote>>; detached?: boolean }> {
   const runIds = input.runs
     .map((run) => run.id)
@@ -1816,34 +1840,23 @@ async function waitForCloudRuns(input: {
   const timeoutMs = positiveIntEnv("WORKBENCH_CLOUD_RUN_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS;
   const pollIntervalMs = positiveIntEnv("WORKBENCH_CLOUD_RUN_POLL_INTERVAL_MS") ?? CLOUD_RUN_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
-  let runs = [...input.runs];
-  const startedAtMs = Date.now();
-  let lastProgressAtMs = startedAtMs;
-  const seenStatuses = new Map<string, string>();
+  let details: CloudRunDetail[] = input.runs.map((run) => ({ run, jobs: [] }));
+  let runs = details.map((detail) => detail.run);
   while (true) {
-    runs = await fetchCloudRuns(input.source.baseUrl, input.skillId, runIds, runs);
-    let wroteProgress = false;
-    const nowMs = Date.now();
-    for (const run of runs) {
-      const previous = seenStatuses.get(run.id);
-      if (previous !== run.status) {
-        seenStatuses.set(run.id, run.status);
-        writeCloudProgress(input.io, `workbench cloud: ${formatCloudRunState(run, startedAtMs, nowMs)}.`, input.progress);
-        wroteProgress = input.progress || wroteProgress;
-      }
-    }
+    details = await fetchCloudRunDetails(input.source.baseUrl, input.skillId, runIds, details);
+    runs = details.map((detail) => detail.run);
+    const jobs = details.flatMap((detail) => detail.jobs);
+    input.renderer.render(progressSnapshotFromRuns({
+      command: input.command,
+      location: "cloud",
+      phase: cloudProgressPhase(input.command, runs, jobs),
+      runs,
+      jobs,
+      startedAtMs: input.startedAtMs,
+    }));
     if (runs.length === runIds.length && runs.every(isTerminalRun)) {
       sync = await syncWorkbenchRemote({ ...input.core, remote: input.remote.name });
       return { runs, sync };
-    }
-    if (wroteProgress) {
-      lastProgressAtMs = nowMs;
-    } else if (input.progress && nowMs - lastProgressAtMs >= 60_000) {
-      writeCloudProgress(input.io, `workbench cloud: still waiting (${formatCloudRunStates(runs, startedAtMs, nowMs)}).`);
-      if (runs.some((run) => run.status === "queued")) {
-        writeCloudProgress(input.io, `workbench cloud: queued runs are waiting for a hosted worker; press Ctrl-C to detach and inspect later with ${cloudDetachedNextCommand(runs) ?? "workbench log --runs"}.`);
-      }
-      lastProgressAtMs = nowMs;
     }
     if (input.interrupt.interrupted) {
       return { runs, sync, detached: true };
@@ -1867,22 +1880,60 @@ async function waitForCloudRuns(input: {
   }
 }
 
-async function fetchCloudRuns(
+interface CloudRunDetail {
+  run: WorkbenchRun;
+  jobs: WorkbenchJob[];
+  traces?: WorkbenchTrace[];
+  artifacts?: WorkbenchArtifact[];
+}
+
+async function fetchCloudRunDetails(
   baseUrl: string,
   skillId: string,
   runIds: readonly string[],
-  fallback: readonly WorkbenchRun[],
-): Promise<WorkbenchRun[]> {
+  fallback: readonly CloudRunDetail[],
+): Promise<CloudRunDetail[]> {
   const responses = await Promise.all(runIds.map((runId) =>
-    apiRequest<{ run?: WorkbenchRun }>(
+    apiRequest<Partial<CloudRunDetail>>(
       `/api/workbench/skills/${encodeURIComponent(skillId)}/runs/${encodeURIComponent(runId)}`,
       {},
       baseUrl,
     )
   ));
   return runIds
-    .map((runId, index) => responses[index]?.run ?? fallback.find((run) => run.id === runId))
-    .filter((run): run is WorkbenchRun => Boolean(run));
+    .map((runId, index) => {
+      const response = responses[index];
+      if (response?.run) {
+        return {
+          run: response.run,
+          jobs: response.jobs ?? [],
+          ...(response.traces ? { traces: response.traces } : {}),
+          ...(response.artifacts ? { artifacts: response.artifacts } : {}),
+        };
+      }
+      return fallback.find((detail) => detail.run.id === runId);
+    })
+    .filter((detail): detail is CloudRunDetail => Boolean(detail));
+}
+
+function cloudProgressPhase(
+  command: "eval" | "improve",
+  runs: readonly WorkbenchRun[],
+  jobs: readonly WorkbenchJob[],
+): WorkbenchProgressPhase {
+  if (command === "eval") {
+    return "running";
+  }
+  if (runs.length > 0 && runs.every((run) => run.status === "queued") && jobs.every((job) => job.status === "queued")) {
+    return "running";
+  }
+  if (jobs.some((job) => job.caseId !== "current")) {
+    return "proof_eval";
+  }
+  if (jobs.some((job) => job.caseId === "current" && job.status === "succeeded")) {
+    return "applying_patch";
+  }
+  return "improving";
 }
 
 function isTerminalRun(run: WorkbenchRun): boolean {
@@ -2154,38 +2205,11 @@ function runEvidenceTime(run: WorkbenchRun): string {
   return run.finishedAt ?? run.createdAt;
 }
 
-function writeCloudProgress(io: CliIo, message: string, enabled = true): void {
-  if (!enabled) {
-    return;
-  }
-  io.stderr.write(`${message}\n`);
-}
-
 function writeCliProgress(parsed: ParsedArgs, io: CliIo, message: string, options: { json?: boolean } = {}): void {
   if (parsed.flags.json === true && options.json !== true) {
     return;
   }
   io.stderr.write(`${message}\n`);
-}
-
-function formatCloudRunStatuses(runs: readonly WorkbenchRun[]): string {
-  return runs.length > 0
-    ? runs.map((run) => `${displayRef(run.id)}:${run.status}`).join(", ")
-    : "no runs";
-}
-
-function formatCloudRunStates(runs: readonly WorkbenchRun[], startedAtMs: number, nowMs: number): string {
-  return runs.length > 0
-    ? runs.map((run) => formatCloudRunState(run, startedAtMs, nowMs)).join(", ")
-    : `no runs (${elapsedSeconds(startedAtMs, nowMs)}s)`;
-}
-
-function formatCloudRunState(run: WorkbenchRun, startedAtMs: number, nowMs: number): string {
-  return `${displayRef(run.id)} ${run.status} (${elapsedSeconds(startedAtMs, nowMs)}s)`;
-}
-
-function elapsedSeconds(startedAtMs: number, nowMs: number): number {
-  return Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
 }
 
 interface ParsedWorkbenchInstallSource {
@@ -4058,6 +4082,99 @@ async function withProgressHeartbeat<T>(
     if (interval) {
       clearInterval(interval);
     }
+  }
+}
+
+const LOCAL_PROGRESS_POLL_INTERVAL_MS = 1_000;
+
+async function withLocalCommandProgress<T>(input: {
+  command: WorkbenchProgressCommand;
+  core: { dir?: string; authToken?: string };
+  io: CliIo;
+  runKind: WorkbenchRun["kind"];
+  initialPhase: WorkbenchProgressPhase;
+  run: (setPhase: (phase: WorkbenchProgressPhase) => void) => Promise<T>;
+}): Promise<T> {
+  const startedAtMs = Date.now();
+  const renderer = createProgressRenderer({ stderr: input.io.stderr });
+  const before = await readProgressSnapshot(input.core);
+  const existingRunIds = new Set((before?.runs ?? []).map((run) => run.id));
+  let phase = input.initialPhase;
+  let activeRender: Promise<void> | undefined;
+  let printedRunProgress = false;
+
+  const renderRuns = async (force = false): Promise<void> => {
+    if (activeRender) {
+      await activeRender;
+      if (!force) {
+        return;
+      }
+    }
+    const current = (async (): Promise<void> => {
+      const snapshot = await readProgressSnapshot(input.core);
+      if (!snapshot) {
+        return;
+      }
+      const runs = snapshot.runs.filter((run) =>
+        run.kind === input.runKind && !existingRunIds.has(run.id)
+      );
+      if (runs.length === 0) {
+        return;
+      }
+      const runIds = new Set(runs.map((run) => run.id));
+      const jobs = snapshot.jobs.filter((job) => runIds.has(job.runId));
+      renderer.render(progressSnapshotFromRuns({
+        command: input.command,
+        location: "local",
+        phase,
+        runs,
+        jobs,
+        startedAtMs,
+      }), { force });
+      printedRunProgress = true;
+    })();
+    activeRender = current;
+    try {
+      await current;
+    } finally {
+      if (activeRender === current) {
+        activeRender = undefined;
+      }
+    }
+  };
+
+  const setPhase = (nextPhase: WorkbenchProgressPhase): void => {
+    phase = nextPhase;
+    renderer.render(progressSnapshotFromRuns({
+      command: input.command,
+      location: "local",
+      phase,
+      runs: [],
+      jobs: [],
+      startedAtMs,
+    }));
+    void renderRuns();
+  };
+
+  const interval = setInterval(() => {
+    void renderRuns();
+  }, LOCAL_PROGRESS_POLL_INTERVAL_MS);
+  try {
+    return await input.run(setPhase);
+  } finally {
+    clearInterval(interval);
+    await renderRuns(printedRunProgress);
+    if (activeRender) {
+      await activeRender;
+    }
+  }
+}
+
+async function readProgressSnapshot(core: { dir?: string; authToken?: string }): Promise<WorkbenchInspectionSnapshot | null> {
+  try {
+    return await createWorkbenchReadOnlyInspectionSnapshot(core);
+  } catch {
+    return null;
   }
 }
 

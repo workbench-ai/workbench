@@ -697,7 +697,7 @@ describe("workbench skill-first CLI", () => {
 
     const result = await invoke(["eval", "--dir", root, "--json"]);
     expect(result.code, result.stdout || result.stderr).toBe(1);
-    expect(result.stderr).toBe("");
+    expect(result.stderr).toMatch(/workbench eval: complete, cases 1\/1, samples 1\/1 complete, failed 1, elapsed \d+s\./u);
     expect(stdoutJson(result)).toMatchObject({
       ok: false,
       code: "eval_runs_failed",
@@ -850,7 +850,7 @@ describe("workbench skill-first CLI", () => {
     await writePassingCaseTest(codexRoot);
     const codexResult = await invoke(["eval", "--dir", codexRoot, "--json"]);
     expect(codexResult.code, codexResult.stdout || codexResult.stderr).toBe(1);
-    expect(codexResult.stderr).toBe("");
+    expect(codexResult.stderr).toMatch(/workbench eval: complete, cases 1\/1, samples 1\/1 complete, failed 1, elapsed \d+s\./u);
     expect(stdoutJson(codexResult)).toMatchObject({
       ok: false,
       code: "eval_runs_failed",
@@ -871,7 +871,7 @@ describe("workbench skill-first CLI", () => {
     await writePassingCaseTest(claudeRoot);
     const claudeResult = await invoke(["eval", "--dir", claudeRoot, "--json"]);
     expect(claudeResult.code, claudeResult.stdout || claudeResult.stderr).toBe(1);
-    expect(claudeResult.stderr).toBe("");
+    expect(claudeResult.stderr).toMatch(/workbench eval: complete, cases 1\/1, samples 1\/1 complete, failed 1, elapsed \d+s\./u);
     expect(stdoutJson(claudeResult)).toMatchObject({
       ok: false,
       code: "eval_runs_failed",
@@ -1839,7 +1839,10 @@ describe("workbench skill-first CLI", () => {
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/runs/run_cloud" && method === "GET") {
         runPolls += 1;
-        return jsonResponse({ run: runPolls >= 2 ? succeededRun : runningRun });
+        return jsonResponse({
+          run: runPolls >= 2 ? succeededRun : runningRun,
+          jobs: [runPolls >= 2 ? succeededJob : runningJob],
+        });
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         if (started) {
@@ -1872,13 +1875,10 @@ describe("workbench skill-first CLI", () => {
       const result = await invoke(["eval", "--cloud", "--dir", root, "--agents", "default"]);
       expect(result.code, result.stdout || result.stderr).toBe(0);
       expect(result.stdout).toContain("Completed hosted eval");
-      expect(result.stderr).toContain("workbench cloud: preparing hosted eval.");
-      expect(result.stderr).toContain("workbench cloud: preparing current source.");
-      expect(result.stderr).toContain("workbench cloud: syncing source to cloud.");
-      expect(result.stderr).toContain("workbench cloud: scheduling hosted eval.");
-      expect(result.stderr).toContain("workbench cloud: scheduled hosted eval");
-      expect(result.stderr.match(/workbench cloud: run_cloud running \(\d+s\)\./gu)).toHaveLength(1);
-      expect(result.stderr.match(/workbench cloud: run_cloud succeeded \(\d+s\)\./gu)).toHaveLength(1);
+      expect(result.stderr).toContain("workbench eval: preflight");
+      expect(result.stderr).toContain("workbench eval: sync with Workbench Cloud");
+      expect(result.stderr.match(/workbench eval: running, cases 0\/1, samples 0\/1 complete, failed 0, elapsed \d+s\./gu)).toHaveLength(1);
+      expect(result.stderr.match(/workbench eval: complete, cases 1\/1, samples 1\/1 complete, failed 0, elapsed \d+s\./gu)).toHaveLength(1);
       expect(result.stderr).not.toContain("synced cloud while waiting");
       expect(objectReadsAfterStart).toBe(2);
     } finally {
@@ -1951,12 +1951,11 @@ describe("workbench skill-first CLI", () => {
       const canceled = await invoke(["eval", "--cloud", "--dir", root, "--agents", "default"]);
       expect(canceled.code, canceled.stdout || canceled.stderr).toBe(130);
       expect(canceled.stdout).toBe("");
-      expect(canceled.stderr).toContain("workbench cloud: preparing hosted eval.");
-      expect(canceled.stderr).toContain("workbench cloud: preparing current source.");
-      expect(canceled.stderr).toContain("workbench cloud: syncing source to cloud.");
+      expect(canceled.stderr).toContain("workbench eval: preflight");
+      expect(canceled.stderr).toContain("workbench eval: sync with Workbench Cloud");
       expect(canceled.stderr).toContain("error[cloud_canceled]: Hosted eval was canceled before Workbench Cloud returned a run id.");
       expect(canceled.stderr).toContain("next: workbench eval --cloud");
-      expect(canceled.stderr).not.toContain("workbench cloud: scheduling hosted eval.");
+      expect(canceled.stderr).not.toContain("workbench eval: queued on Workbench Cloud");
       expect(fetchMock).not.toHaveBeenCalledWith(
         expect.stringContaining("/api/workbench/skills/skill_cloud/runs"),
         expect.anything(),
@@ -2117,7 +2116,7 @@ describe("workbench skill-first CLI", () => {
         code: "improve_evidence_required",
         remediation: "workbench eval --rerun",
       });
-      expect(improved.stderr).not.toContain("workbench cloud: preparing hosted improve.");
+      expect(improved.stderr).not.toContain("workbench improve: preflight");
       expect(fetchMock).not.toHaveBeenCalled();
       await expect(fs.access(path.join(root, ".workbench", "remotes.yaml")))
         .rejects.toMatchObject({ code: "ENOENT" });
@@ -2239,7 +2238,8 @@ describe("workbench skill-first CLI", () => {
         message: "codex disconnected.",
         remediation: "codex login --device-auth && workbench login codex --method oauth",
       });
-      expect(improved.stderr).toContain("workbench cloud: checking provider auth.");
+      expect(improved.stderr).toContain("workbench improve: preflight");
+      expect(improved.stderr).not.toContain("workbench cloud:");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       if (previousConfig === undefined) {
@@ -2416,8 +2416,8 @@ describe("workbench skill-first CLI", () => {
         cloud: expect.objectContaining({ remote: "cloud", skillId: "skill_cloud" }),
       });
       expect(startedJson.cloud.initialRunIds).toEqual(["run_cloud"]);
-      expect(started.stderr).not.toContain("workbench cloud: checking provider auth.");
-      expect(started.stderr).toContain("workbench cloud: run_cloud succeeded");
+      expect(started.stderr).not.toContain("workbench cloud:");
+      expect(started.stderr).toContain("workbench eval: complete");
 
       const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
       expect(runs.code, runs.stdout || runs.stderr).toBe(0);
@@ -2579,8 +2579,8 @@ describe("workbench skill-first CLI", () => {
           initialRunIds: ["run_detach"],
         }),
       });
-      expect(detached.stderr).not.toContain("workbench cloud: checking provider auth.");
-      expect(detached.stderr).toContain("workbench cloud: detaching from hosted eval (run_detach).");
+      expect(detached.stderr).not.toContain("workbench cloud:");
+      expect(detached.stderr).toContain("workbench eval: detaching from hosted run (run_detach).");
       const shown = await invoke(["show", "run_detach", "--dir", root, "--json"]);
       expect(shown.code, shown.stdout || shown.stderr).toBe(0);
       expect(stdoutJson(shown)).toMatchObject({
@@ -5418,9 +5418,9 @@ describe("workbench skill-first CLI", () => {
     const improve = await invoke(["improve", "--dir", root, "--agents", "patcher", "--json"]);
     expect(improve.code).toBe(1);
     const improveError = stdoutJson<{ code: string; message: string; remediation?: string }>(improve);
-    expect(improve.stderr).toContain("workbench improve: running patcher improvement adapter.");
+    expect(improve.stderr).toContain("workbench improve: running improvement adapter");
     if (improveError.message.includes("Improve proof eval failed")) {
-      expect(improve.stderr).toContain("workbench improve: running proof eval.");
+      expect(improve.stderr).toContain("workbench improve: proof eval running");
     }
     expect(improveError).toMatchObject({
       ok: false,
