@@ -10131,13 +10131,16 @@ function comparisonCellRunFields(
   jobs: readonly WorkbenchJob[],
 ): Pick<WorkbenchComparisonCell, "runId" | "status" | "score" | "samples" | "costUsd" | "latencyMs" | "error"> {
   const samples = comparisonRunSamples(run, jobs);
+  const latencyMs = run.latencyMs !== undefined && samples > 1
+    ? Math.round(run.latencyMs / samples)
+    : run.latencyMs;
   return {
     runId: run.id,
     status: run.status,
     ...(run.score !== undefined ? { score: run.score } : {}),
     ...(samples > 0 ? { samples } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
-    ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
+    ...(latencyMs !== undefined ? { latencyMs } : {}),
     ...(run.error ? { error: run.error } : {}),
   };
 }

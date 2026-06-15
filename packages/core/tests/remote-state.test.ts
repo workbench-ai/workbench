@@ -13,6 +13,7 @@ import {
   publishWorkbenchVersion,
   removeWorkbenchRemote,
   syncWorkbenchRemote,
+  switchWorkbenchVersion,
   WorkbenchCodedError,
   workbenchStatusSnapshot,
   type WorkbenchObjectPack,
@@ -170,6 +171,32 @@ describe("remote state lifecycle", () => {
     await syncWorkbenchRemote({ dir: root });
     const resynced = await workbenchStatusSnapshot({ dir: root });
     expect(resynced.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("up_to_date");
+  });
+
+  test("switching between already synced versions does not dirty remote sync", async () => {
+    const root = await makeTempRoot("workbench-sync-switch-clean-");
+    const remote = await makeTempRoot("workbench-sync-switch-clean-remote-");
+    await initWorkbenchSkill({ dir: root });
+    await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    await syncWorkbenchRemote({ dir: root });
+    const firstVersionId = (await workbenchStatusSnapshot({ dir: root })).project.currentVersionId;
+    expect(firstVersionId).toBeTruthy();
+
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond synced version.\n");
+    await syncWorkbenchRemote({ dir: root });
+    const secondVersionId = (await workbenchStatusSnapshot({ dir: root })).project.currentVersionId;
+    expect(secondVersionId).toBeTruthy();
+    expect(secondVersionId).not.toBe(firstVersionId);
+
+    await switchWorkbenchVersion(firstVersionId!, { dir: root });
+    await switchWorkbenchVersion(secondVersionId!, { dir: root });
+
+    const status = await workbenchStatusSnapshot({ dir: root });
+    expect(status.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("up_to_date");
+    const dryRun = await syncWorkbenchRemote({ dir: root, dryRun: true });
+    expect(dryRun.pushed).toBe(0);
+    expect(dryRun.pulled).toBe(0);
+    expect(dryRun.upToDate).toBe(true);
   });
 
   test("file remotes are sync-only and reject publication", async () => {

@@ -541,6 +541,9 @@ describe("skill-first Workbench runtime", () => {
       score: 0.8,
       samples: 5,
     });
+    if (fiveSampleRun?.latencyMs !== undefined) {
+      expect(cell?.latencyMs).toBe(Math.round(fiveSampleRun.latencyMs / 5));
+    }
   }, 60_000);
 
   dockerTest("compare fills unrun cells for valid selected versions when recorded evidence exists", async () => {

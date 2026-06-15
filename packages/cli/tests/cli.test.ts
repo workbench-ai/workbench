@@ -1758,14 +1758,27 @@ describe("workbench skill-first CLI", () => {
     const paths = listing.result.files.map((file) => file.path);
     expect(paths).toContain("cases/case-001/jobs/job_surface/result.json");
     expect(paths).toContain("cases/case-001/jobs/job_surface/skill-summary.md");
-    expect(listing.result.highlights).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "agent_output", preview: expect.stringContaining("Provider answer line one.") }),
-      expect.objectContaining({ kind: "agent_session", ref: "codex:session-surface" }),
-      expect.objectContaining({ kind: "rubric_scorecard", score: 0.75 }),
-    ]));
-    expect(paths.filter((entry) => entry.endsWith("/result.json"))).toEqual([
-      "cases/case-001/jobs/job_surface/result.json",
-    ]);
+	    expect(listing.result.highlights).toEqual(expect.arrayContaining([
+	      expect.objectContaining({ kind: "agent_output", preview: expect.stringContaining("Provider answer line one.") }),
+	      expect.objectContaining({ kind: "agent_session", ref: "codex:session-surface" }),
+	      expect.objectContaining({ kind: "rubric_scorecard", score: 0.75 }),
+	    ]));
+	    const session = await invoke(["show", "codex:session-surface", "--dir", root, "--json"]);
+	    expect(session.code, session.stdout || session.stderr).toBe(0);
+	    expect(stdoutJson<{ result: { id: string; path: string; excerpts: string[] } }>(session)).toMatchObject({
+	      result: {
+	        id: "codex:session-surface",
+	        path: "cases/case-001/jobs/job_surface/agent-session.json",
+	        excerpts: expect.arrayContaining([
+	          "Evidence file: cases/case-001/jobs/job_surface/agent-session.json",
+	          expect.stringContaining("Run run_surface; job job_surface; status succeeded."),
+	          expect.stringContaining("Provider answer line one."),
+	        ]),
+	      },
+	    });
+	    expect(paths.filter((entry) => entry.endsWith("/result.json"))).toEqual([
+	      "cases/case-001/jobs/job_surface/result.json",
+	    ]);
     expect(paths.some((entry) => entry.includes(".workbench"))).toBe(false);
     expect(paths.some((entry) => entry.includes("/traces/") && entry.endsWith("/result.json"))).toBe(false);
     const human = await invoke(["show", "run_surface", "--dir", root]);

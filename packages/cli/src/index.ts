@@ -664,7 +664,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         host: stringFlag(parsed, "host"),
         port: portFlag(parsed, "port"),
       });
-      io.stdout.write(`Workbench: ${server.url}\n`);
+      io.stdout.write(`Workbench: ${server.url}\nServing read-only Workbench UI. Press Ctrl-C to stop.\n`);
       if (parsed.flags["no-open"] !== true) {
         await openBrowser(server.url).catch(() => undefined);
       }
@@ -795,11 +795,15 @@ type WorkbenchLogEntry =
 
 async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const ref = requiredPositional(parsed, 1, "workbench show requires REF.");
+  const core = await coreOptions(parsed);
+  const evidenceSession = await showWorkbenchEvidenceSession(ref, core);
+  if (evidenceSession) {
+    return output(evidenceSession, parsed, io, () => formatSessionDetail(evidenceSession));
+  }
   const session = await showLocalAgentSession(ref);
   if (session) {
     return output(session, parsed, io, () => formatSessionDetail(session));
   }
-  const core = await coreOptions(parsed);
   const [objectRef, requestedPath] = splitShowRef(ref);
   if (requestedPath) {
     const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
@@ -1948,6 +1952,17 @@ async function waitForCloudRuns(input: {
       startedAtMs: input.startedAtMs,
     }));
   };
+  const renderTerminalSyncProgress = (): void => {
+    const currentJobs = details.flatMap((detail) => detail.jobs);
+    input.renderer.render(progressSnapshotFromRuns({
+      command: input.command,
+      location: "cloud",
+      phase: "sync",
+      runs,
+      jobs: currentJobs,
+      startedAtMs: input.startedAtMs,
+    }));
+  };
   while (true) {
     const fetchedDetails = await Promise.race([
       withCloudProgressRendering(
@@ -1977,7 +1992,7 @@ async function waitForCloudRuns(input: {
       const terminalSync = await Promise.race([
         withCloudProgressRendering(
           syncWorkbenchRemote({ ...input.core, remote: input.remote.name }),
-          renderCurrentProgress,
+          renderTerminalSyncProgress,
         ),
         input.interrupt.signal.then(() => null),
       ]);
@@ -3485,6 +3500,22 @@ interface LocalAgentSessionDetail extends LocalAgentSession {
   excerpts: string[];
 }
 
+async function showWorkbenchEvidenceSession(
+  ref: string,
+  core: { dir?: string; authToken?: string },
+): Promise<LocalAgentSessionDetail | null> {
+  if (!isAgentSessionRef(ref)) {
+    return null;
+  }
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core).catch((error: unknown) => {
+    if (error instanceof WorkbenchUserError && /not initialized/u.test(error.message)) {
+      return null;
+    }
+    throw error;
+  });
+  return snapshot ? evidenceSessionDetailForRef(snapshot, ref) : null;
+}
+
 async function listLocalAgentSessions(): Promise<LocalAgentSession[]> {
   const [codex, claude] = await Promise.all([
     discoverSessionFiles("codex", [
@@ -3501,7 +3532,7 @@ async function listLocalAgentSessions(): Promise<LocalAgentSession[]> {
 }
 
 async function showLocalAgentSession(ref: string): Promise<LocalAgentSessionDetail | null> {
-  if (!ref.startsWith("codex:") && !ref.startsWith("claude:")) {
+  if (!isAgentSessionRef(ref)) {
     return null;
   }
   const sessions = await listLocalAgentSessions();
@@ -3513,6 +3544,71 @@ async function showLocalAgentSession(ref: string): Promise<LocalAgentSessionDeta
     ...session,
     excerpts: await readSessionExcerpts(session.path),
   };
+}
+
+function isAgentSessionRef(ref: string): boolean {
+  return ref.startsWith("codex:") || ref.startsWith("claude:");
+}
+
+function evidenceSessionDetailForRef(snapshot: InspectionSnapshot, ref: string): LocalAgentSessionDetail | null {
+  const jobs = snapshot.jobs
+    .slice()
+    .sort((left, right) =>
+      (right.finishedAt ?? right.startedAt ?? right.createdAt).localeCompare(left.finishedAt ?? left.startedAt ?? left.createdAt) ||
+      right.id.localeCompare(left.id)
+    );
+  for (const job of jobs) {
+    const files = evidenceFilesForSelection(snapshot, { jobs: [job] });
+    const sessionFile = files
+      .filter((file) => file.encoding === "utf8" && path.basename(file.path.replace(/\\/gu, "/")) === "agent-session.json")
+      .map((file) => ({ file, record: parseJsonRecord(file.content) }))
+      .find((entry) => entry.record && agentSessionEvidenceRefMatches(entry.record, ref));
+    if (!sessionFile?.record) {
+      continue;
+    }
+    const source = agentSessionSource(ref);
+    const run = snapshot.runs.find((entry) => entry.id === job.runId);
+    const output = files.find((file) =>
+      file.encoding === "utf8" &&
+      path.basename(file.path.replace(/\\/gu, "/")) === "skill-summary.md" &&
+      file.content.trim().length > 0
+    );
+    const updatedAt = job.finishedAt ?? job.startedAt ?? job.createdAt;
+    const title = [
+      run?.kind ? `Hosted ${run.kind}` : "Hosted session",
+      `case ${job.caseId}`,
+      `sample ${job.sample + 1}`,
+      job.status,
+    ].join(" ");
+    const excerpts = [
+      `Evidence file: ${sessionFile.file.path}`,
+      `Run ${job.runId}; job ${job.id}; status ${job.status}.`,
+      ...(output ? ["", "Agent output:", ...previewBlock(output.content, 1200, 12).split("\n")] : []),
+    ];
+    return {
+      id: ref,
+      source,
+      path: sessionFile.file.path,
+      updatedAt,
+      bytes: surfaceFileByteLength(sessionFile.file),
+      title,
+      excerpts,
+    };
+  }
+  return null;
+}
+
+function agentSessionSource(ref: string): LocalAgentSession["source"] {
+  return ref.startsWith("claude:") ? "claude" : "codex";
+}
+
+function agentSessionEvidenceRefMatches(record: Record<string, unknown>, ref: string): boolean {
+  const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+  const evidenceRef = typeof record.ref === "string" ? record.ref.trim() : "";
+  return evidenceRef === ref ||
+    Boolean(provider && sessionId && `${provider}:${sessionId}` === ref) ||
+    Boolean(sessionId && ref.endsWith(`:${sessionId}`));
 }
 
 async function discoverSessionFiles(source: LocalAgentSession["source"], roots: readonly string[]): Promise<LocalAgentSession[]> {
@@ -5661,7 +5757,7 @@ function formatJob(job: WorkbenchJob): string {
 }
 
 function formatComparison(comparison: WorkbenchComparison): string {
-  const lines = ["version\tskill\tagent\tstatus\tscore\tsamples\tcost\tlatency\trun"];
+  const lines = ["version\tskill\tagent\tstatus\tscore\tsamples\tcost\tavg latency\trun"];
   const evidenceCells = comparison.cells.filter((cell) => cell.runId || cell.status);
   for (const cell of evidenceCells) {
     lines.push([

@@ -162,6 +162,22 @@ describe("Workbench CLI progress projection", () => {
       "",
     ].join("\n"));
   });
+
+  test("keeps terminal cloud evidence sync visible as sync", () => {
+    const snapshot = progressSnapshotFromRuns({
+      command: "eval",
+      location: "cloud",
+      phase: "sync",
+      runs: [run({ id: "run_cloud", status: "succeeded" })],
+      jobs: [job({ id: "job_cloud", runId: "run_cloud", status: "succeeded", score: 1 })],
+      startedAtMs: 0,
+      nowMs: 90_000,
+    });
+
+    expect(snapshot.phase).toBe("sync");
+    expect(formatProgressSnapshot(snapshot))
+      .toBe("workbench eval: sync with Workbench Cloud, cases 1/1, samples 1/1 complete, failed 0, elapsed 1m 30s.");
+  });
 });
 
 function run(overrides: Partial<WorkbenchRun>): WorkbenchRun {

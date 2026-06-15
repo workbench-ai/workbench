@@ -137,10 +137,13 @@ function progressPhaseForRuns(
   runs: readonly WorkbenchRun[],
   jobs: readonly WorkbenchJob[],
 ): WorkbenchProgressPhase {
+  if (phase === "preflight" || phase === "provider_auth" || phase === "sync") {
+    return phase;
+  }
   if (runs.length > 0 && runs.every(isTerminalRun)) {
     return "complete";
   }
-  if (phase === "preflight" || phase === "provider_auth" || phase === "sync" || phase === "improving" || phase === "applying_patch" || phase === "proof_eval") {
+  if (phase === "improving" || phase === "applying_patch" || phase === "proof_eval") {
     return phase;
   }
   if (runs.length > 0 && runs.every((run) => run.status === "queued") && jobs.every((job) => job.status === "queued")) {
