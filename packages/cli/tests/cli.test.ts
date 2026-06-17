@@ -4399,6 +4399,7 @@ describe("workbench skill-first CLI", () => {
     let remotePack = emptyObjectPack(createdAt);
     let started = false;
     let signalScheduled = false;
+    let waitRequestAborted = false;
     let inspectionReadsAfterStart = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
@@ -4416,15 +4417,21 @@ describe("workbench skill-first CLI", () => {
         }));
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/state/wait" && method === "GET") {
+        const signal = init?.signal as AbortSignal | undefined;
+        expect(signal).toBeTruthy();
+        const pendingWait = new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            waitRequestAborted = true;
+            const error = new Error("This operation was aborted.");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
         if (!signalScheduled) {
           signalScheduled = true;
-          process.emit("SIGINT");
+          setTimeout(() => process.emit("SIGINT"), 0);
         }
-        return jsonResponse({
-          schema: "workbench.state.notice.v1",
-          type: "changed",
-          cursor: `cloud:${inspectionReadsAfterStart + 1}`,
-        });
+        return await pendingWait;
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         return jsonResponse({ objectPack: remotePack });
@@ -4469,6 +4476,7 @@ describe("workbench skill-first CLI", () => {
       });
       expect(detached.stderr).not.toContain("workbench cloud:");
       expect(detached.stderr).toContain(`workbench eval: detaching from hosted run (${hostedRunId.slice(0, 12)}).`);
+      expect(waitRequestAborted).toBe(true);
       const shown = await invoke(["show", hostedRunId, "--dir", root, "--json"]);
       expect(shown.code, shown.stdout || shown.stderr).toBe(0);
       expect(stdoutJson(shown)).toMatchObject({
@@ -5776,7 +5784,7 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
-  test("publish --json emits authenticated progress on stderr", async () => {
+  test("publish --json keeps human progress off stderr", async () => {
     const root = await makeTempRoot("workbench-cli-publish-progress-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
@@ -5836,7 +5844,7 @@ describe("workbench skill-first CLI", () => {
       const publish = await invoke(["publish", "--as", "alice/progress-skill", "--dir", root, "--json"]);
       expect(publish.code, publish.stdout || publish.stderr).toBe(0);
       expect(publish.stdout).not.toContain("workbench publish:");
-      expect(publish.stderr).toContain("workbench publish: checking current source publication.");
+      expect(publish.stderr).toBe("");
       expect(stdoutJson(publish)).toMatchObject({
         schema: "workbench.cli.publish.v1",
         ok: true,

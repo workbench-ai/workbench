@@ -701,7 +701,6 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         remote = await ensurePublishRemote(parsed);
         await assertPublishCloudAuth(parsed, remote);
         writeCliProgress(parsed, io, "workbench publish: preparing Cloud skill.");
-        await writeAuthenticatedJsonProgress(parsed, io, remote, `workbench publish: checking ${optionalPositional(parsed, 1) ?? "current"} source publication.`);
         writeCliProgress(parsed, io, `workbench publish: checking ${optionalPositional(parsed, 1) ?? "current"} source publication.`);
         result = await withProgressHeartbeat(io, "workbench publish: remote publication check", async () => await publishWorkbenchVersion({
           ...core,
@@ -1623,13 +1622,13 @@ async function retryCloudRun(
       ),
     );
     await abortIfLocalHostedRunCanceled("run retry", remoteContext.core, prescheduledRun);
-    const skillId = await cloudPreScheduleStep("run retry", interrupt, resolveCloudSkillId(remoteContext.source));
+    const skillId = await cloudPreScheduleStep("run retry", interrupt, async (signal) => await resolveCloudSkillId(remoteContext.source, signal));
     await abortIfLocalHostedRunCanceled("run retry", remoteContext.core, prescheduledRun);
     const retryRequest = retryOperationRequest(retryPlan, "cloud", run.id, runId);
     const response = await cloudPreScheduleStep(
       "run retry",
       interrupt,
-      withProgressHeartbeat(
+      async (signal) => await withProgressHeartbeat(
         io,
         "workbench run retry: scheduling hosted run",
         async () => await apiRequest<WorkbenchRunSnapshot>(
@@ -1637,6 +1636,7 @@ async function retryCloudRun(
           {
             method: "POST",
             body: retryRequest,
+            signal,
           },
           remoteContext.source.baseUrl,
         ),
@@ -2754,7 +2754,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       interrupt,
       core,
       prescheduledRun,
-      async () => await ensureCloudRemoteForExecution(root, parsed, () => renderCloudProgress("queued", [prescheduledRun])),
+      async (signal) => await ensureCloudRemoteForExecution(root, parsed, () => renderCloudProgress("queued", [prescheduledRun]), signal),
     );
     const source = parseWorkbenchInstallSource(remote.url);
     if (!source) {
@@ -2785,9 +2785,10 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     }
     const adapterAuthTargets = cloudAdapterAuthTargetsFromPreview(preview);
     if (adapterAuthTargets.length > 0) {
-      await cloudPreScheduleStepWithProgress(command, interrupt, assertCloudAdapterAuthConnected({
+      await cloudPreScheduleStepWithProgress(command, interrupt, async (signal) => await assertCloudAdapterAuthConnected({
         baseUrl: source.baseUrl,
         targets: adapterAuthTargets,
+        signal,
       }), () => renderCloudProgress("provider_auth", [prescheduledRun]));
     }
     const request = { ...requestWithoutRunId, runId };
@@ -2808,17 +2809,17 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       ),
     );
     await abortIfLocalHostedRunCanceled(command, core, prescheduledRun);
-    const skillId = await cloudPreScheduleStep(command, interrupt, resolveCloudSkillId(source));
+    const skillId = await cloudPreScheduleStep(command, interrupt, async (signal) => await resolveCloudSkillId(source, signal));
     await abortIfLocalHostedRunCanceled(command, core, prescheduledRun);
     const response = await cloudPreScheduleStep(
       command,
       interrupt,
-      withProgressHeartbeat(
+      async (signal) => await withProgressHeartbeat(
         io,
         `workbench ${command}: scheduling hosted run`,
         async () => await apiRequest<WorkbenchRunSnapshot>(
           `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/operations`,
-          { method: "POST", body: cloudExecutionRequestBody(command, request) },
+          { method: "POST", body: cloudExecutionRequestBody(command, request), signal },
           source.baseUrl,
         ),
         {
@@ -2977,17 +2978,24 @@ function createCloudInterruptController(
 async function cloudPreScheduleStep<T>(
   command: WorkbenchProgressCommand,
   interrupt: CloudInterruptController,
-  step: Promise<T>,
+  step: Promise<T> | ((signal: AbortSignal) => Promise<T>),
 ): Promise<T> {
   if (interrupt.interrupted) {
     throw cloudInterruptedBeforeScheduleFinishedError(command, interrupt.runIds);
   }
+  const abortController = new AbortController();
+  const stepPromise = typeof step === "function" ? step(abortController.signal) : step;
   return await Promise.race([
-    step,
+    stepPromise,
     interrupt.signal.then(() => {
+      abortController.abort();
       throw cloudInterruptedBeforeScheduleFinishedError(command, interrupt.runIds);
     }),
-  ]);
+  ]).finally(() => {
+    if (interrupt.interrupted) {
+      abortController.abort();
+    }
+  });
 }
 
 async function cloudPreScheduleStepWithLocalCancel<T>(
@@ -3022,7 +3030,7 @@ async function cloudPreScheduleStepWithLocalCancel<T>(
 async function cloudPreScheduleStepWithProgress<T>(
   command: WorkbenchProgressCommand,
   interrupt: CloudInterruptController,
-  step: Promise<T>,
+  step: Promise<T> | ((signal: AbortSignal) => Promise<T>),
   renderProgress: () => void,
 ): Promise<T> {
   return await withCloudProgressRendering(
@@ -3141,6 +3149,7 @@ function hostedCommandRemediation(command: WorkbenchProgressCommand): string {
 async function assertCloudAdapterAuthConnected(input: {
   baseUrl: string;
   targets: readonly CloudAdapterAuthTarget[];
+  signal?: AbortSignal;
 }): Promise<void> {
   const readiness = await cloudAdapterAuthReadiness(input);
   const issue = readiness.issues[0];
@@ -3195,12 +3204,13 @@ function cloudAdapterAuthTargetFromWorkbench(target: WorkbenchAdapterAuthTarget)
 async function cloudAdapterAuthReadiness(input: {
   baseUrl: string;
   targets: readonly CloudAdapterAuthTarget[];
+  signal?: AbortSignal;
 }): Promise<WorkbenchLaunchReadiness> {
   const targets = uniqueAdapterAuthTargets(input.targets);
   if (targets.length === 0) {
     return { ready: true, issues: [] };
   }
-  const statuses = await fetchCloudAdapterAuthStatuses(input.baseUrl);
+  const statuses = await fetchCloudAdapterAuthStatuses(input.baseUrl, input.signal);
   const issues = targets
     .filter((target) => !statuses.some((status) => adapterAuthStatusMatchesTarget(status, target)))
     .map((target) => ({
@@ -3230,10 +3240,10 @@ function uniqueAdapterAuthTargets(targets: readonly CloudAdapterAuthTarget[]): C
   return [...byKey.values()].sort((left, right) => adapterAuthTargetKey(left).localeCompare(adapterAuthTargetKey(right)));
 }
 
-async function fetchCloudAdapterAuthStatuses(baseUrl: string): Promise<WorkbenchAdapterAuthStatusRecord[]> {
+async function fetchCloudAdapterAuthStatuses(baseUrl: string, signal?: AbortSignal): Promise<WorkbenchAdapterAuthStatusRecord[]> {
   const response = await apiRequest<{ adapters?: WorkbenchAdapterAuthStatusRecord[] }>(
     "/api/workbench/auth/adapters",
-    {},
+    { signal },
     baseUrl,
   );
   return response.adapters ?? [];
@@ -3280,11 +3290,18 @@ async function waitForCloudRun(input: {
   let sync = input.initialSync;
   const timeoutMs = positiveIntEnv("WORKBENCH_CLOUD_RUN_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
-  let envelope = await fetchCloudInspectionEnvelope(input.source.baseUrl, input.skillId);
+  let runSnapshot = input.run;
+  const initialEnvelope = await cloudInterruptibleStep(
+    input.interrupt,
+    async (signal) => await fetchCloudInspectionEnvelope(input.source.baseUrl, input.skillId, signal),
+  );
+  if (!initialEnvelope) {
+    return { run: runSnapshot, sync, detached: true };
+  }
+  let envelope = initialEnvelope;
   await recordWorkbenchCloudInspectionSnapshot({ ...input.core, remoteName: input.remote.name, snapshot: envelope.snapshot });
   let run = runForCloudInspectionEnvelope(envelope, runId) ?? runFromSnapshot(input.run);
   let jobs = jobsForRuns(envelope.snapshot, [runId]);
-  let runSnapshot = input.run;
   const projectCurrentSnapshot = (phase: WorkbenchProgressPhase): WorkbenchRunSnapshot => {
     const projected = runProgressSnapshotForInspection({
       command: input.command,
@@ -3309,13 +3326,13 @@ async function waitForCloudRun(input: {
       return { run: runSnapshot, sync, detached: true };
     }
     if (isTerminalRun(run)) {
-      const terminalSync = await Promise.race([
-        withCloudProgressRendering(
-          syncWorkbenchRemote({ ...input.core, remote: input.remote.name }),
+      const terminalSync = await cloudInterruptibleStep(
+        input.interrupt,
+        async (signal) => await withCloudProgressRendering(
+          syncWorkbenchRemote({ ...input.core, remote: input.remote.name, signal }),
           renderTerminalSyncProgress,
         ),
-        input.interrupt.signal.then(() => null),
-      ]);
+      );
       if (!terminalSync) {
         return { run: runSnapshot, sync, detached: true };
       }
@@ -3337,18 +3354,19 @@ async function waitForCloudRun(input: {
         exitCode: 1,
       });
     }
-    const notice = await Promise.race([
-      withCloudProgressRendering(
+    const notice = await cloudInterruptibleStep(
+      input.interrupt,
+      async (signal) => await withCloudProgressRendering(
         fetchCloudInspectionNotice(
           input.source.baseUrl,
           input.skillId,
           envelope.cursor,
           cloudInspectionNoticeWaitTimeoutMs(deadline),
+          signal,
         ),
         renderCurrentProgress,
       ),
-      input.interrupt.signal.then(() => null),
-    ]);
+    );
     if (!notice) {
       return { run: runSnapshot, sync, detached: true };
     }
@@ -3358,7 +3376,14 @@ async function waitForCloudRun(input: {
     if (notice.type === "heartbeat" && notice.cursor === envelope.cursor) {
       continue;
     }
-    envelope = await fetchCloudInspectionEnvelope(input.source.baseUrl, input.skillId);
+    const nextEnvelope = await cloudInterruptibleStep(
+      input.interrupt,
+      async (signal) => await fetchCloudInspectionEnvelope(input.source.baseUrl, input.skillId, signal),
+    );
+    if (!nextEnvelope) {
+      return { run: runSnapshot, sync, detached: true };
+    }
+    envelope = nextEnvelope;
     await recordWorkbenchCloudInspectionSnapshot({ ...input.core, remoteName: input.remote.name, snapshot: envelope.snapshot });
     run = runForCloudInspectionEnvelope(envelope, runId) ?? run;
     jobs = jobsForRuns(envelope.snapshot, [runId]);
@@ -3368,10 +3393,11 @@ async function waitForCloudRun(input: {
 async function fetchCloudInspectionEnvelope(
   baseUrl: string,
   skillId: string,
+  signal?: AbortSignal,
 ): Promise<WorkbenchInspectionSnapshotEnvelope> {
   return await apiRequest<WorkbenchInspectionSnapshotEnvelope>(
     `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/snapshot`,
-    {},
+    { signal },
     baseUrl,
   );
 }
@@ -3381,12 +3407,44 @@ async function fetchCloudInspectionNotice(
   skillId: string,
   cursor: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<WorkbenchStateNotice> {
   return await apiRequest<WorkbenchStateNotice>(
     `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/state/wait?cursor=${encodeURIComponent(cursor)}&timeoutMs=${timeoutMs}`,
-    {},
+    { signal },
     baseUrl,
   );
+}
+
+async function cloudInterruptibleStep<T>(
+  interrupt: CloudInterruptController,
+  step: (signal: AbortSignal) => Promise<T>,
+): Promise<T | null> {
+  const abortController = new AbortController();
+  const interrupted = { interrupted: true } as const;
+  const stepPromise = step(abortController.signal);
+  try {
+    const result = await Promise.race<T | typeof interrupted>([
+      stepPromise,
+      interrupt.signal.then(() => {
+        abortController.abort();
+        return interrupted;
+      }),
+    ]);
+    if (result === interrupted) {
+      return null;
+    }
+    return result as T;
+  } catch (error) {
+    if (interrupt.interrupted && abortController.signal.aborted && isAbortError(error)) {
+      return null;
+    }
+    throw error;
+  } finally {
+    if (interrupt.interrupted) {
+      abortController.abort();
+    }
+  }
 }
 
 function cloudInspectionNoticeWaitTimeoutMs(deadline: number): number {
@@ -3544,6 +3602,7 @@ async function ensureCloudRemoteForExecution(
   root: string,
   parsed: ParsedArgs,
   renderProgress?: () => void,
+  signal?: AbortSignal,
 ): Promise<WorkbenchRemote> {
   const linked = await linkedCloudRemote(root);
   if (linked) {
@@ -3567,7 +3626,7 @@ async function ensureCloudRemoteForExecution(
     });
   }
   renderProgress?.();
-  remote = await availableCloudRemoteForHostedAutoLink(remote);
+  remote = await availableCloudRemoteForHostedAutoLink(remote, signal);
   renderProgress?.();
   const result = await addWorkbenchRemote(remote.name, remote.url, {
     dir: root,
@@ -3627,8 +3686,8 @@ function availableCloudRemoteName(remotes: readonly WorkbenchRemote[]): string {
   }
 }
 
-async function resolveCloudSkillId(source: ParsedWorkbenchInstallSource): Promise<string> {
-  const skill = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
+async function resolveCloudSkillId(source: ParsedWorkbenchInstallSource, signal?: AbortSignal): Promise<string> {
+  const skill = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill, signal);
   if (!skill?.id) {
     throw new WorkbenchCodedError("remote_not_found", `Workbench Cloud skill not found: ${source.owner}/${source.skill}`, {
       remediation: "workbench publish",
@@ -4368,7 +4427,7 @@ async function readDeviceAuthorizationJson(filePath: string): Promise<DeviceAuth
 
 async function apiRequest<T>(
   apiPath: string,
-  options: { method?: string; body?: unknown } = {},
+  options: { method?: string; body?: unknown; signal?: AbortSignal } = {},
   baseUrlOverride?: string,
 ): Promise<T> {
   const config = await loadConfig();
@@ -4385,6 +4444,7 @@ async function apiRequest<T>(
     try {
       response = await fetch(`${baseUrl}${apiPath}`, {
         method,
+        signal: options.signal,
         headers: {
           ...requestBody.headers,
           ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -4657,6 +4717,10 @@ function parseWorkbenchCloudErrorBody(text: string): {
 
 function isTransientFetchError(error: unknown): boolean {
   return /(?:fetch failed|socket hang up|ECONNRESET|EPIPE|UND_ERR_SOCKET|terminated)/iu.test(errorMessage(error));
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || /aborted|abort/iu.test(error.message));
 }
 
 function isTransientApiRequestError(error: unknown): boolean {
@@ -5519,26 +5583,6 @@ async function assertPublishCloudAuth(parsed: ParsedArgs, remoteName: string | u
   });
 }
 
-async function writeAuthenticatedJsonProgress(
-  parsed: ParsedArgs,
-  io: CliIo,
-  remoteName: string | undefined,
-  message: string,
-): Promise<void> {
-  if (parsed.flags.json !== true) {
-    return;
-  }
-  const root = path.resolve(dirFlag(parsed) ?? process.cwd());
-  const remote = remoteName
-    ? (await inspectionRemotes(root)).find((entry) => entry.name === remoteName)
-    : preferredCloudRemote(await inspectionRemotes(root));
-  const source = remote ? parseWorkbenchInstallSource(remote.url) : undefined;
-  if (!source || !await workbenchCloudToken({ baseUrl: source.baseUrl })) {
-    return;
-  }
-  writeCliProgress(parsed, io, message, { json: true });
-}
-
 async function derivePublishCloudRemote(parsed: ParsedArgs, action = "workbench publish", name = "cloud"): Promise<WorkbenchRemote> {
   const config = await loadConfig();
   const baseUrl = optionalWorkbenchBaseUrl({ configBaseUrl: config.baseUrl }) ?? DEFAULT_WORKBENCH_CLOUD_BASE_URL;
@@ -5594,7 +5638,7 @@ async function assertDerivedCloudHandleAvailable(
   });
 }
 
-async function availableCloudRemoteForHostedAutoLink(remote: WorkbenchRemote): Promise<WorkbenchRemote> {
+async function availableCloudRemoteForHostedAutoLink(remote: WorkbenchRemote, signal?: AbortSignal): Promise<WorkbenchRemote> {
   const source = parseWorkbenchInstallSource(remote.url);
   if (!source) {
     throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote is not a Cloud skill URL: ${remote.url}`, {
@@ -5603,7 +5647,7 @@ async function availableCloudRemoteForHostedAutoLink(remote: WorkbenchRemote): P
       exitCode: 2,
     });
   }
-  const existing = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
+  const existing = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill, signal);
   if (!existing) {
     return remote;
   }
@@ -5618,11 +5662,12 @@ async function getCloudSkillByHandle(
   baseUrl: string,
   owner: string,
   skill: string,
+  signal?: AbortSignal,
 ): Promise<{ id?: string; ownerSlug?: string; name?: string } | undefined> {
   const params = new URLSearchParams({ owner, name: skill });
   const listed = await apiRequest<{ skills?: Array<{ id?: string; ownerSlug?: string; name?: string }> }>(
     `/api/workbench/skills?${params.toString()}`,
-    {},
+    { signal },
     baseUrl,
   );
   return listed.skills?.find((entry) => entry.ownerSlug === owner && entry.name === skill);
