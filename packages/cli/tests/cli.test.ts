@@ -3542,6 +3542,13 @@ describe("workbench skill-first CLI", () => {
         expect(JSON.parse(line)).toMatchObject({ schema: "workbench.run.v1" });
       }
       expect(operationsCalled).toBe(false);
+      const status = await invoke(["status", "--dir", root, "--json"]);
+      expect(status.code, status.stdout || status.stderr).toBe(0);
+      const remoteSync = stdoutJson<{ remotes: Array<{ name: string; sync: { status: string; lastError: unknown } }> }>(status)
+        .remotes.find((remote) => remote.name === "cloud")?.sync;
+      expect(remoteSync).toBeTruthy();
+      expect(remoteSync?.status).not.toBe("error");
+      expect(JSON.stringify(remoteSync)).not.toContain("aborted");
     } finally {
       releaseObjectRead();
       if (previousConfig === undefined) {

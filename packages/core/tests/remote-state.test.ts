@@ -271,6 +271,68 @@ describe("remote state lifecycle", () => {
     expect(snapshot.next).toBeNull();
   });
 
+  test("aborted cloud sync preserves previous sync health", async () => {
+    const root = await makeTempRoot("workbench-sync-abort-preserves-health-");
+    await initWorkbenchSkill({ dir: root });
+    const createdAt = "2026-06-17T00:00:00.000Z";
+    let remotePack = emptyPack(createdAt);
+    let blockObjectRead = false;
+    let objectReadStarted = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname === "/api/workbench/skills") {
+        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "sync-abort" }] });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && (init?.method ?? "GET") === "GET") {
+        if (blockObjectRead) {
+          objectReadStarted = true;
+          await new Promise<void>((_, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              const error = new Error("The operation was aborted.");
+              error.name = "AbortError";
+              reject(error);
+            }, { once: true });
+          });
+        }
+        return jsonResponse({ objectPack: remotePack });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { objectPack?: WorkbenchObjectPack };
+        remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyPack(createdAt));
+        return jsonResponse({ skill: { id: "skill_cloud" }, objectPack: remotePack });
+      }
+      return jsonResponse({ message: `Unexpected ${init?.method ?? "GET"} ${url.pathname}` }, 404);
+    }));
+
+    await addWorkbenchRemote("cloud", "https://cloud.test/skills/alice/sync-abort", {
+      dir: root,
+      authToken: "token",
+    });
+    await syncWorkbenchRemote({ dir: root, authToken: "token" });
+    const syncedRecord = await readSyncState(root, "cloud");
+    expect((await workbenchStatusSnapshot({ dir: root })).remotes[0]?.sync.status).toBe("up_to_date");
+
+    blockObjectRead = true;
+    const controller = new AbortController();
+    const aborted = syncWorkbenchRemote({ dir: root, authToken: "token", signal: controller.signal });
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (objectReadStarted) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(objectReadStarted).toBe(true);
+    controller.abort();
+    await expect(aborted).rejects.toThrow(/aborted/u);
+
+    expect(await readSyncState(root, "cloud")).toEqual(syncedRecord);
+    const status = await workbenchStatusSnapshot({ dir: root });
+    expect(status.remotes[0]?.sync).toMatchObject({
+      status: "up_to_date",
+      lastError: null,
+    });
+  });
+
   test("a sync record for a different URL is ignored and the remote reads as never synced", async () => {
     const root = await makeTempRoot("workbench-sync-stale-url-");
     const remote = await makeTempRoot("workbench-sync-stale-url-remote-");

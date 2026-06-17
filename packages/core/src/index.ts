@@ -7309,6 +7309,9 @@ export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}):
       });
       return result;
     } catch (error) {
+      if (options.signal?.aborted) {
+        throw error;
+      }
       const syncError = syncFailureError(error, remote);
       await writeRemoteSyncState(root, {
         schema: "workbench.remote-sync-state.v1",
