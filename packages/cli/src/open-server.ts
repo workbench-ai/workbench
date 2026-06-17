@@ -4,19 +4,33 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  createWorkbenchActionCapabilities,
   createWorkbenchReadOnlyInspectionSnapshot,
+  previewLocalWorkbenchOperation,
+  readWorkbenchReadOnlyInspectionCursor,
+  waitForWorkbenchReadOnlyInspectionNotice,
   workbenchJobEvidenceForSnapshot,
   workbenchInspectionFileContent,
   workbenchInspectionFileManifest,
   WorkbenchUserError,
   type SurfaceSnapshotFile,
   type WorkbenchArtifact,
+  type WorkbenchEvalCaseSnapshot,
   type WorkbenchInspectionFileContent,
   type WorkbenchInspectionSnapshot,
-  type WorkbenchInspectionFileOwnerKind,
+  type WorkbenchInspectionSnapshotEnvelope,
   type WorkbenchTrace,
   type WorkbenchVersion,
 } from "@workbench-ai/workbench-core";
+import {
+  parseWorkbenchCaseFileOwnerId,
+  workbenchInspectionFileOwnerKindFromRouteSegment,
+  type WorkbenchInspectionFileOwnerKind,
+  type WorkbenchOperationRequest,
+} from "@workbench-ai/workbench-contract";
+import {
+  startPrivateLocalWorkbenchOperation,
+} from "./local-worker-control.js";
 
 export interface StartWorkbenchOpenServerOptions {
   dir?: string;
@@ -98,8 +112,47 @@ async function handleRequest({
   try {
     const url = new URL(request.url ?? "/", "http://workbench.local");
     if (url.pathname === "/api/snapshot") {
-      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken });
-      sendText(response, 200, `${JSON.stringify(inspectionSnapshotManifest(snapshot), null, 2)}\n`, "application/json; charset=utf-8");
+      const envelope = await createInspectionSnapshotEnvelope({ dir, authToken });
+      sendText(response, 200, `${JSON.stringify(envelope, null, 2)}\n`, "application/json; charset=utf-8");
+      return;
+    }
+    if (url.pathname === "/api/operations/preview" && request.method === "POST") {
+      const operationRequest = await readOperationRequest(request);
+      const preview = await previewLocalWorkbenchOperation({
+        dir,
+        authToken,
+        request: operationRequest,
+      });
+      sendText(response, 200, `${JSON.stringify(preview, null, 2)}\n`, "application/json; charset=utf-8");
+      return;
+    }
+    if (url.pathname === "/api/operations" && request.method === "POST") {
+      const operationRequest = await readOperationRequest(request);
+      const started = await startPrivateLocalWorkbenchOperation({
+        core: { dir, authToken },
+        request: operationRequest,
+      });
+      sendText(response, 200, `${JSON.stringify(started.snapshot, null, 2)}\n`, "application/json; charset=utf-8");
+      return;
+    }
+    if (url.pathname === "/api/state/wait") {
+      const notice = await waitForWorkbenchReadOnlyInspectionNotice({
+        dir,
+        authToken,
+        cursor: url.searchParams.get("cursor") ?? undefined,
+        timeoutMs: parseInspectionWaitTimeout(url.searchParams.get("timeoutMs")),
+      });
+      sendText(response, 200, `${JSON.stringify(notice, null, 2)}\n`, "application/json; charset=utf-8");
+      return;
+    }
+    if (url.pathname === "/api/state/stream") {
+      await sendStateEventStream({
+        request,
+        response,
+        dir,
+        authToken,
+        cursor: url.searchParams.get("cursor") ?? undefined,
+      });
       return;
     }
     const jobEvidenceRoute = parseJobEvidenceApiPath(url.pathname);
@@ -150,6 +203,116 @@ async function handleRequest({
   }
 }
 
+async function createInspectionSnapshotEnvelope(options: {
+  dir?: string;
+  authToken?: string;
+}): Promise<WorkbenchInspectionSnapshotEnvelope> {
+  // Read the cursor first so an envelope can be stale-but-refreshable, never fresh-but-silent.
+  const cursor = await readWorkbenchReadOnlyInspectionCursor(options);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(options);
+  return {
+    schema: "workbench.inspection.snapshot-envelope.v1",
+    cursor,
+    snapshot: inspectionSnapshotManifest(snapshot),
+    actions: createWorkbenchActionCapabilities(snapshot, {
+      variant: "local",
+      evidenceAccess: "full",
+    }),
+  };
+}
+
+async function readOperationRequest(request: IncomingMessage): Promise<WorkbenchOperationRequest> {
+  const body = await readJsonObject(request);
+  const kind = body.kind === "improve" ? "improve" : body.kind === "eval" ? "eval" : null;
+  if (!kind) {
+    throw new WorkbenchUserError("Operation kind must be eval or improve.");
+  }
+  return {
+    kind,
+    variant: "local",
+    ...(typeof body.versionId === "string" && body.versionId.trim() ? { versionId: body.versionId.trim() } : {}),
+    ...(typeof body.evalHash === "string" && body.evalHash.trim() ? { evalHash: body.evalHash.trim() } : {}),
+    ...(typeof body.skill === "string" && body.skill.trim() ? { skill: body.skill.trim() } : {}),
+    ...(typeof body.agent === "string" && body.agent.trim() ? { agent: body.agent.trim() } : {}),
+    ...(readPositiveInteger(body.samples) ? { samples: readPositiveInteger(body.samples) } : {}),
+    ...(kind === "improve" && readPositiveInteger(body.budget) ? { budget: readPositiveInteger(body.budget) } : {}),
+    ...(Array.isArray(body.evidenceTraceIds)
+      ? { evidenceTraceIds: body.evidenceTraceIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) }
+      : {}),
+    ...(typeof body.retryOfRunId === "string" && body.retryOfRunId.trim() ? { retryOfRunId: body.retryOfRunId.trim() } : {}),
+  };
+}
+
+async function readJsonObject(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  if (chunks.length === 0) {
+    return {};
+  }
+  const content = Buffer.concat(chunks).toString("utf8").trim();
+  if (!content) {
+    return {};
+  }
+  const parsed = JSON.parse(content) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new WorkbenchUserError("Request body must be a JSON object.");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+async function sendStateEventStream({
+  request,
+  response,
+  dir,
+  authToken,
+  cursor,
+}: {
+  request: IncomingMessage;
+  response: ServerResponse;
+  dir?: string;
+  authToken?: string;
+  cursor?: string;
+}): Promise<void> {
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+  });
+  let closed = false;
+  request.on("close", () => {
+    closed = true;
+  });
+  let currentCursor = cursor;
+  while (!closed) {
+    const notice = await waitForWorkbenchReadOnlyInspectionNotice({
+      dir,
+      authToken,
+      cursor: currentCursor,
+      timeoutMs: 25_000,
+    });
+    if (closed) {
+      return;
+    }
+    currentCursor = notice.cursor;
+    response.write(`data: ${JSON.stringify(notice)}\n\n`);
+  }
+}
+
+function parseInspectionWaitTimeout(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): WorkbenchInspectionSnapshot {
   return {
     ...snapshot,
@@ -164,6 +327,10 @@ function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): Work
     evals: snapshot.evals.map((evalSnapshot) => ({
       ...evalSnapshot,
       files: inspectionFileManifests(evalSnapshot.files),
+      cases: evalSnapshot.cases.map((evalCase) => ({
+        ...evalCase,
+        files: inspectionFileManifests(evalCase.files),
+      })),
     })),
     ...(snapshot.comparison ? {
       comparison: {
@@ -209,14 +376,15 @@ function parseInspectionFileApiPath(pathname: string): {
 } | null {
   const segments = pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
   const [api, ownerKind, ownerId, files, ...filePath] = segments;
+  const parsedOwnerKind = workbenchInspectionFileOwnerKindFromRouteSegment(ownerKind ?? "");
   if (api !== "api" || files !== "files" || !ownerId || filePath.length === 0) {
     return null;
   }
-  if (ownerKind !== "versions" && ownerKind !== "traces" && ownerKind !== "artifacts") {
+  if (!parsedOwnerKind) {
     return null;
   }
   return {
-    ownerKind: ownerKind.slice(0, -1) as WorkbenchInspectionFileOwnerKind,
+    ownerKind: parsedOwnerKind,
     ownerId,
     path: filePath.join("/"),
   };
@@ -239,12 +407,21 @@ function findInspectionFileOwner(
   snapshot: WorkbenchInspectionSnapshot,
   ownerKind: WorkbenchInspectionFileOwnerKind,
   ownerId: string,
-): WorkbenchVersion | WorkbenchTrace | WorkbenchArtifact | undefined {
+): WorkbenchVersion | WorkbenchTrace | WorkbenchArtifact | WorkbenchEvalCaseSnapshot | undefined {
   if (ownerKind === "version") {
     return snapshot.versions.find((entry) => entry.id === ownerId);
   }
   if (ownerKind === "trace") {
     return snapshot.traces.find((entry) => entry.id === ownerId);
+  }
+  if (ownerKind === "case") {
+    const parsed = parseWorkbenchCaseFileOwnerId(ownerId);
+    if (!parsed) {
+      return undefined;
+    }
+    return snapshot.evals
+      .find((entry) => entry.hash === parsed.evaluationHash)
+      ?.cases.find((entry) => entry.id === parsed.caseId);
   }
   return snapshot.artifacts.find((entry) => entry.id === ownerId);
 }

@@ -23,7 +23,7 @@ pnpm --dir packages/cli build
 pnpm test
 ```
 
-The tests assert the skill-first command surface, local runtime lifecycle, read-only UI helpers, minimal adapter protocol, automatic source versions, and Workbench object remote layout.
+The tests assert the skill-first command surface, local runtime lifecycle, shared UI helpers, minimal adapter protocol, automatic source versions, and Workbench object remote layout.
 
 ## Release Contract
 

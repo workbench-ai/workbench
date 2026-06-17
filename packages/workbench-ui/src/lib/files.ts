@@ -3,23 +3,10 @@ import type {
   WorkbenchInspectionFileContent,
 } from "@workbench-ai/workbench-contract";
 import type {
-  FileChangeSummary,
   FilePreviewData,
   PreviewKind,
   PreviewMode,
 } from "@workbench-ai/cli-web-ui/lib/file-preview";
-
-export function surfaceFilesToChanges(files: readonly SurfaceSnapshotFile[]): FileChangeSummary[] {
-  return files.map((file) => ({
-    path: file.path,
-    old_path: null,
-    status: "unchanged",
-    mime_type: mimeTypeForPath(file.path),
-    preview_kind: previewKindForFile(file),
-    additions: 0,
-    deletions: 0,
-  }));
-}
 
 export function surfaceFileToPreview(
   file: WorkbenchInspectionFileContent,

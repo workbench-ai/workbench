@@ -34,6 +34,7 @@ import {
   type SandboxPlane,
 } from "../sandbox-plane.ts";
 import {
+  abortSignalOrUndefined,
   asRuntimeRecord,
   importNodeModule,
   nodeBuiltin,
@@ -60,6 +61,7 @@ const BUILT_IN_ENVIRONMENT_IMAGES: Record<string, string> = {
 const DOCKER_RUNTIME_MOUNT = "/workbench-runtime";
 const DOCKER_DEFAULT_WORKSPACE = "/workspace";
 const mutableDockerTemplateImageBuilds = new Map<string, Promise<string>>();
+let dockerAvailabilityCheck: Promise<void> | undefined;
 
 type DockerRuntimePayload = {
   mounts: readonly DockerRuntimeMount[];
@@ -132,8 +134,8 @@ export function createDockerSandboxPlane(
         },
       };
     },
-    async exec(request) {
-      const completedJob = await runDockerSandboxExecution(args, request.sandbox, request.execution);
+    async exec(request, options) {
+      const completedJob = await runDockerSandboxExecution(args, request.sandbox, request.execution, options.signal);
       return await executionResultFromCompletedSandboxJob({
         completedJob,
         execution: request.execution,
@@ -253,11 +255,13 @@ async function prepareDockerSandboxWorkspace(
 async function assertDockerSandboxAvailable(
   execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
 ): Promise<void> {
-  try {
-    await execFileAsync("docker", ["info", "--format", "{{json .ServerVersion}}"], { maxBuffer: 1024 * 1024 });
-  } catch (error) {
-    throw new Error(`Docker sandbox unavailable: Docker must be installed and running before Workbench can execute this eval. ${dockerUnavailableDetail(error)}`);
-  }
+  dockerAvailabilityCheck ??= execFileAsync("docker", ["info", "--format", "{{json .ServerVersion}}"], { maxBuffer: 1024 * 1024 })
+    .then(() => undefined)
+    .catch((error: unknown) => {
+      dockerAvailabilityCheck = undefined;
+      throw new Error(`Docker sandbox unavailable: Docker must be installed and running before Workbench can execute this eval. ${dockerUnavailableDetail(error)}`);
+    });
+  await dockerAvailabilityCheck;
 }
 
 function dockerUnavailableDetail(error: unknown): string {
@@ -291,6 +295,7 @@ async function runDockerSandboxExecution(
   args: WorkbenchExecutionRuntimeInput,
   sandbox: SandboxHandle,
   execution: WorkbenchExecutionSpec,
+  signal?: AbortSignal,
 ): Promise<RemoteWorkbenchJob> {
   const metadata = asRuntimeRecord(sandbox.metadata);
   const root = readRequiredMetadataString(metadata, "root", DOCKER_SANDBOX_BACKEND);
@@ -368,6 +373,8 @@ async function runDockerSandboxExecution(
       stderrPath,
       timeoutMs,
       progressTarget,
+      signal,
+      containerName,
     });
   } catch (error) {
     dockerError = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -466,11 +473,15 @@ function runDockerSandboxProcess(
     stderrPath: string;
     timeoutMs: number;
     progressTarget?: WorkbenchExecutionProgressTarget;
+    signal?: AbortSignal;
+    containerName?: string;
   },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    const signal = abortSignalOrUndefined(options.signal);
     let settled = false;
     let timedOut = false;
+    let aborted = false;
     const progressPublishes: Promise<void>[] = [];
     const progressParser = createWorkbenchProgressStdoutParser((envelope) => {
       progressPublishes.push(
@@ -483,8 +494,29 @@ function runDockerSandboxProcess(
     const child = spawn("docker", args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const removeContainer = (): void => {
+      if (!options.containerName) {
+        return;
+      }
+      const remover = spawn("docker", ["rm", "-f", options.containerName], {
+        stdio: "ignore",
+      });
+      remover.on("error", () => undefined);
+    };
+    if (signal?.aborted) {
+      aborted = true;
+      removeContainer();
+      child.kill("SIGTERM");
+    }
+    const abort = () => {
+      aborted = true;
+      removeContainer();
+      child.kill("SIGTERM");
+    };
+    signal?.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => {
       timedOut = true;
+      removeContainer();
       child.kill("SIGKILL");
     }, options.timeoutMs);
 
@@ -502,6 +534,7 @@ function runDockerSandboxProcess(
       }
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       progressParser.flush();
       const stdoutClosed = new Promise<void>((closeResolve) => stdout.end(closeResolve));
       const stderrClosed = new Promise<void>((closeResolve) => stderr.end(closeResolve));
@@ -518,6 +551,10 @@ function runDockerSandboxProcess(
     child.on("exit", (code, signal) => {
       if (timedOut) {
         finish(new Error(`Docker sandbox timed out after ${options.timeoutMs}ms.`));
+        return;
+      }
+      if (aborted) {
+        finish(new Error("Run cancellation requested."));
         return;
       }
       if (code === 0) {

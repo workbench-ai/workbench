@@ -31,6 +31,15 @@ export function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+export function abortSignalOrUndefined(value: AbortSignal | undefined): AbortSignal | undefined {
+  return value &&
+    typeof value.aborted === "boolean" &&
+    typeof value.addEventListener === "function" &&
+    typeof value.removeEventListener === "function"
+    ? value
+    : undefined;
+}
+
 export function normalizeRelativePath(filePath: string): string {
   const normalized = filePath.replace(/\\/gu, "/").replace(/^\/+/u, "");
   if (!normalized || normalized.includes("\0")) {

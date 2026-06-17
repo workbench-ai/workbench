@@ -18,6 +18,7 @@ const WORKBENCH_METADATA_DIRS = new Set([
   "objects",
   "refs",
   "sync",
+  "live",
   "tmp",
   "logs",
   "locks",
@@ -64,7 +65,54 @@ export function isWorkbenchLocalMetadataPath(filePath: string): boolean {
   );
 }
 
-export type WorkbenchInspectionFileOwnerKind = "version" | "trace" | "artifact";
+export type WorkbenchInspectionFileOwnerKind = "version" | "trace" | "artifact" | "case";
+
+const WORKBENCH_CASE_FILE_OWNER_SEPARATOR = ":";
+
+export function workbenchInspectionFileOwnerKindFromRouteSegment(
+  value: string,
+): WorkbenchInspectionFileOwnerKind | null {
+  if (value === "versions") {
+    return "version";
+  }
+  if (value === "traces") {
+    return "trace";
+  }
+  if (value === "artifacts") {
+    return "artifact";
+  }
+  if (value === "cases") {
+    return "case";
+  }
+  return null;
+}
+
+export function workbenchInspectionFileOwnerRouteSegment(
+  kind: WorkbenchInspectionFileOwnerKind,
+): string {
+  if (kind === "version") {
+    return "versions";
+  }
+  if (kind === "trace") {
+    return "traces";
+  }
+  if (kind === "artifact") {
+    return "artifacts";
+  }
+  return "cases";
+}
+
+export function workbenchCaseFileOwnerId(evaluationHash: string, caseId: string): string {
+  return `${evaluationHash}${WORKBENCH_CASE_FILE_OWNER_SEPARATOR}${caseId}`;
+}
+
+export function parseWorkbenchCaseFileOwnerId(
+  ownerId: string,
+): { evaluationHash: string; caseId: string } | null {
+  const [evaluationHash, ...caseIdParts] = ownerId.split(WORKBENCH_CASE_FILE_OWNER_SEPARATOR);
+  const caseId = caseIdParts.join(WORKBENCH_CASE_FILE_OWNER_SEPARATOR);
+  return evaluationHash && caseId ? { evaluationHash, caseId } : null;
+}
 
 export interface WorkbenchInspectionFileContent {
   path: string;
@@ -174,16 +222,182 @@ export interface WorkbenchVersion {
 export interface WorkbenchEvalSnapshot {
   hash: string;
   files: SurfaceSnapshotFile[];
+  cases: WorkbenchEvalCaseSnapshot[];
   caseCount: number;
   createdAt: string;
   updatedAt: string;
   scoreAdapter: string;
 }
 
+export interface WorkbenchEvalCaseSnapshot {
+  id: string;
+  path: string;
+  title?: string;
+  description?: string;
+  command?: string;
+  files: SurfaceSnapshotFile[];
+}
+
 export type WorkbenchRunKind = "eval" | "improve" | "compare";
-export type WorkbenchRunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+export type WorkbenchRunLocation = "local" | "cloud";
+export type WorkbenchRunStatus = "queued" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type WorkbenchArtifactKind = "file" | "directory" | "log" | "scorecard";
+export type WorkbenchOperationKind = "eval" | "improve";
+export type WorkbenchOperationVariant = WorkbenchRunLocation;
+
+export interface WorkbenchOperationRequest {
+  kind: WorkbenchOperationKind;
+  variant: WorkbenchOperationVariant;
+  runId?: string;
+  versionId?: string;
+  evalHash?: string;
+  skill?: string;
+  agent?: string;
+  samples?: number;
+  rerun?: boolean;
+  budget?: number;
+  evidenceTraceIds?: readonly string[];
+  retryOfRunId?: string;
+}
+
+export interface WorkbenchOperationSelection {
+  name: string;
+  hash?: string;
+}
+
+export interface WorkbenchOperationPreview {
+  kind: WorkbenchOperationKind;
+  variant: WorkbenchOperationVariant;
+  canStart: boolean;
+  versionId?: string;
+  evalHash?: string;
+  skills: readonly WorkbenchOperationSelection[];
+  agents: readonly WorkbenchOperationSelection[];
+  caseCount: number;
+  samples: number;
+  budget?: number;
+  evidenceTraceIds?: readonly string[];
+  evidenceCount?: number;
+  disabledReason?: string;
+  setupCommands?: readonly string[];
+  cliEquivalent: string;
+}
+
+export interface WorkbenchOperationRouteTarget {
+  kind: "run";
+  runId: string;
+  source: "activity" | "evaluation";
+  evaluationId?: string;
+}
+
+export type WorkbenchRunPhase =
+  | "planning"
+  | "queued"
+  | "syncing"
+  | "running"
+  | "improving"
+  | "proof"
+  | "materializing"
+  | "canceling"
+  | "complete";
+
+export interface WorkbenchActiveJobSummary {
+  jobId: string;
+  caseId?: string;
+  sample?: number;
+  skillName?: string;
+  agentName?: string;
+  runningCount: number;
+}
+
+export interface WorkbenchRunProgressSummary {
+  planned: number;
+  completed: number;
+  scored: number;
+  failed: number;
+  canceled: number;
+  active?: WorkbenchActiveJobSummary;
+  partialScore?: number;
+  evidenceCount?: number;
+  costUsd?: number;
+  elapsedMs: number;
+  lastProgressAt?: string;
+}
+
+export interface WorkbenchOperationPlanSummary {
+  kind: WorkbenchOperationKind;
+  variant: WorkbenchOperationVariant;
+  versionId?: string;
+  evalHash?: string;
+  skills: readonly string[];
+  agents: readonly string[];
+  samples?: number;
+  rerun?: boolean;
+  budget?: number;
+  retryOfRunId?: string;
+}
+
+export interface WorkbenchMeasurementSummary {
+  versionId: string;
+  skillName: string;
+  skillBundleHash: string;
+  evalHash: string;
+  agentName: string;
+  agentHash: string;
+  runId: string;
+  status: WorkbenchRunStatus;
+  score?: number;
+  samples?: number;
+  costUsd?: number;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface WorkbenchRunSnapshot {
+  schema: "workbench.run.v1";
+  id: string;
+  kind: WorkbenchRunKind;
+  variant: WorkbenchRunLocation;
+  status: WorkbenchRunStatus;
+  phase: WorkbenchRunPhase;
+  plan: WorkbenchOperationPlanSummary;
+  progress: WorkbenchRunProgressSummary;
+  measurements: readonly WorkbenchMeasurementSummary[];
+  result?: {
+    score?: number;
+    improvedVersionId?: string;
+    switchedToVersionId?: string;
+    error?: string;
+  };
+  retryOfRunId?: string;
+  route: WorkbenchOperationRouteTarget;
+  cursor?: string;
+  cliEquivalent: string;
+  next?: string;
+}
+
+export interface WorkbenchOperationCapability {
+  enabled: boolean;
+  defaultRequest: WorkbenchOperationRequest;
+  preview?: WorkbenchOperationPreview;
+  disabledReason?: string;
+}
+
+export interface WorkbenchAcquisitionOption {
+  id: string;
+  label: string;
+  kind: "copy-command" | "copy-url" | "local-action";
+  value: string;
+}
+
+export interface WorkbenchActionCapabilities {
+  variant: WorkbenchOperationVariant;
+  evidenceAccess: "full" | "source";
+  eval: WorkbenchOperationCapability;
+  improve: WorkbenchOperationCapability;
+  acquisition: readonly WorkbenchAcquisitionOption[];
+}
 
 export interface WorkbenchRun {
   id: string;
@@ -195,6 +409,7 @@ export interface WorkbenchRun {
   agentName: string;
   agentHash: string;
   status: WorkbenchRunStatus;
+  operationPlan?: WorkbenchOperationPlanSummary;
   score?: number;
   costUsd?: number;
   latencyMs?: number;
@@ -203,6 +418,14 @@ export interface WorkbenchRun {
   createdAt: string;
   finishedAt?: string;
   parentRunId?: string;
+  location?: WorkbenchRunLocation;
+  remoteName?: string;
+  baseVersionId?: string;
+  requestedSamples?: number;
+  requestedBudget?: number;
+  retryOfRunId?: string;
+  cancelRequestedAt?: string;
+  lastProgressAt?: string;
   outputVersionId?: string;
   error?: string;
 }
@@ -368,6 +591,19 @@ export interface WorkbenchStatusSnapshot {
     lastRunId?: string;
     lastStatus?: WorkbenchRunStatus;
     lastScore?: number;
+    activeRuns?: Array<{
+      id: string;
+      kind: WorkbenchRunKind;
+      location: WorkbenchRunLocation;
+      status: WorkbenchRunStatus;
+      skillName: string;
+      agentName: string;
+      failed: number;
+      elapsedMs: number;
+      lastProgressAt?: string;
+      health: "healthy" | "stale_local_state" | "unknown";
+      next: string;
+    }>;
   };
   remotes: Array<{
     name: string;
@@ -450,6 +686,30 @@ export interface WorkbenchInspectionSnapshot {
   refs: WorkbenchRefs;
   publication?: WorkbenchPublication;
 }
+
+export interface WorkbenchInspectionSnapshotEnvelope {
+  schema: "workbench.inspection.snapshot-envelope.v1";
+  cursor: string;
+  snapshot: WorkbenchInspectionSnapshot;
+  actions: WorkbenchActionCapabilities;
+}
+
+export type WorkbenchStateNotice =
+  | {
+      schema: "workbench.state.notice.v1";
+      type: "changed";
+      cursor: string;
+    }
+  | {
+      schema: "workbench.state.notice.v1";
+      type: "reset";
+      cursor: string;
+    }
+  | {
+      schema: "workbench.state.notice.v1";
+      type: "heartbeat";
+      cursor: string;
+    };
 
 export interface WorkbenchPublication {
   versionId: string;

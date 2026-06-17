@@ -2,7 +2,7 @@ import { promises as fs, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { hashJson, WorkbenchCodedError, type Json, type SurfaceSnapshotFile } from "@workbench-ai/workbench-core";
+import { hashJson, quoteShellArg, WorkbenchCodedError, type Json, type SurfaceSnapshotFile } from "@workbench-ai/workbench-core";
 import YAML from "yaml";
 
 const INSTALLS_SCHEMA = "workbench.skill-installs.v1";
@@ -144,13 +144,30 @@ export async function readInstalledSkillsInventory(options: {
   dir?: string;
   env?: NodeJS.ProcessEnv;
 } = {}): Promise<WorkbenchSkillAccessInventory> {
-  const request = resolveSkillAccessTargets({
+  return readInventoryForRequest(resolveSkillAccessTargets({
     requestedFor: options.requestedFor,
     global: options.global,
     dir: options.dir,
     write: false,
     env: options.env,
-  });
+  }));
+}
+
+export async function observeCurrentInstalledSkillsInventory(options: {
+  global?: boolean;
+  dir?: string;
+  env?: NodeJS.ProcessEnv;
+} = {}): Promise<WorkbenchSkillAccessInventory> {
+  return readInventoryForRequest(observeCurrentSkillAccessTargets(options));
+}
+
+async function readInventoryForRequest(request: {
+  scope: SkillAccessScope;
+  dir?: string;
+  requestedFor?: SkillAccessFor;
+  currentAgent?: SkillAccessTargetId;
+  targets: SkillAccessTargetView[];
+}): Promise<WorkbenchSkillAccessInventory> {
   const skills: WorkbenchInstalledSkill[] = [];
   for (const target of request.targets) {
     const targetRows: WorkbenchInstalledSkill[] = [];
@@ -204,6 +221,12 @@ export async function installSnapshotToSkillTargets(options: {
   }
   const skillName = canonicalSkillDirectoryName({ name: options.snapshot.name, files: packageFiles });
   const contentHash = contentHashForFiles(packageFiles);
+  const overwriteRemediation = installOverwriteRemediation({
+    handle: options.provenance.handle,
+    requestedFor: request.requestedFor,
+    global: request.scope === "global",
+    dir: request.scope === "folder" && options.dir ? request.dir : undefined,
+  });
   const results: WorkbenchInstallTargetResult[] = [];
   for (const target of request.targets) {
     results.push(await installPackageInRoot({
@@ -214,6 +237,7 @@ export async function installSnapshotToSkillTargets(options: {
       overwrite: options.overwrite,
       dryRun: options.dryRun,
       provenance: options.provenance,
+      overwriteRemediation,
       installedAt: options.installedAt,
     }));
   }
@@ -234,6 +258,27 @@ export async function installSnapshotToSkillTargets(options: {
     contentHash,
     targets: results,
   };
+}
+
+function installOverwriteRemediation(input: {
+  handle: string;
+  requestedFor?: SkillAccessFor;
+  global: boolean;
+  dir?: string;
+}): string {
+  return [
+    "workbench",
+    "install",
+    commandArg(input.handle),
+    ...(input.requestedFor ? ["--for", input.requestedFor] : []),
+    ...(input.global ? ["--global"] : []),
+    ...(input.dir ? ["--dir", commandArg(input.dir)] : []),
+    "--yes",
+  ].join(" ");
+}
+
+function commandArg(value: string): string {
+  return /^[A-Za-z0-9_./:@+-]+$/u.test(value) ? value : quoteShellArg(value);
 }
 
 export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventory): Record<string, Json> {
@@ -363,6 +408,29 @@ function failUndetectedTarget(command: "install" | "skills", source: string | un
     subject: { supportedTargets: ["codex", "claude"] },
     exitCode: 2,
   });
+}
+
+function observeCurrentSkillAccessTargets(options: {
+  global?: boolean;
+  dir?: string;
+  env?: NodeJS.ProcessEnv;
+}): {
+  scope: SkillAccessScope;
+  dir?: string;
+  currentAgent?: SkillAccessTargetId;
+  targets: SkillAccessTargetView[];
+} {
+  const env = options.env ?? process.env;
+  const detected = detectCurrentSkillAccessTargets(env);
+  const scope: SkillAccessScope = options.global === true ? "global" : "folder";
+  const resolvedDir = scope === "folder" ? path.resolve(options.dir ?? process.cwd()) : undefined;
+  const currentAgent = detected.length === 1 ? detected[0] : undefined;
+  return {
+    scope,
+    ...(resolvedDir ? { dir: resolvedDir } : {}),
+    ...(currentAgent ? { currentAgent } : {}),
+    targets: currentAgent ? [targetView(currentAgent, scope, resolvedDir, env)] : [],
+  };
 }
 
 function detectCurrentSkillAccessTargets(env: NodeJS.ProcessEnv): SkillAccessTargetId[] {
@@ -620,6 +688,7 @@ async function installPackageInRoot(args: {
   overwrite: boolean;
   dryRun: boolean;
   provenance: WorkbenchInstallProvenanceInput;
+  overwriteRemediation: string;
   installedAt?: string;
 }): Promise<WorkbenchInstallTargetResult> {
   const root = args.target.writeRoot;
@@ -654,7 +723,7 @@ async function installPackageInRoot(args: {
   if (!args.dryRun && existingHash && previous === "overwritten" && !args.overwrite) {
     const status = record ? "modified" : "unmanaged";
     throw new WorkbenchCodedError("install_failed", `Skill destination has ${status} content: ${destination}`, {
-      remediation: `workbench install ${args.provenance.handle} --yes`,
+      remediation: args.overwriteRemediation,
       subject: { destination, status, target: args.target.id },
       exitCode: 1,
     });

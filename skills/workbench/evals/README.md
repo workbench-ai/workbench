@@ -8,7 +8,7 @@ It checks:
 - running `workbench`, `workbench status`, `workbench log`, `workbench show`, `workbench eval`, `workbench improve`, and `workbench compare`
 - treating versions as automatic source snapshots
 - using agents for local command and provider-backed eval configurations
-- treating the web UI as read-only inspection
+- treating the web UI as a snapshot-backed, capability-driven inspection and operation-start surface
 - using Workbench object remotes with `workbench sync` and explicit source publication with `workbench publish`
 - keeping workflow-specific authoring in the skill layer
 

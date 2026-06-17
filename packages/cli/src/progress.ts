@@ -1,9 +1,15 @@
 import type {
   WorkbenchJob,
+  WorkbenchOperationRequest,
   WorkbenchRun,
+  WorkbenchRunPhase,
+  WorkbenchRunSnapshot,
 } from "@workbench-ai/workbench-contract";
+import {
+  createWorkbenchRunSnapshot,
+} from "@workbench-ai/workbench-core";
 
-export type WorkbenchProgressCommand = "eval" | "improve";
+export type WorkbenchProgressCommand = "eval" | "improve" | "run watch" | "run retry";
 export type WorkbenchProgressPhase =
   | "preflight"
   | "provider_auth"
@@ -15,28 +21,21 @@ export type WorkbenchProgressPhase =
   | "proof_eval"
   | "complete";
 
-export interface ProgressSnapshot {
-  command: WorkbenchProgressCommand;
-  phase: WorkbenchProgressPhase;
-  location: "local" | "cloud";
-  runIds: string[];
-  active?: ProgressActiveWork;
-  casesTotal?: number;
-  casesDone?: number;
-  samplesTotal?: number;
-  samplesDone?: number;
-  failed?: number;
-  elapsedMs: number;
+export interface ProgressEvidenceCounts {
+  artifacts?: number;
+  traces?: number;
+  sessions?: number;
+  resultFiles?: number;
 }
 
-interface ProgressActiveWork {
-  jobId: string;
-  caseId: string;
-  sample: number;
-  runningCount: number;
+export interface ProgressRenderer {
+  render(
+    snapshot: WorkbenchRunSnapshot | undefined,
+    options?: { force?: boolean; command?: WorkbenchProgressCommand },
+  ): void;
 }
 
-export interface ProgressSnapshotInput {
+export interface RunProgressSnapshotInput {
   command: WorkbenchProgressCommand;
   phase: WorkbenchProgressPhase;
   location: "local" | "cloud";
@@ -44,281 +43,114 @@ export interface ProgressSnapshotInput {
   jobs: readonly WorkbenchJob[];
   startedAtMs: number;
   nowMs?: number;
+  evidence?: ProgressEvidenceCounts;
+  next?: string;
 }
 
-export interface ProgressRenderer {
-  render(snapshot: ProgressSnapshot, options?: { force?: boolean }): void;
-}
-
-export function progressSnapshotFromRuns(input: ProgressSnapshotInput): ProgressSnapshot {
-  const nowMs = input.nowMs ?? Date.now();
-  const runIds = input.runs.map((run) => run.id);
-  const runIdSet = new Set(runIds);
-  const jobsForRuns = input.jobs.filter((job) => runIdSet.has(job.runId));
-  const phase = progressPhaseForRuns(input.phase, input.runs, jobsForRuns);
-  const counterJobs = progressCounterJobs(input.command, phase, jobsForRuns);
-  const activeJobs = progressActiveJobs(input.command, phase, jobsForRuns, counterJobs);
+export function runProgressSnapshotFromRuns(input: RunProgressSnapshotInput): WorkbenchRunSnapshot | undefined {
+  if (input.runs.length === 0) {
+    return undefined;
+  }
+  const request = progressOperationRequest(input);
+  if (!request) {
+    return undefined;
+  }
+  const jobs = progressJobs(input.command, input.phase, input.jobs);
+  const base = createWorkbenchRunSnapshot(request, input.runs, { jobs });
+  const phase = runSnapshotPhase(input.phase, base.phase);
+  const nowMs = input.nowMs ?? terminalProgressObservedAtMs(phase, input.runs, jobs) ?? Date.now();
+  const elapsedMs = Math.max(0, nowMs - input.startedAtMs);
+  const partialScore = progressPartialScore(base, jobs);
+  const evidenceCount = progressEvidenceCount(input.evidence);
   return {
-    command: input.command,
+    ...base,
     phase,
-    location: input.location,
-    runIds,
-    ...progressActive(activeJobs),
-    ...progressCounters(counterJobs),
-    elapsedMs: Math.max(0, nowMs - input.startedAtMs),
+    progress: {
+      ...base.progress,
+      ...(partialScore !== undefined ? { partialScore } : {}),
+      ...(evidenceCount !== undefined ? { evidenceCount } : {}),
+      elapsedMs,
+    },
+    ...(input.next ? { next: input.next } : {}),
   };
 }
 
 export function createProgressRenderer(input: {
   stderr: Pick<NodeJS.WritableStream, "write">;
   heartbeatMs?: number;
+  json?: boolean;
 }): ProgressRenderer {
   const heartbeatMs = input.heartbeatMs ?? 60_000;
-  let last: ProgressSnapshot | undefined;
+  let last: WorkbenchRunSnapshot | undefined;
   let lastPrintedAtMs: number | undefined;
   let queuedGuidanceRunId: string | undefined;
   let inspectionGuidanceKey: string | undefined;
   return {
     render(snapshot, options = {}) {
+      if (!snapshot) {
+        return;
+      }
       const reason = progressRenderReason(last, snapshot, lastPrintedAtMs, heartbeatMs, options.force === true);
       if (!reason) {
         return;
       }
-      input.stderr.write(`${formatProgressSnapshot(snapshot)}\n`);
-      if (snapshot.location === "cloud" && snapshot.phase === "queued" && snapshot.runIds[0]) {
-        if (reason === "heartbeat" || queuedGuidanceRunId !== snapshot.runIds[0]) {
-          input.stderr.write(`${formatQueuedCloudGuidance(snapshot.command, snapshot.runIds[0])}\n`);
-          queuedGuidanceRunId = snapshot.runIds[0];
+      if (input.json === true) {
+        input.stderr.write(`${JSON.stringify(snapshot)}\n`);
+        last = snapshot;
+        lastPrintedAtMs = snapshot.progress.elapsedMs;
+        return;
+      }
+      const command = options.command ?? progressCommandForSnapshot(snapshot);
+      input.stderr.write(`${formatProgressSnapshot(snapshot, command)}\n`);
+      if (snapshot.variant === "cloud" && snapshot.phase === "queued") {
+        if (reason === "heartbeat" || queuedGuidanceRunId !== snapshot.id) {
+          input.stderr.write(`${formatQueuedCloudGuidance(command, snapshot.id)}\n`);
+          queuedGuidanceRunId = snapshot.id;
         }
       }
-      if (isInspectablePhase(snapshot.phase) && snapshot.runIds[0]) {
-        const guidanceKey = `${snapshot.location}:${snapshot.runIds[0]}`;
+      if (isInspectablePhase(snapshot.phase)) {
+        const guidanceKey = `${snapshot.variant}:${snapshot.id}`;
         if (reason === "heartbeat" || inspectionGuidanceKey !== guidanceKey) {
-          input.stderr.write(`${formatInspectableGuidance(snapshot.command, snapshot.runIds[0], snapshot.location)}\n`);
+          input.stderr.write(`${formatInspectableGuidance(command, snapshot.id, snapshot.variant)}\n`);
           inspectionGuidanceKey = guidanceKey;
         }
       }
       last = snapshot;
-      lastPrintedAtMs = snapshot.elapsedMs;
+      lastPrintedAtMs = snapshot.progress.elapsedMs;
     },
   };
 }
 
-export function formatProgressSnapshot(snapshot: ProgressSnapshot): string {
-  const parts = [
-    progressPhaseText(snapshot),
-    ...progressCounterParts(snapshot),
-    `elapsed ${formatElapsed(snapshot.elapsedMs)}`,
-  ];
-  return `workbench ${snapshot.command}: ${parts.join(", ")}.`;
+export function formatProgressSnapshot(
+  snapshot: WorkbenchRunSnapshot,
+  command: WorkbenchProgressCommand = progressCommandForSnapshot(snapshot),
+): string {
+  const parts = formatProgressSummaryParts(snapshot);
+  return `workbench ${command}: ${parts.join(", ")}.`;
+}
+
+export function formatProgressSummary(
+  snapshot: WorkbenchRunSnapshot,
+): string {
+  return formatProgressSummaryParts(snapshot).join(", ");
 }
 
 export function formatQueuedCloudGuidance(command: WorkbenchProgressCommand, runId: string): string {
-  return `workbench ${command}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench show ${runId}.`;
+  return `workbench ${command}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench run watch ${runId}.`;
 }
 
 export function formatInspectableGuidance(
   command: WorkbenchProgressCommand,
   runId: string,
-  location: ProgressSnapshot["location"],
+  location: "local" | "cloud",
 ): string {
   if (location === "cloud") {
-    return `workbench ${command}: press Ctrl-C to detach; inspect last local state with workbench show ${runId} and refresh later with workbench sync cloud.`;
+    return `workbench ${command}: press Ctrl-C to detach; resume with workbench run watch ${runId}.`;
   }
   return `workbench ${command}: inspect current evidence with workbench show ${runId}.`;
 }
 
-function isInspectablePhase(phase: WorkbenchProgressPhase): boolean {
-  return phase === "running" || phase === "improving" || phase === "proof_eval";
-}
-
-function progressPhaseForRuns(
-  phase: WorkbenchProgressPhase,
-  runs: readonly WorkbenchRun[],
-  jobs: readonly WorkbenchJob[],
-): WorkbenchProgressPhase {
-  if (phase === "preflight" || phase === "provider_auth" || phase === "sync") {
-    return phase;
-  }
-  if (runs.length > 0 && runs.every(isTerminalRun)) {
-    return "complete";
-  }
-  if (phase === "improving" || phase === "applying_patch" || phase === "proof_eval") {
-    return phase;
-  }
-  if (runs.length > 0 && runs.every((run) => run.status === "queued") && jobs.every((job) => job.status === "queued")) {
-    return "queued";
-  }
-  if (runs.length > 0) {
-    return "running";
-  }
-  return phase;
-}
-
-function progressCounterJobs(
-  command: WorkbenchProgressCommand,
-  phase: WorkbenchProgressPhase,
-  jobs: readonly WorkbenchJob[],
-): WorkbenchJob[] {
-  if (command !== "improve") {
-    return [...jobs];
-  }
-  if (phase !== "proof_eval" && phase !== "complete") {
-    return [];
-  }
-  return jobs.filter((job) => job.caseId !== "current");
-}
-
-function progressActiveJobs(
-  command: WorkbenchProgressCommand,
-  phase: WorkbenchProgressPhase,
-  jobs: readonly WorkbenchJob[],
-  counterJobs: readonly WorkbenchJob[],
-): readonly WorkbenchJob[] {
-  if (command === "improve" && (phase === "running" || phase === "improving" || phase === "applying_patch")) {
-    return jobs;
-  }
-  return counterJobs;
-}
-
-function progressActive(jobs: readonly WorkbenchJob[]): Pick<ProgressSnapshot, "active"> {
-  const runningJobs = jobs
-    .filter((job) => job.status === "running")
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
-  const [active] = runningJobs;
-  if (!active) {
-    return {};
-  }
-  return {
-    active: {
-      jobId: active.id,
-      caseId: active.caseId,
-      sample: active.sample,
-      runningCount: runningJobs.length,
-    },
-  };
-}
-
-function progressCounters(jobs: readonly WorkbenchJob[]): Partial<ProgressSnapshot> {
-  if (jobs.length === 0) {
-    return {};
-  }
-  let casesTotal = 0;
-  let casesDone = 0;
-  const jobsByRun = new Map<string, WorkbenchJob[]>();
-  for (const job of jobs) {
-    const existing = jobsByRun.get(job.runId) ?? [];
-    existing.push(job);
-    jobsByRun.set(job.runId, existing);
-  }
-  for (const runJobs of jobsByRun.values()) {
-    const jobsByCase = new Map<string, WorkbenchJob[]>();
-    for (const job of runJobs) {
-      const existing = jobsByCase.get(job.caseId) ?? [];
-      existing.push(job);
-      jobsByCase.set(job.caseId, existing);
-    }
-    casesTotal += jobsByCase.size;
-    for (const caseJobs of jobsByCase.values()) {
-      if (caseJobs.every((job) => isTerminalJob(job))) {
-        casesDone += 1;
-      }
-    }
-  }
-  return {
-    casesTotal,
-    casesDone,
-    samplesTotal: jobs.length,
-    samplesDone: jobs.filter(isTerminalJob).length,
-    failed: jobs.filter((job) => job.status === "failed" || job.status === "canceled").length,
-  };
-}
-
-function progressRenderReason(
-  previous: ProgressSnapshot | undefined,
-  next: ProgressSnapshot,
-  lastPrintedAtMs: number | undefined,
-  heartbeatMs: number,
-  force: boolean,
-): "changed" | "heartbeat" | null {
-  if (force || !previous) {
-    return "changed";
-  }
-  if (progressSignature(previous) !== progressSignature(next)) {
-    return "changed";
-  }
-  if (lastPrintedAtMs !== undefined && next.elapsedMs - lastPrintedAtMs >= heartbeatMs) {
-    return "heartbeat";
-  }
-  return null;
-}
-
-function progressSignature(snapshot: ProgressSnapshot): string {
-  return JSON.stringify({
-    command: snapshot.command,
-    phase: snapshot.phase,
-    location: snapshot.location,
-    runIds: snapshot.runIds,
-    casesDone: snapshot.casesDone,
-    casesTotal: snapshot.casesTotal,
-    samplesDone: snapshot.samplesDone,
-    samplesTotal: snapshot.samplesTotal,
-    failed: snapshot.failed,
-    active: snapshot.active,
-  });
-}
-
-function progressPhaseText(snapshot: ProgressSnapshot): string {
-  switch (snapshot.phase) {
-    case "preflight":
-      return "preflight";
-    case "provider_auth":
-      return "checking provider auth";
-    case "sync":
-      return snapshot.location === "cloud" ? "sync with Workbench Cloud" : "sync";
-    case "queued":
-      return snapshot.location === "cloud" ? "queued on Workbench Cloud" : "queued";
-    case "running":
-      return "running";
-    case "improving":
-      return "running improvement adapter";
-    case "applying_patch":
-      return "applying patch";
-    case "proof_eval":
-      return "proof eval running";
-    case "complete":
-      return "complete";
-  }
-}
-
-function progressCounterParts(snapshot: ProgressSnapshot): string[] {
-  const parts: Array<string | undefined> = [];
-  if (snapshot.samplesTotal === undefined || snapshot.samplesDone === undefined) {
-    return activeProgressParts(snapshot);
-  }
-  parts.push(
-    snapshot.casesTotal !== undefined && snapshot.casesDone !== undefined
-      ? `cases ${snapshot.casesDone}/${snapshot.casesTotal}`
-      : undefined,
-    `samples ${snapshot.samplesDone}/${snapshot.samplesTotal} complete`,
-    `failed ${snapshot.failed ?? 0}`,
-  );
-  parts.push(...activeProgressParts(snapshot));
-  return parts.filter((entry): entry is string => Boolean(entry));
-}
-
-function activeProgressParts(snapshot: ProgressSnapshot): string[] {
-  const active = snapshot.active;
-  if (!active) {
-    return [];
-  }
-  return [
-    `active case=${active.caseId} sample=${active.sample + 1} job=${active.jobId}`,
-    ...(active.runningCount > 1 ? [`running=${active.runningCount}`] : []),
-  ];
-}
-
-function formatElapsed(elapsedMs: number): string {
+export function formatProgressDuration(elapsedMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
   if (totalSeconds < 60) {
     return `${totalSeconds}s`;
@@ -333,10 +165,271 @@ function formatElapsed(elapsedMs: number): string {
   return remainderMinutes === 0 ? `${hours}h` : `${hours}h ${remainderMinutes}m`;
 }
 
+function progressOperationRequest(input: RunProgressSnapshotInput): WorkbenchOperationRequest | undefined {
+  const firstRun = input.runs[0];
+  if (!firstRun || (firstRun.kind !== "eval" && firstRun.kind !== "improve")) {
+    return undefined;
+  }
+  const storedPlan = firstRun.operationPlan;
+  return {
+    kind: storedPlan?.kind ?? firstRun.kind,
+    variant: storedPlan?.variant ?? input.location,
+    versionId: storedPlan?.versionId ?? firstRun.versionId,
+    evalHash: storedPlan?.evalHash ?? firstRun.evalHash,
+    skill: storedPlan?.skills.join(",") || [...new Set(input.runs.map((run) => run.skillName))].join(","),
+    agent: storedPlan?.agents.join(",") || [...new Set(input.runs.map((run) => run.agentName))].join(","),
+    ...(storedPlan?.samples !== undefined ? { samples: storedPlan.samples } : firstRun.requestedSamples !== undefined ? { samples: firstRun.requestedSamples } : {}),
+    ...(storedPlan?.rerun ? { rerun: true } : {}),
+    ...(storedPlan?.budget !== undefined ? { budget: storedPlan.budget } : firstRun.kind === "improve" && firstRun.requestedBudget !== undefined ? { budget: firstRun.requestedBudget } : {}),
+    ...(storedPlan?.retryOfRunId ? { retryOfRunId: storedPlan.retryOfRunId } : firstRun.retryOfRunId ? { retryOfRunId: firstRun.retryOfRunId } : {}),
+  };
+}
+
+function runSnapshotPhase(
+  phase: WorkbenchProgressPhase,
+  fallback: WorkbenchRunPhase,
+): WorkbenchRunPhase {
+  if (fallback === "complete" && phase !== "sync") {
+    return "complete";
+  }
+  if (fallback === "queued" && phase !== "sync") {
+    return "queued";
+  }
+  if (phase === "preflight" || phase === "provider_auth") {
+    return "planning";
+  }
+  if (phase === "sync") {
+    return "syncing";
+  }
+  if (phase === "applying_patch") {
+    return "materializing";
+  }
+  if (phase === "proof_eval") {
+    return "proof";
+  }
+  if (phase === "queued") {
+    return "queued";
+  }
+  if (phase === "running") {
+    return "running";
+  }
+  if (phase === "improving") {
+    return "improving";
+  }
+  if (phase === "complete") {
+    return "complete";
+  }
+  return fallback;
+}
+
+function progressJobs(
+  command: WorkbenchProgressCommand,
+  phase: WorkbenchProgressPhase,
+  jobs: readonly WorkbenchJob[],
+): WorkbenchJob[] {
+  if (!isImproveProgress(command, jobs)) {
+    return jobs.filter((job) => job.caseId !== "current");
+  }
+  if (phase !== "proof_eval" && phase !== "complete" && phase !== "sync") {
+    return jobs.filter((job) => job.caseId === "current");
+  }
+  return jobs.filter((job) => job.caseId !== "current");
+}
+
+function progressPartialScore(base: WorkbenchRunSnapshot, jobs: readonly WorkbenchJob[]): number | undefined {
+  if (base.status !== "queued" && base.status !== "running" && base.status !== "canceling") {
+    return undefined;
+  }
+  const scoredJobs = jobs.filter((job) => typeof job.score === "number");
+  if (scoredJobs.length > 0) {
+    return Number((scoredJobs.reduce((sum, job) => sum + (job.score ?? 0), 0) / scoredJobs.length).toFixed(3));
+  }
+  if (typeof base.result?.score === "number") {
+    return base.result.score;
+  }
+  return undefined;
+}
+
+function progressEvidenceCount(evidence: ProgressEvidenceCounts | undefined): number | undefined {
+  if (!evidence) {
+    return undefined;
+  }
+  const count = (evidence.artifacts ?? 0) +
+    (evidence.traces ?? 0) +
+    (evidence.sessions ?? 0) +
+    (evidence.resultFiles ?? 0);
+  return count > 0 ? count : undefined;
+}
+
+function isImproveProgress(command: WorkbenchProgressCommand, jobs: readonly WorkbenchJob[]): boolean {
+  return command === "improve" || jobs.some((job) => job.kind === "improve");
+}
+
+function progressRenderReason(
+  previous: WorkbenchRunSnapshot | undefined,
+  next: WorkbenchRunSnapshot,
+  lastPrintedAtMs: number | undefined,
+  heartbeatMs: number,
+  force: boolean,
+): "changed" | "heartbeat" | null {
+  if (force || !previous) {
+    return "changed";
+  }
+  if (progressSignature(previous) !== progressSignature(next)) {
+    return "changed";
+  }
+  if (lastPrintedAtMs !== undefined && next.progress.elapsedMs - lastPrintedAtMs >= heartbeatMs) {
+    return "heartbeat";
+  }
+  return null;
+}
+
+function progressSignature(snapshot: WorkbenchRunSnapshot): string {
+  const { elapsedMs: _elapsedMs, lastProgressAt: _lastProgressAt, ...stableProgress } = snapshot.progress;
+  return JSON.stringify({
+    id: snapshot.id,
+    kind: snapshot.kind,
+    variant: snapshot.variant,
+    status: snapshot.status,
+    phase: snapshot.phase,
+    progress: stableProgress,
+    result: snapshot.result,
+    next: snapshot.next,
+  });
+}
+
+function progressCommandForSnapshot(snapshot: WorkbenchRunSnapshot): WorkbenchProgressCommand {
+  return snapshot.kind === "improve" ? "improve" : "eval";
+}
+
+function isInspectablePhase(phase: WorkbenchRunPhase): boolean {
+  return phase === "running" || phase === "improving" || phase === "proof";
+}
+
+function formatProgressSummaryParts(snapshot: WorkbenchRunSnapshot): string[] {
+  return [
+    progressPhaseText(snapshot),
+    ...progressCounterParts(snapshot),
+    ...activeProgressParts(snapshot),
+    ...evidenceProgressParts(snapshot),
+    ...usageProgressParts(snapshot),
+    `elapsed ${formatProgressDuration(snapshot.progress.elapsedMs)}`,
+  ];
+}
+
+function progressPhaseText(snapshot: WorkbenchRunSnapshot): string {
+  switch (snapshot.phase) {
+    case "planning":
+      return "preflight";
+    case "queued":
+      return snapshot.variant === "cloud" ? "queued on Workbench Cloud" : "queued";
+    case "syncing":
+      return snapshot.variant === "cloud" ? "sync with Workbench Cloud" : "sync";
+    case "running":
+      return "running";
+    case "improving":
+      return "running improvement adapter";
+    case "proof":
+      return "proof eval running";
+    case "materializing":
+      return "applying patch";
+    case "canceling":
+      return "canceling";
+    case "complete":
+      return "complete";
+  }
+}
+
+function progressCounterParts(snapshot: WorkbenchRunSnapshot): string[] {
+  const progress = snapshot.progress;
+  const parts: Array<string | undefined> = [];
+  if (progress.planned > 0) {
+    parts.push(`work ${progress.completed}/${progress.planned} complete`);
+  }
+  if (progress.scored > 0) {
+    parts.push(`scored ${progress.scored}`);
+  }
+  if (progress.partialScore !== undefined) {
+    const label = snapshot.kind === "improve" || snapshot.phase === "proof" ? "partial proof score" : "partial score";
+    parts.push(`${label} ${formatScore(progress.partialScore)}`);
+  }
+  parts.push(`failed ${progress.failed}`);
+  if (progress.canceled > 0) {
+    parts.push(`canceled ${progress.canceled}`);
+  }
+  return parts.filter((entry): entry is string => Boolean(entry));
+}
+
+function activeProgressParts(snapshot: WorkbenchRunSnapshot): string[] {
+  const active = snapshot.progress.active;
+  if (!active) {
+    return [];
+  }
+  const details = [
+    active.caseId ? `case=${active.caseId}` : undefined,
+    active.sample !== undefined ? `sample=${active.sample + 1}` : undefined,
+    `job=${active.jobId}`,
+  ].filter((entry): entry is string => Boolean(entry));
+  return [
+    `active ${details.join(" ")}`,
+    ...(active.runningCount > 1 ? [`running=${active.runningCount}`] : []),
+  ];
+}
+
+function evidenceProgressParts(snapshot: WorkbenchRunSnapshot): string[] {
+  const evidenceCount = snapshot.progress.evidenceCount;
+  return evidenceCount && evidenceCount > 0 ? [`evidence ${evidenceCount}`] : [];
+}
+
+function usageProgressParts(snapshot: WorkbenchRunSnapshot): string[] {
+  const costUsd = snapshot.progress.costUsd;
+  return costUsd !== undefined ? [`usage cost=${formatCostUsd(costUsd)}`] : [];
+}
+
+function terminalProgressObservedAtMs(
+  phase: WorkbenchRunPhase,
+  runs: readonly WorkbenchRun[],
+  jobs: readonly WorkbenchJob[],
+): number | undefined {
+  if (phase !== "complete") {
+    return undefined;
+  }
+  const timestamps = [
+    ...runs.flatMap((run) => [
+      run.finishedAt,
+      isTerminalRun(run) ? run.lastProgressAt : undefined,
+    ]),
+    ...jobs.filter(isTerminalJob).flatMap((job) => [
+      job.finishedAt,
+      job.startedAt,
+    ]),
+  ]
+    .map((value) => value === undefined ? undefined : timestampMs(value))
+    .filter((value): value is number => value !== undefined)
+    .sort((left, right) => right - left);
+  return timestamps[0];
+}
+
 function isTerminalRun(run: WorkbenchRun): boolean {
   return run.status === "succeeded" || run.status === "failed" || run.status === "canceled";
 }
 
 function isTerminalJob(job: WorkbenchJob): boolean {
   return job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
+}
+
+function timestampMs(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function formatScore(score: number): string {
+  return score.toFixed(3);
+}
+
+function formatCostUsd(costUsd: number): string {
+  if (costUsd < 0.01) {
+    return `$${costUsd.toFixed(4)}`;
+  }
+  return `$${costUsd.toFixed(2)}`;
 }

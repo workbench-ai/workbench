@@ -8,9 +8,12 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   addWorkbenchRemote,
   createWorkbenchInspectionSnapshot,
+  createWorkbenchReadOnlyInspectionSnapshot,
   initWorkbenchSkill,
   listWorkbenchRemotes,
   publishWorkbenchVersion,
+  clearWorkbenchLocalHostedRunHandle,
+  recordWorkbenchLocalHostedRunHandle,
   removeWorkbenchRemote,
   syncWorkbenchRemote,
   switchWorkbenchVersion,
@@ -58,6 +61,41 @@ afterEach(async () => {
 });
 
 describe("remote state lifecycle", () => {
+  test("local hosted run handles are read-only live state and never durable run objects", async () => {
+    const root = await makeTempRoot("workbench-local-hosted-handle-");
+    await initWorkbenchSkill({ dir: root });
+    const versionId = (await createWorkbenchInspectionSnapshot({ dir: root })).refs.current;
+    expect(versionId).toBeTruthy();
+    const run: WorkbenchRun = {
+      id: "run_cloud_handle",
+      kind: "eval",
+      versionId: versionId!,
+      skillName: "primary",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      status: "queued",
+      jobIds: [],
+      traceIds: [],
+      location: "cloud",
+      remoteName: "cloud",
+      createdAt: "2026-06-16T00:00:00.000Z",
+      requestedSamples: 1,
+    };
+
+    await recordWorkbenchLocalHostedRunHandle({ dir: root, run });
+
+    const live = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    expect(live.runs).toContainEqual(expect.objectContaining({ id: run.id, location: "cloud", status: "queued" }));
+    expect(await exists(path.join(root, ".workbench", "objects", "run", `${run.id}.json`))).toBe(false);
+
+    await clearWorkbenchLocalHostedRunHandle({ dir: root, runId: run.id });
+
+    const cleared = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    expect(cleared.runs.map((entry) => entry.id)).not.toContain(run.id);
+  });
+
   test("add is idempotent, conflicts are coded, and replace clears prior sync state", async () => {
     const root = await makeTempRoot("workbench-remote-add-");
     const remoteA = await makeTempRoot("workbench-remote-add-a-");
@@ -347,6 +385,8 @@ describe("remote state lifecycle", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       if (url.pathname === "/api/workbench/skills") {
+        expect(url.searchParams.get("owner")).toBe("alice");
+        expect(url.searchParams.get("name")).toBe("smoke");
         return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "smoke" }] });
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && (init?.method ?? "GET") === "GET") {
@@ -378,6 +418,78 @@ describe("remote state lifecycle", () => {
       jobIds: ["job_cloud"],
       traceIds: ["trace_cloud"],
     });
+  });
+
+  test("cloud-owned lifecycle snapshots do not dirty sync status", async () => {
+    const root = await makeTempRoot("workbench-cloud-lifecycle-clean-status-");
+    await initWorkbenchSkill({ dir: root });
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+    expect(versionId).toBeTruthy();
+
+    const createdAt = "2026-06-17T00:00:00.000Z";
+    let remotePack = emptyPack(createdAt);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname === "/api/workbench/skills") {
+        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "clean-status" }] });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && (init?.method ?? "GET") === "GET") {
+        return jsonResponse({ objectPack: remotePack });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { objectPack?: WorkbenchObjectPack };
+        remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyPack(createdAt));
+        return jsonResponse({ skill: { id: "skill_cloud" }, objectPack: remotePack });
+      }
+      return jsonResponse({ message: `Unexpected ${init?.method ?? "GET"} ${url.pathname}` }, 404);
+    }));
+
+    await addWorkbenchRemote("cloud", "https://cloud.test/skills/alice/clean-status", {
+      dir: root,
+      authToken: "token",
+    });
+    await syncWorkbenchRemote({ dir: root, authToken: "token" });
+
+    const synced = await workbenchStatusSnapshot({ dir: root });
+    expect(synced.remotes.find((entry) => entry.name === "cloud")?.sync.status).toBe("up_to_date");
+
+    const cloudRun = {
+      ...fakeRun("run_cloud_owned_status", versionId!, "succeeded", createdAt),
+      location: "cloud" as const,
+      remoteName: "cloud",
+    };
+    await writeWorkbenchObject(root, "run", cloudRun.id, cloudRun);
+    const afterCloudLifecycle = await workbenchStatusSnapshot({ dir: root });
+    expect(afterCloudLifecycle.remotes.find((entry) => entry.name === "cloud")?.sync.status).toBe("up_to_date");
+    const cloudLifecycleDryRun = await syncWorkbenchRemote({ dir: root, authToken: "token", dryRun: true });
+    expect(cloudLifecycleDryRun).toMatchObject({
+      pushed: 0,
+      pulled: 0,
+      upToDate: true,
+      dryRun: true,
+    });
+
+    remotePack = {
+      ...remotePack,
+      runs: [{
+        ...fakeRun("run_cloud_imported_status", versionId!, "succeeded", createdAt),
+        location: "cloud" as const,
+      }],
+    };
+    await syncWorkbenchRemote({ dir: root, authToken: "token" });
+    const afterImported = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(afterImported.runs.find((run) => run.id === "run_cloud_imported_status")).toMatchObject({
+      location: "cloud",
+      remoteName: "cloud",
+    });
+    const afterImportedStatus = await workbenchStatusSnapshot({ dir: root });
+    expect(afterImportedStatus.remotes.find((entry) => entry.name === "cloud")?.sync.status).toBe("up_to_date");
+
+    const localRun = fakeRun("run_local_unsynced_status", versionId!, "succeeded", createdAt);
+    await writeWorkbenchObject(root, "run", localRun.id, localRun);
+    const afterLocalLifecycle = await workbenchStatusSnapshot({ dir: root });
+    expect(afterLocalLifecycle.remotes.find((entry) => entry.name === "cloud")?.sync.status).toBe("local_changes");
   });
 });
 
@@ -420,6 +532,32 @@ function emptyPack(createdAt: string): WorkbenchObjectPack {
     artifacts: [],
     lineage: [],
   };
+}
+
+function mergeObjectPacks(left: WorkbenchObjectPack, right: WorkbenchObjectPack): WorkbenchObjectPack {
+  return {
+    ...left,
+    refs: { ...left.refs, ...right.refs },
+    versions: mergeBy(left.versions, right.versions, (entry) => entry.id),
+    skillSources: mergeBy(left.skillSources, right.skillSources, (entry) => entry.name),
+    skillBundles: mergeBy(left.skillBundles, right.skillBundles, (entry) => entry.hash),
+    evals: mergeBy(left.evals, right.evals, (entry) => entry.hash),
+    agents: [...left.agents, ...right.agents],
+    runs: mergeBy(left.runs, right.runs, (entry) => entry.id),
+    jobs: mergeBy(left.jobs, right.jobs, (entry) => entry.id),
+    traces: mergeBy(left.traces, right.traces, (entry) => entry.id),
+    executionEvents: [...left.executionEvents, ...right.executionEvents],
+    artifacts: mergeBy(left.artifacts, right.artifacts, (entry) => entry.id),
+    lineage: [...left.lineage, ...right.lineage],
+  };
+}
+
+function mergeBy<T>(left: readonly T[], right: readonly T[], key: (entry: T) => string): T[] {
+  const merged = new Map(left.map((entry) => [key(entry), entry]));
+  for (const entry of right) {
+    merged.set(key(entry), entry);
+  }
+  return [...merged.values()];
 }
 
 async function writeWorkbenchObject(root: string, type: string, id: string, value: unknown): Promise<void> {

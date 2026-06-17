@@ -13,6 +13,8 @@
   },
   "include": [
     "src/index.ts",
+    "src/local-worker-control.ts",
+    "src/local-worker.ts",
     "src/open-server.ts",
     "src/workbench.ts"
   ]

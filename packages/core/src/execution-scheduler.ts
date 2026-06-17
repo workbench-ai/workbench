@@ -25,11 +25,16 @@ export interface WorkbenchExecutionDagResult {
 
 type WorkbenchExecutionDagJobHook = (job: RemoteWorkbenchJob) => void | Promise<void>;
 
+export interface WorkbenchExecutionDagJobControl {
+  signal: AbortSignal;
+}
+
 export interface WorkbenchExecutionDagRunInput {
   jobs: readonly RemoteWorkbenchJob[];
   capacity: WorkbenchExecutionDagCapacity;
   sandboxBackend: WorkbenchSandboxBackendName;
-  executeJob: (job: RemoteWorkbenchJob) => Promise<RemoteWorkbenchJob>;
+  executeJob: (job: RemoteWorkbenchJob, control: WorkbenchExecutionDagJobControl) => Promise<RemoteWorkbenchJob>;
+  shouldCancelJob?: (job: RemoteWorkbenchJob) => boolean | Promise<boolean>;
   now?: () => string;
   onJobQueued?: WorkbenchExecutionDagJobHook;
   onJobStarted?: WorkbenchExecutionDagJobHook;
@@ -37,7 +42,6 @@ export interface WorkbenchExecutionDagRunInput {
 }
 
 interface RunningJob {
-  cost: WorkbenchExecutionDagCapacity;
   promise: Promise<void>;
 }
 
@@ -143,6 +147,11 @@ export async function runWorkbenchExecutionDag(
       if (!capacityFits(available, cost)) {
         continue;
       }
+      if (await args.shouldCancelJob?.(job)) {
+        await cancelPendingJob(job, "cancelled", "Run cancellation requested.");
+        progressed = true;
+        continue;
+      }
       pending.delete(job.id);
       activeCost = addCapacity(activeCost, cost);
       const startedAt = now();
@@ -155,8 +164,9 @@ export async function runWorkbenchExecutionDag(
       startedJobCount += 1;
       maxConcurrency = Math.max(maxConcurrency, running.size + 1);
       await runJobHook(args.onJobStarted, runningJob);
-      const promise = finishJob(runningJob, cost);
-      running.set(job.id, { cost, promise });
+      const abortController = new AbortController();
+      const promise = finishJob(runningJob, cost, abortController);
+      running.set(job.id, { promise });
       progressed = true;
     }
     return progressed;
@@ -204,6 +214,7 @@ export async function runWorkbenchExecutionDag(
   async function cancelPendingJob(
     job: RemoteWorkbenchJob,
     dependencyStatus: "failed" | "cancelled",
+    reason?: string,
   ): Promise<void> {
     pending.delete(job.id);
     const finishedAt = now();
@@ -212,7 +223,7 @@ export async function runWorkbenchExecutionDag(
       status: "cancelled",
       updatedAt: finishedAt,
       finishedAt,
-      error: `Dependency ${dependencyStatus}.`,
+      error: reason ?? `Dependency ${dependencyStatus}.`,
     };
     cancelledJobCount += 1;
     terminal.set(job.id, cancelled);
@@ -223,10 +234,12 @@ export async function runWorkbenchExecutionDag(
   async function finishJob(
     runningJob: RemoteWorkbenchJob,
     cost: WorkbenchExecutionDagCapacity,
+    abortController: AbortController,
   ): Promise<void> {
     let completed: RemoteWorkbenchJob;
+    const stopCancellationWatcher = watchRunningJobCancellation(runningJob, abortController);
     try {
-      completed = await args.executeJob(runningJob);
+      completed = await args.executeJob(runningJob, { signal: abortController.signal });
     } catch (error) {
       const finishedAt = now();
       completed = {
@@ -237,12 +250,56 @@ export async function runWorkbenchExecutionDag(
         error: error instanceof Error ? error.message : String(error),
       };
     } finally {
+      stopCancellationWatcher();
       activeCost = subtractCapacity(activeCost, cost);
       running.delete(runningJob.id);
+    }
+    if (abortController.signal.aborted) {
+      const finishedAt = completed.finishedAt ?? now();
+      completed = {
+        ...completed,
+        status: "cancelled",
+        updatedAt: finishedAt,
+        finishedAt,
+        error: completed.error ?? "Run cancellation requested.",
+      };
+      cancelledJobCount += 1;
     }
     terminal.set(runningJob.id, completed);
     results.set(runningJob.id, completed);
     await runJobHook(args.onJobFinished, completed);
+  }
+
+  function watchRunningJobCancellation(
+    runningJob: RemoteWorkbenchJob,
+    abortController: AbortController,
+  ): () => void {
+    if (!args.shouldCancelJob) {
+      return () => {};
+    }
+    let stopped = false;
+    let checking = false;
+    const check = async (): Promise<void> => {
+      if (stopped || checking || abortController.signal.aborted) {
+        return;
+      }
+      checking = true;
+      try {
+        if (await args.shouldCancelJob?.(runningJob)) {
+          abortController.abort();
+        }
+      } finally {
+        checking = false;
+      }
+    };
+    const timer = setInterval(() => {
+      void check();
+    }, 250);
+    void check();
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
   }
 }
 

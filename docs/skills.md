@@ -6,7 +6,7 @@ The public Workbench source ships one authored skill at `skills/workbench/`. It 
 
 The Workbench skill owns agent ergonomics: deciding what skill to create or edit, turning conversations and traces into eval cases, drafting rubrics, choosing local command agents, configuring skill composition, running eval/improve loops, and explaining the evidence.
 
-Workbench core owns durable substrate behavior: automatic source versions, skill bundle snapshots, eval snapshots, agent records, runs, traces, artifacts, lineage, object remotes, source publication, and shared read-only inspection.
+Workbench core owns durable substrate behavior: automatic source versions, skill bundle snapshots, eval snapshots, agent records, runs, traces, artifacts, lineage, object remotes, source publication, shared inspection, and operation capabilities.
 
 Do not add core features for flows that can be encoded in a skill.
 

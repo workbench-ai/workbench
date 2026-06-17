@@ -15,10 +15,12 @@ import {
   compareWorkbench,
   createWorkbenchExecutionCapability,
   createWorkbenchInspectionSnapshotFromState,
+  createWorkbenchEvalSnapshotFromVersionFiles,
   createWorkbenchSandboxAllocation,
   createWorkbenchSkillEvalRuntimeInput,
   createWorkbenchSkillImproveRuntimeInput,
   createWorkbenchInspectionSnapshot,
+  createWorkbenchRunSnapshotForRun,
   createWorkbenchReadOnlyInspectionSnapshot,
   diffWorkbenchVersions,
   DOCKER_SANDBOX_BACKEND,
@@ -35,6 +37,8 @@ import {
   importObjectPack,
   initWorkbenchSkill,
   readWorkbenchSkillRunOutputUsage,
+  previewWorkbenchImprove,
+  recordWorkbenchCloudRunSnapshot,
   readWorkbenchSkillTraceResultsCostUsd,
   requiredWorkbenchAdapterAuthTargetsForRuntimeInput,
   listWorkbenchVersions,
@@ -42,6 +46,8 @@ import {
   removeWorkbenchAgent,
   setDefaultWorkbenchAgent,
   showWorkbenchRef,
+  superviseLocalWorkbenchOperation,
+  previewLocalWorkbenchOperation,
   switchWorkbenchVersion,
   syncWorkbenchRemote,
   type Json,
@@ -337,7 +343,22 @@ describe("skill-first Workbench runtime", () => {
     });
     await writeFailingCaseTest(root, "slow case should be measured by command result");
 
-    const evalPromise = evalWorkbenchSkill({ dir: root, agent: "slow-command", rerun: true });
+    const supervisor = superviseLocalWorkbenchOperation({
+      dir: root,
+      request: { kind: "eval", variant: "local", agent: "slow-command", samples: 1 },
+    });
+    const started = await supervisor.started;
+    expect(started).toMatchObject({
+      schema: "workbench.run.v1",
+      status: "running",
+      plan: {
+        kind: "eval",
+        variant: "local",
+        agents: ["slow-command"],
+        samples: 1,
+      },
+      measurements: [expect.objectContaining({ agentName: "slow-command", status: "running" })],
+    });
     let observed = false;
     try {
       const observedState = await waitForValue(async () => {
@@ -355,15 +376,25 @@ describe("skill-first Workbench runtime", () => {
       }, 10_000);
       observed = true;
       expect(observedState.run.jobIds).toHaveLength(1);
+      expect(observedState.run.operationPlan).toMatchObject({
+        kind: "eval",
+        variant: "local",
+        versionId: observedState.run.versionId,
+        evalHash: observedState.run.evalHash,
+        skills: [observedState.run.skillName],
+        agents: ["slow-command"],
+        samples: 1,
+      });
       expect(observedState.jobs[0]?.status).toMatch(/queued|running/u);
       expect(observedState.snapshot.status.runCount).toBeGreaterThan(0);
     } finally {
       if (!observed) {
-        await evalPromise.catch(() => undefined);
+        await supervisor.completed.catch(() => undefined);
       }
     }
-    const [run] = await evalPromise;
-    expect(run).toMatchObject({ agentName: "slow-command", status: "succeeded" });
+    const completed = await supervisor.completed;
+    expect(completed.plan).toMatchObject({ agents: ["slow-command"], samples: 1 });
+    expect(completed.measurements[0]).toMatchObject({ agentName: "slow-command", status: "succeeded" });
   }, 90_000);
 
   dockerTest("compares active, no-skill, and dummy-skill configurations through real eval runs", async () => {
@@ -430,8 +461,8 @@ describe("skill-first Workbench runtime", () => {
       agent: "skill-probe",
       rerun: true,
     });
+    const matrixRun = runs[0]!;
     const runVersionIds = [...new Set(runs.map((run) => run.versionId))];
-    const runScoreBySkill = new Map(runs.map((run) => [run.skillName, run.score]));
     const comparison = await compareWorkbench({
       dir: root,
       versions: runVersionIds[0],
@@ -439,18 +470,26 @@ describe("skill-first Workbench runtime", () => {
       agents: "skill-probe",
     });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const runSnapshot = createWorkbenchRunSnapshotForRun(
+      matrixRun,
+      snapshot.jobs.filter((job) => job.runId === matrixRun.id),
+    );
     const version = (await listWorkbenchVersions({ dir: root })).find((entry) => entry.id === runVersionIds[0]);
     const noSkillBundle = comparison.skills.find((skill) => skill.skillName === "no-skill");
     const primaryBundle = comparison.skills.find((skill) => skill.skillName === "primary");
     const scoreBySkill = new Map(comparison.cells.map((cell) => [cell.skillName, cell.score]));
+    const measurementScoreBySkill = new Map(runSnapshot.measurements
+      .map((measurement) => [measurement.skillName, measurement.score]));
     const snapshotScoreBySkill = new Map(snapshot.comparison?.cells.map((cell) => [cell.skillName, cell.score]));
 
-    expect(runs).toHaveLength(3);
+    expect(runs).toHaveLength(1);
+    expect(matrixRun.jobIds).toHaveLength(3);
+    expect([...(matrixRun.operationPlan?.skills ?? [])].sort()).toEqual(["dummy-skill", "no-skill", "primary"]);
+    expect(matrixRun.operationPlan?.agents).toEqual(["skill-probe"]);
     expect(runVersionIds).toHaveLength(1);
     expect(version?.files.map((file) => file.path)).toContain("baselines/dummy-skill/SKILL.md");
     expect(version?.files.map((file) => file.path)).not.toContain("baselines/no-skill/README.md");
-    expect(runs.map((run) => run.skillName).sort()).toEqual(["dummy-skill", "no-skill", "primary"]);
-    expect(runScoreBySkill).toEqual(new Map([
+    expect(measurementScoreBySkill).toEqual(new Map([
       ["dummy-skill", 0.3],
       ["no-skill", 0.1],
       ["primary", 0.9],
@@ -544,6 +583,230 @@ describe("skill-first Workbench runtime", () => {
     if (fiveSampleRun?.latencyMs !== undefined) {
       expect(cell?.latencyMs).toBe(Math.round(fiveSampleRun.latencyMs / 5));
     }
+  }, 60_000);
+
+  dockerTest("improve preview uses the same higher-sample incumbent as compare", async () => {
+    const root = await makeTempRoot("workbench-improve-incumbent-samples-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    await addWorkbenchAgent({
+      dir: root,
+      name: "patcher",
+      adapter: "command",
+      config: {
+        command: scoreCommand(0.8),
+        improveCommand: "true",
+      },
+    });
+    await setDefaultWorkbenchAgent("patcher", { dir: root });
+
+    const [fiveSampleRun] = await evalWorkbenchSkill({ dir: root, agent: "patcher", samples: 5, rerun: true });
+    const [oneSampleRun] = await evalWorkbenchSkill({ dir: root, agent: "patcher", samples: 1, rerun: true });
+    const comparison = await compareWorkbench({ dir: root, agents: "patcher" });
+    const preview = await previewWorkbenchImprove({ dir: root, agent: "patcher" });
+
+    expect(fiveSampleRun?.id).toBeTruthy();
+    expect(oneSampleRun?.id).toBeTruthy();
+    expect(comparison?.cells[0]).toMatchObject({
+      runId: fiveSampleRun?.id,
+      score: 0.8,
+      samples: 5,
+    });
+    expect(preview).toMatchObject({
+      incumbentRunId: fiveSampleRun?.id,
+      incumbentScore: 0.8,
+    });
+  }, 60_000);
+
+  test("local operation eval preview reports blocked adapter auth readiness", async () => {
+    const root = await makeTempRoot("workbench-operation-eval-preview-auth-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    await addWorkbenchAgent({
+      dir: root,
+      name: "codex",
+      adapter: "codex",
+      model: "gpt-5.4-mini",
+      config: { auth: "default" },
+    });
+    await setDefaultWorkbenchAgent("codex", { dir: root });
+
+    const preview = await previewLocalWorkbenchOperation({
+      dir: root,
+      adapterAuthStoreRoot: path.join(root, "adapter-auth"),
+      request: { kind: "eval", variant: "local" },
+    });
+
+    expectBlockedCodexOperationPreview(preview, "eval");
+  });
+
+  dockerTest("local operation improve preview reports blocked adapter auth readiness", async () => {
+    const root = await makeTempRoot("workbench-operation-improve-preview-auth-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writeFailingCaseTest(root, "needs provider-backed improvement");
+    await addWorkbenchAgent({
+      dir: root,
+      name: "scorer",
+      adapter: "command",
+      config: { command: scoreCommand(0) },
+    });
+    await setDefaultWorkbenchAgent("scorer", { dir: root });
+    await evalWorkbenchSkill({ dir: root, agent: "scorer", rerun: true });
+    await addWorkbenchAgent({
+      dir: root,
+      name: "codex",
+      adapter: "codex",
+      model: "gpt-5.4-mini",
+      config: { auth: "default" },
+    });
+
+    const preview = await previewLocalWorkbenchOperation({
+      dir: root,
+      adapterAuthStoreRoot: path.join(root, "adapter-auth"),
+      request: { kind: "improve", variant: "local", agent: "codex" },
+    });
+
+    expectBlockedCodexOperationPreview(preview, "improve");
+    expect(preview.evidenceCount).toBeGreaterThan(0);
+  }, 60_000);
+
+  dockerTest("records scheduled cloud run snapshots locally before terminal sync", async () => {
+    const root = await makeTempRoot("workbench-cloud-scheduled-run-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    const [seedRun] = await evalWorkbenchSkill({ dir: root, samples: 1, rerun: true });
+    if (!seedRun) {
+      throw new Error("Expected seed eval run.");
+    }
+    await addWorkbenchRemote("cloud", "https://cloud.test/skills/alice/scheduled-run", { dir: root });
+    const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    const version = snapshot.versions[0]!;
+    const scheduled = createWorkbenchRunSnapshotForRun({
+      id: "run_cloud_scheduled",
+      kind: "eval",
+      versionId: version.id,
+      skillName: seedRun.skillName,
+      skillBundleHash: seedRun.skillBundleHash,
+      evalHash: seedRun.evalHash,
+      agentName: seedRun.agentName,
+      agentHash: seedRun.agentHash,
+      status: "queued",
+      traceIds: [],
+      createdAt: "2026-06-16T20:00:00.000Z",
+      location: "cloud",
+      requestedSamples: 1,
+      lastProgressAt: "2026-06-16T20:00:00.000Z",
+    });
+
+    await recordWorkbenchCloudRunSnapshot({ dir: root, remoteName: "cloud", run: scheduled });
+    const recorded = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    const run = recorded.runs.find((entry) => entry.id === scheduled.id);
+
+    expect(run).toMatchObject({
+      id: scheduled.id,
+      status: "queued",
+      location: "cloud",
+      remoteName: "cloud",
+      versionId: version.id,
+      skillName: seedRun.skillName,
+      evalHash: seedRun.evalHash,
+    });
+    expect(run?.operationPlan).toMatchObject({
+      kind: "eval",
+      variant: "cloud",
+      versionId: version.id,
+      skills: [seedRun.skillName],
+      agents: [seedRun.agentName],
+    });
+  }, 60_000);
+
+  dockerTest("compare reads matrix measurements from jobs inside one run", async () => {
+    const root = await makeTempRoot("workbench-compare-job-measurements-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    const defaultAgent = { name: "default", adapter: "command" as const, config: { command: scoreCommand(0.4) } };
+    const patcherAgent = { name: "patcher", adapter: "command" as const, config: { command: scoreCommand(0.9) } };
+    await addWorkbenchAgent({ dir: root, ...defaultAgent });
+    await addWorkbenchAgent({ dir: root, ...patcherAgent });
+    await setDefaultWorkbenchAgent("default", { dir: root });
+    const [seedRun] = await evalWorkbenchSkill({ dir: root, agent: "default", rerun: true });
+    if (!seedRun) {
+      throw new Error("Expected seed eval to record a run.");
+    }
+
+    const matrixRun = {
+      ...seedRun,
+      id: "run_matrix",
+      status: "succeeded" as const,
+      score: 0.65,
+      jobIds: ["job_matrix_default", "job_matrix_patcher"],
+      traceIds: [],
+      createdAt: "2099-01-01T00:00:00.000Z",
+      finishedAt: "2099-01-01T00:00:01.000Z",
+      lastProgressAt: "2099-01-01T00:00:01.000Z",
+      operationPlan: {
+        kind: "eval" as const,
+        variant: "local" as const,
+        versionId: seedRun.versionId,
+        evalHash: seedRun.evalHash,
+        skills: ["primary"],
+        agents: ["default", "patcher"],
+        samples: 1,
+        rerun: true,
+      },
+    };
+    const jobBase = {
+      runId: matrixRun.id,
+      kind: "eval" as const,
+      versionId: seedRun.versionId,
+      skillName: seedRun.skillName,
+      skillBundleHash: seedRun.skillBundleHash,
+      evalHash: seedRun.evalHash,
+      caseId: "case-001",
+      sample: 0,
+      status: "succeeded" as const,
+      artifactIds: [],
+      traceIds: [],
+      createdAt: matrixRun.createdAt,
+      startedAt: matrixRun.createdAt,
+      finishedAt: matrixRun.finishedAt,
+    };
+    await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench", "objects", "job"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "objects", "run", `${matrixRun.id}.json`), `${JSON.stringify(matrixRun, null, 2)}\n`);
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", "job_matrix_default.json"), `${JSON.stringify({
+      ...jobBase,
+      id: "job_matrix_default",
+      agentName: defaultAgent.name,
+      agentHash: hashJson(defaultAgent),
+      score: 0.4,
+      durationMs: 400,
+    }, null, 2)}\n`);
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", "job_matrix_patcher.json"), `${JSON.stringify({
+      ...jobBase,
+      id: "job_matrix_patcher",
+      agentName: patcherAgent.name,
+      agentHash: hashJson(patcherAgent),
+      score: 0.9,
+      durationMs: 900,
+    }, null, 2)}\n`);
+
+    const comparison = await compareWorkbench({ dir: root, agents: "all" });
+    const defaultCell = comparison.cells.find((cell) => cell.agentName === "default" && cell.runId === matrixRun.id);
+    const patcherCell = comparison.cells.find((cell) => cell.agentName === "patcher");
+
+    expect(defaultCell).toMatchObject({
+      runId: matrixRun.id,
+      status: "succeeded",
+      score: 0.4,
+      samples: 1,
+    });
+    expect(patcherCell).toMatchObject({
+      runId: matrixRun.id,
+      status: "succeeded",
+      score: 0.9,
+      samples: 1,
+    });
   }, 60_000);
 
   dockerTest("compare fills unrun cells for valid selected versions when recorded evidence exists", async () => {
@@ -748,6 +1011,7 @@ describe("skill-first Workbench runtime", () => {
     expect(ignore).toContain("/objects/\n");
     expect(ignore).toContain("/refs/\n");
     expect(ignore).toContain("/sync/\n");
+    expect(ignore).toContain("/live/\n");
     expect(ignore).toContain("/tmp/\n");
     expect(ignore).toContain("/logs/\n");
     expect(ignore).toContain("/locks/\n");
@@ -1687,6 +1951,63 @@ describe("skill-first Workbench runtime", () => {
     expect(check.plan.source.caseCount).toBe(0);
   });
 
+  test("inspection snapshot exposes authored eval cases as typed snapshot data", async () => {
+    const root = await makeTempRoot("workbench-typed-cases-");
+    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await fs.rm(path.join(root, ".workbench", "cases"), { recursive: true, force: true });
+    await fs.mkdir(path.join(root, ".workbench", "cases", "case-custom"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, ".workbench", "cases", "case-custom", "case.yaml"),
+      [
+        "id: case-custom",
+        "title: Custom case",
+        "description: Checks typed case projection.",
+        "command: npm test -- custom",
+        "",
+      ].join("\n"),
+    );
+
+    await workbenchStatus({ dir: root });
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const evalSnapshot = snapshot.evals.find((entry) => entry.cases.some((evalCase) => evalCase.id === "case-custom"));
+
+    expect(evalSnapshot?.caseCount).toBe(1);
+    expect(evalSnapshot?.cases).toEqual([expect.objectContaining({
+      id: "case-custom",
+      path: "cases/case-custom/case.yaml",
+      title: "Custom case",
+      description: "Checks typed case projection.",
+      command: "npm test -- custom",
+    })]);
+    expect(evalSnapshot?.cases[0]?.files.map((file) => file.path)).toEqual(["cases/case-custom/case.yaml"]);
+  });
+
+  test("version files derive eval snapshots only from authored Workbench eval source", () => {
+    const authored = createWorkbenchEvalSnapshotFromVersionFiles([
+      { path: ".workbench/eval.yaml", kind: "text", encoding: "utf8", content: "cases:\n  - case-001\n" },
+      { path: ".workbench/cases/case-001/case.yaml", kind: "text", encoding: "utf8", content: "id: case-001\ncommand: npm test\n" },
+      { path: ".workbench/environment/Dockerfile", kind: "text", encoding: "utf8", content: "FROM node:22\n" },
+      { path: "cases/example.md", kind: "text", encoding: "utf8", content: "# ordinary skill source\n" },
+    ]);
+
+    expect(authored?.files.map((file) => file.path)).toEqual([
+      "cases/case-001/case.yaml",
+      "environment/Dockerfile",
+      "eval.yaml",
+    ]);
+    expect(authored?.cases).toEqual([expect.objectContaining({
+      id: "case-001",
+      path: "cases/case-001/case.yaml",
+      command: "npm test",
+    })]);
+
+    expect(createWorkbenchEvalSnapshotFromVersionFiles([
+      { path: "eval.yaml", kind: "text", encoding: "utf8", content: "cases: []\n" },
+      { path: "cases/case-001/case.yaml", kind: "text", encoding: "utf8", content: "id: case-001\n" },
+      { path: "environment/Dockerfile", kind: "text", encoding: "utf8", content: "FROM node:22\n" },
+    ])).toBeNull();
+  });
+
   test("bounds skill improve trace inputs to structured and small text evidence", () => {
     const input = createWorkbenchSkillImproveRuntimeInput({
       ownerUserId: "user_123",
@@ -2039,6 +2360,17 @@ describe("skill-first Workbench runtime", () => {
     expect(evidence?.executions[0]?.trace.summaries).toEqual([
       expect.objectContaining({ status: "running" }),
     ]);
+  });
+
+  test("keeps inspection snapshots readable when current ref is unresolved", () => {
+    const state = createQueuedEvalState();
+    state.refs.current = "current";
+
+    const snapshot = createWorkbenchInspectionSnapshotFromState({ state });
+
+    expect(snapshot.status.currentVersionId).toBe("current");
+    expect(snapshot.versions).toHaveLength(1);
+    expect(snapshot.comparison).toBeUndefined();
   });
 
   dockerTest("rejects queued eval execution when same-name agent hash has changed", async () => {
@@ -2439,6 +2771,7 @@ describe("skill-first Workbench runtime", () => {
       evals: [{
         hash: evalHash,
         files: evalFiles,
+        cases: [],
         caseCount: 0,
         createdAt: "2026-06-09T00:00:00.000Z",
         updatedAt: "2026-06-09T00:00:00.000Z",
@@ -2460,6 +2793,7 @@ describe("skill-first Workbench runtime", () => {
     const evalSnapshot = evalFixture({
       hash: "eval_hash_1",
       files: evalFiles,
+      cases: [],
       caseCount: 3,
       updatedAt: "2026-06-09T00:00:00.000Z",
     });
@@ -2524,6 +2858,13 @@ describe("skill-first Workbench runtime", () => {
     await fs.mkdir(caseDir, { recursive: true });
     await fs.writeFile(path.join(caseDir, "case.yaml"), "id: [unterminated\ncommand: 'echo ok\n");
 
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const evalSnapshot = snapshot.evals.find((entry) => entry.cases.some((evalCase) => evalCase.id === "broken"));
+    expect(evalSnapshot?.cases).toEqual([expect.objectContaining({
+      id: "broken",
+      path: "cases/broken/case.yaml",
+    })]);
+    expect(evalSnapshot?.cases[0]?.files.map((file) => file.path)).toEqual(["cases/broken/case.yaml"]);
     await expect(checkWorkbenchSkill({ dir: root })).rejects.toThrow(/invalid case YAML/u);
   });
 
@@ -3148,7 +3489,9 @@ describe("skill-first Workbench runtime", () => {
     }
     const improvedSkill = improvedVersion.files.find((file) => file.path === "SKILL.md")?.content ?? "";
     const diff = await diffWorkbenchVersions(`${failingRun!.versionId}..${improvedVersion.id}`, { dir: root });
-    const improveTrace = snapshot.traces.find((trace) => trace.runId === proofRun.id);
+    const improveTraces = snapshot.traces.filter((trace) => trace.runId === proofRun.id);
+    const patchTrace = improveTraces.find((trace) => (trace.request as Record<string, unknown>).caseId === "current");
+    const proofTrace = improveTraces.find((trace) => (trace.request as Record<string, unknown>).improvementMode === "command");
 
     expect(improvedVersion.parentIds).toEqual([failingRun!.versionId]);
     expect(proofRun).toMatchObject({ status: "failed", outputVersionId: improvedVersion.id });
@@ -3158,11 +3501,19 @@ describe("skill-first Workbench runtime", () => {
     expect(diff).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: "SKILL.md", status: "modified" }),
     ]));
-    expect(improveTrace?.request).toMatchObject({
+    expect(patchTrace?.request).toMatchObject({
+      evidenceTraceIds: [expect.stringMatching(/^trace_/u)],
+      samples: 1,
+    });
+    expect(patchTrace?.result).toMatchObject({
+      status: "succeeded",
+      fileChanges: ["SKILL.md"],
+    });
+    expect(proofTrace?.request).toMatchObject({
       improvementMode: "command",
       improvementFileChanges: ["SKILL.md"],
     });
-    expect(improveTrace?.result).toMatchObject({
+    expect(proofTrace?.result).toMatchObject({
       improvementMode: "command",
       outputVersionId: improvedVersion.id,
     });
@@ -4535,9 +4886,15 @@ function jobFixture(
 function evalFixture(
   overrides: Partial<WorkbenchProjectState["evals"][number]> = {},
 ): WorkbenchProjectState["evals"][number] {
+  const cases = overrides.cases ?? (overrides.caseCount === 0 ? [] : [{
+    id: "case-001",
+    path: "cases/case-001/case.yaml",
+    files: [],
+  }]);
   return {
     hash: "eval_hash",
     files: [],
+    cases,
     caseCount: 1,
     createdAt: "2026-06-08T00:00:00.000Z",
     updatedAt: "2026-06-08T00:00:00.000Z",
@@ -4673,6 +5030,20 @@ function scoreCommand(score: number): string {
     "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
     `fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'result.json'), ${JSON.stringify(JSON.stringify({ ok: true, score }) + "\n")});`,
   ]);
+}
+
+function expectBlockedCodexOperationPreview(
+  preview: Awaited<ReturnType<typeof previewLocalWorkbenchOperation>>,
+  kind: "eval" | "improve",
+): void {
+  expect(preview).toMatchObject({
+    kind,
+    variant: "local",
+    canStart: false,
+    agents: [expect.objectContaining({ name: "codex" })],
+    disabledReason: expect.stringContaining("codex disconnected"),
+    setupCommands: ["codex login --device-auth && workbench login codex --method oauth"],
+  });
 }
 
 async function waitForValue<T>(

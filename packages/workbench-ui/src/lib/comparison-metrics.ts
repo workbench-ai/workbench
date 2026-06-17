@@ -7,6 +7,7 @@ import type {
   WorkbenchComparisonCell,
   WorkbenchEvalSnapshot,
   WorkbenchInspectionSnapshot,
+  WorkbenchJob,
   WorkbenchRun,
   WorkbenchSkillBundleSnapshot,
   WorkbenchVersion,
@@ -56,6 +57,7 @@ export interface ComparisonEvidenceRow {
   evidenceLabel: string;
   runId: string | null;
   error?: string;
+  samples?: number;
   score?: number;
   latencyMs?: number;
   costUsd?: number;
@@ -176,6 +178,11 @@ export function comparisonForActiveSkillVersions(snapshot: WorkbenchInspectionSn
 }
 
 export function comparisonForScorecard(snapshot: WorkbenchInspectionSnapshot): WorkbenchComparison {
+  const canonical = comparisonForSnapshot(snapshot);
+  if (canonical.cells.length > 0) {
+    return canonical;
+  }
+
   const current = comparisonForCurrentVersionRuns(snapshot);
   const history = comparisonForActiveSkillVersions(snapshot);
   const cells = [...current.cells];
@@ -269,16 +276,16 @@ function comparisonForRuns(
   snapshot: WorkbenchInspectionSnapshot,
   sourceRuns: readonly WorkbenchRun[],
 ): WorkbenchComparison {
-  const latestRunByKey = new Map<string, WorkbenchRun>();
+  const bestRunByKey = new Map<string, WorkbenchRun>();
   for (const run of sourceRuns) {
     const key = comparisonRunKey(run);
-    const previous = latestRunByKey.get(key);
-    if (!previous || compareRunRecency(previous, run) < 0) {
-      latestRunByKey.set(key, run);
+    const previous = bestRunByKey.get(key);
+    if (!previous || compareRunsByEvidenceStrength(previous, run, snapshot.jobs) < 0) {
+      bestRunByKey.set(key, run);
     }
   }
 
-  const runs = [...latestRunByKey.values()].sort(compareRunsForComparison);
+  const runs = [...bestRunByKey.values()].sort(compareRunsForComparison);
   const versionIds = new Set(runs.map((run) => run.versionId));
   const skillBundleHashes = new Set(runs.map((run) => run.skillBundleHash));
   const agentHashes = new Set(runs.map((run) => run.agentHash));
@@ -290,7 +297,7 @@ function comparisonForRuns(
     versions: snapshot.versions.filter((version) => versionIds.has(version.id)),
     skills: snapshot.skillBundles.filter((bundle) => skillBundleHashes.has(bundle.hash)),
     agents: snapshot.agents.filter((agent) => agentHashes.has(agent.hash)),
-    cells: runs.map(comparisonCellForRun),
+    cells: runs.map((run) => comparisonCellForRun(run, snapshot.jobs)),
   };
 }
 
@@ -299,7 +306,14 @@ function latestEvalHashForRuns(runs: readonly WorkbenchRun[]): string | null {
   return latest?.evalHash ?? null;
 }
 
-function comparisonCellForRun(run: WorkbenchRun): WorkbenchComparisonCell {
+function comparisonCellForRun(
+  run: WorkbenchRun,
+  jobs: readonly WorkbenchJob[],
+): WorkbenchComparisonCell {
+  const samples = comparisonRunSamples(run, jobs);
+  const latencyMs = run.latencyMs !== undefined && samples > 1
+    ? Math.round(run.latencyMs / samples)
+    : run.latencyMs;
   return {
     versionId: run.versionId,
     skillName: run.skillName,
@@ -310,8 +324,9 @@ function comparisonCellForRun(run: WorkbenchRun): WorkbenchComparisonCell {
     runId: run.id,
     status: run.status,
     ...(run.status === "succeeded" && run.score !== undefined ? { score: run.score } : {}),
+    ...(samples > 0 ? { samples } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
-    ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
+    ...(latencyMs !== undefined ? { latencyMs } : {}),
     ...(run.error ? { error: run.error } : {}),
   };
 }
@@ -517,6 +532,7 @@ export function buildComparisonEvidenceRows({
       const score = finiteNumber(cell.score ?? run?.score);
       const latencyMs = finiteNumber(cell.latencyMs ?? run?.latencyMs);
       const costUsd = finiteNumber(cell.costUsd ?? run?.costUsd);
+      const samples = finiteNumber(cell.samples);
       const status = run?.status ?? cell.status;
       const error = run?.error ?? cell.error;
       return {
@@ -545,6 +561,7 @@ export function buildComparisonEvidenceRows({
         evidenceLabel: formatEvidenceLabel(Boolean(run?.id ?? cell.runId), error),
         runId: run?.id ?? cell.runId ?? null,
         ...(error ? { error } : {}),
+        ...(samples !== undefined ? { samples } : {}),
         ...(score !== undefined ? { score } : {}),
         ...(latencyMs !== undefined ? { latencyMs } : {}),
         ...(costUsd !== undefined ? { costUsd } : {}),
@@ -841,6 +858,37 @@ function compareRunsForComparison(left: WorkbenchRun, right: WorkbenchRun): numb
     left.agentName.localeCompare(right.agentName) ||
     left.agentHash.localeCompare(right.agentHash) ||
     left.evalHash.localeCompare(right.evalHash);
+}
+
+function compareRunsByEvidenceStrength(
+  left: WorkbenchRun,
+  right: WorkbenchRun,
+  jobs: readonly WorkbenchJob[],
+): number {
+  const leftTerminal = isTerminalRun(left);
+  const rightTerminal = isTerminalRun(right);
+  if (leftTerminal !== rightTerminal) {
+    return leftTerminal ? 1 : -1;
+  }
+  if (leftTerminal && rightTerminal) {
+    const samples = comparisonRunSamples(left, jobs) - comparisonRunSamples(right, jobs);
+    if (samples !== 0) {
+      return samples;
+    }
+  }
+  return compareRunRecency(left, right);
+}
+
+function comparisonRunSamples(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): number {
+  const runJobs = jobs.filter((job) => job.runId === run.id && job.caseId !== "current");
+  if (runJobs.length > 0) {
+    return new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
+  }
+  return run.jobIds?.length ?? 0;
+}
+
+function isTerminalRun(run: WorkbenchRun): boolean {
+  return run.status !== "queued" && run.status !== "running";
 }
 
 function compareRunRecency(left: WorkbenchRun, right: WorkbenchRun): number {

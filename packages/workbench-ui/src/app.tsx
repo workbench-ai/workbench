@@ -1,11 +1,15 @@
 "use client";
 
 import {
+  createContext,
   Fragment,
   useCallback,
+  useContext,
   useEffect,
+  useId,
   useMemo,
   useState,
+  useTransition,
   type MouseEvent,
   type ReactNode,
   type SVGProps,
@@ -13,55 +17,45 @@ import {
 import {
   ActivityIcon,
   ArchiveIcon,
-  ChartColumnIcon,
   CheckIcon,
-  ChevronRightIcon,
   CircleAlertIcon,
   CopyIcon,
+  FileTextIcon,
   FolderOpenIcon,
   GitBranchIcon,
-  HashIcon,
   HistoryIcon,
-  ListIcon,
-  PanelRightCloseIcon,
+  PlayCircleIcon,
   RefreshCwIcon,
-  SparklesIcon,
   WorkflowIcon,
 } from "lucide-react";
 
-import {
-  workbenchInspectionFileContent,
-  workbenchInspectionFileContentUnavailableReason,
-} from "@workbench-ai/workbench-contract";
+import { isWorkbenchLocalMetadataPath } from "@workbench-ai/workbench-contract";
 import type {
   SurfaceSnapshotFile,
+  WorkbenchActionCapabilities,
   WorkbenchArtifact,
+  WorkbenchEvalCaseSnapshot,
+  WorkbenchEvalSnapshot,
   WorkbenchExecutionTraceDetail,
   WorkbenchInspectionFileContent,
   WorkbenchInspectionSnapshot,
+  WorkbenchInspectionSnapshotEnvelope,
   WorkbenchJob,
   WorkbenchRun,
+  WorkbenchRunSnapshot,
   WorkbenchSkillSource,
+  WorkbenchStateNotice,
   WorkbenchTrace,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
-import { DesktopWorkspaceSplit } from "@workbench-ai/cli-web-ui/components/shared/desktop-workspace-split";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
 import { ExecutionTraceTimeline } from "@workbench-ai/cli-web-ui/components/shared/execution-trace-timeline";
-import { FilesBrowser } from "@workbench-ai/cli-web-ui/components/shared/files-browser";
-import { InspectorDialogShell } from "@workbench-ai/cli-web-ui/components/shared/inspector-dialog-shell";
 import { ProblemState } from "@workbench-ai/cli-web-ui/components/shared/problem-state";
+import { TopLoadingBar } from "@workbench-ai/cli-web-ui/components/shared/top-loading-bar";
 import { ViewSwitch } from "@workbench-ai/cli-web-ui/components/shared/view-switch";
 import { WorkbenchBrand } from "@workbench-ai/cli-web-ui/components/shared/workbench-brand";
-import { WorkspacePane } from "@workbench-ai/cli-web-ui/components/shared/workspace-pane";
 import { WorkspaceRoot } from "@workbench-ai/cli-web-ui/components/shared/workspace-root";
 import { WorkspaceTopBar } from "@workbench-ai/cli-web-ui/components/shared/workspace-top-bar";
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@workbench-ai/cli-web-ui/components/ui/accordion";
 import { Badge } from "@workbench-ai/cli-web-ui/components/ui/badge";
 import {
   Breadcrumb,
@@ -73,6 +67,19 @@ import {
 } from "@workbench-ai/cli-web-ui/components/ui/breadcrumb";
 import { Button } from "@workbench-ai/cli-web-ui/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@workbench-ai/cli-web-ui/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@workbench-ai/cli-web-ui/components/ui/popover";
+import {
   Table,
   TableBody,
   TableCell,
@@ -80,68 +87,79 @@ import {
   TableHeader,
   TableRow,
 } from "@workbench-ai/cli-web-ui/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@workbench-ai/cli-web-ui/components/ui/select";
 import { badgeToneProps } from "@workbench-ai/cli-web-ui/lib/badge";
 import {
   buildExecutionTraceTimeline,
   type ExecutionTrace,
 } from "@workbench-ai/cli-web-ui/lib/execution-trace-timeline";
-import { supportedPreviewModes, type PreviewMode } from "@workbench-ai/cli-web-ui/lib/file-preview";
-import { useMediaQuery } from "@workbench-ai/cli-web-ui/lib/use-media-query";
+import { parseMarkdownDocument } from "@workbench-ai/cli-web-ui/lib/markdown-document";
+import { WORKBENCH_CONTENT_RAIL_CLASS } from "@workbench-ai/cli-web-ui/lib/workbench-layout";
 import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
 import { StatusBadge } from "./components/status-badge";
 import { SurfaceSection } from "./components/surface-section";
 import { LineageGraph } from "./components/lineage-graph";
-import { ComparisonDetail } from "./components/comparison-detail";
-import { parseMarkdownDocument } from "@workbench-ai/cli-web-ui/lib/markdown-document";
-
+import { RepositoryFilesView } from "./components/repository-files-view";
+import { WorkbenchActionBar } from "./components/workbench-action-bar";
 import {
-  directoryPathForFile,
+  caseFileOwnerId,
+  fileContentApiPath,
+  jobEvidenceApiPath,
+} from "./lib/api-paths";
+import {
   fileName,
+  directoryPathForFile,
+  formatCost,
   formatCount,
   formatDurationMs,
   formatRunCost,
   formatScore,
   formatTimestamp,
+  shortId,
 } from "./lib/format";
 import {
-  preferredFilePath,
-  surfaceFilesToChanges,
-  surfaceFileToPreview,
-} from "./lib/files";
-import {
   buildWorkbenchLocationHref,
+  createActivityRoute,
+  createCaseRoute,
+  createEvaluationRoute,
+  createFilesRoute,
+  createRunRoute,
+  emptyFileRouteState,
   parseWorkbenchLocation,
-  routeInspector,
-  routeCaseView,
-  routeOverlay,
-  routeSurface,
+  routePrimaryTab,
+  withEvaluationId,
   withFileRouteState,
-  withCaseView,
-  withInspector,
-  withOverlay,
-  withoutInspector,
-  withSurface,
-  type VersionsView,
-  type WorkbenchCaseView,
-  type WorkbenchOverlayRoute,
-  type WorkbenchInspectorRoute,
+  type WorkbenchEvaluationView,
   type WorkbenchFileOwnerKind,
   type WorkbenchFileRouteState,
+  type WorkbenchJobEvidenceView,
+  type WorkbenchPrimaryTab,
   type WorkbenchRoute,
-  type WorkbenchSurfaceRoute,
 } from "./lib/routes";
+import {
+  routeForWorkbenchRunSnapshot,
+} from "./lib/operations";
 import {
   buildComparisonEvidenceRows,
   buildComparisonGroups,
   comparisonForScorecard,
   defaultEvaluationIdForScorecard,
   evaluationOptionsForScorecard,
-  type ComparisonLabelContext,
   formatEvaluationDisplayDetail,
   formatEvaluationDisplayName,
   formatSkillDisplayName,
   formatVersionDisplayName,
+  missingCostLabelForStatus,
+  type ComparisonEvaluationOption,
+  type ComparisonEvidenceRow,
+  type ComparisonLabelContext,
 } from "./lib/comparison-metrics";
 
 export interface WorkbenchWorkspaceProps {
@@ -149,75 +167,105 @@ export interface WorkbenchWorkspaceProps {
   routeBasePath?: string;
   brandHref?: string;
   headerControls?: ReactNode;
-  initialData?: WorkbenchInspectionSnapshot | null;
+  initialEnvelope?: WorkbenchInspectionSnapshotEnvelope | null;
   initialRoute?: WorkbenchRoute;
+  hostContext?: WorkbenchHostContext;
 }
 
-const STACKED_FILES_QUERY = "(max-width: 900px)";
-const COMPACT_WORKSPACE_QUERY = "(max-width: 1023px)";
-// When a detail pane is open it carries the reading-heavy content (outputs,
-// tables, timelines), so it gets the dominant share of the split.
-const DESKTOP_PRIMARY_DEFAULT_PERCENT = 40;
-const DESKTOP_PRIMARY_MIN_PERCENT = 28;
-const DESKTOP_PRIMARY_MAX_PERCENT = 60;
+export interface WorkbenchHostContext {
+  handle?: string;
+  ownerSlug?: string;
+  skillName?: string;
+  sourceVisibility?: string;
+  evidenceAccess?: "full" | "source";
+}
 
-type PrimarySurfaceView = "scorecard" | "versions" | "files";
+type RouteLoadingReporter = (id: string, active: boolean) => void;
 
-const PRIMARY_SURFACE_ITEMS: Array<{
-  value: PrimarySurfaceView;
+const RouteLoadingContext = createContext<RouteLoadingReporter>(() => undefined);
+
+function useRouteLoadingReporter(): (active: boolean) => void {
+  const report = useContext(RouteLoadingContext);
+  const id = useId();
+  return useCallback((active: boolean) => report(id, active), [id, report]);
+}
+
+function useRouteLoadingSignal(active: boolean): void {
+  const report = useRouteLoadingReporter();
+  useEffect(() => {
+    report(active);
+    return () => report(false);
+  }, [active, report]);
+}
+
+const PRIMARY_TABS: Array<{
+  value: WorkbenchPrimaryTab;
   label: string;
   icon: typeof WorkflowIcon;
 }> = [
-  { value: "scorecard", label: "Compare", icon: ChartColumnIcon },
-  { value: "versions", label: "Versions", icon: HistoryIcon },
   { value: "files", label: "Files", icon: FolderOpenIcon },
+  { value: "evaluation", label: "Evaluation", icon: WorkflowIcon },
+  { value: "activity", label: "Activity", icon: ActivityIcon },
 ];
 
-const ACTIVE_SNAPSHOT_REFRESH_MS = 2_000;
-const ACTIVE_JOB_EVIDENCE_REFRESH_MS = 1_500;
+const EVALUATION_VIEW_ITEMS: Array<{
+  value: WorkbenchEvaluationView;
+  label: string;
+  icon: typeof WorkflowIcon;
+}> = [
+  { value: "results", label: "Results", icon: WorkflowIcon },
+  { value: "cases", label: "Cases", icon: FileTextIcon },
+];
 
-export function WorkbenchWorkspace({
-  apiBasePath = "/api",
-  routeBasePath = "/",
-  brandHref = "/",
-  headerControls,
-  initialData = null,
-  initialRoute,
-}: WorkbenchWorkspaceProps) {
-  const [snapshot, setSnapshot] = useState<WorkbenchInspectionSnapshot | null>(initialData);
-  const [loading, setLoading] = useState(!initialData);
+type VersionHistoryView = "list" | "lineage";
+
+const VERSION_HISTORY_VIEW_ITEMS: Array<{
+  value: VersionHistoryView;
+  label: string;
+  icon: typeof WorkflowIcon;
+}> = [
+  { value: "list", label: "List", icon: FolderOpenIcon },
+  { value: "lineage", label: "Lineage", icon: GitBranchIcon },
+];
+
+function useWorkbenchInspection({
+  apiBasePath,
+  initialEnvelope,
+}: {
+  apiBasePath: string;
+  initialEnvelope: WorkbenchInspectionSnapshotEnvelope | null;
+}): {
+  cursor: string | null;
+  error: string | null;
+  loading: boolean;
+  refresh: () => void;
+  refreshing: boolean;
+  actions: WorkbenchActionCapabilities | null;
+  snapshot: WorkbenchInspectionSnapshot | null;
+} {
+  const [envelope, setEnvelope] = useState<WorkbenchInspectionSnapshotEnvelope | null>(initialEnvelope);
+  const [loading, setLoading] = useState(!initialEnvelope);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [route, setRoute] = useState<WorkbenchRoute>(() =>
-    initialRoute ?? parseWorkbenchLocation(undefined, routeBasePath));
-  const [primaryPercent, setPrimaryPercent] = useState(DESKTOP_PRIMARY_DEFAULT_PERCENT);
-  const compact = useMediaQuery(COMPACT_WORKSPACE_QUERY);
-  const activePrimaryView = primarySurfaceView(route);
-  const primarySurfaceFillsBody = surfaceFillsBody(route);
+  const refresh = useCallback(() => setRefreshKey((current) => current + 1), []);
 
   useEffect(() => {
-    if (initialData && refreshKey === 0) {
+    if (initialEnvelope && refreshKey === 0) {
       return;
     }
     const controller = new AbortController();
     let cancelled = false;
-    const hasExistingSnapshot = snapshot !== null;
+    const hasExistingSnapshot = envelope !== null;
     setLoading(!hasExistingSnapshot);
     setRefreshing(hasExistingSnapshot);
     setError(null);
 
     async function loadSnapshot() {
       try {
-        const response = await fetch(`${apiBasePath}/snapshot`, {
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          throw new Error(await response.text());
-        }
-        const next = await response.json() as WorkbenchInspectionSnapshot;
+        const next = await fetchInspectionEnvelope(apiBasePath, controller.signal);
         if (!cancelled) {
-          setSnapshot(next);
+          setEnvelope(next);
           setError(null);
         }
       } catch (nextError) {
@@ -237,17 +285,172 @@ export function WorkbenchWorkspace({
       cancelled = true;
       controller.abort();
     };
-  }, [apiBasePath, initialData, refreshKey]);
+  }, [apiBasePath, initialEnvelope, refreshKey]);
 
   useEffect(() => {
-    if (!snapshotHasActiveWork(snapshot) || loading || refreshing) {
+    if (!envelope?.cursor) {
       return;
     }
-    const timer = window.setTimeout(() => {
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
+    let waitController: AbortController | null = null;
+    let retryTimer: number | null = null;
+    let currentCursor = envelope.cursor;
+
+    const triggerRefresh = (notice: WorkbenchStateNotice) => {
+      currentCursor = notice.cursor;
       setRefreshKey((current) => current + 1);
-    }, ACTIVE_SNAPSHOT_REFRESH_MS);
-    return () => window.clearTimeout(timer);
-  }, [loading, refreshing, snapshot]);
+    };
+
+    const scheduleWaitLoop = (delayMs = 0) => {
+      if (cancelled) {
+        return;
+      }
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void waitLoop();
+      }, delayMs);
+    };
+
+    const waitLoop = async () => {
+      while (!cancelled) {
+        waitController = new AbortController();
+        try {
+          const notice = await fetchStateNotice(apiBasePath, currentCursor, waitController.signal);
+          waitController = null;
+          if (cancelled) {
+            return;
+          }
+          if (notice.type === "changed" || notice.type === "reset" || notice.cursor !== currentCursor) {
+            triggerRefresh(notice);
+            return;
+          }
+          currentCursor = notice.cursor;
+        } catch {
+          waitController = null;
+          if (!cancelled) {
+            scheduleWaitLoop(1_000);
+          }
+          return;
+        }
+      }
+    };
+
+    if (typeof window.EventSource === "function") {
+      eventSource = new window.EventSource(stateStreamUrl(apiBasePath, currentCursor));
+      eventSource.onmessage = (event) => {
+        try {
+          const notice = JSON.parse(event.data) as WorkbenchStateNotice;
+          if (notice.type === "changed" || notice.type === "reset" || notice.cursor !== currentCursor) {
+            triggerRefresh(notice);
+          } else {
+            currentCursor = notice.cursor;
+          }
+        } catch {
+          // Ignore malformed live notices; the next valid notice or manual refresh recovers.
+        }
+      };
+      eventSource.onerror = () => {
+        eventSource?.close();
+        eventSource = null;
+        scheduleWaitLoop(1_000);
+      };
+    } else {
+      scheduleWaitLoop();
+    }
+
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
+      waitController?.abort();
+      eventSource?.close();
+    };
+  }, [apiBasePath, envelope?.cursor]);
+
+  return {
+    cursor: envelope?.cursor ?? null,
+    error,
+    loading,
+    refresh,
+    refreshing,
+    actions: envelope?.actions ?? null,
+    snapshot: envelope?.snapshot ?? null,
+  };
+}
+
+async function fetchInspectionEnvelope(
+  apiBasePath: string,
+  signal: AbortSignal,
+): Promise<WorkbenchInspectionSnapshotEnvelope> {
+  const response = await fetch(`${apiBasePath}/snapshot`, { signal });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  const envelope = await response.json() as WorkbenchInspectionSnapshotEnvelope;
+  if (envelope.schema !== "workbench.inspection.snapshot-envelope.v1" || !envelope.cursor || !envelope.snapshot) {
+    throw new Error("Workbench snapshot endpoint returned an unsupported response.");
+  }
+  return envelope;
+}
+
+async function fetchStateNotice(
+  apiBasePath: string,
+  cursor: string,
+  signal: AbortSignal,
+): Promise<WorkbenchStateNotice> {
+  const response = await fetch(`${apiBasePath}/state/wait?cursor=${encodeURIComponent(cursor)}&timeoutMs=25000`, { signal });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  const notice = await response.json() as WorkbenchStateNotice;
+  if (notice.schema !== "workbench.state.notice.v1" || !notice.cursor) {
+    throw new Error("Workbench state endpoint returned an unsupported response.");
+  }
+  return notice;
+}
+
+function stateStreamUrl(apiBasePath: string, cursor: string): string {
+  return `${apiBasePath}/state/stream?cursor=${encodeURIComponent(cursor)}`;
+}
+
+export function WorkbenchWorkspace({
+  apiBasePath = "/api",
+  routeBasePath = "/",
+  brandHref = "/",
+  headerControls,
+  initialEnvelope = null,
+  initialRoute,
+  hostContext,
+}: WorkbenchWorkspaceProps) {
+  const {
+    cursor: inspectionCursor,
+    error,
+    loading,
+    refresh: refreshSnapshot,
+    refreshing,
+    actions,
+    snapshot,
+  } = useWorkbenchInspection({ apiBasePath, initialEnvelope });
+  const [route, setRoute] = useState<WorkbenchRoute>(() =>
+    initialRoute ?? parseWorkbenchLocation(undefined, routeBasePath));
+  const [routePending, startRouteTransition] = useTransition();
+  const [routeLoadingIds, setRouteLoadingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const reportRouteLoading = useCallback<RouteLoadingReporter>((id, active) => {
+    setRouteLoadingIds((current) => {
+      if (active === current.has(id)) {
+        return current;
+      }
+      const next = new Set(current);
+      if (active) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const updateRoute = () => setRoute(parseWorkbenchLocation(undefined, routeBasePath));
@@ -270,11 +473,13 @@ export function WorkbenchWorkspace({
   const navigate = useCallback((nextRoute: WorkbenchRoute, options: { replace?: boolean } = {}) => {
     const href = hrefFor(nextRoute);
     const current = `${window.location.pathname}${window.location.search}`;
-    if (href !== current) {
-      window.history[options.replace ? "replaceState" : "pushState"]({}, "", href);
-    }
-    setRoute(nextRoute);
-  }, [hrefFor]);
+    startRouteTransition(() => {
+      if (href !== current) {
+        window.history[options.replace ? "replaceState" : "pushState"]({}, "", href);
+      }
+      setRoute(nextRoute);
+    });
+  }, [hrefFor, startRouteTransition]);
   const onRouteClick = useCallback((nextRoute: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
@@ -282,12 +487,125 @@ export function WorkbenchWorkspace({
     event.preventDefault();
     navigate(nextRoute);
   }, [navigate]);
-  const refreshSnapshot = useCallback(() => setRefreshKey((current) => current + 1), []);
-  const hasBreadcrumbs = breadcrumbItems(route, snapshot).length > 0;
+  const identity = useSkillIdentity({ apiBasePath, hostContext, snapshot });
+  const onOperationStarted = useCallback((started: WorkbenchRunSnapshot) => {
+    refreshSnapshot();
+    navigate(routeForWorkbenchRunSnapshot(started));
+  }, [navigate, refreshSnapshot]);
 
   const header = (
+    <WorkbenchShellHeader
+      brandHref={brandHref}
+      error={error}
+      headerControls={headerControls}
+      loading={loading}
+      onRefresh={refreshSnapshot}
+      refreshing={refreshing}
+      snapshot={snapshot}
+    />
+  );
+  const routeFeedbackActive = loading || routePending || routeLoadingIds.size > 0;
+  const renderWorkspace = (children: ReactNode) => (
+    <RouteLoadingContext.Provider value={reportRouteLoading}>
+      <TopLoadingBar active={routeFeedbackActive} />
+      <WorkspaceRoot
+        header={header}
+        headerClassName="px-0 py-0 sm:px-0"
+        mainId="main-content"
+        skipLinkLabel="Skip to Workbench workspace"
+      >
+        {children}
+      </WorkspaceRoot>
+    </RouteLoadingContext.Provider>
+  );
+
+  if (error && !snapshot) {
+    return renderWorkspace(
+      <ProblemState
+        icon={CircleAlertIcon}
+        title="Workbench snapshot is unavailable"
+        message={error}
+        scope="workspace"
+      />,
+    );
+  }
+
+  if (!snapshot) {
+    return renderWorkspace(
+      <ProblemState
+        icon={WorkbenchLoadingIcon}
+        title="Loading Workbench"
+        message="Reading the skill inspection snapshot."
+        scope="workspace"
+      />,
+    );
+  }
+
+  return renderWorkspace(
+    <div className="min-h-0 overflow-y-auto px-4 py-5 sm:px-6 sm:py-7">
+      <div className={cn("mx-auto grid w-full gap-0", WORKBENCH_CONTENT_RAIL_CLASS)}>
+        <SkillIdentityHeader
+          actions={actions}
+          apiBasePath={apiBasePath}
+          hrefFor={hrefFor}
+          identity={identity}
+          onOperationStarted={onOperationStarted}
+          onRouteClick={onRouteClick}
+          snapshot={snapshot}
+          hostContext={hostContext}
+        />
+        <PrimaryTabs route={route} hrefFor={hrefFor} onRouteClick={onRouteClick} />
+        <WorkbenchBreadcrumbs
+          className="pt-3"
+          route={route}
+          snapshot={snapshot}
+          hrefFor={hrefFor}
+          onRouteClick={onRouteClick}
+        />
+        <div className="grid min-w-0 gap-6 pt-6 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start xl:gap-8">
+          <main className="min-w-0" data-testid="workbench-primary-content">
+            <RouteBody
+              apiBasePath={apiBasePath}
+              hrefFor={hrefFor}
+              inspectionCursor={inspectionCursor}
+              navigate={navigate}
+              onRouteClick={onRouteClick}
+              route={route}
+              snapshot={snapshot}
+            />
+          </main>
+          <RouteSidebar
+            hostContext={hostContext}
+            identity={identity}
+            route={route}
+            snapshot={snapshot}
+          />
+        </div>
+      </div>
+    </div>,
+  );
+}
+
+function WorkbenchShellHeader({
+  brandHref,
+  error,
+  headerControls,
+  loading,
+  onRefresh,
+  refreshing,
+  snapshot,
+}: {
+  brandHref: string;
+  error: string | null;
+  headerControls: ReactNode;
+  loading: boolean;
+  onRefresh: () => void;
+  refreshing: boolean;
+  snapshot: WorkbenchInspectionSnapshot | null;
+}) {
+  return (
     <div className="flex min-w-0 flex-col">
-      <div className="px-4 py-3 sm:px-5">
+      <div className="border-b border-border/70 px-4 py-3 sm:px-6">
         <WorkspaceTopBar
           brand={(
             <a
@@ -300,24 +618,16 @@ export function WorkbenchWorkspace({
           actions={headerControls}
         />
       </div>
-      <div className="border-t border-border/60 bg-muted/30 px-4 py-2 sm:px-5">
-        <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <div className={cn("min-w-0", !hasBreadcrumbs && "hidden md:block")} aria-hidden={hasBreadcrumbs ? undefined : true}>
-            {hasBreadcrumbs ? (
-              <WorkbenchBreadcrumbs route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />
-            ) : null}
-          </div>
-          <div className={cn(
-            "flex min-w-0 flex-wrap items-center gap-2",
-            hasBreadcrumbs ? "justify-start md:justify-end" : "justify-end",
-          )}>
+      <div className="border-b border-border/50 bg-background px-4 py-2 sm:px-6">
+        <div className={cn("mx-auto flex min-w-0 justify-end", WORKBENCH_CONTENT_RAIL_CLASS)}>
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
             {snapshot ? (
               <WorkbenchActivitySummary
                 snapshot={snapshot}
                 loading={loading}
                 refreshing={refreshing}
                 error={error}
-                onRefresh={refreshSnapshot}
+                onRefresh={onRefresh}
               />
             ) : null}
           </div>
@@ -325,391 +635,278 @@ export function WorkbenchWorkspace({
       </div>
     </div>
   );
-
-  if (error && !snapshot) {
-    return (
-      <WorkspaceRoot header={header} headerClassName="px-0 py-0 sm:px-0" mainId="main-content" skipLinkLabel="Skip to Workbench workspace">
-        <ProblemState
-          icon={CircleAlertIcon}
-          title="Workbench snapshot is unavailable"
-          message={error}
-          scope="workspace"
-        />
-      </WorkspaceRoot>
-    );
-  }
-
-  if (!snapshot) {
-    return (
-      <WorkspaceRoot header={header} headerClassName="px-0 py-0 sm:px-0" mainId="main-content" skipLinkLabel="Skip to Workbench workspace">
-        <ProblemState
-          icon={WorkbenchLoadingIcon}
-          title="Loading Workbench"
-          message="Reading the skill inspection snapshot."
-          scope="workspace"
-        />
-      </WorkspaceRoot>
-    );
-  }
-
-  const primaryPane = (
-    <WorkspacePane
-      tone="secondary"
-      hideHeader
-      scrollBody={!primarySurfaceFillsBody}
-      contentClassName={primarySurfaceFillsBody ? "flex h-full min-h-0 flex-col" : undefined}
-    >
-      <PrimaryWorkspaceSurface
-        apiBasePath={apiBasePath}
-        activeView={activePrimaryView}
-        hrefFor={hrefFor}
-        navigate={navigate}
-        onRouteClick={onRouteClick}
-        route={route}
-        snapshot={snapshot}
-      />
-    </WorkspacePane>
-  );
-
-  const inspector = routeInspector(route);
-  const hasDetail = inspector !== null;
-
-  const detailPane = (
-    <WorkspacePane
-      title={inspector ? inspectorTitle(inspector, snapshot) : "Details"}
-      summary={inspector ? (
-        <p className="min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-          {inspectorDescription(inspector, snapshot)}
-        </p>
-      ) : null}
-      actions={(
-        <Button
-          aria-label="Close detail pane"
-          size="icon-sm"
-          type="button"
-          variant="ghost"
-          onClick={() => navigate(withoutInspector(route))}
-        >
-          <PanelRightCloseIcon aria-hidden="true" />
-        </Button>
-      )}
-    >
-      {inspector ? (
-        <div data-testid="workbench-detail-pane" className="min-w-0">
-          {inspectorBody({
-            apiBasePath,
-            hrefFor,
-            inspector,
-            navigate,
-            onRouteClick,
-            route,
-            snapshot,
-          })}
-        </div>
-      ) : null}
-    </WorkspacePane>
-  );
-
-  return (
-    <>
-      <WorkspaceRoot
-        header={header}
-        headerClassName="px-0 py-0 sm:px-0"
-        mainId="main-content"
-        skipLinkLabel="Skip to Workbench workspace"
-      >
-        {compact ? (
-          hasDetail ? detailPane : primaryPane
-        ) : (
-          <DesktopWorkspaceSplit
-            paneOpen={hasDetail}
-            primaryPercent={primaryPercent}
-            minPrimaryPercent={DESKTOP_PRIMARY_MIN_PERCENT}
-            maxPrimaryPercent={DESKTOP_PRIMARY_MAX_PERCENT}
-            onPrimaryPercentChange={setPrimaryPercent}
-            primaryPane={primaryPane}
-            secondaryPane={detailPane}
-            secondaryPaneId="workbench-detail-pane-panel"
-            separatorLabel="Resize Workbench detail pane"
-          />
-        )}
-      </WorkspaceRoot>
-      <WorkbenchOverlayDialog
-        apiBasePath={apiBasePath}
-        navigate={navigate}
-        route={route}
-        snapshot={snapshot}
-      />
-    </>
-  );
 }
 
-function PrimaryWorkspaceSurface({
-  activeView,
+interface SkillIdentity {
+  name: string;
+  description: string | null;
+  handle: string | null;
+}
+
+function useSkillIdentity({
   apiBasePath,
-  hrefFor,
-  navigate,
-  onRouteClick,
-  route,
+  hostContext,
   snapshot,
 }: {
-  activeView: PrimarySurfaceView;
   apiBasePath: string;
-  hrefFor: (route: WorkbenchRoute) => string;
-  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  const fillsBody = surfaceFillsBody(route);
-  const identity = useMemo(() => skillIdentity(snapshot), [snapshot]);
-  return (
-    <div className={cn("min-w-0", fillsBody ? "flex h-full min-h-0 flex-col gap-5" : "grid gap-5")}>
-      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-        <div className="grid min-w-0 gap-1">
-          <h2 className="break-words text-lg font-semibold text-foreground [overflow-wrap:anywhere]">
-            {identity.name}
-          </h2>
-          {identity.description ? (
-            <p className="max-w-3xl break-words text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">
-              {identity.description}
-            </p>
-          ) : null}
-        </div>
-      </div>
+  hostContext?: WorkbenchHostContext;
+  snapshot: WorkbenchInspectionSnapshot | null;
+}): SkillIdentity {
+  const fallback = useMemo(() => snapshot
+    ? skillIdentity(snapshot, hostContext)
+    : {
+      name: hostContext?.skillName ?? "Skill",
+      description: null,
+      handle: hostContext?.handle ?? null,
+    }, [hostContext, snapshot]);
+  const owner = snapshot ? currentVersion(snapshot) : null;
+  const [hydrated, setHydrated] = useState<SkillIdentity | null>(null);
 
-      <ViewSwitch
-        ariaLabel="Workbench views"
-        value={activeView}
-        items={PRIMARY_SURFACE_ITEMS}
-        onValueChange={(value) => {
-          if (isPrimarySurfaceView(value)) {
-            // Keep the open detail pane (and any overlay) when switching
-            // surfaces: tabs change the master pane, not the inspection.
-            navigate(withSurface(route, primarySurfaceFor(value)));
-          }
-        }}
-      />
+  useEffect(() => {
+    const skillFile = owner?.files.find((file) => file.path === "SKILL.md");
+    if (!snapshot || !owner || !skillFile || (fallback.name && fallback.description)) {
+      setHydrated(null);
+      return;
+    }
+    const controller = new AbortController();
+    let canceled = false;
+    void fetch(fileContentApiPath(apiBasePath, "version", owner.id, "SKILL.md"), { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+        return await response.json() as WorkbenchInspectionFileContent;
+      })
+      .then((content) => {
+        if (canceled || content.encoding === "base64" || typeof content.content !== "string") {
+          return;
+        }
+        setHydrated(skillIdentityFromContent(content.content, snapshot, hostContext));
+      })
+      .catch((error: unknown) => {
+        if (!canceled && !(error instanceof DOMException && error.name === "AbortError")) {
+          setHydrated(null);
+        }
+      });
+    return () => {
+      canceled = true;
+      controller.abort();
+    };
+  }, [apiBasePath, fallback.description, fallback.name, hostContext, owner, snapshot]);
 
-      {activeView === "versions" ? (
-        <VersionsSurface
-          route={route}
-          snapshot={snapshot}
-          hrefFor={hrefFor}
-          navigate={navigate}
-          onRouteClick={onRouteClick}
-        />
-      ) : activeView === "files" ? (
-        <FilesSurface
-          apiBasePath={apiBasePath}
-          route={route}
-          snapshot={snapshot}
-          navigate={navigate}
-        />
-      ) : (
-        <ScorecardSurface route={route} snapshot={snapshot} navigate={navigate} />
-      )}
-    </div>
-  );
+  return hydrated ?? fallback;
 }
 
-function isPrimarySurfaceView(value: string): value is PrimarySurfaceView {
-  return value === "scorecard" || value === "versions" || value === "files";
-}
-
-function primarySurfaceFor(view: PrimarySurfaceView): WorkbenchSurfaceRoute {
-  if (view === "versions") {
-    return { kind: "versions", view: "list" };
-  }
-  if (view === "files") {
-    return { kind: "files", file: emptyFileRouteState() };
-  }
-  return { kind: "scorecard" };
-}
-
-function primarySurfaceView(route: WorkbenchRoute): PrimarySurfaceView {
-  const surface = routeSurface(route);
-  if (surface.kind === "versions") {
-    return "versions";
-  }
-  if (surface.kind === "files") {
-    return "files";
-  }
-  return "scorecard";
-}
-
-function surfaceFillsBody(route: WorkbenchRoute): boolean {
-  const surface = routeSurface(route);
-  return (surface.kind === "versions" && surface.view === "graph") || surface.kind === "files";
-}
-
-const FRONTMATTER_NAME_PATTERN = /^name:\s*(.+)$/mu;
-const FRONTMATTER_DESCRIPTION_PATTERN = /^description:\s*(.+)$/mu;
-
-function skillIdentity(snapshot: WorkbenchInspectionSnapshot): { name: string; description: string | null } {
+function skillIdentity(snapshot: WorkbenchInspectionSnapshot, hostContext?: WorkbenchHostContext): SkillIdentity {
   const owner = currentVersion(snapshot);
   const skillFile = owner?.files.find((file) => file.path === "SKILL.md");
   const content = skillFile?.content && skillFile.encoding !== "base64" ? skillFile.content : null;
+  return skillIdentityFromContent(content, snapshot, hostContext);
+}
+
+function skillIdentityFromContent(
+  content: string | null | undefined,
+  snapshot: WorkbenchInspectionSnapshot,
+  hostContext?: WorkbenchHostContext,
+): SkillIdentity {
   const frontmatter = content ? parseMarkdownDocument(content).frontmatter : null;
-  const read = (pattern: RegExp): string | null => {
-    const raw = frontmatter?.match(pattern)?.[1]?.trim() ?? null;
-    return raw ? raw.replace(/^["']|["']$/gu, "") : null;
+  const name = readFrontmatterScalar(frontmatter, "name") ?? hostContext?.skillName ?? (fileName(snapshot.root) || "Skill");
+  return {
+    name,
+    description: readFrontmatterScalar(frontmatter, "description"),
+    handle: hostContext?.handle ?? snapshot.publication?.installHandle ?? null,
   };
-  const name = read(FRONTMATTER_NAME_PATTERN);
-  if (name) {
-    return { name, description: read(FRONTMATTER_DESCRIPTION_PATTERN) };
+}
+
+function readFrontmatterScalar(frontmatter: string | null, key: string): string | null {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const raw = frontmatter?.match(new RegExp(`^${escapedKey}:\\s*(.+)$`, "mu"))?.[1]?.trim() ?? null;
+  if (!raw) {
+    return null;
   }
-  return { name: fileName(snapshot.root) || "Skill", description: null };
+  const unquoted = raw.replace(/^["']|["']$/gu, "").trim();
+  return unquoted || null;
 }
 
-function versionNameFor(snapshot: WorkbenchInspectionSnapshot, versionId: string | null | undefined): string {
-  return versionId
-    ? formatVersionDisplayName(versionId, snapshot.versions, comparisonLabelContext(snapshot))
-    : "none";
-}
-
-function ScorecardSurface({
-  navigate,
-  route,
-  snapshot,
-}: {
-  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  return (
-    <div className="grid min-w-0 gap-5">
-      <CompareSurface route={route} snapshot={snapshot} navigate={navigate} />
-    </div>
-  );
-}
-
-function CompareSurface({
-  navigate,
-  route,
-  snapshot,
-}: {
-  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  const comparison = comparisonForScorecard(snapshot);
-  const evaluationOptions = evaluationOptionsForScorecard(snapshot, comparison);
-  const defaultEvaluationId = defaultEvaluationIdForScorecard(evaluationOptions);
-  const [selectedEvaluationId, setSelectedEvaluationId] = useState<string | null>(defaultEvaluationId);
-  useEffect(() => {
-    const availableIds = new Set(evaluationOptions.map((option) => option.id));
-    if (!defaultEvaluationId && selectedEvaluationId) {
-      setSelectedEvaluationId(null);
-      return;
-    }
-    if (defaultEvaluationId && (!selectedEvaluationId || !availableIds.has(selectedEvaluationId))) {
-      setSelectedEvaluationId(defaultEvaluationId);
-    }
-  }, [defaultEvaluationId, evaluationOptions, selectedEvaluationId]);
-  const activeEvaluationId = selectedEvaluationId && evaluationOptions.some((option) => option.id === selectedEvaluationId)
-    ? selectedEvaluationId
-    : defaultEvaluationId;
-  const labelContext = comparisonLabelContext(snapshot);
-  const groups = buildComparisonGroups(
-    comparison,
-    labelContext,
-  );
-  const rows = buildComparisonEvidenceRows({
-    groups,
-    context: labelContext,
-    agents: comparison.agents,
-    runs: snapshot.runs,
-  });
-  const visibleRows = activeEvaluationId
-    ? rows.filter((row) => row.evalHash === activeEvaluationId)
-    : rows;
-  const visibleGroupIds = new Set(visibleRows.map((row) => row.groupId));
-  const visibleGroups = groups.filter((group) => visibleGroupIds.has(group.id));
-  const selectedEvaluation = activeEvaluationId
-    ? evaluationOptions.find((option) => option.id === activeEvaluationId) ?? null
-    : null;
-  return (
-    <ComparisonDetail
-      rows={visibleRows}
-      groups={visibleGroups.map((group) => ({ id: group.id, label: group.label }))}
-      hasComparison={comparison.cells.length > 0}
-      evaluation={selectedEvaluation}
-      evaluationOptions={evaluationOptions}
-      selectedEvaluationId={activeEvaluationId}
-      filterLabel="Skills"
-      onSelectEvaluation={setSelectedEvaluationId}
-      onSelectRun={(runId) => navigate(withInspector(route, { kind: "run", runId }))}
-    />
-  );
-}
-
-function VersionsSurface({
+function SkillIdentityHeader({
+  actions,
+  apiBasePath,
   hrefFor,
+  hostContext,
+  identity,
+  onOperationStarted,
+  onRouteClick,
+  snapshot,
+}: {
+  actions: WorkbenchActionCapabilities | null;
+  apiBasePath: string;
+  hrefFor: (route: WorkbenchRoute) => string;
+  hostContext: WorkbenchHostContext | undefined;
+  identity: SkillIdentity;
+  onOperationStarted: (started: WorkbenchRunSnapshot) => void;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const ownerLabel = identity.handle?.split("/", 1)[0] ?? hostContext?.ownerSlug ?? null;
+  const homeRoute = createFilesRoute();
+  return (
+    <section className="grid min-w-0 gap-4 border-b border-border/70 pb-5">
+      <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="grid min-w-0 gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {ownerLabel ? (
+              <>
+                <span className="font-mono text-sm text-muted-foreground">{ownerLabel}</span>
+                <span className="text-muted-foreground">/</span>
+              </>
+            ) : null}
+            <h1 className="break-words font-mono text-[1.45rem] font-semibold leading-tight tracking-normal text-foreground [overflow-wrap:anywhere]">
+              <a
+                className="rounded-sm text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                href={hrefFor(homeRoute)}
+                onClick={onRouteClick(homeRoute)}
+              >
+                {identity.name}
+              </a>
+            </h1>
+            {identity.handle ? (
+              <CopyIconButton label="handle" value={identity.handle} />
+            ) : null}
+            {hostContext?.sourceVisibility ? <Badge variant="outline">{hostContext.sourceVisibility}</Badge> : null}
+            {hostContext?.evidenceAccess === "source" ? <Badge variant="outline">source only</Badge> : null}
+          </div>
+        </div>
+        {actions ? (
+          <WorkbenchActionBar
+            actions={actions}
+            apiBasePath={apiBasePath}
+            onOperationStarted={onOperationStarted}
+          />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function PrimaryTabs({
+  hrefFor,
+  onRouteClick,
+  route,
+}: {
+  hrefFor: (route: WorkbenchRoute) => string;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  route: WorkbenchRoute;
+}) {
+  const active = routePrimaryTab(route);
+  const routeFor = (tab: WorkbenchPrimaryTab): WorkbenchRoute => {
+    if (tab === "evaluation") {
+      return createEvaluationRoute({ view: "results", evaluationId: route.kind === "evaluation" || route.kind === "case" || route.kind === "run" ? route.evaluationId : null });
+    }
+    if (tab === "activity") {
+      return createActivityRoute();
+    }
+    return createFilesRoute();
+  };
+  return (
+    <nav className="flex min-w-0 flex-wrap items-center gap-4 border-b border-border/70" aria-label="Workbench skill tabs">
+      {PRIMARY_TABS.map((item) => {
+        const nextRoute = routeFor(item.value);
+        const Icon = item.icon;
+        return (
+          <a
+            aria-current={active === item.value ? "page" : undefined}
+            className={cn(
+              "inline-flex h-10 items-center gap-1.5 border-b-2 px-0.5 text-sm font-medium text-muted-foreground no-underline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              active === item.value
+                ? "border-primary text-foreground"
+                : "border-transparent hover:text-foreground",
+            )}
+            href={hrefFor(nextRoute)}
+            key={item.value}
+            onClick={onRouteClick(nextRoute)}
+          >
+            <Icon aria-hidden="true" className="size-3.5" />
+            {item.label}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
+function RouteBody({
+  apiBasePath,
+  hrefFor,
+  inspectionCursor,
   navigate,
   onRouteClick,
   route,
   snapshot,
 }: {
+  apiBasePath: string;
   hrefFor: (route: WorkbenchRoute) => string;
+  inspectionCursor: string | null;
   navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   route: WorkbenchRoute;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const surface = routeSurface(route);
-  const view: VersionsView = surface.kind === "versions" ? surface.view : "list";
-  const fillsBody = surfaceFillsBody(route);
-  return (
-    <div className={cn("min-w-0", fillsBody ? "flex min-h-0 flex-1 flex-col gap-4" : "grid gap-4")}>
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <p className="min-w-0 break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
-          Every saved state of the skill, newest first, with the improvements that produced it.
-        </p>
-        <div className="flex shrink-0 items-center gap-1" role="group" aria-label="Versions view">
-          <Button
-            aria-pressed={view === "list"}
-            size="sm"
-            type="button"
-            variant={view === "list" ? "secondary" : "ghost"}
-            onClick={() => navigate(withSurface(route, { kind: "versions", view: "list" }))}
-          >
-            <ListIcon aria-hidden="true" /> List
-          </Button>
-          <Button
-            aria-pressed={view === "graph"}
-            size="sm"
-            type="button"
-            variant={view === "graph" ? "secondary" : "ghost"}
-            onClick={() => navigate(withSurface(route, { kind: "versions", view: "graph" }))}
-          >
-            <GitBranchIcon aria-hidden="true" /> Graph
-          </Button>
-        </div>
-      </div>
-      {view === "graph" ? (
-        <VersionLineageSurface route={route} snapshot={snapshot} navigate={navigate} />
-      ) : (
-        <>
-          <ReleaseCard snapshot={snapshot} />
-          <VersionHistoryList route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />
-          <Accordion type="multiple" className="min-w-0">
-            <DetailAccordionSection
-              value="advanced"
-              title="Advanced"
-              summary="Workspace location, skill sources, and connected sources."
-            >
-              <FactGrid>
-                <FactItem title="Workspace root" value={snapshot.root} />
-              </FactGrid>
-              <SkillsList skills={snapshot.skillSources} route={route} hrefFor={hrefFor} onRouteClick={onRouteClick} />
-              <RemotesTable snapshot={snapshot} />
-            </DetailAccordionSection>
-          </Accordion>
-        </>
-      )}
-    </div>
-  );
+  switch (route.kind) {
+    case "files":
+      return (
+        <FilesSurface
+          apiBasePath={apiBasePath}
+          navigate={navigate}
+          route={route}
+          snapshot={snapshot}
+        />
+      );
+    case "evaluation":
+      return (
+        <EvaluationSurface
+          hrefFor={hrefFor}
+          navigate={navigate}
+          onRouteClick={onRouteClick}
+          route={route}
+          snapshot={snapshot}
+        />
+      );
+    case "case":
+      return (
+        <CaseDetail
+          apiBasePath={apiBasePath}
+          navigate={navigate}
+          route={route}
+          snapshot={snapshot}
+          hrefFor={hrefFor}
+          onRouteClick={onRouteClick}
+        />
+      );
+    case "activity":
+      return <ActivitySurface route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />;
+    case "run":
+      return (
+        <RunDetailPage
+          apiBasePath={apiBasePath}
+          hrefFor={hrefFor}
+          inspectionCursor={inspectionCursor}
+          onRouteClick={onRouteClick}
+          route={route}
+          snapshot={snapshot}
+        />
+      );
+    case "not-found":
+      return (
+        <EmptyState
+          icon={CircleAlertIcon}
+          title="Workbench page not found"
+          message="This Workbench web route is not part of the current interface."
+          actions={<Button asChild><a href={hrefFor(createFilesRoute())} onClick={onRouteClick(createFilesRoute())}>Open Files</a></Button>}
+          variant="hero"
+          size="md"
+        />
+      );
+  }
 }
 
 function FilesSurface({
@@ -720,12 +917,10 @@ function FilesSurface({
 }: {
   apiBasePath: string;
   navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
-  route: WorkbenchRoute;
+  route: Extract<WorkbenchRoute, { kind: "files" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const surface = routeSurface(route);
-  const file = surface.kind === "files" ? surface.file : emptyFileRouteState();
-  const owner = currentVersion(snapshot);
+  const owner = selectedFilesVersion(snapshot, route.file.versionId);
   if (!owner) {
     return (
       <EmptyState
@@ -737,439 +932,1328 @@ function FilesSurface({
       />
     );
   }
+  const files = useMemo(() => authoredSourceFiles(owner.files), [owner.files]);
   return (
-    <FileBrowserSurface
+    <RepositorySourceSurface
       apiBasePath={apiBasePath}
-      ownerKind="version"
+      file={route.file}
+      files={files}
       ownerId={owner.id}
-      files={owner.files}
-      title="Files"
-      description="What this skill tells the agent to do."
-      file={file}
       onFileChange={(nextFile, options) => navigate(withFileRouteState(route, nextFile), options)}
+      onVersionChange={(versionId) => navigate(withFileRouteState(route, { versionId }))}
+      snapshot={snapshot}
+      versionId={owner.id}
     />
   );
 }
 
-function ReleaseCard({ snapshot }: { snapshot: WorkbenchInspectionSnapshot }) {
-  const currentId = snapshot.status.currentVersionId;
-  const publishedId = publishedVersionId(snapshot);
-  const versionsAhead = versionsAheadOfPublished(snapshot, publishedId, currentId);
+function authoredSourceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
+  return files
+    .filter((file) => {
+      try {
+        return !isWorkbenchLocalMetadataPath(file.path);
+      } catch {
+        return true;
+      }
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function RepositorySourceSurface({
+  apiBasePath,
+  file,
+  files,
+  onFileChange,
+  onVersionChange,
+  ownerId,
+  snapshot,
+  versionId,
+}: {
+  apiBasePath: string;
+  file: WorkbenchFileRouteState;
+  files: readonly SurfaceSnapshotFile[];
+  ownerId: string;
+  onFileChange: (file: Partial<WorkbenchFileRouteState>, options?: { replace?: boolean }) => void;
+  onVersionChange: (versionId: string) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+  versionId: string;
+}) {
+  const reportRouteLoading = useRouteLoadingReporter();
+
+  if (files.length === 0) {
+    return (
+      <EmptyState
+        icon={FolderOpenIcon}
+        title="No authored files"
+        message="Authored source appears here once Workbench observes files for this skill version."
+        size="sm"
+      />
+    );
+  }
+
   return (
-    <SurfaceSection
-      title="Release"
-      icon={HashIcon}
-      description={publishedId ? "The version other people install." : "This skill has not been published yet."}
-    >
-      <div className="grid min-w-0 gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-          <Badge variant="outline">published {publishedId ? versionNameFor(snapshot, publishedId) : "none"}</Badge>
-          <Badge variant="outline">current {currentId ? versionNameFor(snapshot, currentId) : "none"}</Badge>
-          {versionsAhead > 0 ? (
-            <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">
-              Current is {formatCount(versionsAhead, "version")} ahead of the published release.
-            </span>
-          ) : null}
+    <div className="grid min-w-0 gap-5">
+      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <VersionHistoryDialog
+            snapshot={snapshot}
+            value={versionId}
+            onValueChange={onVersionChange}
+          />
+          <VersionSelect
+            snapshot={snapshot}
+            value={versionId}
+            onValueChange={onVersionChange}
+          />
         </div>
-        {snapshot.publication ? (
-          <div className="grid min-w-0 gap-2">
-            <CopyField label="Install handle" value={snapshot.publication.installHandle} />
+      </div>
+
+      <RepositoryFilesView
+        apiBasePath={apiBasePath}
+        file={file}
+        files={files}
+        ownerId={ownerId}
+        ownerKind="version"
+        repositoryLabel="Files"
+        onFileChange={onFileChange}
+        onLoadingChange={reportRouteLoading}
+      />
+    </div>
+  );
+}
+
+function VersionHistoryDialog({
+  onValueChange,
+  snapshot,
+  value,
+}: {
+  onValueChange: (versionId: string) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+  value: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<VersionHistoryView>("list");
+  const selectVersion = (versionId: string) => {
+    onValueChange(versionId);
+    setOpen(false);
+  };
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline" size="sm">
+          <HistoryIcon aria-hidden="true" />
+          Version history
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="flex h-[min(42rem,calc(100dvh-2rem))] w-[calc(100vw-2rem)] max-w-2xl grid-rows-none flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader className="shrink-0 gap-3 border-b border-border/70 px-4 pb-3 pt-4 pr-12">
+          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <DialogTitle>Version history</DialogTitle>
+            <ViewSwitch
+              ariaLabel="Version history views"
+              value={view}
+              items={VERSION_HISTORY_VIEW_ITEMS}
+              onValueChange={(nextView) => {
+                if (nextView === "list" || nextView === "lineage") {
+                  setView(nextView);
+                }
+              }}
+            />
           </div>
+        </DialogHeader>
+        {view === "lineage" ? (
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            <LineageGraph
+              className="min-h-0 rounded-none border-0"
+              currentVersionId={value}
+              publishedVersionId={publishedVersionId(snapshot)}
+              lineage={snapshot.lineage}
+              versions={snapshot.versions}
+              runs={snapshot.runs}
+              onVersionClick={selectVersion}
+            />
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            <VersionHistory
+              snapshot={snapshot}
+              value={value}
+              onValueChange={selectVersion}
+            />
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function VersionSelect({
+  onValueChange,
+  snapshot,
+  value,
+}: {
+  onValueChange: (versionId: string) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+  value: string;
+}) {
+  const publishedId = publishedVersionId(snapshot);
+  const options = orderedVersions(snapshot).map((version) => {
+    const subtitles = [
+      snapshot.status.currentVersionId === version.id ? "current" : null,
+      publishedId === version.id ? "published" : null,
+      formatTimestamp(version.createdAt),
+    ].filter(Boolean);
+    return {
+      id: version.id,
+      label: versionNameFor(snapshot, version.id),
+      subtitle: subtitles.join(" / "),
+    };
+  });
+  const selectedOption = options.find((option) => option.id === value);
+  return (
+    <Select value={value} onValueChange={onValueChange}>
+      <SelectTrigger
+        size="sm"
+        aria-label="Select version"
+        data-testid="version-select"
+      >
+        <SelectValue placeholder="Version">{selectedOption?.label}</SelectValue>
+      </SelectTrigger>
+      <SelectContent align="end" className="min-w-64">
+        {options.map((option) => (
+          <SelectItem key={option.id} value={option.id} textValue={option.label}>
+            <span className="grid min-w-0 gap-0.5">
+              <span>{option.label}</span>
+              <span className="text-xs text-muted-foreground">{option.subtitle}</span>
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function VersionHistory({
+  onValueChange,
+  snapshot,
+  value,
+}: {
+  onValueChange: (versionId: string) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+  value: string;
+}) {
+  const publishedId = publishedVersionId(snapshot);
+  const versions = orderedVersions(snapshot);
+  return (
+    <div className="grid min-w-0 gap-2">
+      {versions.map((version) => {
+        const active = value === version.id;
+        const current = snapshot.status.currentVersionId === version.id;
+        return (
+          <button
+            key={version.id}
+            type="button"
+            aria-current={active ? "true" : undefined}
+            className={cn(
+              "grid min-w-0 cursor-pointer gap-1 rounded-lg border border-border/60 bg-background px-3 py-2 text-left text-sm transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              active && "border-primary/50 bg-muted/45",
+            )}
+            onClick={() => onValueChange(version.id)}
+          >
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="font-medium">{versionNameFor(snapshot, version.id)}</span>
+              {active ? <Badge variant="outline">selected</Badge> : null}
+              {current ? <Badge variant="outline">current</Badge> : null}
+              {publishedId === version.id ? <Badge variant="outline">published</Badge> : null}
+            </div>
+            <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">{version.message}</span>
+            <span className="text-xs text-muted-foreground">{formatTimestamp(version.createdAt)}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function EvaluationSurface({
+  hrefFor,
+  navigate,
+  onRouteClick,
+  route,
+  snapshot,
+}: {
+  hrefFor: (route: WorkbenchRoute) => string;
+  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  route: Extract<WorkbenchRoute, { kind: "evaluation" }>;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const comparison = comparisonForScorecard(snapshot);
+  const evaluationOptions = evaluationOptionsForScorecard(snapshot, comparison);
+  const defaultEvaluationId = defaultEvaluationIdForScorecard(evaluationOptions);
+  const activeEvaluationId = route.evaluationId && evaluationOptions.some((option) => option.id === route.evaluationId)
+    ? route.evaluationId
+    : defaultEvaluationId;
+  const labelContext = comparisonLabelContext(snapshot);
+  const groups = buildComparisonGroups(comparison, labelContext);
+  const rows = buildComparisonEvidenceRows({
+    groups,
+    context: labelContext,
+    agents: comparison.agents,
+    runs: snapshot.runs,
+  });
+  const visibleRows = activeEvaluationId
+    ? rows.filter((row) => row.evalHash === activeEvaluationId)
+    : rows;
+  const selectedEvaluation = activeEvaluationId
+    ? evaluationOptions.find((option) => option.id === activeEvaluationId) ?? null
+    : null;
+  const showEvaluationSelector = evaluationOptions.length > 0 && typeof activeEvaluationId === "string";
+  return (
+    <div className="grid min-w-0 gap-5">
+      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <ViewSwitch
+          ariaLabel="Evaluation views"
+          value={route.view}
+          items={EVALUATION_VIEW_ITEMS}
+          onValueChange={(value) => {
+            if (value === "results" || value === "cases") {
+              navigate(createEvaluationRoute({ view: value, evaluationId: activeEvaluationId ?? route.evaluationId }));
+            }
+          }}
+        />
+        {showEvaluationSelector ? (
+          <EvaluationSelect
+            options={evaluationOptions}
+            value={activeEvaluationId}
+            onValueChange={(evaluationId) => navigate(withEvaluationId(route, evaluationId), { replace: false })}
+          />
         ) : null}
+      </div>
+      {route.view === "cases" ? (
+        <EvaluationCases route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />
+      ) : (
+        <EvaluationResults
+          evaluationId={activeEvaluationId}
+          hasComparison={comparison.cells.length > 0}
+          hrefFor={hrefFor}
+          onRouteClick={onRouteClick}
+          rows={visibleRows}
+          selectedEvaluation={selectedEvaluation}
+          snapshot={snapshot}
+        />
+      )}
+    </div>
+  );
+}
+
+function EvaluationResults({
+  evaluationId,
+  hasComparison,
+  hrefFor,
+  onRouteClick,
+  rows,
+  selectedEvaluation,
+  snapshot,
+}: {
+  evaluationId: string | null;
+  hasComparison: boolean;
+  hrefFor: (route: WorkbenchRoute) => string;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  rows: ComparisonEvidenceRow[];
+  selectedEvaluation: ComparisonEvaluationOption | null;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const sortedRows = useMemo(() => sortLeaderboardRows(rows), [rows]);
+  const runsById = useMemo(() => new Map(snapshot.runs.map((run) => [run.id, run])), [snapshot.runs]);
+  const jobsByRunId = useMemo(() => groupJobsByRunId(snapshot.jobs), [snapshot.jobs]);
+  if (rows.length === 0) {
+    return (
+      <EmptyState
+        icon={ActivityIcon}
+        eyebrow={selectedEvaluation?.label ?? "Evaluation"}
+        title={hasComparison ? "No results for this evaluation" : "No runs yet"}
+        message={hasComparison
+          ? "This evaluation has no recorded scorecard rows."
+          : "Run evals to record scorecards for comparison."}
+        variant="hero"
+        size="sm"
+      />
+    );
+  }
+  return (
+    <section className="min-w-0" aria-label="Results">
+      <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+        <Table data-testid="evaluation-results-leaderboard" className="min-w-[58rem]">
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-[3rem]">#</TableHead>
+              <TableHead className="w-[10rem]">Mode</TableHead>
+              <TableHead className="w-[8.5rem]">Version</TableHead>
+              <TableHead className="w-[5.5rem]">Cases</TableHead>
+              <TableHead className="w-[5.5rem]">Score</TableHead>
+              <TableHead className="w-[6.5rem]">Latency</TableHead>
+              <TableHead className="w-[8rem]">Cost</TableHead>
+              <TableHead className="w-[8.5rem]">When</TableHead>
+              <TableHead>Agent</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sortedRows.map((row, index) => {
+              const run = row.runId ? runsById.get(row.runId) ?? null : null;
+              const jobs = run ? jobsByRunId.get(run.id) ?? [] : [];
+              const runRoute = row.runId
+                ? createRunRoute({ runId: row.runId, source: "evaluation", evaluationId })
+                : null;
+              return (
+                <TableRow
+                  key={row.rowId}
+                  className={runRoute ? "cursor-pointer" : undefined}
+                  onClick={runRoute ? onRouteClick(runRoute) : undefined}
+                >
+                  <TableCell className="align-top text-muted-foreground">{index + 1}</TableCell>
+                  <TableCell className="align-top">
+                    <div className="grid min-w-0 gap-1">
+                      {runRoute ? (
+                        <a
+                          className="break-words font-medium text-primary underline-offset-4 hover:underline [overflow-wrap:anywhere]"
+                          href={hrefFor(runRoute)}
+                          onClick={onRouteClick(runRoute)}
+                        >
+                          {row.agentName}
+                        </a>
+                      ) : (
+                        <span className="break-words font-medium text-foreground [overflow-wrap:anywhere]">
+                          {row.agentName}
+                        </span>
+                      )}
+                      <div className="flex min-w-0 flex-wrap gap-1">
+                        {row.status ? (
+                          <StatusBadge status={row.status} />
+                        ) : (
+                          <Badge variant="outline">{row.statusLabel}</Badge>
+                        )}
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell className="align-top">
+                    <div className="grid min-w-0 gap-1">
+                      <span className="break-words text-foreground [overflow-wrap:anywhere]">{row.versionLabel}</span>
+                      {row.versionBadges.length > 0 ? (
+                        <div className="flex min-w-0 flex-wrap gap-1">
+                          {row.versionBadges.map((badge) => (
+                            <Badge key={badge} variant="outline" className="w-fit">
+                              {badge}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatLeaderboardCases(row, jobs)}</TableCell>
+                  <TableCell className="align-top font-medium">{formatScore(row.score)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatDurationMs(row.latencyMs)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatLeaderboardCost(row)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatTimestamp(run?.finishedAt ?? run?.createdAt)}</TableCell>
+                  <TableCell className="align-top">
+                    <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">
+                      {row.agentDetail}
+                    </span>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </section>
+  );
+}
+
+function EvaluationSelect({
+  onValueChange,
+  options,
+  value,
+}: {
+  onValueChange: (evaluationId: string) => void;
+  options: ComparisonEvaluationOption[];
+  value: string;
+}) {
+  const selectedOption = options.find((option) => option.id === value);
+  return (
+    <Select value={value} onValueChange={onValueChange}>
+      <SelectTrigger
+        size="sm"
+        aria-label="Select evaluation"
+        data-testid="evaluation-select"
+      >
+        <SelectValue placeholder="Evaluation">{selectedOption?.label}</SelectValue>
+      </SelectTrigger>
+      <SelectContent align="end" className="min-w-64">
+        {options.map((option) => (
+          <SelectItem key={option.id} value={option.id} textValue={option.label}>
+            <span className="grid min-w-0 gap-0.5">
+              <span>{option.label}</span>
+              <span className="text-xs text-muted-foreground">{option.subtitle}</span>
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function sortLeaderboardRows(rows: readonly ComparisonEvidenceRow[]): ComparisonEvidenceRow[] {
+  return [...rows].sort((left, right) =>
+    compareOptionalNumber(left.score, right.score, "desc") ||
+    compareOptionalNumber(left.latencyMs, right.latencyMs, "asc") ||
+    compareOptionalNumber(left.versionOrdinal, right.versionOrdinal, "desc") ||
+    compareText(left.setupLabel, right.setupLabel) ||
+    compareText(left.agentName, right.agentName) ||
+    compareText(left.rowId, right.rowId)
+  );
+}
+
+function groupJobsByRunId(jobs: readonly WorkbenchJob[]): Map<string, WorkbenchJob[]> {
+  const grouped = new Map<string, WorkbenchJob[]>();
+  for (const job of jobs) {
+    const runJobs = grouped.get(job.runId);
+    if (runJobs) {
+      runJobs.push(job);
+    } else {
+      grouped.set(job.runId, [job]);
+    }
+  }
+  for (const runJobs of grouped.values()) {
+    runJobs.sort((left, right) => compareText(left.caseId, right.caseId) || left.sample - right.sample || compareText(left.id, right.id));
+  }
+  return grouped;
+}
+
+function formatLeaderboardCases(row: ComparisonEvidenceRow, jobs: readonly WorkbenchJob[]): string {
+  if (jobs.length > 0) {
+    return `${jobs.filter((job) => job.status === "succeeded").length}/${jobs.length}`;
+  }
+  if (typeof row.samples === "number" && Number.isFinite(row.samples)) {
+    return formatCount(row.samples, "case");
+  }
+  return "n/a";
+}
+
+function formatLeaderboardCost(row: ComparisonEvidenceRow): string {
+  return typeof row.costUsd === "number" && Number.isFinite(row.costUsd)
+    ? formatCost(row.costUsd)
+    : missingCostLabelForStatus(row.statusLabel, Boolean(row.runId));
+}
+
+function compareOptionalNumber(
+  left: number | undefined,
+  right: number | undefined,
+  direction: "asc" | "desc",
+): number {
+  if (left === undefined && right === undefined) {
+    return 0;
+  }
+  if (left === undefined) {
+    return 1;
+  }
+  if (right === undefined) {
+    return -1;
+  }
+  return direction === "asc" ? left - right : right - left;
+}
+
+function compareText(left: string, right: string): number {
+  return left.localeCompare(right, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function EvaluationCases({
+  hrefFor,
+  onRouteClick,
+  route,
+  snapshot,
+}: {
+  hrefFor: (route: WorkbenchRoute) => string;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  route: Extract<WorkbenchRoute, { kind: "evaluation" }>;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const evalSnapshot = selectedEvalSnapshot(snapshot, route.evaluationId);
+  if (!evalSnapshot) {
+    return <EmptyState icon={FileTextIcon} title="No evaluation cases" message="Cases appear after Workbench observes .workbench/cases." variant="hero" size="sm" />;
+  }
+  if (evalSnapshot.cases.length === 0) {
+    return <EmptyState icon={FileTextIcon} title="No cases in this evaluation" message="Add authored cases under .workbench/cases and run Workbench again." variant="hero" size="sm" />;
+  }
+  return (
+    <section className="min-w-0" aria-label="Cases">
+      <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Case</TableHead>
+              <TableHead>Command</TableHead>
+              <TableHead>Runs</TableHead>
+              <TableHead>Latest</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {evalSnapshot.cases.map((evalCase) => {
+              const jobs = jobsForCase(snapshot, evalSnapshot.hash, evalCase.id);
+              const latest = latestJob(jobs);
+              const caseRoute = createCaseRoute({ caseId: evalCase.id, evaluationId: evalSnapshot.hash });
+              return (
+                <TableRow key={evalCase.id} className="cursor-pointer" onClick={onRouteClick(caseRoute)}>
+                  <TableCell>
+                    <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(caseRoute)} onClick={onRouteClick(caseRoute)}>
+                      {caseDisplayTitle(evalCase)}
+                    </a>
+                    {showCaseSecondaryId(evalCase) ? (
+                      <div className="text-xs text-muted-foreground">{evalCase.id}</div>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{evalCase.command ?? "Not specified"}</TableCell>
+                  <TableCell>{formatCount(jobs.length, "job")}</TableCell>
+                  <TableCell>{latest ? <StatusBadge status={latest.status} /> : <span className="text-muted-foreground">Not run</span>}</TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </section>
+  );
+}
+
+function CaseDetail({
+  apiBasePath,
+  hrefFor,
+  navigate,
+  onRouteClick,
+  route,
+  snapshot,
+}: {
+  apiBasePath: string;
+  hrefFor: (route: WorkbenchRoute) => string;
+  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  route: Extract<WorkbenchRoute, { kind: "case" }>;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const evalSnapshot = selectedEvalSnapshot(snapshot, route.evaluationId);
+  const evalCase = evalSnapshot?.cases.find((entry) => entry.id === route.caseId) ?? null;
+  if (!evalSnapshot || !evalCase) {
+    return <MissingObject label={`Case ${route.caseId}`} />;
+  }
+  const jobs = jobsForCase(snapshot, evalSnapshot.hash, evalCase.id);
+  const definitionRoute = createCaseRoute({ caseId: evalCase.id, evaluationId: evalSnapshot.hash, section: "definition", file: route.file });
+  const runsRoute = createCaseRoute({ caseId: evalCase.id, evaluationId: evalSnapshot.hash, section: "runs" });
+  return (
+    <div className="grid min-w-0 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
+      <nav className="grid h-max gap-1 rounded-lg border border-border/70 bg-background p-2 text-sm" aria-label="Case sections">
+        <a
+          aria-current={route.section === "definition" ? "page" : undefined}
+          className={sectionNavItemClass(route.section === "definition")}
+          href={hrefFor(definitionRoute)}
+          onClick={onRouteClick(definitionRoute)}
+        >
+          Definition
+        </a>
+        <a
+          aria-current={route.section === "runs" ? "page" : undefined}
+          className={sectionNavItemClass(route.section === "runs", "flex items-center justify-between gap-2")}
+          href={hrefFor(runsRoute)}
+          onClick={onRouteClick(runsRoute)}
+        >
+          <span>Runs</span>
+          <Badge variant="outline">{jobs.length}</Badge>
+        </a>
+      </nav>
+      <div className="grid min-w-0 gap-5">
+        <DetailPageHeader
+          eyebrow={formatEvaluationDisplayName(evalSnapshot.hash, snapshot.evals)}
+          title={caseDisplayTitle(evalCase)}
+          description={evalCase.description ?? evalCase.command ?? "Authored evaluation case."}
+        />
+        {route.section === "definition" ? (
+          <CaseDefinitionFiles
+            apiBasePath={apiBasePath}
+            evalCase={evalCase}
+            evalSnapshot={evalSnapshot}
+            file={route.file}
+            onFileChange={(nextFile, options) => navigate(withFileRouteState(route, nextFile), options)}
+          />
+        ) : (
+          <LinkedRunTable
+            title="Runs"
+            empty="No runs are recorded for this case."
+            jobs={jobs}
+            snapshot={snapshot}
+            hrefFor={hrefFor}
+            onRouteClick={onRouteClick}
+            source="evaluation"
+            evaluationId={evalSnapshot.hash}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function caseDisplayTitle(evalCase: WorkbenchEvalCaseSnapshot): string {
+  const title = evalCase.title?.trim();
+  return title || evalCase.id;
+}
+
+function showCaseSecondaryId(evalCase: WorkbenchEvalCaseSnapshot): boolean {
+  const title = evalCase.title?.trim();
+  return Boolean(title && title !== evalCase.id);
+}
+
+function CaseDefinitionFiles({
+  apiBasePath,
+  evalCase,
+  evalSnapshot,
+  file,
+  onFileChange,
+}: {
+  apiBasePath: string;
+  evalCase: WorkbenchEvalCaseSnapshot;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  file: WorkbenchFileRouteState;
+  onFileChange: (file: WorkbenchFileRouteState, options?: { replace?: boolean }) => void;
+}) {
+  const reportRouteLoading = useRouteLoadingReporter();
+
+  if (evalCase.files.length === 0) {
+    return (
+      <EmptyState
+        icon={FileTextIcon}
+        title="No case files"
+        message="Case source files appear here once Workbench observes this evaluation case."
+        size="sm"
+      />
+    );
+  }
+  const defaultFilePath = evalCase.files.some((entry) => entry.path === evalCase.path)
+    ? evalCase.path
+    : evalCase.files.find((entry) => fileName(entry.path).toLowerCase() === "case.yaml")?.path ?? evalCase.files[0]?.path ?? null;
+  return (
+    <section className="grid min-w-0 gap-4" aria-label="Definition">
+      <RepositoryFilesView
+        apiBasePath={apiBasePath}
+        defaultFilePath={defaultFilePath}
+        displayRootPath={directoryPathForFile(evalCase.path)}
+        file={file}
+        files={evalCase.files}
+        ownerId={caseFileOwnerId(evalSnapshot.hash, evalCase.id)}
+        ownerKind="case"
+        repositoryLabel="Case files"
+        onFileChange={onFileChange}
+        onLoadingChange={reportRouteLoading}
+      />
+    </section>
+  );
+}
+
+function sectionNavItemClass(active: boolean, className?: string): string {
+  return cn(
+    "rounded-md px-2 py-1 font-medium no-underline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+    active
+      ? "bg-muted text-foreground"
+      : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+    className,
+  );
+}
+
+function ActivitySurface({
+  hrefFor,
+  onRouteClick,
+  route: _route,
+  snapshot,
+}: {
+  hrefFor: (route: WorkbenchRoute) => string;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  route: Extract<WorkbenchRoute, { kind: "activity" }>;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const activeRuns = snapshot.runs.filter((run) => isRunActive(run, snapshot.jobs));
+  const inactiveRuns = snapshot.runs.filter((run) => !activeRuns.some((active) => active.id === run.id));
+  const runs = [
+    ...activeRuns.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    ...inactiveRuns.sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+  ];
+  if (runs.length === 0) {
+    return <EmptyState icon={ActivityIcon} title="No activity" message="Runs appear here after Workbench evaluates or improves a skill." variant="hero" size="sm" />;
+  }
+  return (
+    <section className="min-w-0" aria-label="Activity">
+      <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Run</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Kind</TableHead>
+              <TableHead>Agent</TableHead>
+              <TableHead>Evaluation</TableHead>
+              <TableHead>Score</TableHead>
+              <TableHead>Updated</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {runs.map((run) => {
+              const runRoute = createRunRoute({ runId: run.id, source: "activity" });
+              return (
+                <TableRow key={run.id} className="cursor-pointer" onClick={onRouteClick(runRoute)}>
+                  <TableCell>
+                    <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(runRoute)} onClick={onRouteClick(runRoute)}>
+                      {shortId(run.id)}
+                    </a>
+                  </TableCell>
+                  <TableCell><StatusBadge status={run.status} /></TableCell>
+                  <TableCell>{run.kind}</TableCell>
+                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{run.agentName}</TableCell>
+                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{formatEvaluationDisplayName(run.evalHash, snapshot.evals)}</TableCell>
+                  <TableCell>{formatScore(run.score)}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </section>
+  );
+}
+
+function RunDetailPage({
+  apiBasePath,
+  hrefFor,
+  inspectionCursor,
+  onRouteClick,
+  route,
+  snapshot,
+}: {
+  apiBasePath: string;
+  hrefFor: (route: WorkbenchRoute) => string;
+  inspectionCursor: string | null;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  route: Extract<WorkbenchRoute, { kind: "run" }>;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const run = snapshot.runs.find((entry) => entry.id === route.runId) ?? null;
+  if (!run) {
+    return <MissingObject label={`Run ${route.runId}`} />;
+  }
+  const jobs = snapshot.jobs.filter((job) => job.runId === run.id);
+  const summaryRoute = createRunRoute({
+    runId: run.id,
+    source: route.source,
+    evaluationId: route.evaluationId,
+    section: { kind: "summary" },
+  });
+  const selectedJobId = route.section.kind === "job" ? route.section.jobId : null;
+  const selectedJob = selectedJobId
+    ? jobs.find((job) => job.id === selectedJobId) ?? null
+    : null;
+  return (
+    <div className="grid min-w-0 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
+      <nav className="grid h-max gap-1 rounded-lg border border-border/70 bg-background p-2 text-sm" aria-label="Run sections">
+        <a
+          aria-current={route.section.kind === "summary" ? "page" : undefined}
+          className={sectionNavItemClass(route.section.kind === "summary")}
+          href={hrefFor(summaryRoute)}
+          onClick={onRouteClick(summaryRoute)}
+        >
+          Summary
+        </a>
+        {jobs.map((job) => {
+          const jobRoute = createRunRoute({
+            runId: run.id,
+            source: route.source,
+            evaluationId: route.evaluationId,
+            section: { kind: "job", jobId: job.id, view: "trace" },
+          });
+          const active = route.section.kind === "job" && route.section.jobId === job.id;
+          return (
+            <a
+              aria-current={active ? "page" : undefined}
+              className={sectionNavItemClass(active, "truncate")}
+              href={hrefFor(jobRoute)}
+              key={job.id}
+              onClick={onRouteClick(jobRoute)}
+            >
+              {job.caseId}
+            </a>
+          );
+        })}
+      </nav>
+      <div className="grid min-w-0 gap-5">
+        <DetailPageHeader
+          eyebrow={formatEvaluationDisplayName(run.evalHash, snapshot.evals)}
+          title={runDisplayTitle(run, snapshot)}
+          description={`${run.kind} run from ${formatTimestamp(run.createdAt)} with ${formatCount(jobs.length, "case result")}.`}
+        />
+        {route.section.kind === "summary" ? (
+          <>
+            <MetricStrip
+              items={[
+                { label: "Score", value: formatScore(run.score) },
+                { label: "Cases", value: formatRunCasePassSummary(jobs) },
+                { label: "Duration", value: formatDurationMs(run.latencyMs) },
+                { label: "Cost", value: formatRunCost(run) },
+              ]}
+            />
+            {run.error ? <ProblemState icon={CircleAlertIcon} title="Run error" message={run.error} align="start" /> : null}
+            <RunSummaryCaseTable
+              evaluationId={route.evaluationId}
+              hrefFor={hrefFor}
+              jobs={jobs}
+              onRouteClick={onRouteClick}
+              run={run}
+              snapshot={snapshot}
+              source={route.source}
+            />
+            <RunTimelineSummary jobs={jobs} run={run} snapshot={snapshot} />
+          </>
+        ) : selectedJob ? (
+          <JobResult
+            apiBasePath={apiBasePath}
+            evaluationId={route.evaluationId}
+            hrefFor={hrefFor}
+            inspectionCursor={inspectionCursor}
+            job={selectedJob}
+            onRouteClick={onRouteClick}
+            run={run}
+            snapshot={snapshot}
+            source={route.source}
+            view={route.section.view}
+          />
+        ) : (
+          <MissingObject label={`Case result ${selectedJobId ?? "unknown"}`} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RunSummaryCaseTable({
+  evaluationId,
+  hrefFor,
+  jobs,
+  onRouteClick,
+  run,
+  snapshot,
+  source,
+}: {
+  evaluationId: string | null;
+  hrefFor: (route: WorkbenchRoute) => string;
+  jobs: WorkbenchJob[];
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  run: WorkbenchRun;
+  snapshot: WorkbenchInspectionSnapshot;
+  source: "evaluation" | "activity";
+}) {
+  const evalSnapshot = selectedEvalSnapshot(snapshot, run.evalHash);
+  const casesById = new Map((evalSnapshot?.cases ?? []).map((evalCase) => [evalCase.id, evalCase]));
+  if (jobs.length === 0) {
+    return (
+      <SurfaceSection title="Case results" icon={FileTextIcon} headingLevel={3}>
+        <p className="text-sm text-muted-foreground">No case results are recorded for this run.</p>
+      </SurfaceSection>
+    );
+  }
+  return (
+    <SurfaceSection title="Case results" icon={FileTextIcon} headingLevel={3} description={formatRunCasePassSummary(jobs)}>
+      <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Case</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Score</TableHead>
+              <TableHead>Duration</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {jobs.map((job) => {
+              const jobRoute = createRunRoute({
+                runId: run.id,
+                source,
+                evaluationId,
+                section: { kind: "job", jobId: job.id, view: "trace" },
+              });
+              const evalCase = casesById.get(job.caseId);
+              const title = evalCase ? caseDisplayTitle(evalCase) : job.caseId;
+              return (
+                <TableRow key={job.id} className="cursor-pointer" onClick={onRouteClick(jobRoute)}>
+                  <TableCell className="align-top">
+                    <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(jobRoute)} onClick={onRouteClick(jobRoute)}>
+                      {title}
+                    </a>
+                    {evalCase && showCaseSecondaryId(evalCase) ? (
+                      <div className="text-xs text-muted-foreground">{job.caseId}</div>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="align-top"><StatusBadge status={job.status} /></TableCell>
+                  <TableCell className="align-top">{formatScore(job.score)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatDurationMs(job.durationMs)}</TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
       </div>
     </SurfaceSection>
   );
 }
 
-function versionsAheadOfPublished(
-  snapshot: WorkbenchInspectionSnapshot,
-  publishedId: string | null | undefined,
-  currentId: string | null | undefined,
-): number {
-  if (!publishedId || !currentId || publishedId === currentId) {
-    return 0;
-  }
-  const published = snapshot.versions.find((version) => version.id === publishedId);
-  if (!published) {
-    return 0;
-  }
-  return snapshot.versions.filter((version) => version.createdAt > published.createdAt).length;
-}
-
-function CopyField({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="shrink-0 text-xs font-medium text-muted-foreground">{label}</span>
-      <code className="min-w-0 truncate rounded border border-border/60 bg-muted/30 px-2 py-1 text-xs" title={value}>
-        {value}
-      </code>
-      <Button
-        aria-label={`Copy ${label}`}
-        size="icon-sm"
-        type="button"
-        variant="ghost"
-        onClick={() => {
-          void navigator.clipboard.writeText(value).then(() => {
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1_500);
-          });
-        }}
-      >
-        {copied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
-      </Button>
-    </div>
-  );
-}
-
-interface OverlayDialogContent {
-  title: string;
-  description: string;
-  body: ReactNode;
-  fill: boolean;
-}
-
-function WorkbenchOverlayDialog({
-  apiBasePath,
-  navigate,
-  route,
-  snapshot,
-}: {
-  apiBasePath: string;
-  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  const overlay = routeOverlay(route);
-  if (!overlay) {
-    return null;
-  }
-  const content = overlayDialogContent({ apiBasePath, route, snapshot });
-  if (!content) {
-    return null;
-  }
-  return (
-    <InspectorDialogShell
-      open
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) {
-          navigate(withOverlay(route, null));
-        }
-      }}
-      title={content.title}
-      description={content.description}
-      className="h-[min(94vh,calc(100dvh-1rem))]"
-      bodyClassName="flex h-full min-h-0 flex-col gap-4"
-      testId="workbench-overlay-dialog"
-      bodyTestId="workbench-overlay-dialog-body"
-    >
-      <div className="grid min-w-0 shrink-0 gap-1">
-        <h2 className="break-words text-base font-semibold text-foreground [overflow-wrap:anywhere]">{content.title}</h2>
-        <p className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{content.description}</p>
-      </div>
-      <div className={cn("min-h-0 min-w-0 flex-1", content.fill ? "overflow-hidden" : "overflow-y-auto")}>
-        {content.body}
-      </div>
-    </InspectorDialogShell>
-  );
-}
-
-function overlayDialogContent({
-  apiBasePath,
-  route,
-  snapshot,
-}: {
-  apiBasePath: string;
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-}): OverlayDialogContent | null {
-  const pane = routeInspector(route);
-  if (pane?.kind !== "version") {
-    return null;
-  }
-  const version = snapshot.versions.find((entry) => entry.id === pane.versionId) ?? null;
-  return {
-    title: `${versionNameFor(snapshot, pane.versionId)} files`,
-    description: version
-      ? `Browsing ${formatCount(version.files.length, "file")} from ${versionNameFor(snapshot, version.id)}.`
-      : "Version files",
-    fill: true,
-    body: version ? (
-      <ObjectFilesSurface
-        apiBasePath={apiBasePath}
-        ownerKind="version"
-        ownerId={version.id}
-        files={version.files}
-      />
-    ) : <MissingObject label={`Version ${pane.versionId}`} />,
-  };
-}
-
-function inspectorDescription(inspector: WorkbenchInspectorRoute, snapshot: WorkbenchInspectionSnapshot): string {
-  if (inspector.kind === "version") {
-    const version = snapshot.versions.find((entry) => entry.id === inspector.versionId) ?? null;
-    return version ? `${version.message} / ${formatTimestamp(version.createdAt)}` : "Version details";
-  }
-  if (inspector.kind === "run") {
-    const run = snapshot.runs.find((entry) => entry.id === inspector.runId) ?? null;
-    return run ? `${run.kind} / ${run.status} / ${formatScore(run.score)}` : "Run details";
-  }
-  if (inspector.kind === "job") {
-    const job = snapshot.jobs.find((entry) => entry.id === inspector.jobId) ?? null;
-    return job ? `${job.kind} / ${job.status} / ${formatScore(job.score)}` : "Case details";
-  }
-  if (inspector.kind === "skill-source") {
-    return "Skill source configuration";
-  }
-  return "Workbench details";
-}
-
-function inspectorBody({
-  apiBasePath,
-  hrefFor,
-  inspector,
-  navigate,
-  onRouteClick,
-  route,
-  snapshot,
-}: {
-  apiBasePath: string;
-  hrefFor: (route: WorkbenchRoute) => string;
-  inspector: WorkbenchInspectorRoute;
-  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  if (inspector.kind === "version") {
-    const version = snapshot.versions.find((entry) => entry.id === inspector.versionId) ?? null;
-    if (!version) {
-      return <MissingObject label={`Version ${inspector.versionId}`} />;
-    }
-    return (
-      <VersionDetail
-        version={version}
-        snapshot={snapshot}
-        route={route}
-        hrefFor={hrefFor}
-        onRouteClick={onRouteClick}
-      />
-    );
-  }
-  if (inspector.kind === "run") {
-    const run = snapshot.runs.find((entry) => entry.id === inspector.runId) ?? null;
-    if (!run) {
-      return <MissingObject label={`Run ${inspector.runId}`} />;
-    }
-    const jobs = snapshot.jobs.filter((job) => job.runId === run.id);
-    return (
-      <RunDetail
-        run={run}
-        jobs={jobs}
-        snapshot={snapshot}
-        route={route}
-        hrefFor={hrefFor}
-        onRouteClick={onRouteClick}
-      />
-    );
-  }
-  if (inspector.kind === "job") {
-    const job = snapshot.jobs.find((entry) => entry.id === inspector.jobId) ?? null;
-    if (!job) {
-      return <MissingObject label={`Case ${inspector.jobId}`} />;
-    }
-    return (
-      <JobDetail
-        apiBasePath={apiBasePath}
-        job={job}
-        traces={snapshot.traces.filter((trace) => job.traceIds.includes(trace.id) || trace.jobId === job.id)}
-        artifacts={snapshot.artifacts.filter((artifact) => job.artifactIds.includes(artifact.id))}
-        snapshot={snapshot}
-        route={route}
-        navigate={navigate}
-      />
-    );
-  }
-  if (inspector.kind === "skill-source") {
-    const skill = snapshot.skillSources.find((entry) => entry.name === inspector.skillName) ?? null;
-    return skill ? <SkillDetail skill={skill} /> : <MissingObject label={`Skill ${inspector.skillName}`} />;
-  }
-  return null;
-}
-
-function VersionDetail({
-  hrefFor,
-  onRouteClick,
-  route,
-  version,
-  snapshot,
-}: {
-  hrefFor: (route: WorkbenchRoute) => string;
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  route: WorkbenchRoute;
-  version: WorkbenchVersion;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  const runs = snapshot.runs.filter((run) => run.versionId === version.id);
-  const filesRoute = withOverlay(route, { kind: "version-files" });
-  const publishedId = publishedVersionId(snapshot);
-  return (
-    <div className="grid min-w-0 gap-6">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        {snapshot.status.currentVersionId === version.id ? <Badge variant="outline">current</Badge> : null}
-        {publishedId === version.id ? <Badge variant="outline">published</Badge> : null}
-      </div>
-      <FactGrid>
-        <FactItem title="Message" value={version.message} />
-        <FactItem title="Created" value={formatTimestamp(version.createdAt)} />
-      </FactGrid>
-      <PanelTriggerRow
-        title="Files"
-        summary={`Browse ${formatCount(version.files.length, "file")} from this version.`}
-        icon={FolderOpenIcon}
-        href={hrefFor(filesRoute)}
-        onClick={onRouteClick(filesRoute)}
-      />
-      <LinkedObjectTable
-        title="Runs"
-        icon={ActivityIcon}
-        rows={runs.map((run) => ({
-          id: run.id,
-          label: formatTimestamp(run.createdAt),
-          route: withInspector(route, { kind: "run", runId: run.id }),
-          cells: [run.kind, run.status, run.agentName, formatScore(run.score)],
-        }))}
-        idColumn="Run"
-        columns={["Kind", "Status", "Agent", "Score"]}
-        empty="No runs are linked to this version."
-        hrefFor={hrefFor}
-        onRouteClick={onRouteClick}
-      />
-    </div>
-  );
-}
-
-function RunDetail({
-  hrefFor,
+function RunTimelineSummary({
   jobs,
-  onRouteClick,
-  route,
   run,
   snapshot,
 }: {
-  hrefFor: (route: WorkbenchRoute) => string;
   jobs: WorkbenchJob[];
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  route: WorkbenchRoute;
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const outputVersionLabel = run.outputVersionId
-    ? versionNameFor(snapshot, run.outputVersionId)
-    : null;
-  const evaluationLabel = formatEvaluationDisplayName(run.evalHash, snapshot.evals);
-  const evaluationDetail = formatEvaluationDisplayDetail(run.evalHash, snapshot.evals);
+  const traces = snapshot.traces.filter((trace) => trace.runId === run.id || run.traceIds.includes(trace.id));
+  const eventBatches = snapshot.executionEvents.filter((batch) => batch.runId === run.id);
+  const eventCount = eventBatches.reduce((count, batch) => count + batch.events.length, 0);
+  const startedAt = jobs
+    .map((job) => job.startedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()[0] ?? run.createdAt;
+  const finishedAt = run.finishedAt ?? jobs
+    .map((job) => job.finishedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1) ?? null;
+
   return (
-    <div className="grid min-w-0 gap-6">
-      <FactGrid>
-        <FactItem title="Status" value={run.status} />
-        <FactItem title="Score" value={formatScore(run.score)} />
-        <FactItem title="Evaluation" value={evaluationLabel} detail={evaluationDetail} />
-        <FactItem title="Agent" value={run.agentName} />
-        <FactItem title="Latency" value={formatDurationMs(run.latencyMs)} />
-        <FactItem title="Cost" value={formatRunCost(run)} />
-        <FactItem title="Started" value={formatTimestamp(run.createdAt)} />
-        {outputVersionLabel ? <FactItem title="Improved into" value={outputVersionLabel} /> : null}
-      </FactGrid>
-      {run.error ? <ProblemState icon={CircleAlertIcon} title="Run error" message={run.error} align="start" /> : null}
-      <LinkedObjectTable
-        title="Case results"
-        icon={ActivityIcon}
-        rows={jobs.map((job) => ({
-          id: job.id,
-          label: job.caseId,
-          route: withInspector(route, { kind: "job", jobId: job.id }),
-          cells: [job.status, formatScore(job.score), formatDurationMs(job.durationMs)],
-        }))}
-        idColumn="Case"
-        columns={["Status", "Score", "Duration"]}
-        empty="No case results are recorded for this run."
-        hrefFor={hrefFor}
-        onRouteClick={onRouteClick}
-      />
-    </div>
+    <SurfaceSection
+      title="Timeline"
+      icon={ActivityIcon}
+      headingLevel={3}
+      description={`Execution trace / ${formatCount(traces.length, "trace")} / ${formatCount(eventCount, "event")}`}
+    >
+      <div className="grid min-w-0 gap-3 rounded-lg border border-border/70 bg-background p-4">
+        <FactGrid>
+          <FactItem title="Created" value={formatTimestamp(run.createdAt)} />
+          <FactItem title="Started" value={formatTimestamp(startedAt)} />
+          <FactItem title="Finished" value={finishedAt ? formatTimestamp(finishedAt) : "Still running"} />
+        </FactGrid>
+      </div>
+    </SurfaceSection>
   );
 }
 
-const CASE_VIEW_ITEMS: Array<{
-  value: WorkbenchCaseView;
-  label: string;
-  icon: typeof WorkflowIcon;
-}> = [
-  { value: "output", label: "Output", icon: ArchiveIcon },
-  { value: "timeline", label: "Timeline", icon: ActivityIcon },
-];
-
-function isCaseView(value: string): value is WorkbenchCaseView {
-  return value === "output" || value === "timeline";
+function formatRunCasePassSummary(jobs: readonly WorkbenchJob[]): string {
+  if (jobs.length === 0) {
+    return "No cases";
+  }
+  const passed = jobs.filter((job) => job.status === "succeeded").length;
+  return `${passed} / ${jobs.length} passed`;
 }
 
-function JobDetail({
+function JobResult({
   apiBasePath,
-  artifacts,
+  evaluationId,
+  hrefFor,
+  inspectionCursor,
   job,
-  navigate,
-  route,
+  onRouteClick,
+  run,
   snapshot,
-  traces,
+  source,
+  view,
 }: {
   apiBasePath: string;
-  artifacts: WorkbenchArtifact[];
+  evaluationId: string | null;
+  hrefFor: (route: WorkbenchRoute) => string;
+  inspectionCursor: string | null;
   job: WorkbenchJob;
-  navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
-  route: WorkbenchRoute;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
-  traces: WorkbenchTrace[];
+  source: "evaluation" | "activity";
+  view: WorkbenchJobEvidenceView;
 }) {
-  const view = routeCaseView(route);
-  const evaluationLabel = formatEvaluationDisplayName(job.evalHash, snapshot.evals);
-  const evaluationDetail = formatEvaluationDisplayDetail(job.evalHash, snapshot.evals);
+  const traces = snapshot.traces.filter((trace) => job.traceIds.includes(trace.id) || trace.jobId === job.id);
+  const artifacts = snapshot.artifacts.filter((artifact) => job.artifactIds.includes(artifact.id));
+  const caseTitle = job.caseId ?? job.id;
   return (
-    <div className="grid min-w-0 gap-6">
+    <section className="grid min-w-0 gap-4" aria-label={`${caseTitle} evidence`}>
+      <div className="flex min-w-0 flex-col gap-3 border-b border-border/70 pb-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="grid min-w-0 gap-1">
+          <div className="text-xs font-medium text-muted-foreground">Case result</div>
+          <h2 className="break-words text-xl font-semibold leading-tight text-foreground [overflow-wrap:anywhere]">{caseTitle}</h2>
+          <p className="break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">{job.id}</p>
+        </div>
+        <JobEvidenceViewNav
+          evaluationId={evaluationId}
+          hrefFor={hrefFor}
+          job={job}
+          onRouteClick={onRouteClick}
+          run={run}
+          source={source}
+          view={view}
+        />
+      </div>
       <FactGrid>
-        <FactItem title="Status" value={job.status} />
-        <FactItem title="Score" value={formatScore(job.score)} />
-        <FactItem title="Duration" value={formatDurationMs(job.durationMs)} />
-        <FactItem title="Agent" value={job.agentName} />
-        <FactItem title="Evaluation" value={evaluationLabel} detail={evaluationDetail} />
+        <FactItem title="Case status" value={job.status} />
+        <FactItem title="Case score" value={formatScore(job.score)} />
+        <FactItem title="Case duration" value={formatDurationMs(job.durationMs)} />
       </FactGrid>
       {job.error ? <ProblemState icon={CircleAlertIcon} title="Case error" message={job.error} align="start" /> : null}
-      <ViewSwitch
-        ariaLabel="Case views"
-        value={view}
-        items={CASE_VIEW_ITEMS}
-        onValueChange={(value) => {
-          if (isCaseView(value)) {
-            navigate(withCaseView(route, value));
-          }
-        }}
-      />
-      {view === "timeline" ? (
+      {view === "trace" ? (
         <JobEvidencePanel
           apiBasePath={apiBasePath}
           jobStatus={job.status}
+          refreshToken={job.status === "queued" || job.status === "running" ? inspectionCursor : null}
           runId={job.runId}
           jobId={job.id}
         />
       ) : (
-        <CaseOutputView
-          apiBasePath={apiBasePath}
-          artifacts={artifacts}
-          job={job}
-          traces={traces}
-        />
+        <CaseOutputView apiBasePath={apiBasePath} artifacts={artifacts} job={job} traces={traces} />
       )}
-    </div>
+    </section>
+  );
+}
+
+function JobEvidenceViewNav({
+  evaluationId,
+  hrefFor,
+  job,
+  onRouteClick,
+  run,
+  source,
+  view,
+}: {
+  evaluationId: string | null;
+  hrefFor: (route: WorkbenchRoute) => string;
+  job: WorkbenchJob;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  run: WorkbenchRun;
+  source: "evaluation" | "activity";
+  view: WorkbenchJobEvidenceView;
+}) {
+  const views: Array<{ value: WorkbenchJobEvidenceView; label: string; icon: typeof ActivityIcon }> = [
+    { value: "trace", label: "Trace", icon: ActivityIcon },
+    { value: "output", label: "Output", icon: ArchiveIcon },
+  ];
+  return (
+    <nav className="flex shrink-0 flex-wrap items-center gap-1 rounded-lg border border-border/70 bg-background p-1 text-sm" aria-label="Case result evidence">
+      {views.map((item) => {
+        const route = createRunRoute({
+          runId: run.id,
+          source,
+          evaluationId,
+          section: { kind: "job", jobId: job.id, view: item.value },
+        });
+        const active = item.value === view;
+        const Icon = item.icon;
+        return (
+          <a
+            aria-current={active ? "page" : undefined}
+            className={cn(
+              "inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 font-medium text-muted-foreground no-underline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              active ? "bg-muted text-foreground" : "hover:bg-muted/55 hover:text-foreground",
+            )}
+            href={hrefFor(route)}
+            key={item.value}
+            onClick={onRouteClick(route)}
+          >
+            <Icon aria-hidden="true" className="size-3.5" />
+            {item.label}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
+function LinkedRunTable({
+  empty,
+  evaluationId,
+  hrefFor,
+  jobs,
+  onRouteClick,
+  snapshot,
+  source,
+  title,
+}: {
+  empty: string;
+  evaluationId: string | null;
+  hrefFor: (route: WorkbenchRoute) => string;
+  jobs: WorkbenchJob[];
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+  source: "evaluation" | "activity";
+  title: string;
+}) {
+  const runs = uniqueRunsForJobs(snapshot, jobs);
+  return (
+    <section className="min-w-0" aria-label={title}>
+      {runs.length > 0 ? (
+        <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Run</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Agent</TableHead>
+                <TableHead>Score</TableHead>
+                <TableHead>Updated</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {runs.map((run) => {
+                const runRoute = createRunRoute({ runId: run.id, source, evaluationId });
+                return (
+                  <TableRow key={run.id} className="cursor-pointer" onClick={onRouteClick(runRoute)}>
+                    <TableCell>
+                      <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(runRoute)} onClick={onRouteClick(runRoute)}>
+                        {shortId(run.id)}
+                      </a>
+                    </TableCell>
+                    <TableCell><StatusBadge status={run.status} /></TableCell>
+                    <TableCell>{run.agentName}</TableCell>
+                    <TableCell>{formatScore(run.score)}</TableCell>
+                    <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">{empty}</p>
+      )}
+    </section>
+  );
+}
+
+function RouteSidebar({
+  hostContext,
+  identity,
+  route,
+  snapshot,
+}: {
+  hostContext: WorkbenchHostContext | undefined;
+  identity: SkillIdentity;
+  route: WorkbenchRoute;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  if (route.kind === "case") {
+    const evalSnapshot = selectedEvalSnapshot(snapshot, route.evaluationId);
+    const evalCase = evalSnapshot?.cases.find((entry) => entry.id === route.caseId) ?? null;
+    if (evalSnapshot && evalCase) {
+      return (
+        <CaseContextSidebar
+          evalCase={evalCase}
+          evalSnapshot={evalSnapshot}
+          snapshot={snapshot}
+        />
+      );
+    }
+  }
+  if (route.kind === "run") {
+    const run = snapshot.runs.find((entry) => entry.id === route.runId) ?? null;
+    if (run) {
+      return <RunContextSidebar run={run} snapshot={snapshot} />;
+    }
+  }
+  return <AboutSidebar identity={identity} snapshot={snapshot} hostContext={hostContext} />;
+}
+
+function CaseContextSidebar({
+  evalCase,
+  evalSnapshot,
+  snapshot,
+}: {
+  evalCase: WorkbenchEvalCaseSnapshot;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const jobs = jobsForCase(snapshot, evalSnapshot.hash, evalCase.id);
+  const latest = latestJob(jobs);
+  return (
+    <aside className="grid min-w-0 gap-4 rounded-lg border border-border/70 bg-background p-4 text-sm xl:sticky xl:top-6">
+      <div className="grid gap-1">
+        <h2 className="text-sm font-semibold">Case</h2>
+        <div className="break-words font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">{evalCase.id}</div>
+      </div>
+      <FactGrid>
+        <FactItem title="Path" value={evalCase.path} />
+        <FactItem title="Files" value={formatCount(evalCase.files.length, "file")} />
+        <FactItem title="Runs" value={formatCount(jobs.length, "run")} />
+        <FactItem title="Latest" value={latest ? <StatusBadge status={latest.status} /> : "Not run"} />
+      </FactGrid>
+      <div className="grid gap-1">
+        <h3 className="text-sm font-semibold">Evaluation</h3>
+        <div className="text-sm text-muted-foreground">{formatEvaluationDisplayName(evalSnapshot.hash, snapshot.evals)}</div>
+        <div className="text-xs text-muted-foreground">{formatEvaluationDisplayDetail(evalSnapshot.hash, snapshot.evals)}</div>
+      </div>
+    </aside>
+  );
+}
+
+function RunContextSidebar({
+  run,
+  snapshot,
+}: {
+  run: WorkbenchRun;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  return (
+    <aside className="grid min-w-0 gap-4 rounded-lg border border-border/70 bg-background p-4 text-sm xl:sticky xl:top-6">
+      <div className="grid gap-1">
+        <h2 className="text-sm font-semibold">Run</h2>
+        <div className="break-words font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">{run.id}</div>
+      </div>
+      <FactGrid>
+        <FactItem title="Status" value={<StatusBadge status={run.status} />} />
+        <FactItem title="Kind" value={run.kind} />
+        <FactItem title="Version" value={formatVersionDisplayName(run.versionId, snapshot.versions, comparisonLabelContext(snapshot))} />
+        <FactItem title="Agent" value={run.agentName} />
+        <FactItem title="Evaluation" value={formatEvaluationDisplayName(run.evalHash, snapshot.evals)} />
+      </FactGrid>
+    </aside>
+  );
+}
+
+function AboutSidebar({
+  hostContext,
+  identity,
+  snapshot,
+}: {
+  hostContext: WorkbenchHostContext | undefined;
+  identity: SkillIdentity;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const casesCount = snapshot.evals.reduce((total, entry) => total + entry.caseCount, 0);
+  return (
+    <aside className="grid min-w-0 gap-4 rounded-lg border border-border/70 bg-background p-4 text-sm xl:sticky xl:top-6">
+      <div className="grid gap-1">
+        <h2 className="text-sm font-semibold">About</h2>
+        <p className="break-words text-muted-foreground [overflow-wrap:anywhere]">{identity.description ?? "Workbench skill source."}</p>
+      </div>
+      <FactGrid>
+        <FactItem title="Current" value={snapshot.status.currentVersionId ? versionNameFor(snapshot, snapshot.status.currentVersionId) : "none"} />
+        <FactItem title="Published" value={publishedVersionId(snapshot) ? versionNameFor(snapshot, publishedVersionId(snapshot)) : "none"} />
+        <FactItem title="Evaluations" value={formatCount(snapshot.evals.length, "evaluation")} />
+        <FactItem title="Cases" value={formatCount(casesCount, "case")} />
+        <FactItem title="Runs" value={formatCount(snapshot.runs.length, "run")} />
+        {hostContext?.ownerSlug ? <FactItem title="Owner" value={hostContext.ownerSlug} /> : null}
+        {hostContext?.sourceVisibility ? <FactItem title="Visibility" value={hostContext.sourceVisibility} /> : null}
+        {hostContext?.evidenceAccess ? <FactItem title="Access" value={hostContext.evidenceAccess === "full" ? "full evidence" : "source only"} /> : null}
+      </FactGrid>
+    </aside>
   );
 }
 
@@ -1202,17 +2286,7 @@ function CaseOutputView({
     );
   }
   return (
-    <div className="grid min-w-0 gap-2">
-      <p className="text-sm text-muted-foreground">What the skill produced for {job.caseId}.</p>
-      <div className="h-[clamp(20rem,calc(100dvh-26rem),48rem)] overflow-hidden">
-        <ObjectFilesSurface
-          apiBasePath={apiBasePath}
-          ownerKind={owner.kind}
-          ownerId={owner.id}
-          files={owner.files}
-        />
-      </div>
-    </div>
+    <OutputFilesSurface apiBasePath={apiBasePath} ownerKind={owner.kind} ownerId={owner.id} files={owner.files} />
   );
 }
 
@@ -1220,24 +2294,22 @@ function JobEvidencePanel({
   apiBasePath,
   jobId,
   jobStatus,
+  refreshToken,
   runId,
 }: {
   apiBasePath: string;
   jobId: string;
   jobStatus: WorkbenchJob["status"];
+  refreshToken: string | null;
   runId: string;
 }) {
-  const evidence = useJobEvidence({
-    apiBasePath,
-    jobId,
-    runId,
-    poll: jobStatus === "queued" || jobStatus === "running",
-  });
+  const evidence = useJobEvidence({ apiBasePath, jobId, runId, refreshToken });
   const execution = evidence.detail?.executions.find((entry) => entry.jobIds.includes(jobId)) ?? null;
   const timeline = useMemo(
     () => buildExecutionTraceTimeline({ trace: execution?.trace as ExecutionTrace | null }),
     [execution?.trace],
   );
+  useRouteLoadingSignal(evidence.loading && !execution);
 
   const isActiveJob = jobStatus === "queued" || jobStatus === "running";
   if (!execution && isActiveJob) {
@@ -1260,52 +2332,23 @@ function JobEvidencePanel({
     return <EmptyState icon={ActivityIcon} title="No timeline evidence" message={isActiveJob ? "Waiting for live trace events." : "No trace events were recorded for this job."} size="sm" />;
   }
   return (
-    <div className="grid min-w-0 gap-4">
+    <section className="grid min-w-0 gap-4" aria-label="Trace">
+      <div className="grid min-w-0 gap-1">
+        <h3 className="text-base font-semibold">Trace</h3>
+        <p className="text-sm text-muted-foreground">Execution timeline and recorded trace events for this case run.</p>
+      </div>
       <FactGrid>
-        <FactItem title="Status" value={execution.status} />
+        <FactItem title="Execution status" value={execution.status} />
         <FactItem title="Sessions" value={formatCount(execution.sessions.length, "session")} />
         <FactItem title="Events" value={formatCount(execution.trace.events.length, "event")} />
         <FactItem title="Spans" value={formatCount(execution.trace.spans.length, "span")} />
       </FactGrid>
       <ExecutionTraceTimeline executionTimeline={timeline} layout="content" />
-    </div>
+    </section>
   );
 }
 
-function PanelTriggerRow({
-  href,
-  icon: Icon,
-  onClick,
-  summary,
-  title,
-}: {
-  href: string;
-  icon: typeof WorkflowIcon;
-  onClick: (event: MouseEvent<HTMLElement>) => void;
-  summary?: ReactNode;
-  title: string;
-}) {
-  return (
-    <a
-      className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border/70 bg-background px-3 py-3 text-sm text-foreground no-underline transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      href={href}
-      onClick={onClick}
-    >
-      <span className="flex min-w-0 items-center gap-3">
-        <Icon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-        <span className="grid min-w-0 gap-0.5">
-          <span className="font-medium">{title}</span>
-          {summary ? (
-            <span className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{summary}</span>
-          ) : null}
-        </span>
-      </span>
-      <ChevronRightIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-    </a>
-  );
-}
-
-function ObjectFilesSurface({
+function OutputFilesSurface({
   apiBasePath,
   files,
   ownerId,
@@ -1318,408 +2361,73 @@ function ObjectFilesSurface({
 }) {
   const [file, setFile] = useState<WorkbenchFileRouteState>(() => emptyFileRouteState());
   return (
-    <div className="h-full min-h-0 overflow-hidden">
-      <FileBrowserSurface
-        apiBasePath={apiBasePath}
-        ownerKind={ownerKind}
-        ownerId={ownerId}
-        files={files}
-        title="Files"
-        description="Captured files for this object."
-        file={file}
-        showHeader={false}
-        onFileChange={(nextFile) => setFile(nextFile)}
-      />
-    </div>
+    <OutputRepositorySurface
+      apiBasePath={apiBasePath}
+      ownerKind={ownerKind}
+      ownerId={ownerId}
+      files={files}
+      file={file}
+      onFileChange={(nextFile) => setFile(nextFile)}
+    />
   );
 }
 
-function FileBrowserSurface({
+function OutputRepositorySurface({
   apiBasePath,
-  description,
   file,
   files,
   onFileChange,
   ownerId,
   ownerKind,
-  showHeader = true,
-  title,
 }: {
   apiBasePath: string;
-  description: string;
   file: WorkbenchFileRouteState;
   files: readonly SurfaceSnapshotFile[];
   onFileChange: (file: WorkbenchFileRouteState, options?: { replace?: boolean }) => void;
   ownerId: string;
   ownerKind: WorkbenchFileOwnerKind;
-  showHeader?: boolean;
-  title: string;
 }) {
-  const prefersStackedFilesLayout = useMediaQuery(STACKED_FILES_QUERY);
-  const selectedFilePath = files.some((entry) => entry.path === file.filePath)
-    ? file.filePath
-    : preferredFilePath(files);
-  const directoryPath = file.directoryPath ?? directoryPathForFile(selectedFilePath);
-  const previewMode = file.previewMode;
-  const previewState = useInspectionFilePreview({
-    apiBasePath,
-    ownerKind,
-    ownerId,
-    path: selectedFilePath,
-    previewMode,
-    files,
-  });
+  const reportRouteLoading = useRouteLoadingReporter();
 
-  useEffect(() => {
-    if (selectedFilePath && selectedFilePath !== file.filePath) {
-      onFileChange({
-        filePath: selectedFilePath,
-        directoryPath: directoryPathForFile(selectedFilePath),
-        previewMode,
-      }, { replace: true });
-    }
-  }, [file.filePath, onFileChange, previewMode, selectedFilePath]);
-
-  const browser = (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <FilesBrowser
-        changes={surfaceFilesToChanges(files)}
-        selectedFilePath={selectedFilePath}
-        browseMode="folders"
-        currentDirectory={directoryPath}
-        previewMode={previewMode}
-        availablePreviewModes={supportedPreviewModes()}
-        preview={previewState.preview}
-        changesError={null}
-        previewError={previewState.error}
-        isPreviewLoading={previewState.loading}
-        layout={prefersStackedFilesLayout ? "stacked" : "split"}
-        emptyMessage="No files are available for this object."
-        emptySelectionMessage="Select a file to preview."
-        listErrorMessage="Couldn't load the file list."
-        previewErrorMessage="Couldn't load the file preview."
-        onSelectFile={(filePath) => {
-          onFileChange({
-            filePath,
-            directoryPath: directoryPathForFile(filePath),
-            previewMode,
-          });
-        }}
-        onDirectoryChange={(nextDirectoryPath) => {
-          onFileChange({
-            filePath: selectedFilePath,
-            directoryPath: nextDirectoryPath,
-            previewMode,
-          });
-        }}
-        onPreviewModeChange={(nextPreviewMode) => {
-          onFileChange({
-            filePath: selectedFilePath,
-            directoryPath,
-            previewMode: nextPreviewMode,
-          });
-        }}
+  return (
+    <section className="grid min-w-0 gap-4" aria-label="Output">
+      <div className="grid min-w-0 gap-1">
+        <h3 className="text-base font-semibold">Output</h3>
+        <p className="text-sm text-muted-foreground">Captured files produced by this case run.</p>
+      </div>
+      <RepositoryFilesView
+        apiBasePath={apiBasePath}
+        file={file}
+        files={files}
+        ownerId={ownerId}
+        ownerKind={ownerKind}
+        repositoryLabel="Output files"
+        onFileChange={onFileChange}
+        onLoadingChange={reportRouteLoading}
       />
-    </div>
-  );
-
-  if (!showHeader) {
-    return <div className="flex h-full min-h-0 min-w-0 flex-col">{browser}</div>;
-  }
-
-  return (
-    <SurfaceSection
-      title={title}
-      icon={FolderOpenIcon}
-      description={selectedFilePath ? `Previewing ${selectedFilePath}. ${description}` : description}
-      className="flex h-full min-h-0 flex-col"
-    >
-      {browser}
-    </SurfaceSection>
-  );
-}
-
-function VersionHistoryList({
-  route,
-  snapshot,
-  hrefFor,
-  onRouteClick,
-}: {
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-  hrefFor: (route: WorkbenchRoute) => string;
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-}) {
-  const versions = snapshot.versions;
-  if (versions.length === 0) {
-    return (
-      <EmptyState
-        icon={HistoryIcon}
-        title="No versions"
-        message="Versions appear after Workbench observes skill source."
-        variant="hero"
-        size="sm"
-      />
-    );
-  }
-  const publishedId = publishedVersionId(snapshot);
-  const orderedVersions = [...versions].sort((left, right) =>
-    right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id)
-  );
-  const runsByVersion = new Map<string, WorkbenchRun[]>();
-  const latestScoredRunByVersion = new Map<string, WorkbenchRun>();
-  for (const run of snapshot.runs) {
-    const versionRuns = runsByVersion.get(run.versionId) ?? [];
-    versionRuns.push(run);
-    runsByVersion.set(run.versionId, versionRuns);
-    if (typeof run.score === "number") {
-      const latest = latestScoredRunByVersion.get(run.versionId);
-      if (!latest || run.createdAt > latest.createdAt) {
-        latestScoredRunByVersion.set(run.versionId, run);
-      }
-    }
-  }
-  const improvedFromByChild = new Map<string, string>();
-  for (const edge of snapshot.lineage) {
-    if (edge.reason === "improve") {
-      improvedFromByChild.set(edge.childId, edge.parentId);
-    }
-  }
-  return (
-    <div className="grid min-w-0 gap-3">
-      {orderedVersions.map((version) => {
-        const runs = runsByVersion.get(version.id) ?? [];
-        const latestScore = latestScoredRunByVersion.get(version.id)?.score;
-        const improvedFromId = improvedFromByChild.get(version.id);
-        const active = snapshot.status.currentVersionId === version.id;
-        const versionRoute = withInspector(route, { kind: "version", versionId: version.id });
-        return (
-          <a
-            aria-current={active ? "page" : undefined}
-            className={cn(
-              "grid min-w-0 gap-2 rounded-lg border px-3 py-3 text-sm no-underline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              active
-                ? "border-primary/45 bg-primary/5 text-foreground"
-                : "border-border/70 bg-background text-foreground hover:bg-muted/45",
-            )}
-            href={hrefFor(versionRoute)}
-            key={version.id}
-            onClick={onRouteClick(versionRoute)}
-          >
-            <div className="flex min-w-0 items-start justify-between gap-3">
-              <div className="grid min-w-0 gap-1">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <span className="break-words font-semibold [overflow-wrap:anywhere]">{versionNameFor(snapshot, version.id)}</span>
-                  {active ? <Badge variant="outline">current</Badge> : null}
-                  {version.id === publishedId ? <Badge variant="outline">published</Badge> : null}
-                  {improvedFromId ? (
-                    <Badge variant="outline" className="gap-1">
-                      <SparklesIcon aria-hidden="true" className="size-3" />
-                      improved from {versionNameFor(snapshot, improvedFromId)}
-                    </Badge>
-                  ) : null}
-                </div>
-                <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">{version.message}</span>
-              </div>
-              <HistoryIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-            </div>
-            <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              <span>{formatTimestamp(version.createdAt)}</span>
-              {typeof latestScore === "number" ? <span>score {formatScore(latestScore)}</span> : null}
-              {runs.length > 0 ? <span>{formatCount(runs.length, "run")}</span> : null}
-            </div>
-          </a>
-        );
-      })}
-    </div>
-  );
-}
-
-function VersionLineageSurface({
-  navigate,
-  route,
-  snapshot,
-}: {
-  navigate: (route: WorkbenchRoute) => void;
-  route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  if (snapshot.lineage.length === 0) {
-    return (
-      <EmptyState
-        icon={GitBranchIcon}
-        title="No lineage"
-        message="Version parent-child edges appear after source changes, improves, switches, or publishes."
-        variant="hero"
-        size="sm"
-      />
-    );
-  }
-  return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col p-1">
-      <LineageGraph
-        currentVersionId={snapshot.status.currentVersionId}
-        publishedVersionId={publishedVersionId(snapshot)}
-        lineage={snapshot.lineage}
-        runs={snapshot.runs}
-        versions={snapshot.versions}
-        onVersionClick={(versionId) => navigate(withInspector(route, { kind: "version", versionId }))}
-      />
-    </div>
-  );
-}
-
-function SkillsList({
-  skills,
-  hrefFor,
-  onRouteClick,
-  route,
-}: {
-  skills: WorkbenchSkillSource[];
-  hrefFor: (route: WorkbenchRoute) => string;
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  route: WorkbenchRoute;
-}) {
-  if (skills.length === 0) {
-    return <EmptyState icon={SparklesIcon} title="No skill sources" message="No skill sources are configured." variant="hero" size="sm" />;
-  }
-  return (
-    <div className="grid min-w-0 gap-2">
-      {skills.map((skill) => {
-        const skillRoute = withInspector(route, { kind: "skill-source", skillName: skill.name });
-        return (
-          <a
-            className="grid min-w-0 gap-1 rounded-lg border border-border/70 bg-background px-3 py-3 text-sm text-foreground no-underline transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            href={hrefFor(skillRoute)}
-            key={skill.name}
-            onClick={onRouteClick(skillRoute)}
-          >
-            <span className="font-medium">{skill.name}</span>
-            <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">{skillSourceLocation(skill)}</span>
-            <span className="text-xs text-muted-foreground">{skill.kind} / {formatCount(skill.includes?.length ?? 0, "include")}</span>
-          </a>
-        );
-      })}
-    </div>
-  );
-}
-
-function SkillDetail({
-  skill,
-}: {
-  skill: WorkbenchSkillSource;
-}) {
-  return (
-    <div className="grid min-w-0 gap-6">
-      <FactGrid>
-        <FactItem title="Kind" value={skill.kind} />
-        <FactItem title="Location" value={skillSourceLocation(skill)} />
-        <FactItem title="Includes" value={formatCount(skill.includes?.length ?? 0, "skill")} />
-      </FactGrid>
-      <SurfaceSection title="Included Skills" icon={SparklesIcon}>
-        {skill.includes && skill.includes.length > 0 ? (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Kind</TableHead>
-                <TableHead>Location</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {skill.includes.map((include) => (
-                <TableRow key={include.name}>
-                  <TableCell className="font-medium">{include.name}</TableCell>
-                  <TableCell>{include.kind}</TableCell>
-                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{skillSourceLocation(include)}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        ) : (
-          <p className="text-sm text-muted-foreground">No included skills are configured.</p>
-        )}
-      </SurfaceSection>
-    </div>
-  );
-}
-
-function LinkedObjectTable({
-  title,
-  icon,
-  rows,
-  columns,
-  empty,
-  hrefFor,
-  onRouteClick,
-  idColumn = "ID",
-}: {
-  title: string;
-  icon: typeof WorkflowIcon;
-  rows: Array<{ id: string; label?: string; route: WorkbenchRoute; cells: string[] }>;
-  columns: string[];
-  empty: string;
-  hrefFor: (route: WorkbenchRoute) => string;
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  idColumn?: string;
-}) {
-  return (
-    <SurfaceSection title={title} icon={icon}>
-      {rows.length > 0 ? (
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{idColumn}</TableHead>
-                {columns.map((column) => <TableHead key={column}>{column}</TableHead>)}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((row) => (
-                <TableRow key={row.id} className="cursor-pointer" onClick={onRouteClick(row.route)}>
-                  <TableCell>
-                    <a
-                      className="font-medium text-primary underline-offset-4 hover:underline"
-                      href={hrefFor(row.route)}
-                      onClick={onRouteClick(row.route)}
-                    >
-                      {row.label ?? row.id}
-                    </a>
-                  </TableCell>
-                  {row.cells.map((cell, index) => (
-                    <TableCell key={`${row.id}-${columns[index]}`} className="break-words text-muted-foreground [overflow-wrap:anywhere]">
-                      {cell}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">{empty}</p>
-      )}
-    </SurfaceSection>
+    </section>
   );
 }
 
 function WorkbenchBreadcrumbs({
+  className,
   hrefFor,
   onRouteClick,
   route,
   snapshot,
 }: {
+  className?: string;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   route: WorkbenchRoute;
-  snapshot: WorkbenchInspectionSnapshot | null;
+  snapshot: WorkbenchInspectionSnapshot;
 }) {
   const items = breadcrumbItems(route, snapshot);
   if (items.length === 0) {
     return null;
   }
   return (
-    <Breadcrumb className="min-w-0">
+    <Breadcrumb className={cn("min-w-0", className)}>
       <BreadcrumbList className="min-w-0 flex-nowrap">
         {items.map((item, index) => {
           const isLast = index === items.length - 1;
@@ -1743,6 +2451,37 @@ function WorkbenchBreadcrumbs({
   );
 }
 
+function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSnapshot | null): Array<{ label: string; route?: WorkbenchRoute }> {
+  if (route.kind === "files") {
+    return [];
+  }
+  if (route.kind === "evaluation") {
+    return [{ label: route.view === "cases" ? "Cases" : "Results" }];
+  }
+  if (route.kind === "case") {
+    return [
+      { label: "Cases", route: createEvaluationRoute({ view: "cases", evaluationId: route.evaluationId }) },
+      { label: route.caseId },
+    ];
+  }
+  if (route.kind === "activity") {
+    return [{ label: "Activity" }];
+  }
+  if (route.kind === "run") {
+    const run = snapshot?.runs.find((entry) => entry.id === route.runId) ?? null;
+    return [
+      {
+        label: route.source === "activity" ? "Activity" : "Results",
+        route: route.source === "activity"
+          ? createActivityRoute()
+          : createEvaluationRoute({ view: "results", evaluationId: route.evaluationId }),
+      },
+      { label: run && snapshot ? runDisplayTitle(run, snapshot) : shortId(route.runId) },
+    ];
+  }
+  return [{ label: "Not found" }];
+}
+
 function WorkbenchActivitySummary({
   snapshot,
   loading,
@@ -1758,9 +2497,7 @@ function WorkbenchActivitySummary({
 }) {
   const activeWork = activeWorkbenchWork(snapshot);
   const lastUpdatedAt = latestSnapshotTimestamp(snapshot);
-  const label = loading && !lastUpdatedAt
-    ? "Loading state"
-    : activeWorkbenchWorkLabel(activeWork);
+  const label = loading && !lastUpdatedAt ? "Loading state" : activeWorkbenchWorkLabel(activeWork);
   const secondary = activitySecondaryLabel(snapshot, lastUpdatedAt, refreshing, error);
   const tone = badgeToneProps(error
     ? "destructive"
@@ -1769,11 +2506,7 @@ function WorkbenchActivitySummary({
       : "outline");
   return (
     <div data-testid="workbench-activity-summary" className="flex min-w-0 items-center justify-start gap-2 text-xs md:justify-end">
-      <Badge
-        variant={tone.variant}
-        className={cn("max-w-[11rem] truncate", tone.className)}
-        title={label}
-      >
+      <Badge variant={tone.variant} className={cn("max-w-[11rem] truncate", tone.className)} title={label}>
         {label}
       </Badge>
       <span className="hidden min-w-0 max-w-[14rem] truncate text-muted-foreground lg:inline" title={secondary}>
@@ -1807,11 +2540,7 @@ function activeWorkbenchWork(snapshot: WorkbenchInspectionSnapshot): WorkbenchAc
   const orphanRunningRuns = snapshot.runs.filter((run) => run.status === "running" && !activeJobRunIds.has(run.id));
   const running = activeJobs.filter((job) => job.status === "running").length + orphanRunningRuns.length;
   const queued = activeJobs.filter((job) => job.status === "queued").length;
-  return {
-    queued,
-    running,
-    hasActiveWork: queued > 0 || running > 0,
-  };
+  return { queued, running, hasActiveWork: queued > 0 || running > 0 };
 }
 
 function activeWorkbenchWorkLabel(activeWork: WorkbenchActiveWork): string {
@@ -1827,8 +2556,15 @@ function activeWorkbenchWorkLabel(activeWork: WorkbenchActiveWork): string {
   return `${activeWork.queued} queued`;
 }
 
-function snapshotHasActiveWork(snapshot: WorkbenchInspectionSnapshot | null): boolean {
-  return snapshot ? activeWorkbenchWork(snapshot).hasActiveWork : false;
+function isRunActive(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): boolean {
+  if (run.status === "queued" || run.status === "running") {
+    return true;
+  }
+  return jobs.some((job) => job.runId === run.id && (job.status === "queued" || job.status === "running"));
+}
+
+function isJobTerminal(job: WorkbenchJob): boolean {
+  return job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
 }
 
 function activitySecondaryLabel(
@@ -1853,6 +2589,7 @@ function latestSnapshotTimestamp(snapshot: WorkbenchInspectionSnapshot): string 
   const timestamps = [
     ...snapshot.versions.map((version) => version.createdAt),
     ...snapshot.skillBundles.map((bundle) => bundle.createdAt),
+    ...snapshot.evals.map((entry) => entry.updatedAt),
     ...snapshot.runs.map((run) => run.finishedAt ?? run.createdAt),
     ...snapshot.jobs.map((job) => job.finishedAt ?? job.startedAt ?? job.createdAt),
     ...snapshot.traces.map((trace) => trace.createdAt),
@@ -1863,74 +2600,15 @@ function latestSnapshotTimestamp(snapshot: WorkbenchInspectionSnapshot): string 
   return timestamps.sort().at(-1) ?? null;
 }
 
-function inspectorTitle(inspector: WorkbenchInspectorRoute, snapshot: WorkbenchInspectionSnapshot | null): string {
-  if (inspector.kind === "version") {
-    return snapshot ? formatVersionDisplayName(inspector.versionId, snapshot.versions, comparisonLabelContext(snapshot)) : "Version details";
-  }
-  if (inspector.kind === "run") {
-    const run = snapshot?.runs.find((entry) => entry.id === inspector.runId) ?? null;
-    return run && snapshot ? runDisplayTitle(run, snapshot) : "Run details";
-  }
-  if (inspector.kind === "job") {
-    const job = snapshot?.jobs.find((entry) => entry.id === inspector.jobId) ?? null;
-    return job ? `Case ${job.caseId}` : "Case details";
-  }
-  if (inspector.kind === "skill-source") {
-    return snapshot ? formatSkillDisplayName(inspector.skillName, comparisonLabelContext(snapshot)) : "Skill details";
-  }
-  return "Workbench";
-}
-
-function runDisplayTitle(run: WorkbenchRun, snapshot: WorkbenchInspectionSnapshot): string {
-  const context = comparisonLabelContext(snapshot);
-  return [
-    formatSkillDisplayName(run.skillName, context),
-    formatVersionDisplayName(run.versionId, snapshot.versions, context),
-    "run",
-  ].join(" ");
-}
-
-function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSnapshot | null): Array<{ label: string; route?: WorkbenchRoute }> {
-  const surface = routeSurface(route);
-  const inspector = routeInspector(route);
-  if (!inspector) {
-    return [];
-  }
-  const items: Array<{ label: string; route?: WorkbenchRoute }> = [
-    { label: surfaceLabel(surface), route: withoutInspector(route) },
-  ];
-  if (inspector.kind === "job" && snapshot) {
-    const job = snapshot.jobs.find((entry) => entry.id === inspector.jobId) ?? null;
-    const run = job ? snapshot.runs.find((entry) => entry.id === job.runId) ?? null : null;
-    if (run) {
-      items.push({
-        label: runDisplayTitle(run, snapshot),
-        route: withInspector(route, { kind: "run", runId: run.id }),
-      });
-    }
-  }
-  return [...items, { label: inspectorTitle(inspector, snapshot) }];
-}
-
-function surfaceLabel(surface: WorkbenchSurfaceRoute): string {
-  if (surface.kind === "versions") {
-    return "Versions";
-  }
-  if (surface.kind === "files") {
-    return "Files";
-  }
-  return "Compare";
-}
-
 function useJobEvidence({
   apiBasePath,
   jobId,
-  poll = false,
+  refreshToken,
   runId,
 }: {
   apiBasePath: string;
   jobId: string;
-  poll?: boolean;
+  refreshToken: string | null;
   runId: string;
 }): {
   loading: boolean;
@@ -1953,9 +2631,7 @@ function useJobEvidence({
     }));
     const loadEvidence = async () => {
       try {
-        const response = await fetch(jobEvidenceApiPath(apiBasePath, runId, jobId), {
-          signal: controller.signal,
-        });
+        const response = await fetch(jobEvidenceApiPath(apiBasePath, runId, jobId), { signal: controller.signal });
         if (!response.ok) {
           throw new Error(await responseErrorMessage(response));
         }
@@ -1973,112 +2649,12 @@ function useJobEvidence({
         }
       }
     };
-
     void loadEvidence();
-    const timer = poll
-      ? window.setInterval(() => void loadEvidence(), ACTIVE_JOB_EVIDENCE_REFRESH_MS)
-      : null;
-    return () => {
-      cancelled = true;
-      if (timer !== null) {
-        window.clearInterval(timer);
-      }
-      controller.abort();
-    };
-  }, [apiBasePath, jobId, poll, runId]);
-
-  return state;
-}
-
-function useInspectionFilePreview({
-  apiBasePath,
-  ownerKind,
-  ownerId,
-  path,
-  previewMode,
-  files,
-}: {
-  apiBasePath: string;
-  ownerKind: WorkbenchFileOwnerKind;
-  ownerId: string;
-  path: string | null;
-  previewMode: PreviewMode;
-  files: readonly SurfaceSnapshotFile[];
-}): {
-  loading: boolean;
-  error: string | null;
-  preview: ReturnType<typeof surfaceFileToPreview> | null;
-} {
-  const [state, setState] = useState<{
-    loading: boolean;
-    error: string | null;
-    preview: ReturnType<typeof surfaceFileToPreview> | null;
-  }>({ loading: false, error: null, preview: null });
-
-  useEffect(() => {
-    const fileEntry = path ? files.find((file) => file.path === path) ?? null : null;
-    if (!path || !fileEntry) {
-      setState({ loading: false, error: null, preview: null });
-      return;
-    }
-
-    const unavailableReason = workbenchInspectionFileContentUnavailableReason(fileEntry);
-    if (unavailableReason) {
-      setState({
-        loading: false,
-        error: null,
-        preview: surfaceFileToPreview({
-          path: fileEntry.path,
-          kind: fileEntry.kind,
-          encoding: fileEntry.encoding,
-          executable: fileEntry.executable,
-          unavailableReason,
-        }, previewMode),
-      });
-      return;
-    }
-
-    if (fileEntry.content) {
-      setState({
-        loading: false,
-        error: null,
-        preview: surfaceFileToPreview(workbenchInspectionFileContent(fileEntry), previewMode),
-      });
-      return;
-    }
-
-    const controller = new AbortController();
-    let cancelled = false;
-    setState({ loading: true, error: null, preview: null });
-    void fetch(fileContentApiPath(apiBasePath, ownerKind, ownerId, path), {
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-      return await response.json() as WorkbenchInspectionFileContent;
-    }).then((content) => {
-      if (!cancelled) {
-        setState({
-          loading: false,
-          error: null,
-          preview: surfaceFileToPreview(content, previewMode),
-        });
-      }
-    }).catch((error: unknown) => {
-      if (!cancelled && !controller.signal.aborted) {
-        setState({
-          loading: false,
-          error: error instanceof Error ? error.message : String(error),
-          preview: null,
-        });
-      }
-    });
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, [apiBasePath, files, ownerId, ownerKind, path, previewMode]);
+  }, [apiBasePath, jobId, refreshToken, runId]);
 
   return state;
 }
@@ -2096,57 +2672,52 @@ async function responseErrorMessage(response: Response): Promise<string> {
   return text.trim() || response.statusText || `HTTP ${response.status}`;
 }
 
-function RemotesTable({ snapshot }: { snapshot: WorkbenchInspectionSnapshot }) {
-  if (snapshot.remotes.length === 0) {
-    return <p className="text-sm text-muted-foreground">No remotes are configured.</p>;
-  }
+function DetailPageHeader({
+  description,
+  eyebrow,
+  meta,
+  title,
+}: {
+  description?: ReactNode;
+  eyebrow?: ReactNode;
+  meta?: ReactNode;
+  title: ReactNode;
+}) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Remote</TableHead>
-          <TableHead>URL</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {snapshot.remotes.map((remote) => (
-          <TableRow key={remote.name}>
-            <TableCell className="font-medium">{remote.name}</TableCell>
-            <TableCell className="break-words font-mono text-xs [overflow-wrap:anywhere]">{remote.url}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+    <header className="flex min-w-0 flex-col gap-3 border-b border-border/70 pb-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="grid min-w-0 gap-1.5">
+        {eyebrow ? <div className="text-xs font-medium text-muted-foreground">{eyebrow}</div> : null}
+        <h2 className="break-words text-xl font-semibold leading-tight text-foreground [overflow-wrap:anywhere]">
+          {title}
+        </h2>
+        {description ? (
+          <p className="max-w-3xl break-words text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">
+            {description}
+          </p>
+        ) : null}
+      </div>
+      {meta ? <div className="flex shrink-0 flex-wrap items-center gap-2">{meta}</div> : null}
+    </header>
   );
 }
 
-function DetailAccordionSection({
-  children,
-  summary,
-  title,
-  value,
-}: {
-  children: ReactNode;
-  summary?: ReactNode;
-  title: string;
-  value: string;
-}) {
+interface MetricStripItem {
+  detail?: ReactNode;
+  label: string;
+  value: ReactNode;
+}
+
+function MetricStrip({ items }: { items: MetricStripItem[] }) {
   return (
-    <AccordionItem value={value} className="min-w-0">
-      <AccordionTrigger className="min-w-0 py-2.5">
-        <div className="grid min-w-0 flex-1 gap-1 text-left">
-          <span className="min-w-0 text-sm font-medium text-foreground">{title}</span>
-          {summary ? (
-            <span className="min-w-0 max-w-full whitespace-normal break-words text-xs font-normal text-muted-foreground [overflow-wrap:anywhere]">
-              {summary}
-            </span>
-          ) : null}
+    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {items.map((item) => (
+        <div key={item.label} className="grid min-w-0 gap-1 rounded-lg border border-border/70 bg-background px-3 py-3">
+          <div className="text-xs font-medium text-muted-foreground">{item.label}</div>
+          <div className="break-words text-sm font-semibold leading-5 text-foreground [overflow-wrap:anywhere]">{item.value}</div>
+          {item.detail ? <div className="break-words text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">{item.detail}</div> : null}
         </div>
-      </AccordionTrigger>
-      <AccordionContent className="!h-auto pb-3">
-        <div className="flex flex-col gap-3">{children}</div>
-      </AccordionContent>
-    </AccordionItem>
+      ))}
+    </div>
   );
 }
 
@@ -2169,16 +2740,37 @@ function FactItem({
 }) {
   return (
     <div className="grid min-w-0 gap-1 border-t border-border/60 py-3">
-      <div className="break-words text-xs font-medium text-muted-foreground [overflow-wrap:anywhere]">
-        {title}
-      </div>
-      <div className="break-all text-sm font-semibold leading-5 text-foreground [overflow-wrap:anywhere]">
-        {value}
-      </div>
-      {detail ? (
-        <div className="break-all text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">{detail}</div>
-      ) : null}
+      <div className="break-words text-xs font-medium text-muted-foreground [overflow-wrap:anywhere]">{title}</div>
+      <div className="break-words text-sm font-semibold leading-5 text-foreground [overflow-wrap:anywhere]">{value}</div>
+      {detail ? <div className="break-words text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">{detail}</div> : null}
     </div>
+  );
+}
+
+function CopyIconButton({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      aria-label={`Copy ${label}`}
+      className="text-muted-foreground"
+      size="icon-xs"
+      type="button"
+      variant="ghost"
+      onClick={() => {
+        void navigator.clipboard.writeText(value).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1_500);
+        });
+      }}
+    >
+      {copied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
+    </Button>
   );
 }
 
@@ -2207,6 +2799,70 @@ function comparisonLabelContext(
   };
 }
 
+function selectedEvalSnapshot(snapshot: WorkbenchInspectionSnapshot, evaluationId: string | null): WorkbenchEvalSnapshot | null {
+  if (evaluationId) {
+    const selected = snapshot.evals.find((entry) => entry.hash === evaluationId);
+    if (selected) {
+      return selected;
+    }
+  }
+  return [...snapshot.evals].sort((left, right) =>
+    right.createdAt.localeCompare(left.createdAt) || right.hash.localeCompare(left.hash)
+  )[0] ?? null;
+}
+
+function jobsForCase(snapshot: WorkbenchInspectionSnapshot, evalHash: string, caseId: string): WorkbenchJob[] {
+  return snapshot.jobs
+    .filter((job) => job.evalHash === evalHash && job.caseId === caseId)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
+}
+
+function latestJob(jobs: readonly WorkbenchJob[]): WorkbenchJob | null {
+  return [...jobs].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id))[0] ?? null;
+}
+
+function uniqueRunsForJobs(snapshot: WorkbenchInspectionSnapshot, jobs: readonly WorkbenchJob[]): WorkbenchRun[] {
+  const runIds = new Set(jobs.map((job) => job.runId));
+  return snapshot.runs
+    .filter((run) => runIds.has(run.id))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
+}
+
+function runDisplayTitle(run: WorkbenchRun, snapshot: WorkbenchInspectionSnapshot): string {
+  const context = comparisonLabelContext(snapshot);
+  return [
+    formatSkillDisplayName(run.skillName, context),
+    formatVersionDisplayName(run.versionId, snapshot.versions, context),
+    "run",
+  ].join(" ");
+}
+
+function versionNameFor(snapshot: WorkbenchInspectionSnapshot, versionId: string | null | undefined): string {
+  return versionId ? formatVersionDisplayName(versionId, snapshot.versions, comparisonLabelContext(snapshot)) : "none";
+}
+
+function currentVersion(snapshot: WorkbenchInspectionSnapshot): WorkbenchVersion | null {
+  return snapshot.status.currentVersionId
+    ? snapshot.versions.find((version) => version.id === snapshot.status.currentVersionId) ?? null
+    : snapshot.versions[0] ?? null;
+}
+
+function selectedFilesVersion(snapshot: WorkbenchInspectionSnapshot, versionId: string | null | undefined): WorkbenchVersion | null {
+  return versionId
+    ? snapshot.versions.find((version) => version.id === versionId) ?? currentVersion(snapshot)
+    : currentVersion(snapshot);
+}
+
+function orderedVersions(snapshot: WorkbenchInspectionSnapshot): WorkbenchVersion[] {
+  return [...snapshot.versions].sort((left, right) =>
+    right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id)
+  );
+}
+
+function publishedVersionId(snapshot: WorkbenchInspectionSnapshot): string | null {
+  return snapshot.publication?.versionId ?? snapshot.refs.published ?? null;
+}
+
 function WorkbenchLoadingIcon({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg
@@ -2230,44 +2886,4 @@ function WorkbenchLoadingIcon({ className, ...props }: SVGProps<SVGSVGElement>) 
       </g>
     </svg>
   );
-}
-
-function currentVersion(snapshot: WorkbenchInspectionSnapshot): WorkbenchVersion | null {
-  return snapshot.status.currentVersionId
-    ? snapshot.versions.find((version) => version.id === snapshot.status.currentVersionId) ?? null
-    : snapshot.versions[0] ?? null;
-}
-
-function publishedVersionId(snapshot: WorkbenchInspectionSnapshot): string | null {
-  return snapshot.publication?.versionId ?? snapshot.refs.published ?? null;
-}
-
-function jobEvidenceApiPath(apiBasePath: string, runId: string, jobId: string): string {
-  const base = apiBasePath.replace(/\/+$/u, "");
-  const params = new URLSearchParams({ run: runId });
-  return `${base}/jobs/${encodeURIComponent(jobId)}/evidence?${params.toString()}`;
-}
-
-function fileContentApiPath(
-  apiBasePath: string,
-  ownerKind: WorkbenchFileOwnerKind,
-  ownerId: string,
-  path: string,
-): string {
-  const base = apiBasePath.replace(/\/+$/u, "");
-  return `${base}/${ownerKind}s/${encodeURIComponent(ownerId)}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
-}
-
-function skillSourceLocation(skill: Pick<WorkbenchSkillSource, "kind" | "path" | "from" | "ref">): string {
-  if (skill.kind === "none") {
-    return "No skill mounted";
-  }
-  if (skill.kind === "remote") {
-    return `${skill.from ?? "remote"}${skill.ref ? `#${skill.ref}` : ""}`;
-  }
-  return skill.path ?? ".";
-}
-
-function emptyFileRouteState(): WorkbenchFileRouteState {
-  return { filePath: null, directoryPath: null, previewMode: "rendered" };
 }

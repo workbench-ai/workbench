@@ -9,21 +9,32 @@ import {
   addWorkbenchRemote,
   addWorkbenchAgent,
   compareWorkbench,
-  createWorkbenchVersionRuntimeSnapshot,
+  createWorkbenchRunId,
+  createWorkbenchRunSnapshotForRun,
   createWorkbenchAdapterAuthBundle,
   createWorkbenchReadOnlyInspectionSnapshot,
   diffWorkbenchVersions,
-  evalWorkbenchSkill,
-  improveWorkbenchSkill,
   initWorkbenchSkill,
   listWorkbenchAgents,
   listWorkbenchVersions,
   localWorkbenchAdapterAuthStore,
   parseWorkbenchAdapterAuthTarget,
+  quoteShellArg,
+  hasWorkbenchLocalHostedRunHandle,
+  hasWorkbenchLocalRunCancellationRequest,
   prepareWorkbenchCloudEvalRequest,
   prepareWorkbenchCloudImproveRequest,
+  previewWorkbenchEval,
+  previewWorkbenchImprove,
   publishWorkbenchVersion,
-  markWorkbenchRemoteSyncDirty,
+  clearWorkbenchLocalHostedRunHandle,
+  recordWorkbenchCloudInspectionSnapshot,
+  recordWorkbenchCloudRunSnapshot,
+  recordWorkbenchLocalHostedRunCancellation,
+  recordWorkbenchLocalHostedRunFailure,
+  recordWorkbenchLocalHostedRunHandle,
+  requestLocalWorkbenchRunCancellation,
+  resolveWorkbenchRunRetryPlan,
   removeWorkbenchAgent,
   showWorkbenchRef,
   switchWorkbenchVersion,
@@ -31,7 +42,10 @@ import {
   workbenchStatus,
   workbenchJobEvidenceForSnapshot,
   workbenchProviderAuthSetupCommand,
+  workbenchSkillImproveAdapterRemediation,
+  workbenchSkillImproveCanUseQueuedAdapter,
   workbenchStatusSnapshot,
+  workbenchAuthorEvalCaseCommand,
   WorkbenchCodedError,
   WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
   WorkbenchUserError,
@@ -40,17 +54,27 @@ import {
   type WorkbenchAdapterAuthBundle,
   type WorkbenchAdapterAuthFile,
   type WorkbenchAdapterAuthStatusRecord,
+  type WorkbenchAdapterAuthTarget,
   type WorkbenchArtifact,
   type WorkbenchComparison,
+  type WorkbenchInspectionSnapshotEnvelope,
   type WorkbenchInspectionSnapshot,
   type WorkbenchJob,
+  type WorkbenchEvalPreview,
+  type WorkbenchImprovePreview,
+  type WorkbenchLaunchReadiness,
+  type WorkbenchOperationRequest,
   type WorkbenchPreparedCloudEvalRequest,
   type WorkbenchPreparedCloudImproveRequest,
+  type WorkbenchMeasurementSummary,
+  type WorkbenchRunSnapshot,
+  type WorkbenchRunRetryPlan,
   type WorkbenchRun,
   type WorkbenchAgent,
   type WorkbenchExecutionTraceDetail,
   type WorkbenchRemote,
   type WorkbenchStatus,
+  type WorkbenchStateNotice,
   type WorkbenchTrace,
   type WorkbenchVersion,
 } from "@workbench-ai/workbench-core";
@@ -58,7 +82,10 @@ import { normalizeWorkbenchSkillName } from "@workbench-ai/workbench-contract";
 import { emitError, emitResult } from "./output.js";
 import {
   createProgressRenderer,
-  progressSnapshotFromRuns,
+  formatProgressDuration,
+  formatProgressSummary,
+  runProgressSnapshotFromRuns,
+  type ProgressEvidenceCounts,
   type WorkbenchProgressCommand,
   type WorkbenchProgressPhase,
 } from "./progress.js";
@@ -68,12 +95,17 @@ import {
   installResultToJson,
   installSnapshotToSkillTargets,
   normalizeInstallSnapshotPath,
+  observeCurrentInstalledSkillsInventory,
   readInstalledSkillsInventory,
   type WorkbenchInstallTargetResult,
   type WorkbenchInstallTargetsResult,
   type WorkbenchSkillAccessInventory,
   type WorkbenchInstalledSkill,
 } from "./install-targets.js";
+import {
+  localWorkerErrorForRun,
+  startPrivateLocalWorkbenchOperation,
+} from "./local-worker-control.js";
 import { startWorkbenchOpenServer } from "./open-server.js";
 
 export interface CliIo {
@@ -102,8 +134,8 @@ const HELP = [
   "",
   "Taught commands:",
   "  workbench new [DIR] [--from OWNER/SKILL] [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
-  "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--json]",
-  "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--json]",
+  "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
+  "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
   "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
   "  workbench skills [--for codex|claude|all] [--global] [--dir DIR] [--json]",
@@ -117,15 +149,18 @@ const HELP_ALL = [
   "Usage:",
   "  workbench                          # = workbench status",
   "  workbench new [DIR] [--from OWNER/SKILL] [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
-  "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--json]",
+  "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
   "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
-  "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--json]",
+  "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
   "  workbench skills [--for codex|claude|all] [--global] [--dir DIR] [--json]",
   "  workbench install OWNER/SKILL [--for codex|claude|all] [--global] [--dir DIR] [--yes] [--dry-run] [--json]",
   "",
   "Inspect:",
   "  workbench status [--dir DIR] [--json]",
+  "  workbench run watch RUN_ID [--dir DIR] [--json]",
+  "  workbench run cancel RUN_ID [--dir DIR] [--json]",
+  "  workbench run retry RUN_ID [--dir DIR] [--json]",
   "  workbench log [--runs|--versions] [--json]",
   "  workbench show REF[:PATH] [--json]",
   "  workbench diff [A..B] [--json]",
@@ -157,7 +192,7 @@ const COMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   eval: [
     "Usage:",
-    "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--json]",
+    "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
     "",
     "Runs eval jobs for the selected version, measured skills, and agents. Omitted selectors use manifest defaults.",
     "",
@@ -166,7 +201,7 @@ const COMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   improve: [
     "Usage:",
-    "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--json]",
+    "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
     "",
     "Creates one improved child version from evidence. The selected skills and agents must resolve to exactly one entry each.",
     "",
@@ -237,6 +272,17 @@ const COMMAND_HELP: Record<string, string> = {
     "Example:",
     "  workbench log --runs",
   ].join("\n"),
+  run: [
+    "Usage:",
+    "  workbench run watch RUN_ID [--dir DIR] [--json]",
+    "  workbench run cancel RUN_ID [--dir DIR] [--json]",
+    "  workbench run retry RUN_ID [--dir DIR] [--json]",
+    "",
+    "Operates on an existing run. Watch follows progress, cancel requests cancellation, and retry starts a new full run from durable launch facts.",
+    "",
+    "Example:",
+    "  workbench run watch run_abc12345",
+  ].join("\n"),
   diff: [
     "Usage:",
     "  workbench diff [A..B] [--json]",
@@ -259,7 +305,7 @@ const COMMAND_HELP: Record<string, string> = {
     "Usage:",
     "  workbench open [--host HOST] [--port PORT] [--no-open]",
     "",
-    "Serves the read-only Workbench inspection UI.",
+    "Serves the local Workbench UI.",
     "",
     "Example:",
     "  workbench open --no-open",
@@ -340,6 +386,7 @@ const COMMAND_FLAGS: Record<string, FlagSpec> = {
     ...HELP_FLAG,
     agents: "string",
     cloud: "boolean",
+    "dry-run": "boolean",
     rerun: "boolean",
     samples: "positive-integer",
     skills: "string",
@@ -351,6 +398,7 @@ const COMMAND_FLAGS: Record<string, FlagSpec> = {
     agents: "string",
     budget: "positive-integer",
     cloud: "boolean",
+    "dry-run": "boolean",
     samples: "positive-integer",
     skills: "string",
   },
@@ -400,6 +448,13 @@ const SUBCOMMAND_FLAGS: Record<string, SubcommandFlagSpec> = {
       list: { ...PROJECT_FLAGS, ...HELP_FLAG },
       add: { ...PROJECT_FLAGS, ...HELP_FLAG, adapter: "string", model: "string", with: "repeat-string" },
       rm: { ...PROJECT_FLAGS, ...HELP_FLAG },
+    },
+  },
+  run: {
+    flags: {
+      watch: { ...PROJECT_FLAGS, ...HELP_FLAG },
+      cancel: { ...PROJECT_FLAGS, ...HELP_FLAG },
+      retry: { ...PROJECT_FLAGS, ...HELP_FLAG },
     },
   },
 };
@@ -452,7 +507,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         auth: stringFlag(parsed, "auth"),
         adapterAuthStoreRoot: adapterAuthStoreRoot(),
       });
-      const next = WORKBENCH_AUTHOR_EVAL_CASE_COMMAND;
+      const next = projectScopedNextCommand(status.root, WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
       return emitResult("workbench.cli.new.v1", {
         result: status as unknown as Json,
         defaultAgent: status.defaultAgentSelection as unknown as Json,
@@ -471,38 +526,44 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         message: "workbench eval does not accept a VERSION argument.",
         remediation: "workbench eval",
       });
+      if (parsed.flags["dry-run"] === true) {
+        return await handleEvalDryRun(parsed, io);
+      }
       if (parsed.flags.cloud === true) {
         return await handleCloudEval(parsed, io);
       }
-      const runs = await withLocalCommandProgress({
+      const request = evalOperationRequest(parsed);
+      const started = await startPrivateLocalWorkbenchOperation({
+        core,
+        request,
+      });
+      const completed = await waitForLocalRunTerminal({
         command: "eval",
         core,
+        initialSnapshot: started.snapshot,
         io,
-        runKind: "eval",
-        initialPhase: "running",
-        run: async () => await evalWorkbenchSkill({
-          ...core,
-          skill: stringFlag(parsed, "skills"),
-          agent: stringFlag(parsed, "agents"),
-          samples: intFlag(parsed, "samples"),
-          rerun: parsed.flags.rerun === true,
-        }),
+        json: parsed.flags.json === true,
       });
+      if (completed.detached) {
+        return emitLocalDetach("workbench.cli.eval.v1", completed.snapshot, parsed, io);
+      }
+      const runs = [completed.run];
+      const snapshot = completed.snapshot;
       const artifactIds = await artifactIdsByRunId(core, runs);
       const failedRuns = runs.filter((run) => run.status === "failed" || run.status === "canceled");
       const coverage = await evalCoverageSummaries(core, runs);
       const deltas = await evalDeltas(core, runs);
       if (failedRuns.length > 0) {
-        return emitEvalFailure(runs, failedRuns, artifactIds, coverage, deltas, parsed, io);
+        return emitEvalFailure(snapshot, failedRuns, artifactIds, coverage, deltas, parsed, io);
       }
       const next = await evalSuccessNextCommand(core, runs);
       return emitResult("workbench.cli.eval.v1", {
-        result: runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? [])),
+        run: runSnapshotResultJson(snapshot),
         coverage: coverage as unknown as Json,
         deltas: deltas as unknown as Json,
         next: next as Json,
       }, parsed, io, () => [
-        runs.map(formatRun).join("\n"),
+        formatRunSnapshot(snapshot),
         ...formatEvalCoverageLines(coverage),
         ...formatEvalDeltaLines(deltas),
         ...(next ? [`next: ${next}`] : []),
@@ -514,30 +575,32 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         message: "workbench improve does not accept a VERSION argument.",
         remediation: "workbench improve",
       });
+      if (parsed.flags["dry-run"] === true) {
+        return await handleImproveDryRun(parsed, io);
+      }
       if (parsed.flags.cloud === true) {
         return await handleCloudImprove(parsed, io);
       }
-      const result = await withLocalCommandProgress({
+      const request = improveOperationRequest(parsed);
+      const started = await startPrivateLocalWorkbenchOperation({
+        core,
+        request,
+      });
+      const completed = await waitForLocalRunTerminal({
         command: "improve",
         core,
+        initialSnapshot: started.snapshot,
         io,
-        runKind: "improve",
-        initialPhase: "improving",
-        run: async (setPhase) => await improveWorkbenchSkill({
-          ...core,
-          skill: stringFlag(parsed, "skills"),
-          agent: stringFlag(parsed, "agents"),
-          budget: intFlag(parsed, "budget"),
-          samples: intFlag(parsed, "samples"),
-          progress: setPhase,
-        }),
+        json: parsed.flags.json === true,
       });
-      const next = result.switched ? "workbench eval --rerun -n 5" : "workbench eval";
-      return output({
-        ...result,
-        version: versionSummary(result.version),
-        next,
-      } as unknown as Json, parsed, io, () => `${formatImproveResult(result)}\nnext: ${next}`);
+      if (completed.detached) {
+        return emitLocalDetach("workbench.cli.improve.v1", completed.snapshot, parsed, io);
+      }
+      const improveResult = await localImproveResultFromRun(core, completed.run);
+      const next = completed.run.status === "succeeded"
+        ? improveResult.switched ? "workbench eval --rerun -n 5" : "workbench eval"
+        : `workbench show ${completed.run.id}`;
+      return emitImproveOutcome(parsed, io, completed.snapshot, improveResult, next);
     }
     if (command === "compare") {
       const comparison = await compareWorkbench({
@@ -564,6 +627,9 @@ export async function runCli(argv: readonly string[], io: CliIo = {
     if (command === "log") {
       return await handleLog(parsed, io);
     }
+    if (command === "run") {
+      return await handleRun(parsed, io);
+    }
     if (command === "agent") {
       return await handleAgent(parsed, io);
     }
@@ -583,7 +649,10 @@ export async function runCli(argv: readonly string[], io: CliIo = {
           remote: optionalPositional(parsed, 1),
           dryRun: syncDryRun,
         }),
-        { hint: syncDryRun ? "No files have been written." : "Read commands remain available: workbench log --runs." },
+        {
+          hint: syncDryRun ? "No files have been written." : "Read commands remain available: workbench log --runs.",
+          json: parsed.flags.json === true,
+        },
       );
       const next = result.dryRun
         ? syncChanged(result) ? `workbench sync ${result.remote.name}` : null
@@ -620,6 +689,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
           visibility: audience,
           installHandle: preview.installHandle,
           dryRun: true,
+          next: `workbench install ${preview.installHandle}`,
         }, parsed, io, () => [
           `Would publish ${displayRef(preview.version.id)} as ${preview.installHandle} (${audience}).`,
           `next: workbench install ${preview.installHandle}`,
@@ -631,15 +701,15 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         remote = await ensurePublishRemote(parsed);
         await assertPublishCloudAuth(parsed, remote);
         writeCliProgress(parsed, io, "workbench publish: preparing Cloud skill.");
-        await writeAuthenticatedJsonProgress(parsed, io, remote, `workbench publish: publishing ${optionalPositional(parsed, 1) ?? "current"} source.`);
-        writeCliProgress(parsed, io, `workbench publish: publishing ${optionalPositional(parsed, 1) ?? "current"} source.`);
-        result = await withProgressHeartbeat(io, "workbench publish: remote publish", async () => await publishWorkbenchVersion({
+        await writeAuthenticatedJsonProgress(parsed, io, remote, `workbench publish: checking ${optionalPositional(parsed, 1) ?? "current"} source publication.`);
+        writeCliProgress(parsed, io, `workbench publish: checking ${optionalPositional(parsed, 1) ?? "current"} source publication.`);
+        result = await withProgressHeartbeat(io, "workbench publish: remote publication check", async () => await publishWorkbenchVersion({
           ...core,
           version: optionalPositional(parsed, 1),
           remote,
           dryRun: parsed.flags["dry-run"] === true,
           visibility,
-        }));
+        }), { json: parsed.flags.json === true });
       } catch (error) {
         throw await publishErrorWithCliContext(error, parsed, remote);
       }
@@ -649,22 +719,24 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         version: versionSummary(result.version),
         visibility: audience,
         installHandle: result.installHandle,
+        ...(result.unchanged ? { unchanged: true } : {}),
         ...(result.dryRun ? { dryRun: true } : {}),
+        next: `workbench install ${result.installHandle}`,
       }, parsed, io, () => [
-        `${result.dryRun ? "Would publish" : "Published"} ${displayRef(result.version.id)} as ${result.installHandle} (${audience}).`,
+        `${result.dryRun ? "Would publish" : result.unchanged ? "Already published" : "Published"} ${displayRef(result.version.id)} as ${result.installHandle} (${audience}).`,
         `next: workbench install ${result.installHandle}`,
       ].join("\n"));
     }
     if (command === "open") {
-      // The browser server serves committed object state through a read-only
-      // snapshot path, so long-running commands do not block page loads.
+      // The browser server serves committed object state through a snapshot
+      // path, so long-running commands do not block page loads.
       const server = await startWorkbenchOpenServer({
         dir: dirFlag(parsed),
         authToken: core.authToken,
         host: stringFlag(parsed, "host"),
         port: portFlag(parsed, "port"),
       });
-      io.stdout.write(`Workbench: ${server.url}\nServing read-only Workbench UI. Press Ctrl-C to stop.\n`);
+      io.stdout.write(`Workbench: ${server.url}\nServing Workbench UI. Press Ctrl-C to stop.\n`);
       if (parsed.flags["no-open"] !== true) {
         await openBrowser(server.url).catch(() => undefined);
       }
@@ -672,8 +744,23 @@ export async function runCli(argv: readonly string[], io: CliIo = {
     }
     throw new WorkbenchUserError(`Unknown command: ${command}\n\n${HELP}`);
   } catch (error) {
-    return emitError(error, parsed, io);
+    const exitCode = emitError(error, parsed, io);
+    scheduleProcessExitForDetachedCloud(error, io, exitCode);
+    return exitCode;
   }
+}
+
+function scheduleProcessExitForDetachedCloud(error: unknown, io: CliIo, exitCode: number): void {
+  if (!(error instanceof WorkbenchCodedError) || error.code !== "cloud_detached") {
+    return;
+  }
+  if (io.stdout !== process.stdout || io.stderr !== process.stderr) {
+    return;
+  }
+  if (process.env.VITEST_WORKER_ID || process.env.WORKBENCH_CLI_DISABLE_FORCE_EXIT === "1") {
+    return;
+  }
+  setImmediate(() => process.exit(exitCode));
 }
 
 function formatNewResult(status: WorkbenchStatus, next: string | null): string {
@@ -725,12 +812,388 @@ interface NewFromProjectResult {
   createdPaths: readonly string[];
 }
 
+async function handleEvalDryRun(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const preview = await previewWorkbenchEval({
+    ...(await coreOptions(parsed)),
+    skill: stringFlag(parsed, "skills"),
+    agent: stringFlag(parsed, "agents"),
+    samples: intFlag(parsed, "samples"),
+    rerun: parsed.flags.rerun === true,
+    cloud: parsed.flags.cloud === true,
+  });
+  const readiness = parsed.flags.cloud === true
+    ? await cloudDryRunReadiness("eval", parsed, preview)
+    : preview.readiness;
+  const plan = withPreviewReadiness(preview, readiness);
+  const next = readiness.ready
+    ? parsed.flags.cloud === true ? "workbench eval --cloud" : "workbench eval"
+    : firstReadinessRemediation(readiness);
+  return emitResult("workbench.cli.eval-plan.v1", {
+    dryRun: true,
+    plan: plan as unknown as Json,
+    readiness: readiness as unknown as Json,
+    next: next as Json,
+  }, parsed, io, () => [
+    `Would run eval ${plan.location}: version=${displayRef(plan.versionId)} eval=${plan.evalHash}`,
+    `skills=${plan.skills.map((skill) => skill.name).join(",")} agents=${plan.agents.map((agent) => agent.name).join(",")}`,
+    `cases=${plan.cases} samples=${plan.samples} cached=${plan.cachedRunIds.length}`,
+    ...formatLaunchReadinessLines(readiness),
+    "No files or Workbench state were written.",
+    ...(next ? [`next: ${next}`] : []),
+  ].join("\n"));
+}
+
+function evalOperationRequest(parsed: ParsedArgs, variant: "local" | "cloud" = "local"): WorkbenchOperationRequest {
+  return {
+    kind: "eval",
+    variant,
+    ...(stringFlag(parsed, "skills") ? { skill: stringFlag(parsed, "skills") } : {}),
+    ...(stringFlag(parsed, "agents") ? { agent: stringFlag(parsed, "agents") } : {}),
+    ...(intFlag(parsed, "samples") ? { samples: intFlag(parsed, "samples") } : {}),
+    ...(parsed.flags.rerun === true ? { rerun: true } : {}),
+  };
+}
+
+function improveOperationRequest(parsed: ParsedArgs, variant: "local" | "cloud" = "local"): WorkbenchOperationRequest {
+  return {
+    kind: "improve",
+    variant,
+    ...(stringFlag(parsed, "skills") ? { skill: stringFlag(parsed, "skills") } : {}),
+    ...(stringFlag(parsed, "agents") ? { agent: stringFlag(parsed, "agents") } : {}),
+    ...(intFlag(parsed, "samples") ? { samples: intFlag(parsed, "samples") } : {}),
+    ...(intFlag(parsed, "budget") ? { budget: intFlag(parsed, "budget") } : {}),
+  };
+}
+
+function retryOperationRequest(
+  retryPlan: WorkbenchRunRetryPlan,
+  variant: "local" | "cloud",
+  retryOfRunId: string,
+  runId?: string,
+): WorkbenchOperationRequest {
+  return {
+    kind: retryPlan.kind,
+    variant,
+    ...(runId ? { runId } : {}),
+    versionId: retryPlan.kind === "improve" ? retryPlan.baseVersionId : retryPlan.versionId,
+    skill: retryPlan.skillName,
+    agent: retryPlan.agentName,
+    samples: retryPlan.samples,
+    ...(retryPlan.kind === "eval" ? { rerun: true } : {}),
+    ...(retryPlan.kind === "improve" ? { budget: retryPlan.budget } : {}),
+    retryOfRunId,
+  };
+}
+
+async function localRunStateForSnapshot(
+  core: { dir?: string; authToken?: string },
+  snapshot: WorkbenchRunSnapshot,
+): Promise<{ run: WorkbenchRun; jobs: WorkbenchJob[] }> {
+  const inspection = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const run = inspection.runs.find((entry) => entry.id === snapshot.id);
+  if (!run) {
+    throw new WorkbenchCodedError("run_not_found", `Run not found: ${snapshot.id}`, {
+      remediation: "workbench sync cloud",
+      subject: { runId: snapshot.id },
+      exitCode: 1,
+    });
+  }
+  return { run, jobs: jobsForRuns(inspection, [run.id]) };
+}
+
+interface LocalRunTerminalResult {
+  snapshot: WorkbenchRunSnapshot;
+  run: WorkbenchRun;
+  jobs: WorkbenchJob[];
+  detached: boolean;
+}
+
+async function waitForLocalRunTerminal(input: {
+  command: WorkbenchProgressCommand;
+  core: { dir?: string; authToken?: string };
+  initialSnapshot: WorkbenchRunSnapshot;
+  io: CliIo;
+  json?: boolean;
+}): Promise<LocalRunTerminalResult> {
+  const renderer = createProgressRenderer({ stderr: input.io.stderr, json: input.json === true });
+  const startedAtMs = Date.now();
+  const deadline = Date.now() + (positiveIntEnv("WORKBENCH_RUN_WATCH_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS);
+  let detached = false;
+  const onSigint = (): void => {
+    detached = true;
+    input.io.stderr.write(`workbench ${input.command}: detaching from local run (${displayRef(input.initialSnapshot.id)}).\n`);
+  };
+  process.once("SIGINT", onSigint);
+  try {
+    while (true) {
+      const inspection = await createWorkbenchReadOnlyInspectionSnapshot(input.core);
+      const run = inspection.runs.find((entry) => entry.id === input.initialSnapshot.id);
+      if (!run) {
+        throw new WorkbenchCodedError("run_not_found", `Run not found: ${input.initialSnapshot.id}`, {
+          remediation: "workbench log --runs",
+          subject: { runId: input.initialSnapshot.id },
+          exitCode: 1,
+        });
+      }
+      const jobs = jobsForRuns(inspection, [run.id]);
+      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+      const terminal = isTerminalRun(run);
+      renderer.render(runProgressSnapshotForInspection({
+        command: input.command,
+        location: "local",
+        phase: localProgressPhaseForRun(run, jobs, terminal),
+        runs: [run],
+        snapshot: inspection,
+        startedAtMs,
+        next: runWatchNextCommand(run),
+      }), { force: terminal || detached, command: input.command });
+      if (detached) {
+        return { snapshot: runSnapshot, run, jobs, detached: true };
+      }
+      if (terminal) {
+        return { snapshot: runSnapshot, run, jobs, detached: false };
+      }
+      const workerError = await localWorkerErrorForRun(inspection.root, run.id);
+      if (workerError) {
+        throw workerError;
+      }
+      if (Date.now() >= deadline) {
+        throw new WorkbenchCodedError("run_pending", `Run ${run.id} is still ${run.status}.`, {
+          retryable: true,
+          remediation: `workbench run watch ${run.id}`,
+          subject: { runId: run.id, status: run.status },
+          exitCode: 1,
+        });
+      }
+      await sleep(LOCAL_PROGRESS_POLL_INTERVAL_MS);
+    }
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
+}
+
+function runFromSnapshot(snapshot: WorkbenchRunSnapshot): WorkbenchRun {
+  const [measurement] = snapshot.measurements;
+  return {
+    id: snapshot.id,
+    kind: snapshot.kind,
+    versionId: snapshot.plan.versionId ?? measurement?.versionId ?? "",
+    skillName: snapshot.plan.skills[0] ?? measurement?.skillName ?? "",
+    skillBundleHash: measurement?.skillBundleHash ?? "",
+    evalHash: snapshot.plan.evalHash ?? measurement?.evalHash ?? "",
+    agentName: snapshot.plan.agents[0] ?? measurement?.agentName ?? "",
+    agentHash: measurement?.agentHash ?? "",
+    status: snapshot.status,
+    traceIds: [],
+    createdAt: new Date().toISOString(),
+    location: snapshot.variant,
+    ...(snapshot.plan.samples !== undefined ? { requestedSamples: snapshot.plan.samples } : {}),
+  };
+}
+
+function localProgressPhaseForRun(
+  run: WorkbenchRun,
+  jobs: readonly WorkbenchJob[],
+  terminal: boolean,
+): WorkbenchProgressPhase {
+  if (terminal) {
+    return "complete";
+  }
+  if (run.kind !== "improve") {
+    return "running";
+  }
+  return jobs.some((job) => job.caseId !== "current") ? "proof_eval" : "improving";
+}
+
+function emitLocalDetach(
+  schema: string,
+  snapshot: WorkbenchRunSnapshot,
+  parsed: ParsedArgs,
+  io: CliIo,
+  extra: Record<string, Json | undefined> = {},
+): number {
+  const next = `workbench run watch ${snapshot.id}`;
+  if (parsed.flags.json === true) {
+    io.stdout.write(`${JSON.stringify({
+      schema,
+      ok: false,
+      code: "local_detached",
+      message: "Detached from local run; it is still running.",
+      detached: true,
+      ...extra,
+      run: runSnapshotResultJson(snapshot),
+      next,
+    }, null, 2)}\n`);
+    return 130;
+  }
+  io.stdout.write(`Detached from run ${displayRef(snapshot.id)}.\nnext: ${next}\n`);
+  return 130;
+}
+
+function runSnapshotResultJson(snapshot: WorkbenchRunSnapshot): Json {
+  const { next: _next, ...result } = snapshot as unknown as Record<string, unknown>;
+  return result as Json;
+}
+
+async function localImproveResultFromRun(
+  core: { dir?: string; authToken?: string },
+  run: WorkbenchRun,
+): Promise<{
+  version?: WorkbenchVersion;
+  switched: boolean;
+  promoted: boolean;
+  promotionReason?: string;
+}> {
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const version = run.outputVersionId
+    ? snapshot.versions.find((entry) => entry.id === run.outputVersionId)
+    : undefined;
+  const switched = Boolean(version && snapshot.refs.current === version.id);
+  return {
+    ...(version ? { version } : {}),
+    switched,
+    promoted: switched,
+    promotionReason: switched
+      ? "proof eval promoted the candidate"
+      : run.status === "succeeded" && version
+        ? "proof eval did not beat the incumbent"
+        : run.error,
+  };
+}
+
+function formatImproveRunResult(
+  snapshot: WorkbenchRunSnapshot,
+  result: Awaited<ReturnType<typeof localImproveResultFromRun>>,
+): string {
+  const candidate = result.version ? displayRef(result.version.id) : displayRef(snapshot.id);
+  return [
+    result.switched
+      ? `Improved current -> ${candidate}.`
+      : `Created candidate ${candidate}.`,
+    formatRunSnapshot(snapshot),
+    result.switched
+      ? "Switched to improved version after proof eval; rerun eval with more samples before publishing."
+      : `Did not switch${result.promotionReason ? `: ${result.promotionReason}` : "."}`,
+  ].join("\n");
+}
+
+function emitImproveOutcome(
+  parsed: ParsedArgs,
+  io: CliIo,
+  snapshot: WorkbenchRunSnapshot,
+  result: Awaited<ReturnType<typeof localImproveResultFromRun>>,
+  next: string,
+): number {
+  const succeeded = snapshot.status === "succeeded";
+  const body = {
+    run: runSnapshotResultJson(snapshot),
+    ...(result.version ? { version: versionSummary(result.version) } : {}),
+    switched: result.switched,
+    promoted: result.promoted,
+    ...(result.promotionReason ? { promotionReason: result.promotionReason } : {}),
+    next: next as Json,
+  };
+  if (parsed.flags.json === true) {
+    const message = snapshot.result?.error ?? result.promotionReason ?? "Improve run failed; evidence was saved.";
+    const remediation = adapterAuthRemediationFromErrorMessage(message);
+    io.stdout.write(`${JSON.stringify({
+      schema: "workbench.cli.improve.v1",
+      ok: succeeded,
+      ...(!succeeded
+        ? {
+            code: snapshot.status === "canceled" ? "improve_canceled" : "improve_failed",
+            message,
+            ...(remediation ? { remediation } : {}),
+            retryable: false,
+            evidenceSaved: true,
+          }
+        : {}),
+      ...body,
+    }, null, 2)}\n`);
+    return succeeded ? 0 : 1;
+  }
+  io.stdout.write(`${formatImproveRunResult(snapshot, result)}\nnext: ${next}\n`);
+  return succeeded ? 0 : 1;
+}
+
+async function handleImproveDryRun(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  let preview: WorkbenchImprovePreview;
+  try {
+    preview = await previewWorkbenchImprove({
+      ...(await coreOptions(parsed)),
+      skill: stringFlag(parsed, "skills"),
+      agent: stringFlag(parsed, "agents"),
+      samples: intFlag(parsed, "samples"),
+      budget: intFlag(parsed, "budget"),
+      cloud: parsed.flags.cloud === true,
+    });
+  } catch (error) {
+    throw parsed.flags.cloud === true ? await cloudImproveErrorWithHostedRemediation(error, parsed) : error;
+  }
+  const readiness = parsed.flags.cloud === true
+    ? await cloudDryRunReadiness("improve", parsed, preview)
+    : preview.readiness;
+  const plan = withPreviewReadiness(preview, readiness);
+  const next = readiness.ready
+    ? parsed.flags.cloud === true ? "workbench improve --cloud" : "workbench improve"
+    : firstReadinessRemediation(readiness);
+  return emitResult("workbench.cli.improve-plan.v1", {
+    dryRun: true,
+    plan: plan as unknown as Json,
+    readiness: readiness as unknown as Json,
+    next: next as Json,
+  }, parsed, io, () => [
+    `Would run improve ${plan.location}: version=${displayRef(plan.versionId)} eval=${plan.evalHash}`,
+    `skill=${plan.skill.name} agent=${plan.agent.name} evidence=${plan.evidenceCount}`,
+    `proof_cases=${plan.proofCases} samples=${plan.samples} budget=${plan.budget}`,
+    ...(plan.incumbentRunId ? [`incumbent=${displayRef(plan.incumbentRunId)} score=${plan.incumbentScore ?? "n/a"}`] : []),
+    ...formatLaunchReadinessLines(readiness),
+    "No files or Workbench state were written.",
+    ...(next ? [`next: ${next}`] : []),
+  ].join("\n"));
+}
+
+function withPreviewReadiness<T extends WorkbenchEvalPreview | WorkbenchImprovePreview>(
+  preview: T,
+  readiness: WorkbenchLaunchReadiness,
+): T {
+  const { adapterAuthTargets: _adapterAuthTargets, ...publicPreview } = preview;
+  return {
+    ...publicPreview,
+    readiness,
+  } as T;
+}
+
+function firstReadinessRemediation(readiness: WorkbenchLaunchReadiness): string | null {
+  return readiness.issues.find((issue) => issue.remediation)?.remediation ?? null;
+}
+
+function formatLaunchReadinessLines(readiness: WorkbenchLaunchReadiness): string[] {
+  if (readiness.ready) {
+    return ["readiness=ready"];
+  }
+  const lines = ["readiness=blocked"];
+  for (const issue of readiness.issues) {
+    lines.push(`blocked: ${issue.message}`);
+    if (issue.remediation) {
+      lines.push(`setup: ${issue.remediation}`);
+    }
+  }
+  return lines;
+}
+
 async function handleStatus(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const core = await coreOptions(parsed);
   const status = await workbenchStatusSnapshot(core);
   const auth = await workbenchCliAuthStatus();
   const machine = await workbenchMachineStatus(auth, core);
-  const cliStatus = await statusWithCausalNext(status, auth, core, machine);
+  const inspection = status.project.initialized
+    ? await createWorkbenchReadOnlyInspectionSnapshot(core).catch(() => null)
+    : null;
+  const cliStatus = statusWithActiveRunProgress(
+    await statusWithCausalNext(status, auth, core, machine, inspection),
+    inspection,
+  );
   return emitResult("workbench.status.v1", {
     project: cliStatus.project as Json,
     worktree: cliStatus.worktree as Json,
@@ -793,6 +1256,627 @@ type WorkbenchLogEntry =
   | { kind: "version"; id: string; createdAt: string; message: string; fileCount: number }
   | { kind: "run"; id: string; createdAt: string; status: string; versionId: string; skillName: string; agentName: string; score?: number };
 
+async function handleRun(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const subcommand = requiredPositional(parsed, 1, "workbench run requires watch|cancel|retry.");
+  if (subcommand === "watch") {
+    rejectExtraInput(parsed, {
+      maxPositionals: 3,
+      message: "workbench run watch accepts exactly one RUN_ID.",
+      remediation: "workbench run watch RUN_ID",
+    });
+    return await handleRunWatch(parsed, io);
+  }
+  if (subcommand === "cancel") {
+    rejectExtraInput(parsed, {
+      maxPositionals: 3,
+      message: "workbench run cancel accepts exactly one RUN_ID.",
+      remediation: "workbench run cancel RUN_ID",
+    });
+    return await handleRunCancel(parsed, io);
+  }
+  if (subcommand === "retry") {
+    rejectExtraInput(parsed, {
+      maxPositionals: 3,
+      message: "workbench run retry accepts exactly one RUN_ID.",
+      remediation: "workbench run retry RUN_ID",
+    });
+    return await handleRunRetry(parsed, io);
+  }
+  throw new WorkbenchCodedError("usage", `Unsupported run command: ${subcommand}.`, {
+    remediation: "workbench run watch RUN_ID",
+    exitCode: 2,
+  });
+}
+
+async function handleRunWatch(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const runRef = requiredPositional(parsed, 2, "workbench run watch requires RUN_ID.");
+  const core = await coreOptions(parsed);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const run = requiredRunByRef(snapshot, runRef);
+  const localHostedHandle = (run.location ?? "local") === "cloud"
+    ? await hasWorkbenchLocalHostedRunHandle({ ...core, runId: run.id })
+    : false;
+  if (isTerminalRun(run)) {
+    const jobs = jobsForRuns(snapshot, [run.id]);
+    const progress = runProgressSnapshotForInspection({
+      command: "run watch",
+      location: run.location ?? "local",
+      phase: "complete",
+      runs: [run],
+      snapshot,
+      startedAtMs: timestampMs(run.createdAt) ?? Date.now(),
+      next: runWatchNextCommand(run),
+    });
+    const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+    return emitRunTerminalResult("workbench.cli.run-watch.v1", {
+      run: runSnapshotResultJson(runSnapshot),
+      next: runWatchNextCommand(run) as Json,
+    }, parsed, io, () => formatRunWatchResult(run, jobs, progress), runWatchExitCode(run));
+  }
+  if (localHostedHandle) {
+    return await handleLocalHostedRunWatch(parsed, io, core, run);
+  }
+  if ((run.location ?? "local") === "cloud") {
+    return await handleCloudRunWatch(parsed, io, core, snapshot, run);
+  }
+  return await handleLocalRunWatch(parsed, io, core, run);
+}
+
+async function handleLocalRunWatch(
+  parsed: ParsedArgs,
+  io: CliIo,
+  core: { dir?: string; authToken?: string },
+  initialRun: WorkbenchRun,
+): Promise<number> {
+  const renderer = createProgressRenderer({ stderr: io.stderr, json: parsed.flags.json === true });
+  const startedAtMs = timestampMs(initialRun.createdAt) ?? Date.now();
+  const deadline = Date.now() + (positiveIntEnv("WORKBENCH_RUN_WATCH_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS);
+  let run = initialRun;
+  let jobs: WorkbenchJob[] = [];
+  let progress: WorkbenchRunSnapshot | undefined;
+  while (true) {
+    const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+    run = snapshot.runs.find((entry) => entry.id === run.id) ?? run;
+    jobs = jobsForRuns(snapshot, [run.id]);
+    progress = runProgressSnapshotForInspection({
+      command: "run watch",
+      location: "local",
+      phase: "running",
+      runs: [run],
+      snapshot,
+      startedAtMs,
+      next: runWatchNextCommand(run),
+    });
+    renderer.render(progress, { force: isTerminalRun(run), command: "run watch" });
+    if (isTerminalRun(run)) {
+      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+      return emitRunTerminalResult("workbench.cli.run-watch.v1", {
+        run: runSnapshotResultJson(runSnapshot),
+        next: runWatchNextCommand(run) as Json,
+      }, parsed, io, () => formatRunWatchResult(run, jobs, progress), runWatchExitCode(run));
+    }
+    if (Date.now() >= deadline) {
+      throw new WorkbenchCodedError("run_pending", `Run ${run.id} is still ${run.status}.`, {
+        retryable: true,
+        remediation: `workbench run watch ${run.id}`,
+        subject: { runId: run.id, status: run.status },
+        exitCode: 1,
+      });
+    }
+    await sleep(LOCAL_PROGRESS_POLL_INTERVAL_MS);
+  }
+}
+
+async function handleCloudRunWatch(
+  parsed: ParsedArgs,
+  io: CliIo,
+  core: { dir?: string; authToken?: string },
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+): Promise<number> {
+  const context = await cloudRunContext(core, snapshot, run);
+  const renderer = createProgressRenderer({ stderr: io.stderr, json: parsed.flags.json === true });
+  const interrupt = createCloudInterruptController("run watch", io);
+  interrupt.setRunIds([run.id]);
+  try {
+    const completed = await waitForCloudRun({
+      command: "run watch",
+      core: context.core,
+      interrupt,
+      renderer,
+      remote: context.remote,
+      run: createWorkbenchRunSnapshotForRun(run, jobsForRuns(snapshot, [run.id])),
+      source: context.source,
+      skillId: context.skillId,
+      initialSync: {
+        remote: context.remote,
+        pushed: 0,
+        pulled: 0,
+        upToDate: true,
+      } as Awaited<ReturnType<typeof syncWorkbenchRemote>>,
+      startedAtMs: timestampMs(run.createdAt) ?? Date.now(),
+    });
+    if (completed.detached) {
+      return emitRunTerminalResult("workbench.cli.run-watch.v1", {
+        run: runSnapshotResultJson(completed.run),
+        detached: true,
+        next: `workbench run watch ${run.id}`,
+      }, parsed, io, () => `Detached from run ${displayRef(run.id)}.\nnext: workbench run watch ${run.id}`, 130);
+    }
+    const { run: watchedRun, jobs } = await localRunStateForSnapshot(context.core, completed.run);
+    const latest = await createWorkbenchReadOnlyInspectionSnapshot(context.core);
+    const progress = runProgressSnapshotForInspection({
+      command: "run watch",
+      location: watchedRun.location ?? "cloud",
+      phase: "complete",
+      runs: [watchedRun],
+      snapshot: latest,
+      startedAtMs: timestampMs(watchedRun.createdAt) ?? Date.now(),
+      next: runWatchNextCommand(watchedRun),
+    });
+    const runSnapshot = createWorkbenchRunSnapshotForRun(watchedRun, jobs);
+    return emitRunTerminalResult("workbench.cli.run-watch.v1", {
+      run: runSnapshotResultJson(runSnapshot),
+      next: runWatchNextCommand(watchedRun) as Json,
+    }, parsed, io, () => formatRunWatchResult(watchedRun, jobs, progress), runWatchExitCode(watchedRun));
+  } finally {
+    interrupt.dispose();
+  }
+}
+
+async function handleLocalHostedRunWatch(
+  parsed: ParsedArgs,
+  io: CliIo,
+  core: { dir?: string; authToken?: string },
+  initialRun: WorkbenchRun,
+): Promise<number> {
+  const renderer = createProgressRenderer({ stderr: io.stderr, json: parsed.flags.json === true });
+  const startedAtMs = timestampMs(initialRun.createdAt) ?? Date.now();
+  const deadline = Date.now() + (positiveIntEnv("WORKBENCH_RUN_WATCH_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS);
+  let run = initialRun;
+  while (true) {
+    const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+    run = snapshot.runs.find((entry) => entry.id === run.id) ?? run;
+    const jobs = jobsForRuns(snapshot, [run.id]);
+    const terminal = isTerminalRun(run);
+    const progress = runProgressSnapshotForInspection({
+      command: "run watch",
+      location: "cloud",
+      phase: terminal ? "complete" : "queued",
+      runs: [run],
+      snapshot,
+      startedAtMs,
+      next: runWatchNextCommand(run),
+    });
+    renderer.render(progress, { force: terminal, command: "run watch" });
+    if (terminal) {
+      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+      return emitRunTerminalResult("workbench.cli.run-watch.v1", {
+        run: runSnapshotResultJson(runSnapshot),
+        next: runWatchNextCommand(run) as Json,
+      }, parsed, io, () => formatRunWatchResult(run, jobs, progress), runWatchExitCode(run));
+    }
+    if (!await hasWorkbenchLocalHostedRunHandle({ ...core, runId: run.id })) {
+      return await handleCloudRunWatch(parsed, io, core, snapshot, run);
+    }
+    if (Date.now() >= deadline) {
+      throw new WorkbenchCodedError("run_pending", `Run ${run.id} is still waiting for Workbench Cloud to accept it.`, {
+        retryable: true,
+        remediation: `workbench run watch ${run.id}`,
+        subject: { runId: run.id, status: run.status },
+        exitCode: 1,
+      });
+    }
+    await sleep(LOCAL_PROGRESS_POLL_INTERVAL_MS);
+  }
+}
+
+async function handleRunCancel(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const runRef = requiredPositional(parsed, 2, "workbench run cancel requires RUN_ID.");
+  const core = await coreOptions(parsed);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const run = requiredRunByRef(snapshot, runRef);
+  if (isTerminalRun(run)) {
+    throw new WorkbenchCodedError("run_terminal", `Run ${run.id} is already ${run.status}.`, {
+      remediation: `workbench show ${run.id}`,
+      subject: { runId: run.id, status: run.status },
+      exitCode: 2,
+    });
+  }
+  if ((run.location ?? "local") === "cloud") {
+    if (await hasWorkbenchLocalHostedRunHandle({ ...core, runId: run.id })) {
+      const requested = await requestLocalWorkbenchRunCancellation({ ...core, runId: run.id, reason: "user_requested" });
+      const canceledRun = await recordWorkbenchLocalHostedRunCancellation({
+        ...core,
+        run: requested.run,
+        requestedAt: requested.requestedAt,
+      });
+      const runSnapshot = createWorkbenchRunSnapshotForRun(canceledRun, []);
+      const next = runWatchNextCommand(canceledRun);
+      return emitResult("workbench.cli.run-cancel.v1", {
+        run: runSnapshotResultJson(runSnapshot),
+        requestedAt: requested.requestedAt,
+        next: next as Json,
+      }, parsed, io, () => [
+        `Canceled hosted run ${displayRef(canceledRun.id)} before Workbench Cloud accepted it.`,
+        `next: ${next}`,
+      ].join("\n"));
+    }
+    const context = await cloudRunContext(core, snapshot, run);
+    const response = await apiRequest<{ run?: WorkbenchRun; jobs?: WorkbenchJob[] }>(
+      `/api/workbench/skills/${encodeURIComponent(context.skillId)}/runs/${encodeURIComponent(run.id)}/cancel`,
+      {
+        method: "POST",
+        body: {
+          schema: "workbench.remote.run.cancel-request.v1",
+          reason: "user_requested",
+        },
+      },
+      context.source.baseUrl,
+    );
+    const canceledRun = response.run ?? run;
+    const jobs = response.jobs ?? [];
+    const runSnapshot = createWorkbenchRunSnapshotForRun(canceledRun, jobs);
+    const next = runWatchNextCommand(canceledRun);
+    return emitResult("workbench.cli.run-cancel.v1", {
+      run: runSnapshotResultJson(runSnapshot),
+      next: next as Json,
+    }, parsed, io, () => [
+      `Cancellation requested for ${displayRef(canceledRun.id)}.`,
+      ...(next ? [`next: ${next}`] : []),
+    ].join("\n"));
+  }
+  const result = await requestLocalWorkbenchRunCancellation({ ...core, runId: run.id, reason: "user_requested" });
+  const runSnapshot = createWorkbenchRunSnapshotForRun(result.run, jobsForRuns(snapshot, [result.run.id]));
+  return emitResult("workbench.cli.run-cancel.v1", {
+    run: runSnapshotResultJson(runSnapshot),
+    requestedAt: result.requestedAt,
+    next: `workbench run watch ${result.run.id}`,
+  }, parsed, io, () => [
+    `Cancellation requested for ${displayRef(result.run.id)}.`,
+    `next: workbench run watch ${result.run.id}`,
+  ].join("\n"));
+}
+
+async function handleRunRetry(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const runRef = requiredPositional(parsed, 2, "workbench run retry requires RUN_ID.");
+  const core = await coreOptions(parsed);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const run = requiredRunByRef(snapshot, runRef);
+  const retryPlan = resolveWorkbenchRunRetryPlan(snapshot, run);
+  if (retryPlan.location === "cloud") {
+    return await retryCloudRun(parsed, io, core, snapshot, run, retryPlan);
+  }
+  const request = retryOperationRequest(retryPlan, "local", run.id);
+  const started = await startPrivateLocalWorkbenchOperation({
+    core,
+    request,
+  });
+  const completed = await waitForLocalRunTerminal({
+    command: "run retry",
+    core,
+    initialSnapshot: started.snapshot,
+    io,
+    json: parsed.flags.json === true,
+  });
+  if (completed.detached) {
+    return emitLocalDetach("workbench.cli.run-retry.v1", completed.snapshot, parsed, io, {
+      retryOfRunId: run.id,
+    });
+  }
+  return emitRetryResult(parsed, io, run, [completed.run], completed.snapshot);
+}
+
+async function retryCloudRun(
+  parsed: ParsedArgs,
+  io: CliIo,
+  core: { dir?: string; authToken?: string },
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+  retryPlan: WorkbenchRunRetryPlan,
+): Promise<number> {
+  const remoteContext = await cloudRemoteRunContext(core, snapshot, run);
+  const renderer = createProgressRenderer({ stderr: io.stderr, json: parsed.flags.json === true });
+  const interrupt = createCloudInterruptController("run retry", io);
+  const startedAtMs = Date.now();
+  const renderCloudProgress = (
+    phase: WorkbenchProgressPhase,
+    runs: readonly WorkbenchRun[] = [],
+    jobs: readonly WorkbenchJob[] = [],
+  ): void => {
+    renderer.render(runProgressSnapshotFromRuns({
+      command: "run retry",
+      location: "cloud",
+      phase,
+      runs,
+      jobs,
+      startedAtMs,
+    }), { command: "run retry" });
+  };
+  const runId = createWorkbenchRunId();
+  const prescheduledRun = createPrescheduledCloudRetryRun({
+    remoteName: remoteContext.remote.name,
+    retryOfRun: run,
+    retryPlan,
+    runId,
+  });
+  let prescheduledRunForCleanup: WorkbenchRun | null = prescheduledRun;
+  try {
+    interrupt.setRunIds([runId]);
+    await recordWorkbenchLocalHostedRunHandle({ ...remoteContext.core, run: prescheduledRun });
+    renderCloudProgress("queued", [prescheduledRun]);
+    await abortIfLocalHostedRunCanceled("run retry", remoteContext.core, prescheduledRun);
+    const syncBefore = await cloudPreScheduleStepWithLocalCancel(
+      "run retry",
+      interrupt,
+      remoteContext.core,
+      prescheduledRun,
+      (signal) => withProgressHeartbeat(
+        io,
+        "workbench run retry: syncing with Workbench Cloud",
+        async () => await syncWorkbenchRemote({ ...remoteContext.core, remote: remoteContext.remote.name, signal }),
+        {
+          hint: `Run ${displayRef(runId)} is waiting for Cloud acceptance; resume with workbench run watch ${runId} or cancel with workbench run cancel ${runId}.`,
+          immediate: parsed.flags.json !== true,
+          json: parsed.flags.json === true,
+        },
+      ),
+    );
+    await abortIfLocalHostedRunCanceled("run retry", remoteContext.core, prescheduledRun);
+    const skillId = await cloudPreScheduleStep("run retry", interrupt, resolveCloudSkillId(remoteContext.source));
+    await abortIfLocalHostedRunCanceled("run retry", remoteContext.core, prescheduledRun);
+    const retryRequest = retryOperationRequest(retryPlan, "cloud", run.id, runId);
+    const response = await cloudPreScheduleStep(
+      "run retry",
+      interrupt,
+      withProgressHeartbeat(
+        io,
+        "workbench run retry: scheduling hosted run",
+        async () => await apiRequest<WorkbenchRunSnapshot>(
+          `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/operations`,
+          {
+            method: "POST",
+            body: retryRequest,
+          },
+          remoteContext.source.baseUrl,
+        ),
+        {
+          hint: `Run ${displayRef(runId)} is waiting for Cloud acceptance; resume with workbench run watch ${runId} or cancel with workbench run cancel ${runId}.`,
+          immediate: parsed.flags.json !== true,
+          json: parsed.flags.json === true,
+        },
+      ),
+    );
+    if (response.schema !== "workbench.run.v1" || !response.id) {
+      throw new WorkbenchCodedError("cloud_run_missing", "Workbench Cloud did not return a retry run.", {
+        retryable: true,
+        remediation: `workbench run retry ${run.id}`,
+        exitCode: 1,
+      });
+    }
+    if (response.id !== runId) {
+      throw new WorkbenchCodedError("cloud_run_id_mismatch", "Workbench Cloud returned a different run id for hosted retry.", {
+        retryable: true,
+        remediation: `workbench run watch ${runId}`,
+        subject: { expectedRunId: runId, actualRunId: response.id, remote: remoteContext.remote.name, skillId },
+        exitCode: 1,
+      });
+    }
+    interrupt.setRunIds([response.id]);
+    await recordWorkbenchCloudRunSnapshot({ ...remoteContext.core, remoteName: remoteContext.remote.name, run: response });
+    await clearWorkbenchLocalHostedRunHandle({ ...remoteContext.core, runId });
+    prescheduledRunForCleanup = null;
+    const completed = await waitForCloudRun({
+      command: "run retry",
+      core: remoteContext.core,
+      interrupt,
+      renderer,
+      remote: remoteContext.remote,
+      run: response,
+      source: remoteContext.source,
+      skillId,
+      initialSync: syncBefore,
+      startedAtMs: runSnapshotStartedAtMs(response),
+    });
+    if (completed.detached) {
+      return emitRunTerminalResult("workbench.cli.run-retry.v1", {
+        retryOfRunId: run.id,
+        run: runSnapshotResultJson(completed.run),
+        detached: true,
+        cloud: {
+          remote: remoteContext.remote.name,
+          url: remoteContext.remote.url,
+          skillId,
+          sync: {
+            before: cloudSyncSummary(syncBefore),
+            after: cloudSyncSummary(completed.sync),
+          },
+        },
+        next: `workbench run watch ${completed.run.id}`,
+      }, parsed, io, () => `Detached from retry ${displayRef(completed.run.id)}.\nnext: workbench run watch ${completed.run.id}`, 130);
+    }
+    const { run: retryRun, jobs } = await localRunStateForSnapshot(remoteContext.core, completed.run);
+    const runSnapshot = createWorkbenchRunSnapshotForRun(retryRun, jobs);
+    return emitRetryResult(parsed, io, run, [retryRun], runSnapshot, {
+      remote: remoteContext.remote.name,
+      url: remoteContext.remote.url,
+      skillId,
+      sync: {
+        before: cloudSyncSummary(syncBefore),
+        after: cloudSyncSummary(completed.sync),
+      },
+    });
+  } catch (error) {
+    if (
+      prescheduledRunForCleanup &&
+      !(error instanceof WorkbenchCodedError && (error.code === "cloud_canceled" || error.code === "cloud_detached"))
+    ) {
+      await recordWorkbenchLocalHostedRunFailure({
+        ...remoteContext.core,
+        run: prescheduledRunForCleanup,
+        error: singleLine(errorMessage(error)),
+      }).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    interrupt.dispose();
+  }
+}
+
+function requiredRunByRef(snapshot: WorkbenchInspectionSnapshot, ref: string): WorkbenchRun {
+  const run = snapshotObjectByRef(snapshot.runs, ref, "run");
+  if (!run) {
+    throw new WorkbenchCodedError("run_not_found", `Run not found: ${ref}.`, {
+      remediation: "workbench log --runs",
+      subject: { ref },
+      exitCode: 1,
+    });
+  }
+  return run;
+}
+
+async function cloudRunContext(
+  core: { dir?: string; authToken?: string },
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+): Promise<{
+  core: { dir?: string; authToken?: string };
+  remote: WorkbenchRemote;
+  source: ParsedWorkbenchInstallSource;
+  skillId: string;
+}> {
+  const context = await cloudRemoteRunContext(core, snapshot, run);
+  return {
+    ...context,
+    skillId: await resolveCloudSkillId(context.source),
+  };
+}
+
+async function cloudRemoteRunContext(
+  core: { dir?: string; authToken?: string },
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+): Promise<{
+  core: { dir?: string; authToken?: string };
+  remote: WorkbenchRemote;
+  source: ParsedWorkbenchInstallSource;
+}> {
+  const remote = run.remoteName
+    ? snapshot.remotes.find((entry) => entry.name === run.remoteName)
+    : preferredCloudRemote(snapshot.remotes);
+  if (!remote) {
+    throw new WorkbenchCodedError("remote_not_found", `Run ${run.id} was hosted, but no Workbench Cloud remote is linked locally.`, {
+      remediation: "workbench sync cloud",
+      subject: {
+        runId: run.id,
+        ...(run.remoteName ? { remoteName: run.remoteName } : {}),
+      },
+      exitCode: 1,
+    });
+  }
+  const source = parseWorkbenchInstallSource(remote.url);
+  if (!source) {
+    throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote is not a Cloud skill URL: ${remote.url}`, {
+      remediation: "workbench publish",
+      subject: { remote: remote.name, url: remote.url },
+      exitCode: 2,
+    });
+  }
+  const token = await workbenchCloudToken({ baseUrl: source.baseUrl });
+  if (!token) {
+    throw new WorkbenchCodedError("auth_required", `Run ${run.id} requires Workbench Cloud auth.`, {
+      remediation: workbenchLoginRemediation(source.baseUrl),
+      subject: { runId: run.id },
+      exitCode: 1,
+    });
+  }
+  return {
+    core: { ...core, authToken: token },
+    remote,
+    source,
+  };
+}
+
+function emitRetryResult(
+  parsed: ParsedArgs,
+  io: CliIo,
+  oldRun: WorkbenchRun,
+  runs: readonly WorkbenchRun[],
+  runSnapshot: WorkbenchRunSnapshot,
+  cloud?: Json,
+): number {
+  const code = runs.some((run) => run.status === "failed" || run.status === "canceled") ? 1 : 0;
+  const first = runs[0];
+  return emitRunTerminalResult("workbench.cli.run-retry.v1", {
+    retryOfRunId: oldRun.id,
+    run: runSnapshotResultJson(runSnapshot),
+    ...(cloud ? { cloud } : {}),
+    next: first ? runWatchNextCommand(first) as Json : "workbench log --runs",
+  }, parsed, io, () => [
+    `Retried ${displayRef(oldRun.id)}${first ? ` as ${displayRef(first.id)}` : ""}.`,
+    ...runs.map(formatRun),
+    ...(first ? [`next: ${runWatchNextCommand(first)}`] : []),
+  ].join("\n"), code);
+}
+
+function emitRunTerminalResult(
+  schema: string,
+  body: Record<string, Json | undefined>,
+  parsed: ParsedArgs,
+  io: CliIo,
+  text: () => string,
+  code: number,
+): number {
+  if (parsed.flags.json === true) {
+    io.stdout.write(`${JSON.stringify({ schema, ok: true, ...body }, null, 2)}\n`);
+  } else {
+    io.stdout.write(`${text()}\n`);
+  }
+  return code;
+}
+
+function runWatchExitCode(run: WorkbenchRun): number {
+  return isTerminalRun(run) ? 0 : 1;
+}
+
+function runWatchNextCommand(run: WorkbenchRun): string {
+  if (run.status === "queued" || run.status === "running") {
+    return `workbench run watch ${run.id}`;
+  }
+  if (run.status === "failed" || run.status === "canceled") {
+    return `workbench show ${run.id}`;
+  }
+  return "workbench compare";
+}
+
+function showRunNextCommand(run: WorkbenchRun): string | null {
+  const next = runWatchNextCommand(run);
+  return next === `workbench show ${run.id}` ? null : next;
+}
+
+function formatRunWatchResult(run: WorkbenchRun, jobs: readonly WorkbenchJob[], progress?: WorkbenchRunSnapshot): string {
+  const failed = jobs.filter((job) => job.status === "failed").length;
+  const canceled = jobs.filter((job) => job.status === "canceled").length;
+  return [
+    formatRun(run),
+    ...(progress ? [`progress=${formatProgressSummary(progress)}`] : []),
+    `jobs=${jobs.length} failed=${failed}${canceled > 0 ? ` canceled=${canceled}` : ""}`,
+    `next: ${runWatchNextCommand(run)}`,
+  ].join("\n");
+}
+
+function timestampMs(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function runSnapshotStartedAtMs(snapshot: WorkbenchRunSnapshot): number {
+  return Date.now() - Math.max(0, snapshot.progress.elapsedMs);
+}
+
 async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const ref = requiredPositional(parsed, 1, "workbench show requires REF.");
   const core = await coreOptions(parsed);
@@ -823,12 +1907,31 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const details = evidenceDetailsForSelection(snapshot, selection);
   const evidenceFiles = evidenceFilesForSelection(snapshot, selection);
   if (selection.run || selection.jobs.length > 0 || details.length > 0 || evidenceFiles.length > 0) {
+    const next = selection.run ? showRunNextCommand(selection.run) : null;
+    const progress = selection.run
+      ? runProgressSnapshotForInspection({
+          command: "run watch",
+          location: selection.run.location ?? "local",
+          phase: progressPhaseForRun(selection.run),
+          runs: [selection.run],
+          snapshot,
+          startedAtMs: timestampMs(selection.run.createdAt) ?? Date.now(),
+          ...(next ? { next } : {}),
+        })
+      : undefined;
+    const evidenceOwnerRef = selection.run?.id ?? (selection.jobs.length === 1 ? selection.jobs[0]!.id : objectRef);
     return output({
+      ...(selection.run ? { run: runSummary(selection.run, []) } : {}),
       jobs: selection.jobs.map(jobEvidenceSummary),
+      ...(progress ? { progress: progress as unknown as Json } : {}),
+      failures: runFailureGroups(selection.jobs) as unknown as Json,
       details: details.map(evidenceDetailSummary),
       highlights: evidenceHighlights(evidenceFiles) as unknown as Json,
-      files: evidenceFiles.map(fileSummary),
-    }, parsed, io, () => formatRunOrJobEvidence(selection.jobs, details, evidenceFiles));
+      files: evidenceFiles.map((file) => fileSummary(file, showFileRef(evidenceOwnerRef, file.path))),
+      ...(next ? { next } : {}),
+    }, parsed, io, () => selection.run
+      ? formatRunEvidenceSummary(selection.run, selection.jobs, details, evidenceFiles, progress, next)
+      : formatRunOrJobEvidence(selection.jobs, details, evidenceFiles, evidenceOwnerRef));
   }
   const trace = snapshotObjectByRef(snapshot.traces, objectRef, "trace");
   if (trace) {
@@ -910,10 +2013,11 @@ async function handleAdapterLogout(provider: string, parsed: ParsedArgs, io: Cli
   const remote = await deleteAdapterConnectionRemote(target, parsed).catch((error: unknown) => {
     if (error instanceof WorkbenchCodedError && error.code === "auth_required") {
       return {
-        status: "not_authenticated" as const,
+        status: "unknown" as const,
         sync: "skipped" as const,
-        reason: "not_authenticated",
+        reason: "workbench_not_authenticated",
         remediation: "workbench login",
+        workbenchCloud: { status: "not_authenticated" as const },
       };
     }
     throw error;
@@ -1013,8 +2117,10 @@ const DEFAULT_WORKBENCH_CLOUD_BASE_URL = "https://v2.workbench.ai";
 const API_REQUEST_MAX_ATTEMPTS = 3;
 const API_REQUEST_GZIP_THRESHOLD_BYTES = 1024 * 1024;
 const CLOUD_RUN_TIMEOUT_MS = 30 * 60 * 1000;
-const CLOUD_RUN_POLL_INTERVAL_MS = 3000;
+const CLOUD_RUN_WAIT_MAX_MS = 25_000;
+const CLOUD_RUN_WAIT_MIN_MS = 1_000;
 const CLOUD_PROGRESS_RENDER_INTERVAL_MS = 1000;
+const LOCAL_HOSTED_CANCEL_POLL_INTERVAL_MS = 250;
 const LOGIN_WAIT_TIMEOUT_SECONDS = 120;
 
 interface WorkbenchConfig {
@@ -1306,7 +2412,7 @@ async function handleNewFrom(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const hydratedSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: status.root });
   const next = snapshotHasAnyEvalCase(hydratedSnapshot)
     ? "workbench eval"
-    : authorEvalCaseCommand(hydratedSnapshot);
+    : projectScopedNextCommand(status.root, authorEvalCaseCommand(hydratedSnapshot));
   return emitResult("workbench.cli.new.v1", {
     result: project as unknown as Json,
     source: workbenchInstallSourceSummary(workbenchSource, snapshot),
@@ -1366,35 +2472,38 @@ async function writeSourceSnapshotFile(root: string, file: SurfaceSnapshotFile):
 
 async function handleCloudEval(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const started = await startCloudExecution("eval", parsed, io);
-  const artifactIds = await artifactIdsByRunId(started.core, started.runs);
   if (started.detached) {
-    const next = cloudDetachedNextCommand(started.runs);
+    const next = cloudDetachedNextCommand(started.run);
     return emitCloudDetached("eval", {
-      result: started.runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? [])),
+      run: runSnapshotResultJson(started.run),
       next: next as Json,
       cloud: cloudExecutionSummary(started),
     }, parsed, io, () => [
       `Detached from hosted eval on ${started.remote.url}.`,
-      started.runs.map(formatRun).join("\n"),
+      formatRunSnapshot(started.run),
       ...(next ? [`next: ${next}`] : []),
     ].filter(Boolean).join("\n"));
   }
-  const failedRuns = started.runs.filter((run) => run.status === "failed" || run.status === "canceled");
-  const coverage = await evalCoverageSummaries(started.core, started.runs);
-  const deltas = await evalDeltas(started.core, started.runs);
+  const { run, jobs } = await localRunStateForSnapshot(started.core, started.run);
+  const runs = [run];
+  const snapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+  const artifactIds = await artifactIdsByRunId(started.core, runs);
+  const failedRuns = runs.filter((entry) => entry.status === "failed" || entry.status === "canceled");
+  const coverage = await evalCoverageSummaries(started.core, runs);
+  const deltas = await evalDeltas(started.core, runs);
   if (failedRuns.length > 0) {
-    return emitEvalFailure(started.runs, failedRuns, artifactIds, coverage, deltas, parsed, io);
+    return emitEvalFailure(snapshot, failedRuns, artifactIds, coverage, deltas, parsed, io);
   }
-  const next = await evalSuccessNextCommand(started.core, started.runs);
+  const next = await evalSuccessNextCommand(started.core, runs);
   return emitResult("workbench.cli.eval.v1", {
-    result: started.runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? [])),
+    run: runSnapshotResultJson(snapshot),
     coverage: coverage as unknown as Json,
     deltas: deltas as unknown as Json,
     next: next as Json,
     cloud: cloudExecutionSummary(started),
   }, parsed, io, () => [
     `Completed hosted eval on ${started.remote.url}.`,
-    started.runs.map(formatRun).join("\n"),
+    formatRunSnapshot(snapshot),
     ...formatEvalCoverageLines(coverage),
     ...formatEvalDeltaLines(deltas),
     ...(next ? [`next: ${next}`] : []),
@@ -1403,20 +2512,22 @@ async function handleCloudEval(parsed: ParsedArgs, io: CliIo): Promise<number> {
 
 async function handleCloudImprove(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const started = await startCloudExecution("improve", parsed, io);
-  const artifactIds = await artifactIdsByRunId(started.core, started.runs);
   if (started.detached) {
-    const next = cloudDetachedNextCommand(started.runs);
+    const next = cloudDetachedNextCommand(started.run);
     return emitCloudDetached("improve", {
-      result: hostedImproveResult(started, artifactIds),
+      run: runSnapshotResultJson(started.run),
       next: next as Json,
       cloud: cloudExecutionSummary(started),
     }, parsed, io, () => [
       `Detached from hosted improve on ${started.remote.url}.`,
-      started.runs.map(formatRun).join("\n"),
+      formatRunSnapshot(started.run),
       ...(next ? [`next: ${next}`] : []),
     ].filter(Boolean).join("\n"));
   }
-  const failedRuns = started.runs.filter((run) => run.status === "failed" || run.status === "canceled");
+  const { run, jobs } = await localRunStateForSnapshot(started.core, started.run);
+  const snapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+  const runs = [run];
+  const failedRuns = runs.filter((entry) => entry.status === "failed" || entry.status === "canceled");
   if (failedRuns.length > 0) {
     const first = failedRuns[0]!;
     throw new WorkbenchCodedError("improve_failed", "Hosted improve failed; evidence was saved.", {
@@ -1430,15 +2541,19 @@ async function handleCloudImprove(parsed: ParsedArgs, io: CliIo): Promise<number
   }
   const switchedVersion = await switchHostedImproveVersionIfPromoted(started);
   if (switchedVersion) {
-    await markWorkbenchRemoteSyncDirty({ ...started.core, remote: started.remote.name });
+    await syncWorkbenchRemote({ ...started.core, remote: started.remote.name });
   }
-  const next = cloudImproveNextCommand(started.runs);
+  const next = cloudImproveNextCommand(snapshot);
   return emitResult("workbench.cli.improve.v1", {
-    result: hostedImproveResult(started, artifactIds, switchedVersion),
+    run: runSnapshotResultJson(snapshot),
+    ...(switchedVersion ? { version: versionSummary(switchedVersion) } : {}),
+    switched: Boolean(switchedVersion),
+    promoted: Boolean(switchedVersion),
     next: next as Json,
+    cloud: cloudExecutionSummary(started),
   }, parsed, io, () => [
     `Completed hosted improve on ${started.remote.url}.`,
-    started.runs.map(formatRun).join("\n"),
+    formatRunSnapshot(snapshot),
     ...(switchedVersion ? [`Switched local source to ${displayRef(switchedVersion.id)}.`] : []),
     ...(next ? [`next: ${next}`] : []),
   ].filter(Boolean).join("\n"));
@@ -1473,8 +2588,7 @@ interface StartedCloudExecution {
   core: { dir?: string; authToken?: string };
   remote: WorkbenchRemote;
   skillId: string;
-  initialRunIds: string[];
-  runs: WorkbenchRun[];
+  run: WorkbenchRunSnapshot;
   detached?: boolean;
   startVersionId?: string;
   source: ParsedWorkbenchInstallSource;
@@ -1548,36 +2662,91 @@ function formatFileCount(count: number): string {
 async function startCloudExecution(command: "eval" | "improve", parsed: ParsedArgs, io: CliIo): Promise<StartedCloudExecution> {
   const root = dirFlag(parsed) ?? process.cwd();
   const startedAtMs = Date.now();
-  const renderer = createProgressRenderer({ stderr: io.stderr });
+  const renderer = createProgressRenderer({ stderr: io.stderr, json: parsed.flags.json === true });
   const renderCloudProgress = (
     phase: WorkbenchProgressPhase,
     runs: readonly WorkbenchRun[] = [],
     jobs: readonly WorkbenchJob[] = [],
   ): void => {
-    renderer.render(progressSnapshotFromRuns({
+    renderer.render(runProgressSnapshotFromRuns({
       command,
       location: "cloud",
       phase,
       runs,
       jobs,
       startedAtMs,
-    }));
+    }), { command });
   };
   const interrupt = createCloudInterruptController(command, io);
+  let prescheduledRunForCleanup: WorkbenchRun | null = null;
   try {
+    const link = await cloudPreScheduleStep(command, interrupt, cloudRemoteLinkTarget(root));
+    const plannedRemote = link.existing ?? await cloudPreScheduleStep(
+      command,
+      interrupt,
+      derivePublishCloudRemote(parsed, "workbench --cloud", link.name),
+    );
+    const plannedSource = parseWorkbenchInstallSource(plannedRemote.url);
+    if (!plannedSource) {
+      throw new WorkbenchCodedError("remote_invalid_url", `Workbench remote is not a Cloud skill URL: ${plannedRemote.url}`, {
+        remediation: "workbench publish",
+        subject: { remote: plannedRemote.name, url: plannedRemote.url },
+        exitCode: 2,
+      });
+    }
+    const token = await workbenchCloudToken({ baseUrl: plannedSource.baseUrl });
+    if (!token) {
+      throw new WorkbenchCodedError("auth_required", `workbench ${command} --cloud requires Workbench Cloud auth.`, {
+        remediation: workbenchLoginRemediation(plannedSource.baseUrl),
+        exitCode: 1,
+      });
+    }
+    const core = { dir: root, authToken: token };
     const preparedImproveRequest = command === "improve"
       ? await cloudPreScheduleStep(command, interrupt, prepareWorkbenchCloudImproveRequest({
-          dir: root,
+          ...core,
           skill: stringFlag(parsed, "skills"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           budget: intFlag(parsed, "budget"),
         }))
       : undefined;
-    const remote = await cloudPreScheduleStep(
+    const preview = command === "eval"
+      ? await cloudPreScheduleStepWithProgress(command, interrupt, previewWorkbenchEval({
+          ...core,
+          skill: stringFlag(parsed, "skills"),
+          agent: stringFlag(parsed, "agents"),
+          samples: intFlag(parsed, "samples"),
+          rerun: parsed.flags.rerun === true,
+          cloud: true,
+        }), () => renderCloudProgress("preflight"))
+      : await cloudPreScheduleStepWithProgress(command, interrupt, previewWorkbenchImprove({
+          ...core,
+          skill: stringFlag(parsed, "skills"),
+          agent: stringFlag(parsed, "agents"),
+          samples: intFlag(parsed, "samples"),
+          budget: intFlag(parsed, "budget"),
+          cloud: true,
+        }), () => renderCloudProgress("preflight"));
+    const runId = createWorkbenchRunId();
+    const prescheduledRun = createPrescheduledCloudRun({
+      command,
+      remoteName: plannedRemote.name,
+      runId,
+      preview,
+      rerun: parsed.flags.rerun === true,
+    });
+    prescheduledRunForCleanup = prescheduledRun;
+    interrupt.setRunIds([runId]);
+    await recordWorkbenchLocalHostedRunHandle({ dir: root, run: prescheduledRun });
+    renderCloudProgress("queued", [prescheduledRun]);
+    await abortIfLocalHostedRunCanceled(command, core, prescheduledRun);
+    const remote = await cloudPreScheduleStepWithLocalCancel(
       command,
       interrupt,
-      ensureCloudRemoteForExecution(root, parsed, () => renderCloudProgress("preflight")),
+      core,
+      prescheduledRun,
+      async () => await ensureCloudRemoteForExecution(root, parsed, () => renderCloudProgress("queued", [prescheduledRun])),
     );
     const source = parseWorkbenchInstallSource(remote.url);
     if (!source) {
@@ -1587,50 +2756,71 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
         exitCode: 2,
       });
     }
-    const token = await workbenchCloudToken({ baseUrl: source.baseUrl });
-    if (!token) {
-      throw new WorkbenchCodedError("auth_required", `workbench ${command} --cloud requires Workbench Cloud auth.`, {
-        remediation: workbenchLoginRemediation(source.baseUrl),
-        exitCode: 1,
-      });
-    }
-    renderCloudProgress("preflight");
-    const core = { dir: root, authToken: token };
-    const request = command === "eval"
+    const requestWithoutRunId = command === "eval"
       ? await cloudPreScheduleStepWithProgress(command, interrupt, prepareWorkbenchCloudEvalRequest({
           ...core,
           skill: stringFlag(parsed, "skills"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
-        }), () => renderCloudProgress("preflight"))
+          rerun: parsed.flags.rerun === true,
+        }), () => renderCloudProgress("queued", [prescheduledRun]))
       : preparedImproveRequest!;
-    const adapterAuthTargets = await cloudPreScheduleStepWithProgress(command, interrupt, resolveCloudAdapterAuthTargets({
-      root,
-      command,
-      versionId: request.versionId,
-      parsed,
-      authToken: token,
-    }), () => renderCloudProgress("preflight"));
+    if (requestWithoutRunId.versionId !== preview.versionId) {
+      throw new WorkbenchCodedError("source_changed", `Source changed while preparing hosted ${command}.`, {
+        remediation: `workbench ${command} --cloud`,
+        subject: {
+          plannedVersionId: preview.versionId,
+          preparedVersionId: requestWithoutRunId.versionId,
+        },
+        exitCode: 1,
+      });
+    }
+    const adapterAuthTargets = cloudAdapterAuthTargetsFromPreview(preview);
     if (adapterAuthTargets.length > 0) {
       await cloudPreScheduleStepWithProgress(command, interrupt, assertCloudAdapterAuthConnected({
         baseUrl: source.baseUrl,
         targets: adapterAuthTargets,
-      }), () => renderCloudProgress("provider_auth"));
+      }), () => renderCloudProgress("provider_auth", [prescheduledRun]));
     }
-    const syncBefore = await cloudPreScheduleStepWithProgress(
+    const request = { ...requestWithoutRunId, runId };
+    const syncBefore = await cloudPreScheduleStepWithLocalCancel(
       command,
       interrupt,
-      syncWorkbenchRemote({ ...core, remote: remote.name }),
-      () => renderCloudProgress("sync"),
+      core,
+      prescheduledRun,
+      (signal) => withProgressHeartbeat(
+        io,
+        `workbench ${command}: syncing with Workbench Cloud`,
+        async () => await syncWorkbenchRemote({ ...core, remote: remote.name, signal }),
+        {
+          hint: `Run ${displayRef(runId)} is waiting for Cloud acceptance; resume with workbench run watch ${runId} or cancel with workbench run cancel ${runId}.`,
+          immediate: parsed.flags.json !== true,
+          json: parsed.flags.json === true,
+        },
+      ),
     );
+    await abortIfLocalHostedRunCanceled(command, core, prescheduledRun);
     const skillId = await cloudPreScheduleStep(command, interrupt, resolveCloudSkillId(source));
-    const response = await cloudPreScheduleStep(command, interrupt, apiRequest<{ runs?: WorkbenchRun[] }>(
-      `/api/workbench/skills/${encodeURIComponent(skillId)}${command === "improve" ? "/improve" : "/runs"}`,
-      { method: "POST", body: cloudExecutionRequestBody(command, request) },
-      source.baseUrl,
-    ));
-    const runs = response.runs ?? [];
-    if (runs.length === 0) {
+    await abortIfLocalHostedRunCanceled(command, core, prescheduledRun);
+    const response = await cloudPreScheduleStep(
+      command,
+      interrupt,
+      withProgressHeartbeat(
+        io,
+        `workbench ${command}: scheduling hosted run`,
+        async () => await apiRequest<WorkbenchRunSnapshot>(
+          `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/operations`,
+          { method: "POST", body: cloudExecutionRequestBody(command, request) },
+          source.baseUrl,
+        ),
+        {
+          hint: `Run ${displayRef(runId)} is waiting for Cloud acceptance; resume with workbench run watch ${runId} or cancel with workbench run cancel ${runId}.`,
+          immediate: parsed.flags.json !== true,
+          json: parsed.flags.json === true,
+        },
+      ),
+    );
+    if (response.schema !== "workbench.run.v1" || !response.id) {
       throw new WorkbenchCodedError("cloud_run_missing", `Workbench Cloud did not return a run for ${command}.`, {
         retryable: true,
         remediation: "workbench log --runs",
@@ -1638,52 +2828,35 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
         exitCode: 1,
       });
     }
-    const initialRunIds = runs.map((run) => run.id);
-    interrupt.setRunIds(initialRunIds);
-    const renderScheduledRunProgress = (): void => {
-      renderCloudProgress(cloudProgressPhase(command, runs, []), runs, []);
-    };
-    const syncAfterSchedule = await Promise.race([
-      withCloudProgressRendering(
-        syncWorkbenchRemote({ ...core, remote: remote.name }),
-        renderScheduledRunProgress,
-      ),
-      interrupt.signal.then(() => null),
-    ]);
-    if (!syncAfterSchedule) {
-      return {
-        core,
-        remote,
-        skillId,
-        initialRunIds,
-        runs,
-        detached: true,
-        startVersionId: request.versionId,
-        source,
-        sync: {
-          before: { pushed: syncBefore.pushed, pulled: syncBefore.pulled, upToDate: syncBefore.upToDate },
-          after: { pushed: syncBefore.pushed, pulled: syncBefore.pulled, upToDate: syncBefore.upToDate },
-        },
-      };
+    if (response.id !== runId) {
+      throw new WorkbenchCodedError("cloud_run_id_mismatch", `Workbench Cloud returned a different run id for hosted ${command}.`, {
+        retryable: true,
+        remediation: `workbench run watch ${runId}`,
+        subject: { expectedRunId: runId, actualRunId: response.id, remote: remote.name, skillId },
+        exitCode: 1,
+      });
     }
-    const completed = await waitForCloudRuns({
+    interrupt.setRunIds([response.id]);
+    await recordWorkbenchCloudRunSnapshot({ ...core, remoteName: remote.name, run: response });
+    await clearWorkbenchLocalHostedRunHandle({ dir: root, runId });
+    prescheduledRunForCleanup = null;
+    const completed = await waitForCloudRun({
       command,
       core,
       interrupt,
       renderer,
       remote,
-      runs,
+      run: response,
       source,
       skillId,
-      initialSync: syncAfterSchedule,
-      startedAtMs,
+      initialSync: syncBefore,
+      startedAtMs: runSnapshotStartedAtMs(response),
     });
     return {
       core,
       remote,
       skillId,
-      initialRunIds,
-      runs: completed.runs,
+      run: completed.run,
       ...(completed.detached ? { detached: true } : {}),
       startVersionId: request.versionId,
       source,
@@ -1693,17 +2866,37 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       },
     };
   } catch (error) {
-    throw command === "improve" ? cloudImproveErrorWithHostedRemediation(error) : error;
+    if (
+      prescheduledRunForCleanup &&
+      !(error instanceof WorkbenchCodedError && (error.code === "cloud_canceled" || error.code === "cloud_detached"))
+    ) {
+      await recordWorkbenchLocalHostedRunFailure({
+        dir: root,
+        run: prescheduledRunForCleanup,
+        error: singleLine(errorMessage(error)),
+      }).catch(() => undefined);
+    }
+    throw command === "improve" ? await cloudImproveErrorWithHostedRemediation(error, parsed) : error;
   } finally {
     interrupt.dispose();
   }
 }
 
-function cloudImproveErrorWithHostedRemediation(error: unknown): unknown {
+async function cloudImproveErrorWithHostedRemediation(error: unknown, parsed: ParsedArgs): Promise<unknown> {
   if (!(error instanceof WorkbenchCodedError) || !error.remediation) {
     return error;
   }
-  const remediation = error.remediation.replace(/(^|&&\s*)workbench improve(?!\s+--cloud)\b/gu, "$1workbench improve --cloud");
+  let remediation = error.remediation.replace(/(^|&&\s*)workbench improve(?!\s+--cloud)\b/gu, "$1workbench improve --cloud");
+  if (remediation.includes("workbench improve --cloud") && !hasWorkbenchCloudLoginCommand(remediation)) {
+    const config = await loadConfig();
+    const baseUrl = optionalWorkbenchBaseUrl({
+      explicitBaseUrl: stringFlag(parsed, "base-url"),
+      configBaseUrl: config.baseUrl,
+    });
+    if (!await workbenchCloudToken({ baseUrl })) {
+      remediation = `${workbenchLoginRemediation(baseUrl)} && ${remediation}`;
+    }
+  }
   if (remediation === error.remediation) {
     return error;
   }
@@ -1712,6 +2905,13 @@ function cloudImproveErrorWithHostedRemediation(error: unknown): unknown {
     remediation,
     ...(error.subject ? { subject: error.subject } : {}),
     exitCode: error.exitCode,
+  });
+}
+
+function hasWorkbenchCloudLoginCommand(command: string): boolean {
+  return command.split("&&").some((part) => {
+    const trimmed = part.trim();
+    return trimmed === "workbench login" || /^workbench login\s+--/u.test(trimmed);
   });
 }
 
@@ -1724,7 +2924,7 @@ interface CloudInterruptController {
 }
 
 function createCloudInterruptController(
-  command: "eval" | "improve",
+  command: WorkbenchProgressCommand,
   io: CliIo,
 ): CloudInterruptController {
   let interrupted = false;
@@ -1759,23 +2959,52 @@ function createCloudInterruptController(
 }
 
 async function cloudPreScheduleStep<T>(
-  command: "eval" | "improve",
+  command: WorkbenchProgressCommand,
   interrupt: CloudInterruptController,
   step: Promise<T>,
 ): Promise<T> {
   if (interrupt.interrupted) {
-    throw cloudCanceledBeforeRunIdError(command);
+    throw cloudInterruptedBeforeScheduleFinishedError(command, interrupt.runIds);
   }
   return await Promise.race([
     step,
     interrupt.signal.then(() => {
-      throw cloudCanceledBeforeRunIdError(command);
+      throw cloudInterruptedBeforeScheduleFinishedError(command, interrupt.runIds);
     }),
   ]);
 }
 
+async function cloudPreScheduleStepWithLocalCancel<T>(
+  command: WorkbenchProgressCommand,
+  interrupt: CloudInterruptController,
+  core: { dir?: string; authToken?: string },
+  run: WorkbenchRun,
+  step: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const abortController = new AbortController();
+  let stopped = false;
+  const cancelSignal = (async (): Promise<T> => {
+    while (!stopped) {
+      if (await hasWorkbenchLocalRunCancellationRequest({ ...core, runId: run.id })) {
+        await abortIfLocalHostedRunCanceled(command, core, run);
+      }
+      await sleep(LOCAL_HOSTED_CANCEL_POLL_INTERVAL_MS);
+    }
+    return await new Promise<T>(() => undefined);
+  })();
+  try {
+    return await Promise.race([
+      cloudPreScheduleStep(command, interrupt, step(abortController.signal)),
+      cancelSignal,
+    ]);
+  } finally {
+    stopped = true;
+    abortController.abort();
+  }
+}
+
 async function cloudPreScheduleStepWithProgress<T>(
-  command: "eval" | "improve",
+  command: WorkbenchProgressCommand,
   interrupt: CloudInterruptController,
   step: Promise<T>,
   renderProgress: () => void,
@@ -1799,83 +3028,143 @@ async function withCloudProgressRendering<T>(
   }
 }
 
-function cloudCanceledBeforeRunIdError(command: "eval" | "improve"): WorkbenchCodedError {
-  return new WorkbenchCodedError("cloud_canceled", `Hosted ${command} was canceled before Workbench Cloud returned a run id.`, {
-    remediation: `workbench ${command} --cloud`,
+async function abortIfLocalHostedRunCanceled(
+  command: WorkbenchProgressCommand,
+  core: { dir?: string; authToken?: string },
+  run: WorkbenchRun,
+): Promise<void> {
+  if (!await hasWorkbenchLocalRunCancellationRequest({ ...core, runId: run.id })) {
+    return;
+  }
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const latestRun = snapshot.runs.find((entry) => entry.id === run.id) ?? run;
+  let canceledRun = latestRun;
+  if (await hasWorkbenchLocalHostedRunHandle({ ...core, runId: run.id })) {
+    const requested = isTerminalRun(latestRun)
+      ? { run: latestRun, requestedAt: latestRun.cancelRequestedAt ?? latestRun.finishedAt ?? new Date().toISOString() }
+      : await requestLocalWorkbenchRunCancellation({ ...core, runId: run.id, reason: "user_requested" });
+    canceledRun = await recordWorkbenchLocalHostedRunCancellation({
+      ...core,
+      run: requested.run,
+      requestedAt: requested.requestedAt,
+    });
+  }
+  throw new WorkbenchCodedError("cloud_canceled", `Hosted ${command} was canceled before Workbench Cloud accepted the run.`, {
+    remediation: `workbench show ${canceledRun.id}`,
+    subject: { runId: canceledRun.id, status: canceledRun.status },
     exitCode: 130,
   });
 }
 
-async function resolveCloudAdapterAuthTargets(input: {
-  root: string;
-  command: "eval" | "improve";
-  versionId: string;
-  parsed: ParsedArgs;
-  authToken: string;
-}): Promise<CloudAdapterAuthTarget[]> {
-  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: input.root, authToken: input.authToken });
-  const version = snapshotVersionByRef(snapshot, input.versionId);
-  if (!version) {
-    throw new WorkbenchCodedError("version_not_found", `Version not found: ${input.versionId}`, {
-      remediation: "workbench status",
-      subject: { versionId: input.versionId },
-      exitCode: 1,
-    });
-  }
-  const runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
-    skill: stringFlag(input.parsed, "skills"),
-    agent: stringFlag(input.parsed, "agents"),
-    authToken: input.authToken,
-    selectionRemediationCommand: input.command,
+function cloudCanceledBeforeRunIdError(command: WorkbenchProgressCommand): WorkbenchCodedError {
+  return new WorkbenchCodedError("cloud_canceled", `Hosted ${command} was canceled before Workbench Cloud returned a run id.`, {
+    remediation: hostedCommandRemediation(command),
+    exitCode: 130,
   });
-  return uniqueAdapterAuthTargets(runtime.selectedAgents.flatMap(cloudAdapterAuthTargetsForAgent));
+}
+
+function cloudInterruptedBeforeScheduleFinishedError(command: WorkbenchProgressCommand, runIds: readonly string[]): WorkbenchCodedError {
+  const runId = runIds[0];
+  if (!runId) {
+    return cloudCanceledBeforeRunIdError(command);
+  }
+  return new WorkbenchCodedError("cloud_detached", `Detached from hosted ${command} before Workbench Cloud confirmed scheduling.`, {
+    retryable: true,
+    remediation: `workbench run watch ${runId}`,
+    subject: { runId },
+    exitCode: 130,
+  });
+}
+
+function hostedCommandRemediation(command: WorkbenchProgressCommand): string {
+  if (command === "eval" || command === "improve") {
+    return `workbench ${command} --cloud`;
+  }
+  return "workbench log --runs";
 }
 
 async function assertCloudAdapterAuthConnected(input: {
   baseUrl: string;
   targets: readonly CloudAdapterAuthTarget[];
 }): Promise<void> {
-  const targets = uniqueAdapterAuthTargets(input.targets);
-  if (targets.length === 0) {
+  const readiness = await cloudAdapterAuthReadiness(input);
+  const issue = readiness.issues[0];
+  if (!issue) {
     return;
   }
-  const statuses = await fetchCloudAdapterAuthStatuses(input.baseUrl);
-  const missing = targets.find((target) => !statuses.some((status) => adapterAuthStatusMatchesTarget(status, target)));
-  if (!missing) {
-    return;
-  }
-  throw new WorkbenchCodedError("adapter_auth_required", `${formatCloudAdapterAuthTarget(missing)} disconnected.`, {
-    remediation: workbenchProviderAuthSetupCommand(missing.adapterId),
-    subject: {
-      adapterId: missing.adapterId,
-      profile: missing.profile,
-      ...(missing.slot ? { slot: missing.slot } : {}),
-    },
+  throw new WorkbenchCodedError("adapter_auth_required", issue.message, {
+    remediation: issue.remediation,
+    subject: issue.subject as Record<string, Json> | undefined,
     exitCode: 1,
   });
+}
+
+async function cloudDryRunReadiness(
+  command: "eval" | "improve",
+  parsed: ParsedArgs,
+  preview: WorkbenchEvalPreview | WorkbenchImprovePreview,
+): Promise<WorkbenchLaunchReadiness> {
+  const config = await loadConfig();
+  const baseUrl = optionalWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
+  const token = await workbenchCloudToken({ baseUrl });
+  if (!token) {
+    return {
+      ready: false,
+      issues: [{
+        code: "auth_required",
+        message: `workbench ${command} --dry-run --cloud requires Workbench Cloud auth.`,
+        remediation: workbenchLoginRemediation(baseUrl),
+      }],
+    };
+  }
+  const targets = cloudAdapterAuthTargetsFromPreview(preview);
+  return await cloudAdapterAuthReadiness({ baseUrl, targets });
+}
+
+function cloudAdapterAuthTargetsFromPreview(
+  preview: WorkbenchEvalPreview | WorkbenchImprovePreview,
+): CloudAdapterAuthTarget[] {
+  return uniqueAdapterAuthTargets(preview.adapterAuthTargets
+    .filter((target) => target.adapterId === "codex" || target.adapterId === "claude")
+    .map(cloudAdapterAuthTargetFromWorkbench));
+}
+
+function cloudAdapterAuthTargetFromWorkbench(target: WorkbenchAdapterAuthTarget): CloudAdapterAuthTarget {
+  return {
+    adapterId: target.adapterId,
+    profile: target.profile,
+    ...(target.slot ? { slot: target.slot } : {}),
+  };
+}
+
+async function cloudAdapterAuthReadiness(input: {
+  baseUrl: string;
+  targets: readonly CloudAdapterAuthTarget[];
+}): Promise<WorkbenchLaunchReadiness> {
+  const targets = uniqueAdapterAuthTargets(input.targets);
+  if (targets.length === 0) {
+    return { ready: true, issues: [] };
+  }
+  const statuses = await fetchCloudAdapterAuthStatuses(input.baseUrl);
+  const issues = targets
+    .filter((target) => !statuses.some((status) => adapterAuthStatusMatchesTarget(status, target)))
+    .map((target) => ({
+      code: "adapter_auth_required",
+      message: `${formatCloudAdapterAuthTarget(target)} disconnected.`,
+      remediation: workbenchProviderAuthSetupCommand(target.adapterId),
+      subject: {
+        adapterId: target.adapterId,
+        profile: target.profile,
+        ...(target.slot ? { slot: target.slot } : {}),
+      } as Json,
+    }));
+  return { ready: issues.length === 0, issues };
 }
 
 interface CloudAdapterAuthTarget {
   adapterId: string;
   profile: string;
   slot?: string;
-}
-
-function cloudAdapterAuthTargetsForAgent(agent: WorkbenchAgent): CloudAdapterAuthTarget[] {
-  const adapterId = agent.adapter.trim().toLowerCase();
-  if (adapterId !== "codex" && adapterId !== "claude") {
-    return [];
-  }
-  const auth = agent.config.auth;
-  if (typeof auth === "string" && auth.trim()) {
-    return [{ adapterId, profile: auth.trim() }];
-  }
-  if (auth && typeof auth === "object" && !Array.isArray(auth)) {
-    return Object.entries(auth)
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0)
-      .map(([slot, profile]) => ({ adapterId, slot, profile: profile.trim() }));
-  }
-  return [{ adapterId, profile: "default" }];
 }
 
 function uniqueAdapterAuthTargets(targets: readonly CloudAdapterAuthTarget[]): CloudAdapterAuthTarget[] {
@@ -1913,22 +3202,20 @@ function formatCloudAdapterAuthTarget(target: CloudAdapterAuthTarget): string {
   return `${target.adapterId}${target.slot ? `/${target.slot}` : ""}`;
 }
 
-async function waitForCloudRuns(input: {
-  command: "eval" | "improve";
+async function waitForCloudRun(input: {
+  command: WorkbenchProgressCommand;
   core: { dir?: string; authToken?: string };
   interrupt: CloudInterruptController;
   renderer: ReturnType<typeof createProgressRenderer>;
   remote: WorkbenchRemote;
-  runs: readonly WorkbenchRun[];
+  run: WorkbenchRunSnapshot;
   source: ParsedWorkbenchInstallSource;
   skillId: string;
   initialSync: Awaited<ReturnType<typeof syncWorkbenchRemote>>;
   startedAtMs: number;
-}): Promise<{ runs: WorkbenchRun[]; sync: Awaited<ReturnType<typeof syncWorkbenchRemote>>; detached?: boolean }> {
-  const runIds = input.runs
-    .map((run) => run.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
-  if (runIds.length === 0 || runIds.length !== input.runs.length) {
+}): Promise<{ run: WorkbenchRunSnapshot; sync: Awaited<ReturnType<typeof syncWorkbenchRemote>>; detached?: boolean }> {
+  const runId = input.run.id;
+  if (!runId) {
     throw new WorkbenchCodedError("cloud_run_missing", "Workbench Cloud did not return a run id.", {
       retryable: true,
       remediation: "workbench log --runs",
@@ -1937,58 +3224,36 @@ async function waitForCloudRuns(input: {
   }
   let sync = input.initialSync;
   const timeoutMs = positiveIntEnv("WORKBENCH_CLOUD_RUN_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS;
-  const pollIntervalMs = positiveIntEnv("WORKBENCH_CLOUD_RUN_POLL_INTERVAL_MS") ?? CLOUD_RUN_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
-  let details: CloudRunDetail[] = input.runs.map((run) => ({ run, jobs: [] }));
-  let runs = details.map((detail) => detail.run);
-  const renderCurrentProgress = (): void => {
-    const currentJobs = details.flatMap((detail) => detail.jobs);
-    input.renderer.render(progressSnapshotFromRuns({
+  let envelope = await fetchCloudInspectionEnvelope(input.source.baseUrl, input.skillId);
+  await recordWorkbenchCloudInspectionSnapshot({ ...input.core, remoteName: input.remote.name, snapshot: envelope.snapshot });
+  let run = runForCloudInspectionEnvelope(envelope, runId) ?? runFromSnapshot(input.run);
+  let jobs = jobsForRuns(envelope.snapshot, [runId]);
+  let runSnapshot = input.run;
+  const projectCurrentSnapshot = (phase: WorkbenchProgressPhase): WorkbenchRunSnapshot => {
+    const projected = runProgressSnapshotForInspection({
       command: input.command,
       location: "cloud",
-      phase: cloudProgressPhase(input.command, runs, currentJobs),
-      runs,
-      jobs: currentJobs,
+      phase,
+      runs: [run],
+      snapshot: envelope.snapshot,
       startedAtMs: input.startedAtMs,
-    }));
+    });
+    runSnapshot = projected ?? runSnapshot;
+    return runSnapshot;
+  };
+  const renderCurrentProgress = (): void => {
+    input.renderer.render(projectCurrentSnapshot(cloudProgressPhase(input.command, [run], jobs)), { command: input.command });
   };
   const renderTerminalSyncProgress = (): void => {
-    const currentJobs = details.flatMap((detail) => detail.jobs);
-    input.renderer.render(progressSnapshotFromRuns({
-      command: input.command,
-      location: "cloud",
-      phase: "sync",
-      runs,
-      jobs: currentJobs,
-      startedAtMs: input.startedAtMs,
-    }));
+    input.renderer.render(projectCurrentSnapshot("sync"), { command: input.command });
   };
   while (true) {
-    const fetchedDetails = await Promise.race([
-      withCloudProgressRendering(
-        fetchCloudRunDetails(input.source.baseUrl, input.skillId, runIds, details),
-        renderCurrentProgress,
-      ),
-      input.interrupt.signal.then(() => null),
-    ]);
-    if (!fetchedDetails) {
-      return { runs, sync, detached: true };
-    }
-    details = fetchedDetails;
-    runs = details.map((detail) => detail.run);
-    const jobs = details.flatMap((detail) => detail.jobs);
-    input.renderer.render(progressSnapshotFromRuns({
-      command: input.command,
-      location: "cloud",
-      phase: cloudProgressPhase(input.command, runs, jobs),
-      runs,
-      jobs,
-      startedAtMs: input.startedAtMs,
-    }));
+    input.renderer.render(projectCurrentSnapshot(cloudProgressPhase(input.command, [run], jobs)), { command: input.command });
     if (input.interrupt.interrupted) {
-      return { runs, sync, detached: true };
+      return { run: runSnapshot, sync, detached: true };
     }
-    if (runs.length === runIds.length && runs.every(isTerminalRun)) {
+    if (isTerminalRun(run)) {
       const terminalSync = await Promise.race([
         withCloudProgressRendering(
           syncWorkbenchRemote({ ...input.core, remote: input.remote.name }),
@@ -1997,75 +3262,168 @@ async function waitForCloudRuns(input: {
         input.interrupt.signal.then(() => null),
       ]);
       if (!terminalSync) {
-        return { runs, sync, detached: true };
+        return { run: runSnapshot, sync, detached: true };
       }
       sync = terminalSync;
       if (input.interrupt.interrupted) {
-        return { runs, sync, detached: true };
+        return { run: runSnapshot, sync, detached: true };
       }
-      return { runs, sync };
+      return { run: runSnapshot, sync };
     }
     if (Date.now() >= deadline) {
       throw new WorkbenchCodedError("cloud_run_pending", "Hosted Workbench run is still queued or running; no terminal result has been reported yet.", {
         retryable: true,
-        remediation: runIds[0] ? `workbench show ${runIds[0]}` : "workbench log --runs",
+        remediation: `workbench run watch ${runId}`,
         subject: {
-          runIds,
-          statuses: Object.fromEntries(runs.map((run) => [run.id, run.status])),
-          guidance: "Use the remediation command to inspect status, or re-run with --cloud and press Ctrl-C to detach while it continues.",
+          runId,
+          status: run.status,
+          guidance: "Use the remediation command to resume hosted progress and refresh local evidence.",
         },
         exitCode: 1,
       });
     }
-    await Promise.race([sleep(pollIntervalMs), input.interrupt.signal]);
-    if (input.interrupt.interrupted) {
-      return { runs, sync, detached: true };
+    const notice = await Promise.race([
+      withCloudProgressRendering(
+        fetchCloudInspectionNotice(
+          input.source.baseUrl,
+          input.skillId,
+          envelope.cursor,
+          cloudInspectionNoticeWaitTimeoutMs(deadline),
+        ),
+        renderCurrentProgress,
+      ),
+      input.interrupt.signal.then(() => null),
+    ]);
+    if (!notice) {
+      return { run: runSnapshot, sync, detached: true };
     }
+    if (input.interrupt.interrupted) {
+      return { run: runSnapshot, sync, detached: true };
+    }
+    if (notice.type === "heartbeat" && notice.cursor === envelope.cursor) {
+      continue;
+    }
+    envelope = await fetchCloudInspectionEnvelope(input.source.baseUrl, input.skillId);
+    await recordWorkbenchCloudInspectionSnapshot({ ...input.core, remoteName: input.remote.name, snapshot: envelope.snapshot });
+    run = runForCloudInspectionEnvelope(envelope, runId) ?? run;
+    jobs = jobsForRuns(envelope.snapshot, [runId]);
   }
 }
 
-interface CloudRunDetail {
-  run: WorkbenchRun;
-  jobs: WorkbenchJob[];
-  traces?: WorkbenchTrace[];
-  artifacts?: WorkbenchArtifact[];
-}
-
-async function fetchCloudRunDetails(
+async function fetchCloudInspectionEnvelope(
   baseUrl: string,
   skillId: string,
+): Promise<WorkbenchInspectionSnapshotEnvelope> {
+  return await apiRequest<WorkbenchInspectionSnapshotEnvelope>(
+    `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/snapshot`,
+    {},
+    baseUrl,
+  );
+}
+
+async function fetchCloudInspectionNotice(
+  baseUrl: string,
+  skillId: string,
+  cursor: string,
+  timeoutMs: number,
+): Promise<WorkbenchStateNotice> {
+  return await apiRequest<WorkbenchStateNotice>(
+    `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/state/wait?cursor=${encodeURIComponent(cursor)}&timeoutMs=${timeoutMs}`,
+    {},
+    baseUrl,
+  );
+}
+
+function cloudInspectionNoticeWaitTimeoutMs(deadline: number): number {
+  const remainingMs = deadline - Date.now();
+  return Math.max(
+    CLOUD_RUN_WAIT_MIN_MS,
+    Math.min(CLOUD_RUN_WAIT_MAX_MS, Math.trunc(remainingMs)),
+  );
+}
+
+function runForCloudInspectionEnvelope(
+  envelope: WorkbenchInspectionSnapshotEnvelope,
+  runId: string,
+): WorkbenchRun | undefined {
+  return envelope.snapshot.runs.find((run) => run.id === runId);
+}
+
+function jobsForRuns(snapshot: WorkbenchInspectionSnapshot, runIds: readonly string[]): WorkbenchJob[] {
+  const selected = new Set(runIds);
+  return snapshot.jobs.filter((job) => selected.has(job.runId));
+}
+
+function runProgressSnapshotForInspection(input: {
+  command: WorkbenchProgressCommand;
+  location: "local" | "cloud";
+  phase: WorkbenchProgressPhase;
+  runs: readonly WorkbenchRun[];
+  snapshot: WorkbenchInspectionSnapshot;
+  startedAtMs: number;
+  evidence?: ProgressEvidenceCounts;
+  next?: string;
+}): WorkbenchRunSnapshot | undefined {
+  const runIds = input.runs.map((run) => run.id);
+  return runProgressSnapshotFromRuns({
+    command: input.command,
+    location: input.location,
+    phase: input.phase,
+    runs: input.runs,
+    jobs: jobsForRuns(input.snapshot, runIds),
+    evidence: {
+      ...progressEvidenceCountsForRunIds(input.snapshot, runIds),
+      ...(input.evidence ?? {}),
+    },
+    startedAtMs: input.startedAtMs,
+    next: input.next,
+  });
+}
+
+function progressEvidenceCountsForRunIds(
+  snapshot: WorkbenchInspectionSnapshot,
   runIds: readonly string[],
-  fallback: readonly CloudRunDetail[],
-): Promise<CloudRunDetail[]> {
-  const responses = await Promise.all(runIds.map((runId) =>
-    apiRequest<Partial<CloudRunDetail>>(
-      `/api/workbench/skills/${encodeURIComponent(skillId)}/runs/${encodeURIComponent(runId)}`,
-      {},
-      baseUrl,
-    )
-  ));
-  return runIds
-    .map((runId, index) => {
-      const response = responses[index];
-      if (response?.run) {
-        return {
-          run: response.run,
-          jobs: response.jobs ?? [],
-          ...(response.traces ? { traces: response.traces } : {}),
-          ...(response.artifacts ? { artifacts: response.artifacts } : {}),
-        };
-      }
-      return fallback.find((detail) => detail.run.id === runId);
-    })
-    .filter((detail): detail is CloudRunDetail => Boolean(detail));
+  files?: readonly SurfaceSnapshotFile[],
+  details?: readonly WorkbenchExecutionTraceDetail[],
+): ProgressEvidenceCounts {
+  const selected = new Set(runIds);
+  const runs = snapshot.runs.filter((run) => selected.has(run.id));
+  const jobs = snapshot.jobs.filter((job) => selected.has(job.runId));
+  const artifactIds = new Set(jobs.flatMap((job) => job.artifactIds));
+  const traceIds = new Set([
+    ...runs.flatMap((run) => run.traceIds),
+    ...jobs.flatMap((job) => job.traceIds),
+  ]);
+  const artifacts = snapshot.artifacts.filter((artifact) =>
+    artifactIds.size > 0 ? artifactIds.has(artifact.id) : selected.has(artifact.runId)
+  );
+  const traces = snapshot.traces.filter((trace) =>
+    traceIds.size > 0 ? traceIds.has(trace.id) : selected.has(trace.runId)
+  );
+  const resultFiles = files ? countResultFiles(files) : undefined;
+  const fileSessionCount = files ? evidenceHighlights(files).filter((highlight) => highlight.kind === "agent_session").length : 0;
+  const traceSessionCount = details
+    ? details.reduce((sum, detail) =>
+        sum + detail.executions.reduce((executionSum, execution) => executionSum + execution.sessions.length, 0), 0)
+    : 0;
+  return {
+    ...(artifacts.length > 0 ? { artifacts: artifacts.length } : {}),
+    ...(traces.length > 0 ? { traces: traces.length } : {}),
+    ...(resultFiles && resultFiles > 0 ? { resultFiles } : {}),
+    ...((fileSessionCount > 0 || traceSessionCount > 0) ? { sessions: Math.max(fileSessionCount, traceSessionCount) } : {}),
+  };
+}
+
+function countResultFiles(files: readonly SurfaceSnapshotFile[]): number {
+  return files.filter((file) => path.basename(file.path.replace(/\\/gu, "/")) === "result.json").length;
 }
 
 function cloudProgressPhase(
-  command: "eval" | "improve",
+  command: WorkbenchProgressCommand,
   runs: readonly WorkbenchRun[],
   jobs: readonly WorkbenchJob[],
 ): WorkbenchProgressPhase {
-  if (command === "eval") {
+  if (command === "eval" || (command !== "improve" && runs.every((run) => run.kind !== "improve"))) {
     return "running";
   }
   if (runs.length > 0 && runs.every((run) => run.status === "queued") && jobs.every((job) => job.status === "queued")) {
@@ -2084,8 +3442,15 @@ function isTerminalRun(run: WorkbenchRun): boolean {
   return run.status === "succeeded" || run.status === "failed" || run.status === "canceled";
 }
 
+function progressPhaseForRun(run: WorkbenchRun): WorkbenchProgressPhase {
+  if (run.status === "queued") {
+    return "queued";
+  }
+  return isTerminalRun(run) ? "complete" : "running";
+}
+
 async function switchHostedImproveVersionIfPromoted(started: StartedCloudExecution): Promise<WorkbenchVersion | undefined> {
-  const outputVersionId = started.runs.find((run) => run.status === "succeeded" && run.outputVersionId)?.outputVersionId;
+  const outputVersionId = started.run.status === "succeeded" ? started.run.result?.improvedVersionId : undefined;
   if (!outputVersionId) {
     return undefined;
   }
@@ -2228,33 +3593,170 @@ function cloudExecutionRequestBody(
   command: "eval" | "improve",
   request: WorkbenchPreparedCloudEvalRequest | WorkbenchPreparedCloudImproveRequest,
 ): Record<string, Json | undefined> {
-  return {
+  const base = {
+    kind: command,
+    variant: "cloud",
+    runId: request.runId,
     versionId: request.versionId,
     skill: request.skill,
     agent: request.agent,
     samples: request.samples,
-    ...(command === "improve" ? {
-      budget: (request as WorkbenchPreparedCloudImproveRequest).budget,
-    } : {}),
+  };
+  if (command === "eval") {
+    const evalRequest = request as WorkbenchPreparedCloudEvalRequest;
+    return {
+      ...base,
+      ...(evalRequest.rerun === true ? { rerun: true } : {}),
+    };
+  }
+  const improveRequest = request as WorkbenchPreparedCloudImproveRequest;
+  return {
+    ...base,
+    budget: improveRequest.budget,
+    evidenceTraceIds: improveRequest.evidenceTraceIds,
   };
 }
 
-function cloudImproveNextCommand(runs: readonly WorkbenchRun[]): string | null {
-  return cloudExecutionNextCommand(runs, "workbench eval --rerun -n 5");
-}
-
-function cloudDetachedNextCommand(runs: readonly WorkbenchRun[]): string | null {
-  const first = runs[0];
-  return first?.id ? `workbench show ${displayRef(first.id)}` : "workbench status";
-}
-
-function cloudExecutionNextCommand(runs: readonly WorkbenchRun[], successCommand: string): string | null {
-  const first = runs[0];
-  if (!first) {
-    return "workbench log --runs";
+function createPrescheduledCloudRun(input: {
+  command: "eval" | "improve";
+  remoteName: string;
+  runId: string;
+  preview: WorkbenchEvalPreview | WorkbenchImprovePreview;
+  rerun?: boolean;
+}): WorkbenchRun {
+  const createdAt = new Date().toISOString();
+  if (input.command === "eval") {
+    const preview = input.preview as WorkbenchEvalPreview;
+    if (preview.skills.length !== 1 || preview.agents.length !== 1) {
+      throw new WorkbenchCodedError("cloud_selection_unsupported", "Hosted eval requires exactly one skill and one agent. Pass explicit skill and agent selectors.", {
+        remediation: "workbench eval --cloud --skills SKILL --agents AGENT",
+        exitCode: 2,
+      });
+    }
+    const skill = preview.skills[0]!;
+    const agent = preview.agents[0]!;
+    return {
+      id: input.runId,
+      kind: "eval",
+      versionId: preview.versionId,
+      skillName: skill.name,
+      skillBundleHash: skill.hash,
+      evalHash: preview.evalHash,
+      agentName: agent.name,
+      agentHash: agent.hash,
+      status: "queued",
+      jobIds: [],
+      traceIds: [],
+      createdAt,
+      location: "cloud",
+      remoteName: input.remoteName,
+      requestedSamples: preview.samples,
+      operationPlan: {
+        kind: "eval",
+        variant: "cloud",
+        versionId: preview.versionId,
+        evalHash: preview.evalHash,
+        skills: [skill.name],
+        agents: [agent.name],
+        samples: preview.samples,
+        ...(input.rerun === true ? { rerun: true } : {}),
+      },
+      lastProgressAt: createdAt,
+    };
   }
-  if (first.status === "queued" || first.status === "running" || first.status === "failed" || first.status === "canceled") {
-    return `workbench show ${displayRef(first.id)}`;
+  const preview = input.preview as WorkbenchImprovePreview;
+  return {
+    id: input.runId,
+    kind: "improve",
+    versionId: preview.versionId,
+    skillName: preview.skill.name,
+    skillBundleHash: preview.skill.hash,
+    evalHash: preview.evalHash,
+    agentName: preview.agent.name,
+    agentHash: preview.agent.hash,
+    status: "queued",
+    jobIds: [],
+    traceIds: [],
+    createdAt,
+    location: "cloud",
+    remoteName: input.remoteName,
+    baseVersionId: preview.versionId,
+    requestedSamples: preview.samples,
+    requestedBudget: preview.budget,
+    operationPlan: {
+      kind: "improve",
+      variant: "cloud",
+      versionId: preview.versionId,
+      evalHash: preview.evalHash,
+      skills: [preview.skill.name],
+      agents: [preview.agent.name],
+      samples: preview.samples,
+      budget: preview.budget,
+    },
+    lastProgressAt: createdAt,
+  };
+}
+
+function createPrescheduledCloudRetryRun(input: {
+  remoteName: string;
+  retryOfRun: WorkbenchRun;
+  retryPlan: WorkbenchRunRetryPlan;
+  runId: string;
+}): WorkbenchRun {
+  const createdAt = new Date().toISOString();
+  const versionId = input.retryPlan.kind === "improve"
+    ? input.retryPlan.baseVersionId
+    : input.retryPlan.versionId;
+  return {
+    id: input.runId,
+    kind: input.retryPlan.kind,
+    versionId,
+    skillName: input.retryPlan.skillName,
+    skillBundleHash: input.retryOfRun.skillBundleHash,
+    evalHash: input.retryOfRun.evalHash,
+    agentName: input.retryPlan.agentName,
+    agentHash: input.retryOfRun.agentHash,
+    status: "queued",
+    jobIds: [],
+    traceIds: [],
+    createdAt,
+    location: "cloud",
+    remoteName: input.remoteName,
+    retryOfRunId: input.retryOfRun.id,
+    requestedSamples: input.retryPlan.samples,
+    ...(input.retryPlan.kind === "improve"
+      ? { baseVersionId: versionId, requestedBudget: input.retryPlan.budget }
+      : {}),
+    operationPlan: {
+      kind: input.retryPlan.kind,
+      variant: "cloud",
+      versionId,
+      evalHash: input.retryOfRun.evalHash,
+      skills: [input.retryPlan.skillName],
+      agents: [input.retryPlan.agentName],
+      samples: input.retryPlan.samples,
+      ...(input.retryPlan.kind === "eval" ? { rerun: true } : {}),
+      ...(input.retryPlan.kind === "improve" ? { budget: input.retryPlan.budget } : {}),
+      retryOfRunId: input.retryOfRun.id,
+    },
+    lastProgressAt: createdAt,
+  };
+}
+
+function cloudImproveNextCommand(run: WorkbenchRunSnapshot): string | null {
+  return cloudExecutionNextCommand(run, "workbench eval --rerun -n 5");
+}
+
+function cloudDetachedNextCommand(run: WorkbenchRunSnapshot): string | null {
+  return cloudExecutionNextCommand(run, "workbench status");
+}
+
+function cloudExecutionNextCommand(run: WorkbenchRunSnapshot, successCommand: string): string | null {
+  if (run.status === "queued" || run.status === "running" || run.status === "canceling") {
+    return `workbench run watch ${displayRef(run.id)}`;
+  }
+  if (run.status === "failed" || run.status === "canceled") {
+    return `workbench show ${displayRef(run.id)}`;
   }
   return successCommand;
 }
@@ -2264,27 +3766,12 @@ function cloudExecutionSummary(started: StartedCloudExecution): Json {
     remote: started.remote.name,
     url: started.remote.url,
     skillId: started.skillId,
-    initialRunIds: started.initialRunIds,
+    runId: started.run.id,
     ...(started.detached ? { detached: true } : {}),
     sync: {
       before: cloudSyncSummary(started.sync.before),
       after: cloudSyncSummary(started.sync.after),
     },
-  };
-}
-
-function hostedImproveResult(
-  started: StartedCloudExecution,
-  artifactIds: ReadonlyMap<string, readonly string[]>,
-  switchedVersion?: WorkbenchVersion,
-): Json {
-  const runs = started.runs.map((run) => runSummary(run, artifactIds.get(run.id) ?? []));
-  return {
-    run: runs[0] ?? null,
-    switched: Boolean(switchedVersion),
-    promoted: Boolean(switchedVersion),
-    ...(switchedVersion ? { version: versionSummary(switchedVersion) } : {}),
-    cloud: cloudExecutionSummary(started),
   };
 }
 
@@ -3016,32 +4503,35 @@ function formatAdapterAuthUploadTarget(target: { adapter: string; slot?: string;
 }
 
 async function deleteAdapterConnectionRemote(target: ReturnType<typeof parseWorkbenchAdapterAuthTarget>, parsed: ParsedArgs): Promise<{
-  status: "authenticated" | "not_authenticated";
+  status: "disconnected" | "unchanged" | "unknown";
   sync: "deleted" | "skipped";
   reason?: string;
   remediation?: string;
+  workbenchCloud: { status: "authenticated" | "not_authenticated" };
 }> {
   const token = await workbenchCloudToken();
   if (parsed.flags["local-only"] === true) {
     return {
-      status: token ? "authenticated" : "not_authenticated",
+      status: "unchanged",
       sync: "skipped",
       reason: "local_only",
+      workbenchCloud: { status: token ? "authenticated" : "not_authenticated" },
     };
   }
   if (!token) {
     return {
-      status: "not_authenticated",
+      status: "unknown",
       sync: "skipped",
-      reason: "not_authenticated",
+      reason: "workbench_not_authenticated",
       remediation: "workbench login",
+      workbenchCloud: { status: "not_authenticated" },
     };
   }
   await apiRequest<{ ok: boolean; status: string }>(
     adapterConnectionApiPath(target),
     { method: "DELETE" },
   );
-  return { status: "authenticated", sync: "deleted" };
+  return { status: "disconnected", sync: "deleted", workbenchCloud: { status: "authenticated" } };
 }
 
 function adapterConnectionApiPath(target: {
@@ -3574,8 +5064,9 @@ function evidenceSessionDetailForRef(snapshot: InspectionSnapshot, ref: string):
       file.content.trim().length > 0
     );
     const updatedAt = job.finishedAt ?? job.startedAt ?? job.createdAt;
+    const runLocation = run?.location === "cloud" ? "Hosted" : run?.location === "local" ? "Local" : "Agent";
     const title = [
-      run?.kind ? `Hosted ${run.kind}` : "Hosted session",
+      run?.kind ? `${runLocation} ${run.kind}` : `${runLocation} session`,
       `case ${job.caseId}`,
       `sample ${job.sample + 1}`,
       job.status,
@@ -4267,7 +5758,7 @@ async function artifactIdsByRunId(
 }
 
 function emitEvalFailure(
-  runs: readonly WorkbenchRun[],
+  snapshot: WorkbenchRunSnapshot,
   failedRuns: readonly WorkbenchRun[],
   artifactIds: ReadonlyMap<string, readonly string[]>,
   coverage: readonly EvalCoverage[],
@@ -4284,8 +5775,10 @@ function emitEvalFailure(
       message: "Eval failed; evidence was saved.",
       retryable: false,
       evidenceSaved: true,
-      runs: runs.map((run) => runFailureSummary(run, artifactIds.get(run.id) ?? [])),
-      failedRuns: failedRuns.map((run) => runFailureSummary(run, artifactIds.get(run.id) ?? [])),
+      run: runSnapshotResultJson(snapshot),
+      failedMeasurements: snapshot.measurements
+        .filter((measurement) => measurement.status === "failed" || measurement.status === "canceled")
+        .map((measurement) => measurementFailureSummary(measurement, artifactIds.get(measurement.runId) ?? [])),
       coverage: coverage as unknown as Json,
       deltas: deltas as unknown as Json,
       next,
@@ -4294,7 +5787,7 @@ function emitEvalFailure(
   }
   io.stdout.write([
     "Eval failed; evidence was saved.",
-    runs.map(formatRun).join("\n"),
+    formatRunSnapshot(snapshot),
     ...formatEvalCoverageLines(coverage),
     ...formatEvalDeltaLines(deltas),
     ...(next ? [`next: ${next}`] : []),
@@ -4310,6 +5803,13 @@ function runSummary(run: WorkbenchRun, artifactIds: readonly string[]): Json {
     versionId: run.versionId,
     skillName: run.skillName,
     agentName: run.agentName,
+    ...(run.location ? { location: run.location } : {}),
+    ...(run.remoteName ? { remoteName: run.remoteName } : {}),
+    ...(run.requestedSamples !== undefined ? { requestedSamples: run.requestedSamples } : {}),
+    ...(run.requestedBudget !== undefined ? { requestedBudget: run.requestedBudget } : {}),
+    ...(run.retryOfRunId ? { retryOfRunId: run.retryOfRunId } : {}),
+    ...(run.cancelRequestedAt ? { cancelRequestedAt: run.cancelRequestedAt } : {}),
+    ...(run.lastProgressAt ? { lastProgressAt: run.lastProgressAt } : {}),
     ...(scoredRunValue(run) !== undefined ? { score: scoredRunValue(run) } : {}),
     ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
     ...(run.error ? { error: run.error } : {}),
@@ -4319,16 +5819,15 @@ function runSummary(run: WorkbenchRun, artifactIds: readonly string[]): Json {
   };
 }
 
-function runFailureSummary(run: WorkbenchRun, artifactIds: readonly string[]): Json {
+function measurementFailureSummary(measurement: WorkbenchMeasurementSummary, artifactIds: readonly string[]): Json {
   return {
-    runId: run.id,
-    agent: run.agentName,
-    skill: run.skillName,
-    status: run.status,
-    versionId: run.versionId,
-    ...(scoredRunValue(run) !== undefined ? { score: scoredRunValue(run) } : {}),
-    ...(run.error ? { error: run.error } : {}),
-    traceIds: run.traceIds,
+    runId: measurement.runId,
+    agent: measurement.agentName,
+    skill: measurement.skillName,
+    status: measurement.status,
+    versionId: measurement.versionId,
+    ...(measurement.score !== undefined ? { score: measurement.score } : {}),
+    ...(measurement.error ? { error: measurement.error } : {}),
     artifactIds: [...artifactIds],
   };
 }
@@ -4348,7 +5847,11 @@ function evalFailureNextCommand(failedRuns: readonly WorkbenchRun[]): string | n
 }
 
 function adapterAuthRemediationFromRun(run: WorkbenchRun): string | null {
-  const adapterId = run.error?.match(/ADAPTER_AUTH_REQUIRED:\s*([a-z0-9-]+)/iu)?.[1];
+  return adapterAuthRemediationFromErrorMessage(run.error);
+}
+
+function adapterAuthRemediationFromErrorMessage(error: string | undefined): string | null {
+  const adapterId = error?.match(/ADAPTER_AUTH_REQUIRED:\s*([a-z0-9-]+)/iu)?.[1];
   return adapterId ? workbenchProviderAuthSetupCommand(adapterId) : null;
 }
 
@@ -4359,7 +5862,7 @@ function output(value: unknown, parsed: ParsedArgs, io: CliIo, text: () => strin
 function commandSchema(parsed: ParsedArgs): string {
   const command = parsed.positionals[0] ?? "result";
   const subcommand = parsed.positionals[1];
-  const suffix = ["agent", "case"].includes(command) && subcommand
+  const suffix = ["agent", "case", "run"].includes(command) && subcommand
     ? `${command}-${subcommand}`
     : command;
   return `workbench.cli.${suffix}.v1`;
@@ -4369,23 +5872,34 @@ async function withProgressHeartbeat<T>(
   io: CliIo,
   label: string,
   run: () => Promise<T>,
-  options: { hint?: string } = {},
+  options: { hint?: string; immediate?: boolean; json?: boolean } = {},
 ): Promise<T> {
+  if (options.json === true) {
+    return await run();
+  }
   const startedAt = Date.now();
   let interval: ReturnType<typeof setInterval> | undefined;
-  const timeout = setTimeout(() => {
-    const writeProgress = (): void => {
-      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
-      const hint = options.hint ? ` ${options.hint}` : "";
-      io.stderr.write(`${label} still running (${elapsedSeconds}s).${hint}\n`);
-    };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const writeProgress = (): void => {
+    const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+    const hint = options.hint ? ` ${options.hint}` : "";
+    io.stderr.write(`${label} still running (${elapsedSeconds}s).${hint}\n`);
+  };
+  if (options.immediate) {
     writeProgress();
-    interval = setInterval(writeProgress, 30_000);
-  }, 10_000);
+    interval = setInterval(writeProgress, 10_000);
+  } else {
+    timeout = setTimeout(() => {
+      writeProgress();
+      interval = setInterval(writeProgress, 10_000);
+    }, 5_000);
+  }
   try {
     return await run();
   } finally {
-    clearTimeout(timeout);
+    if (timeout) {
+      clearTimeout(timeout);
+    }
     if (interval) {
       clearInterval(interval);
     }
@@ -4393,97 +5907,6 @@ async function withProgressHeartbeat<T>(
 }
 
 const LOCAL_PROGRESS_POLL_INTERVAL_MS = 1_000;
-
-async function withLocalCommandProgress<T>(input: {
-  command: WorkbenchProgressCommand;
-  core: { dir?: string; authToken?: string };
-  io: CliIo;
-  runKind: WorkbenchRun["kind"];
-  initialPhase: WorkbenchProgressPhase;
-  run: (setPhase: (phase: WorkbenchProgressPhase) => void) => Promise<T>;
-}): Promise<T> {
-  const startedAtMs = Date.now();
-  const renderer = createProgressRenderer({ stderr: input.io.stderr });
-  const before = await readProgressSnapshot(input.core);
-  const existingRunIds = new Set((before?.runs ?? []).map((run) => run.id));
-  let phase = input.initialPhase;
-  let activeRender: Promise<void> | undefined;
-  let printedRunProgress = false;
-
-  const renderRuns = async (force = false): Promise<void> => {
-    if (activeRender) {
-      await activeRender;
-      if (!force) {
-        return;
-      }
-    }
-    const current = (async (): Promise<void> => {
-      const snapshot = await readProgressSnapshot(input.core);
-      if (!snapshot) {
-        return;
-      }
-      const runs = snapshot.runs.filter((run) =>
-        run.kind === input.runKind && !existingRunIds.has(run.id)
-      );
-      if (runs.length === 0) {
-        return;
-      }
-      const runIds = new Set(runs.map((run) => run.id));
-      const jobs = snapshot.jobs.filter((job) => runIds.has(job.runId));
-      renderer.render(progressSnapshotFromRuns({
-        command: input.command,
-        location: "local",
-        phase,
-        runs,
-        jobs,
-        startedAtMs,
-      }), { force });
-      printedRunProgress = true;
-    })();
-    activeRender = current;
-    try {
-      await current;
-    } finally {
-      if (activeRender === current) {
-        activeRender = undefined;
-      }
-    }
-  };
-
-  const setPhase = (nextPhase: WorkbenchProgressPhase): void => {
-    phase = nextPhase;
-    renderer.render(progressSnapshotFromRuns({
-      command: input.command,
-      location: "local",
-      phase,
-      runs: [],
-      jobs: [],
-      startedAtMs,
-    }));
-    void renderRuns();
-  };
-
-  const interval = setInterval(() => {
-    void renderRuns();
-  }, LOCAL_PROGRESS_POLL_INTERVAL_MS);
-  try {
-    return await input.run(setPhase);
-  } finally {
-    clearInterval(interval);
-    await renderRuns(printedRunProgress);
-    if (activeRender) {
-      await activeRender;
-    }
-  }
-}
-
-async function readProgressSnapshot(core: { dir?: string; authToken?: string }): Promise<WorkbenchInspectionSnapshot | null> {
-  try {
-    return await createWorkbenchReadOnlyInspectionSnapshot(core);
-  } catch {
-    return null;
-  }
-}
 
 interface WorkbenchCliAuthStatus {
   workbenchCloud: {
@@ -4529,7 +5952,7 @@ async function workbenchCliAuthStatus(): Promise<WorkbenchCliAuthStatus> {
 }
 
 async function workbenchMachineStatus(auth: WorkbenchCliAuthStatus, core: { dir?: string } = {}): Promise<WorkbenchMachineStatus> {
-  const inventory = await readInstalledSkillsInventory({ dir: core.dir });
+  const inventory = await observeCurrentInstalledSkillsInventory({ dir: core.dir });
   return {
     installedSkillCount: inventory.skills.length,
     targets: inventory.targets.map((target) => ({
@@ -4548,6 +5971,63 @@ async function workbenchMachineStatus(auth: WorkbenchCliAuthStatus, core: { dir?
 }
 
 type InspectionSnapshot = Awaited<ReturnType<typeof createWorkbenchReadOnlyInspectionSnapshot>>;
+
+type WorkbenchStatusSnapshotForCli = Awaited<ReturnType<typeof workbenchStatusSnapshot>>;
+type WorkbenchActiveRunStatusForCli = NonNullable<WorkbenchStatusSnapshotForCli["runs"]["activeRuns"]>[number] & {
+  workDone?: number;
+  workTotal?: number;
+  scored?: number;
+  canceled?: number;
+  partialScore?: number;
+  progress?: Json;
+};
+type WorkbenchStatusSnapshotWithProgress = Omit<WorkbenchStatusSnapshotForCli, "runs"> & {
+  runs: Omit<WorkbenchStatusSnapshotForCli["runs"], "activeRuns"> & {
+    activeRuns?: WorkbenchActiveRunStatusForCli[];
+  };
+};
+
+function statusWithActiveRunProgress(
+  status: WorkbenchStatusSnapshotForCli,
+  snapshot: WorkbenchInspectionSnapshot | null,
+): WorkbenchStatusSnapshotWithProgress {
+  if (!snapshot || !status.runs.activeRuns?.length) {
+    return status;
+  }
+  const runsById = new Map(snapshot.runs.map((run) => [run.id, run]));
+  const activeRuns = status.runs.activeRuns.map((entry): WorkbenchActiveRunStatusForCli => {
+    const run = runsById.get(entry.id);
+    if (!run) {
+      return entry;
+    }
+    const progress = runProgressSnapshotForInspection({
+      command: "run watch",
+      location: run.location ?? "local",
+      phase: progressPhaseForRun(run),
+      runs: [run],
+      snapshot,
+      startedAtMs: timestampMs(run.createdAt) ?? Date.now(),
+      next: `workbench run watch ${run.id}`,
+    });
+    const runProgress = progress?.progress;
+    return {
+      ...entry,
+      ...(runProgress ? { workDone: runProgress.completed, workTotal: runProgress.planned } : {}),
+      failed: runProgress?.failed ?? 0,
+      ...(runProgress?.scored !== undefined ? { scored: runProgress.scored } : {}),
+      ...(runProgress?.canceled !== undefined ? { canceled: runProgress.canceled } : {}),
+      ...(runProgress?.partialScore !== undefined ? { partialScore: runProgress.partialScore } : {}),
+      ...(progress ? { progress: progress as unknown as Json } : {}),
+    };
+  });
+  return {
+    ...status,
+    runs: {
+      ...status.runs,
+      activeRuns,
+    },
+  };
+}
 
 function scoredRunValue(run: WorkbenchRun): number | undefined {
   return typeof run.score === "number" ? run.score : undefined;
@@ -4583,9 +6063,22 @@ function authorEvalCaseCommand(snapshot: InspectionSnapshot | null, caseIds: Rea
   for (let index = 1; ; index += 1) {
     const id = `case-${String(index).padStart(3, "0")}`;
     if (!existingCaseIds.has(id)) {
-      return `mkdir -p .workbench/cases/${id} && \${EDITOR:-vi} .workbench/cases/${id}/case.yaml`;
+      return workbenchAuthorEvalCaseCommand(id);
     }
   }
+}
+
+function projectScopedNextCommand(projectRoot: string, command: string): string {
+  const cwd = path.resolve(process.cwd());
+  const root = path.resolve(projectRoot);
+  if (root === cwd) {
+    return command;
+  }
+  const relative = path.relative(cwd, root);
+  const target = relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+    ? relative
+    : root;
+  return `cd ${shellQuote(target || ".")} && ${command}`;
 }
 
 function isEvalCaseFile(file: SurfaceSnapshotFile): boolean {
@@ -4642,6 +6135,7 @@ async function statusWithCausalNext(
   auth: WorkbenchCliAuthStatus,
   core: { dir?: string; authToken?: string },
   machine: WorkbenchMachineStatus,
+  inspection?: WorkbenchInspectionSnapshot | null,
 ): Promise<Awaited<ReturnType<typeof workbenchStatusSnapshot>>> {
   if (!status.project.initialized) {
     return {
@@ -4649,12 +6143,15 @@ async function statusWithCausalNext(
       next: machine.installedSkillCount > 0 ? "workbench skills" : status.next,
     };
   }
-  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core).catch(() => null);
+  const snapshot = inspection ?? await createWorkbenchReadOnlyInspectionSnapshot(core).catch(() => null);
   const currentVersionId = status.project.currentVersionId ?? snapshot?.status.currentVersionId ?? snapshot?.refs.current;
   const lastRun = snapshot?.runs
     .slice()
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-  if ((lastRun?.status === "queued" || lastRun?.status === "running" || lastRun?.status === "failed" || lastRun?.status === "canceled") && lastRun.id) {
+  if ((lastRun?.status === "queued" || lastRun?.status === "running") && lastRun.id) {
+    return { ...status, next: `workbench run watch ${displayRef(lastRun.id)}` };
+  }
+  if ((lastRun?.status === "failed" || lastRun?.status === "canceled") && lastRun.id) {
     return { ...status, next: `workbench show ${displayRef(lastRun.id)}` };
   }
   const failedRemote = status.remotes.find((remote) => remote.sync.status === "error");
@@ -4687,14 +6184,14 @@ async function statusWithCausalNext(
   if ((snapshot?.runs.length ?? status.runs.total) === 0) {
     return { ...status, next: "workbench eval" };
   }
-  if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
-    return { ...status, next: authorEvalCaseCommand(snapshot, liveCases.caseIds) };
-  }
   if (!hasCurrentScoredEvalRun) {
     return { ...status, next: postImproveProofEvalNextCommand(snapshot, currentVersionId) ?? "workbench eval" };
   }
   if (belowPerfectCurrentEvalRuns.length > 0) {
-    return { ...status, next: belowPerfectEvalNextCommand(belowPerfectCurrentEvalRuns) };
+    return { ...status, next: belowPerfectEvalNextCommand(snapshot, belowPerfectCurrentEvalRuns) };
+  }
+  if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
+    return { ...status, next: "workbench compare" };
   }
   if (cloudAuthMissing && (canPublish || cloudRemoteNeedsAuth)) {
     return { ...status, next: "workbench login" };
@@ -4754,10 +6251,25 @@ function latestScoredEvalRunsForVersion(
   return [...latestBySelection.values()];
 }
 
-function belowPerfectEvalNextCommand(runs: readonly WorkbenchRun[]): string {
+function belowPerfectEvalNextCommand(
+  snapshot: WorkbenchInspectionSnapshot | null,
+  runs: readonly WorkbenchRun[],
+): string {
   const skillNames = new Set(runs.map((run) => run.skillName));
   const agentNames = new Set(runs.map((run) => run.agentName));
-  return skillNames.size === 1 && agentNames.size === 1 ? "workbench improve" : "workbench compare";
+  if (skillNames.size !== 1 || agentNames.size !== 1) {
+    return "workbench compare";
+  }
+  const skill = [...skillNames][0]!;
+  const agentName = [...agentNames][0]!;
+  if (skill !== "primary") {
+    return "workbench compare";
+  }
+  const agent = snapshot?.agents.find((entry) => entry.agent.name === agentName)?.agent;
+  if (!agent) {
+    return "workbench compare";
+  }
+  return improveNextCommandForAgent(skill, agent);
 }
 
 function postImproveProofEvalNextCommand(
@@ -5112,6 +6624,7 @@ function formatRunOrJobEvidence(
   jobs: readonly WorkbenchJob[],
   details: readonly WorkbenchExecutionTraceDetail[],
   files: readonly SurfaceSnapshotFile[],
+  ownerRef?: string,
 ): string {
   const jobRefs = displayRefsForIds([
     ...jobs.map((job) => job.id),
@@ -5124,8 +6637,46 @@ function formatRunOrJobEvidence(
   const jobLines = jobs.length > 0 ? ["Jobs:", ...jobs.map((job) => formatJobEvidenceSummary(job, jobRefs))] : [];
   const detailLines = details.map((detail) => formatTraceDetail(detail, { jobRefs, runRefs })).filter(Boolean);
   const highlightLines = formatEvidenceHighlights(evidenceHighlights(files));
-  const fileLines = files.length > 0 ? ["Files:", ...files.map((file) => file.path)] : [];
+  const fileLines = files.length > 0 ? ["Files:", ...files.map((file) => ownerRef ? `workbench show ${quoteShellArg(showFileRef(ownerRef, file.path))}` : file.path)] : [];
   return [...jobLines, ...detailLines, ...highlightLines, ...fileLines].join("\n") || "No evidence.";
+}
+
+function formatRunEvidenceSummary(
+  run: WorkbenchRun,
+  jobs: readonly WorkbenchJob[],
+  details: readonly WorkbenchExecutionTraceDetail[],
+  files: readonly SurfaceSnapshotFile[],
+  progress?: WorkbenchRunSnapshot,
+  next?: string | null,
+): string {
+  const failures = runFailureGroups(jobs);
+  return [
+    formatRun(run),
+    `location=${run.location ?? "local"}${run.retryOfRunId ? ` retry_of=${displayRef(run.retryOfRunId)}` : ""}${run.outputVersionId ? ` output=${displayRef(run.outputVersionId)}` : ""}`,
+    ...(progress ? [`Progress: ${formatProgressSummary(progress)}`] : []),
+    ...(run.error ? [`error=${singleLine(run.error)}`] : []),
+    ...(failures.length > 0
+      ? ["Failures:", ...failures.map((failure) => `  ${failure.count} ${failure.status}: ${failure.cause}`)]
+      : []),
+    formatRunOrJobEvidence(jobs, details, files, run.id),
+    ...(next ? [`next: ${next}`] : []),
+  ].filter(Boolean).join("\n");
+}
+
+function runFailureGroups(jobs: readonly WorkbenchJob[]): Array<{ status: string; cause: string; count: number; jobIds: string[] }> {
+  const groups = new Map<string, { status: string; cause: string; count: number; jobIds: string[] }>();
+  for (const job of jobs) {
+    if (job.status !== "failed" && job.status !== "canceled") {
+      continue;
+    }
+    const cause = job.error ? singleLine(job.error).slice(0, 240) : job.status;
+    const key = `${job.status}\0${cause}`;
+    const group = groups.get(key) ?? { status: job.status, cause, count: 0, jobIds: [] };
+    group.count += 1;
+    group.jobIds.push(job.id);
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((left, right) => right.count - left.count || left.cause.localeCompare(right.cause));
 }
 
 type EvidenceHighlight =
@@ -5489,12 +7040,19 @@ function fileListing(kind: "version" | "trace" | "artifact", id: string, files: 
     kind,
     id,
     fileCount: files.length,
-    files: files.map(fileSummary),
+    files: files.map((file) => fileSummary(file, showFileRef(id, file.path))),
   };
 }
 
 function formatFileListing(kind: "version" | "trace" | "artifact", id: string, files: readonly SurfaceSnapshotFile[]): string {
-  return [`${kind}\t${displayRef(id)}\tfiles=${files.length}`, ...files.map((file) => file.path)].join("\n");
+  return [
+    `${kind}\t${displayRef(id)}\tfiles=${files.length}`,
+    ...files.map((file) => `workbench show ${quoteShellArg(showFileRef(id, file.path))}`),
+  ].join("\n");
+}
+
+function showFileRef(ownerRef: string, filePath: string): string {
+  return `${ownerRef}:${filePath}`;
 }
 
 interface EvalCoverage {
@@ -5513,25 +7071,49 @@ async function evalCoverageSummaries(
   runs: readonly WorkbenchRun[],
 ): Promise<EvalCoverage[]> {
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
-  const jobsByRun = new Map<string, WorkbenchJob[]>();
+  const runIds = new Set(runs.map((run) => run.id));
+  const coverageByKey = new Map<string, EvalCoverage & { sampleKeys: Set<string>; caseIds: Set<string> }>();
   for (const job of snapshot.jobs) {
-    const existing = jobsByRun.get(job.runId) ?? [];
-    existing.push(job);
-    jobsByRun.set(job.runId, existing);
+    if (!runIds.has(job.runId) || job.caseId === "current") {
+      continue;
+    }
+    const key = [
+      job.runId,
+      job.skillName,
+      job.skillBundleHash,
+      job.evalHash,
+      job.agentName,
+      job.agentHash,
+    ].join("\0");
+    const current = coverageByKey.get(key) ?? {
+      runId: job.runId,
+      skillName: job.skillName,
+      agentName: job.agentName,
+      cases: 0,
+      samples: 0,
+      jobs: 0,
+      succeeded: 0,
+      failed: 0,
+      sampleKeys: new Set<string>(),
+      caseIds: new Set<string>(),
+    };
+    current.caseIds.add(job.caseId);
+    current.sampleKeys.add(`${job.caseId}\0${job.sample}`);
+    current.jobs += 1;
+    if (job.status === "succeeded") {
+      current.succeeded += 1;
+    }
+    if (job.status === "failed" || job.status === "canceled") {
+      current.failed += 1;
+    }
+    coverageByKey.set(key, current);
   }
-  return runs.map((run) => {
-    const jobs = jobsByRun.get(run.id) ?? [];
-    const cases = new Set(jobs.map((job) => job.caseId));
-    const samples = new Set(jobs.map((job) => `${job.caseId}\0${job.sample}`));
+  return [...coverageByKey.values()].map((entry) => {
+    const { sampleKeys, caseIds, ...coverage } = entry;
     return {
-      runId: run.id,
-      skillName: run.skillName,
-      agentName: run.agentName,
-      cases: cases.size,
-      samples: samples.size,
-      jobs: jobs.length,
-      succeeded: jobs.filter((job) => job.status === "succeeded").length,
-      failed: jobs.filter((job) => job.status === "failed" || job.status === "canceled").length,
+      ...coverage,
+      cases: caseIds.size,
+      samples: sampleKeys.size,
     };
   });
 }
@@ -5623,20 +7205,111 @@ async function evalSuccessNextCommand(
     return "workbench eval";
   }
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
-  if (!snapshotHasWorkflowCase(snapshot)) {
-    return authorEvalCaseCommand(snapshot);
-  }
   if (runs.some(scoredRunIsBelowPerfect)) {
-    const skillNames = new Set(runs.map((run) => run.skillName));
-    const agentNames = new Set(runs.map((run) => run.agentName));
-    return skillNames.size === 1 && agentNames.size === 1 ? "workbench improve" : "workbench compare";
+    if (postImproveValidationBeatsIncumbent(snapshot, runs)) {
+      return await publishReadyNextCommand(core);
+    }
+    return belowPerfectEvalNextCommand(snapshot, runs);
   }
+  if (!snapshotHasWorkflowCase(snapshot)) {
+    return "workbench compare";
+  }
+  return await publishReadyNextCommand(core);
+}
+
+function improveNextCommandForAgent(skill: string, agent: WorkbenchAgent): string {
+  if (!workbenchSkillImproveCanUseQueuedAdapter(agent)) {
+    return workbenchSkillImproveAdapterRemediation(agent);
+  }
+  return `workbench improve --skills ${shellQuote(skill)} --agents ${shellQuote(agent.name)}`;
+}
+
+async function publishReadyNextCommand(core: { dir?: string; authToken?: string }): Promise<string> {
   const auth = await workbenchCliAuthStatus();
   if (auth.workbenchCloud.status !== "authenticated") {
     return "workbench login";
   }
   const status = await workbenchStatusSnapshot(core);
   return statusHasPublishedCurrentCloudSource(status) ? "workbench compare" : "workbench publish";
+}
+
+function postImproveValidationBeatsIncumbent(
+  snapshot: WorkbenchInspectionSnapshot,
+  runs: readonly WorkbenchRun[],
+): boolean {
+  const scoredRuns = runs.filter((run) =>
+    run.kind === "eval" &&
+    run.status === "succeeded" &&
+    typeof run.score === "number"
+  );
+  if (scoredRuns.length === 0) {
+    return false;
+  }
+  for (const run of scoredRuns) {
+    const improveRun = snapshot.runs
+      .filter((candidate) =>
+        candidate.kind === "improve" &&
+        candidate.status === "succeeded" &&
+        candidate.outputVersionId === run.versionId &&
+        candidate.skillName === run.skillName &&
+        candidate.evalHash === run.evalHash &&
+        candidate.agentName === run.agentName &&
+        candidate.agentHash === run.agentHash
+      )
+      .sort((left, right) => runEvidenceTime(right).localeCompare(runEvidenceTime(left)))[0];
+    if (!improveRun) {
+      return false;
+    }
+    const incumbent = bestScoredEvalRunForSelection(snapshot, {
+      versionId: improveRun.baseVersionId ?? improveRun.versionId,
+      skillName: improveRun.skillName,
+      skillBundleHash: improveRun.skillBundleHash,
+      evalHash: improveRun.evalHash,
+      agentName: improveRun.agentName,
+      agentHash: improveRun.agentHash,
+    });
+    if (incumbent && run.score! <= incumbent.score) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function bestScoredEvalRunForSelection(
+  snapshot: WorkbenchInspectionSnapshot,
+  args: {
+    versionId: string;
+    skillName: string;
+    skillBundleHash: string;
+    evalHash: string;
+    agentName: string;
+    agentHash: string;
+  },
+): { run: WorkbenchRun; score: number; samples: number } | null {
+  const candidates = snapshot.runs
+    .filter((run) =>
+      run.kind === "eval" &&
+      run.status === "succeeded" &&
+      run.versionId === args.versionId &&
+      run.skillName === args.skillName &&
+      run.skillBundleHash === args.skillBundleHash &&
+      run.evalHash === args.evalHash &&
+      run.agentName === args.agentName &&
+      run.agentHash === args.agentHash &&
+      typeof run.score === "number"
+    )
+    .map((run) => ({
+      run,
+      score: run.score!,
+      samples: new Set(snapshot.jobs
+        .filter((job) => job.runId === run.id && job.caseId !== "current")
+        .map((job) => `${job.caseId}\0${job.sample}`)).size || run.jobIds?.length || 0,
+    }))
+    .sort((left, right) =>
+      right.samples - left.samples ||
+      runEvidenceTime(right.run).localeCompare(runEvidenceTime(left.run))
+    );
+  return candidates[0] ?? null;
 }
 
 function statusHasPublishedCurrentCloudSource(status: Awaited<ReturnType<typeof workbenchStatusSnapshot>>): boolean {
@@ -5648,7 +7321,7 @@ function statusHasPublishedCurrentCloudSource(status: Awaited<ReturnType<typeof 
   ));
 }
 
-function formatStatusSnapshot(status: Awaited<ReturnType<typeof workbenchStatusSnapshot>> & {
+function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
   auth?: WorkbenchCliAuthStatus;
   machine?: WorkbenchMachineStatus;
 }): string {
@@ -5663,6 +7336,12 @@ function formatStatusSnapshot(status: Awaited<ReturnType<typeof workbenchStatusS
     ...(status.project.defaultSkill ? [`Default skill: ${status.project.defaultSkill}`] : []),
     ...(status.project.defaultAgent ? [`Default agent: ${status.project.defaultAgent}`] : []),
     `Runs: ${status.runs.total}${status.runs.lastStatus ? ` (last ${status.runs.lastStatus})` : ""}`,
+    ...((status.runs.activeRuns?.length ?? 0) > 0
+      ? [
+        "Active runs:",
+        ...status.runs.activeRuns!.map(formatStatusActiveRun),
+      ]
+      : []),
     `Workbench Cloud: ${status.auth?.workbenchCloud.status ?? "not_authenticated"}${status.auth?.workbenchCloud.baseUrl ? ` ${status.auth.workbenchCloud.baseUrl}` : ""}`,
     ...(status.remotes.length > 0 ? ["Remotes:", ...status.remotes.flatMap((remote) => {
       const publication = remote.publication.status === "published"
@@ -5686,6 +7365,24 @@ function formatStatusSnapshot(status: Awaited<ReturnType<typeof workbenchStatusS
     ...(status.next ? [`next: ${shortenCommandRefs(status.next)}`] : []),
   ];
   return lines.join("\n");
+}
+
+function formatStatusActiveRun(run: WorkbenchActiveRunStatusForCli): string {
+  return [
+    `  ${displayRef(run.id)}`,
+    run.kind,
+    run.location,
+    run.status,
+    `skill=${run.skillName}`,
+    `agent=${run.agentName}`,
+    run.workTotal !== undefined && run.workDone !== undefined ? `work=${run.workDone}/${run.workTotal}` : undefined,
+    run.scored !== undefined ? `scored=${run.scored}` : undefined,
+    run.partialScore !== undefined ? `partial=${run.partialScore.toFixed(3)}` : undefined,
+    `failed=${run.failed}`,
+    run.canceled !== undefined && run.canceled > 0 ? `canceled=${run.canceled}` : undefined,
+    `health=${run.health}`,
+    `next=${run.next}`,
+  ].filter(Boolean).join("\t");
 }
 
 function formatInstalledInventory(inventory: WorkbenchSkillAccessInventory): string {
@@ -5738,15 +7435,43 @@ function formatRun(run: WorkbenchRun): string {
   return `${displayRef(run.id)}\t${run.kind}\t${run.status}\tversion=${displayRef(run.versionId)}\tskill=${run.skillName}\tagent=${run.agentName}\tscore=${score}\tlatency=${latency}`;
 }
 
-function formatImproveResult(result: Awaited<ReturnType<typeof improveWorkbenchSkill>>): string {
-  const parent = result.version.parentIds[0] ? displayRef(result.version.parentIds[0]) : "current";
-  const candidate = displayRef(result.version.id);
-  return [
-    `${result.switched ? "Improved" : "Created candidate"} ${parent} -> ${candidate}. ${formatRun(result.run)}`,
-    result.switched
-      ? "Switched to improved version after proof eval; rerun eval with more samples before publishing."
-      : `Did not switch: ${result.promotionReason}`,
-  ].join("\n");
+function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
+  const progress = snapshot.progress.planned > 0
+    ? `${snapshot.progress.completed}/${snapshot.progress.planned}`
+    : "n/a";
+  const scoreValue = snapshot.result?.score ?? snapshot.progress.partialScore;
+  const score = scoreValue === undefined ? "n/a" : scoreValue.toFixed(3);
+  const cost = snapshot.progress.costUsd === undefined ? "n/a" : `$${snapshot.progress.costUsd.toFixed(4)}`;
+  const header = [
+    displayRef(snapshot.id),
+    snapshot.kind,
+    snapshot.status,
+    `phase=${snapshot.phase}`,
+    `progress=${progress}`,
+    `scored=${snapshot.progress.scored}`,
+    `failed=${snapshot.progress.failed}`,
+    `canceled=${snapshot.progress.canceled}`,
+    `score=${score}`,
+    `cost=${cost}`,
+  ].join("\t");
+  const measurements = snapshot.measurements.length > 1
+    ? snapshot.measurements.map((measurement) => {
+        const measurementScore = measurement.score === undefined ? "n/a" : measurement.score.toFixed(3);
+        const latency = measurement.latencyMs === undefined ? "n/a" : `${measurement.latencyMs}ms`;
+        return [
+          "  measurement",
+          `run=${displayRef(measurement.runId)}`,
+          `version=${displayRef(measurement.versionId)}`,
+          `skill=${measurement.skillName}`,
+          `agent=${measurement.agentName}`,
+          measurement.status,
+          `score=${measurementScore}`,
+          `samples=${measurement.samples ?? "n/a"}`,
+          `latency=${latency}`,
+        ].join("\t");
+      })
+    : [];
+  return [header, ...measurements].join("\n");
 }
 
 function formatJob(job: WorkbenchJob): string {
@@ -5878,7 +7603,7 @@ function traceSummary(trace: WorkbenchTrace): Json {
     ...(status === "succeeded" && typeof result?.score === "number" ? { score: result.score } : {}),
     ...(typeof result?.error === "string" ? { error: singleLine(result.error) } : {}),
     fileCount: trace.files.length,
-    files: trace.files.map(fileSummary),
+    files: trace.files.map((file) => fileSummary(file)),
   };
 }
 
@@ -5921,13 +7646,14 @@ function artifactSummary(artifact: WorkbenchArtifact): Json {
     jobId: artifact.jobId,
     kind: artifact.kind,
     fileCount: artifact.files.length,
-    files: artifact.files.map(fileSummary),
+    files: artifact.files.map((file) => fileSummary(file)),
   };
 }
 
-function fileSummary(file: SurfaceSnapshotFile): Json {
+function fileSummary(file: SurfaceSnapshotFile, ref?: string): Json {
   return {
     path: file.path,
+    ...(ref ? { ref } : {}),
     ...(file.kind ? { kind: file.kind } : {}),
     ...(file.encoding ? { encoding: file.encoding } : {}),
     ...(file.executable !== undefined ? { executable: file.executable } : {}),

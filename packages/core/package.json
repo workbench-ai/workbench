@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench-core",
-  "version": "0.0.137",
+  "version": "0.0.153",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/workbench-ai/workbench.git",
@@ -21,7 +21,7 @@
     "worker"
   ],
   "scripts": {
-    "build": "rm -rf dist environments && tsc -p tsconfig.json && cp -R ../../environments ./environments",
+    "build": "node ../../scripts/sync-core-environments.mjs && rm -rf dist && tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts"
   },

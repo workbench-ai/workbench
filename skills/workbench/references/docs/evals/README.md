@@ -81,14 +81,14 @@ Skill eval jobs support Docker-style command tests through `local` or `command` 
 ```bash
 workbench new ./earnings-prep
 cd ./earnings-prep
-# write .workbench/cases/case-001/case.yaml
+# run the printed next command, then edit .workbench/cases/case-001/case.yaml
 workbench eval --agents default -n 1
 workbench compare
 workbench log --versions
 workbench show current:SKILL.md
 ```
 
-Use scored below-perfect, failed, or reviewed eval evidence for better cases and skill edits. `workbench improve` refuses to create cosmetic versions from perfect eval history or unscored runtime/auth failures, and the selected agent must have a skill-improvement adapter once actionable evidence exists. To create a regression case from a run, inspect it with `workbench show RUN_ID` and write the `.workbench/cases/*` files directly.
+Use scored below-perfect, failed, or reviewed eval evidence for better cases and skill edits. `workbench improve` refuses to create cosmetic versions from perfect eval history or unscored runtime/auth failures, and the selected agent must have a skill-improvement adapter once actionable evidence exists. Perfect-only evidence errors print a headless draft-case command; to create a regression case from a run, inspect it with `workbench show RUN_ID` and edit the `.workbench/cases/*` files directly.
 
 ```bash
 codex login --device-auth

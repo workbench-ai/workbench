@@ -54,6 +54,7 @@ const HIDDEN_HANDLE_STYLE = {
 };
 
 interface LineageGraphProps {
+  className?: string;
   currentVersionId?: string | null;
   publishedVersionId?: string | null;
   lineage: readonly WorkbenchLineageEdge[];
@@ -71,6 +72,7 @@ export function LineageGraph(props: LineageGraphProps) {
 }
 
 function LineageGraphCanvas({
+  className,
   currentVersionId,
   publishedVersionId,
   lineage,
@@ -155,7 +157,7 @@ function LineageGraphCanvas({
   return (
     <div
       data-testid="lineage-graph"
-      className="flex min-h-[28rem] min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-card"
+      className={cn("flex h-full min-h-[28rem] min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-card", className)}
     >
       <ReactFlow<VersionLineageNode, VersionLineageEdge>
         className="h-full min-h-[28rem] w-full flex-1"

@@ -6,12 +6,19 @@ import {
   isReservedWorkbenchAdapterAuthEnvName,
   normalizeWorkbenchSourcePath,
   normalizeWorkbenchSourceRequestPath,
+  parseWorkbenchCaseFileOwnerId,
+  workbenchCaseFileOwnerId,
+  workbenchInspectionFileOwnerKindFromRouteSegment,
+  workbenchInspectionFileOwnerRouteSegment,
   workbenchInspectionFileContent,
   workbenchInspectionFileContentUnavailableReason,
   workbenchInspectionFileManifest,
   type WorkbenchInspectionFileContent,
   type WorkbenchInspectionSnapshot,
+  type WorkbenchInspectionSnapshotEnvelope,
   type WorkbenchProjectState,
+  type WorkbenchRun,
+  type WorkbenchRunSnapshot,
 } from "../src/index";
 
 describe("workbench contract", () => {
@@ -76,11 +83,43 @@ describe("workbench contract", () => {
       encoding: "base64",
       unavailableReason: "Binary file content is not rendered.",
     } satisfies WorkbenchInspectionFileContent;
+    const envelope = {
+      schema: "workbench.inspection.snapshot-envelope.v1",
+      cursor: "cursor_001",
+      snapshot,
+      actions: {
+        variant: "local",
+        evidenceAccess: "full",
+        eval: {
+          enabled: true,
+          defaultRequest: { kind: "eval", variant: "local", samples: 1 },
+        },
+        improve: {
+          enabled: false,
+          defaultRequest: { kind: "improve", variant: "local", samples: 1, budget: 1 },
+          disabledReason: "No improvement evidence is available.",
+        },
+        acquisition: [{
+          id: "open-local",
+          label: "Open local project",
+          kind: "copy-command",
+          value: "workbench open",
+        }],
+      },
+    } satisfies WorkbenchInspectionSnapshotEnvelope;
 
-    expect(JSON.parse(JSON.stringify({ state, snapshot, fileContent }))).toMatchObject({
+    expect(JSON.parse(JSON.stringify({ state, snapshot, fileContent, envelope }))).toMatchObject({
       state: { schema: "workbench.skill.state.v1", refs: { current: "v001" } },
       snapshot: { status: { initialized: true }, refs: { current: "v001" } },
       fileContent: { path: "output/blob.bin", unavailableReason: "Binary file content is not rendered." },
+      envelope: {
+        actions: {
+          variant: "local",
+          eval: { enabled: true, defaultRequest: { kind: "eval", variant: "local" } },
+          improve: { enabled: false, defaultRequest: { kind: "improve", variant: "local" } },
+          acquisition: [{ label: "Open local project" }],
+        },
+      },
     });
   });
 
@@ -88,6 +127,96 @@ describe("workbench contract", () => {
     expect(isReservedWorkbenchAdapterAuthEnvName("WORKBENCH_TOKEN")).toBe(true);
     expect(() => assertWorkbenchAdapterAuthEnvNameAllowed("PATH")).toThrow("reserved");
     expect(() => assertWorkbenchAdapterAuthEnvNameAllowed("OPENAI_API_KEY")).not.toThrow();
+  });
+
+  test("serializes run snapshots and stored retry plans as the canonical launch contract", () => {
+    const snapshot = {
+      schema: "workbench.run.v1",
+      id: "run_matrix",
+      kind: "eval",
+      variant: "local",
+      status: "running",
+      phase: "running",
+      plan: {
+        kind: "eval",
+        variant: "local",
+        versionId: "v002",
+        evalHash: "eval_hash",
+        skills: ["primary", "baseline"],
+        agents: ["default"],
+        samples: 2,
+        rerun: true,
+      },
+      progress: {
+        planned: 4,
+        completed: 1,
+        scored: 1,
+        failed: 0,
+        canceled: 0,
+        partialScore: 1,
+        evidenceCount: 2,
+        elapsedMs: 1000,
+        lastProgressAt: "2026-06-16T12:00:00.000Z",
+      },
+      measurements: [{
+        versionId: "v002",
+        skillName: "primary",
+        skillBundleHash: "bundle_primary",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash: "agent_hash",
+        runId: "run_matrix",
+        status: "running",
+        score: 1,
+        samples: 1,
+      }],
+      route: {
+        kind: "run",
+        runId: "run_matrix",
+        source: "evaluation",
+        evaluationId: "eval_hash",
+      },
+      cliEquivalent: "workbench eval --skills all -n 2",
+      next: "workbench run watch run_matrix",
+    } satisfies WorkbenchRunSnapshot;
+
+    expect(JSON.parse(JSON.stringify({ snapshot }))).toMatchObject({
+      snapshot: {
+        schema: "workbench.run.v1",
+        id: "run_matrix",
+        progress: { planned: 4, partialScore: 1 },
+        route: { runId: "run_matrix" },
+        plan: { rerun: true },
+        next: "workbench run watch run_matrix",
+      },
+    });
+
+    const run = {
+      id: "run_with_plan",
+      kind: "eval",
+      versionId: "v002",
+      skillName: "primary",
+      skillBundleHash: "bundle_primary",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      status: "running",
+      operationPlan: snapshot.plan,
+      jobIds: [],
+      traceIds: [],
+      createdAt: "2026-06-16T12:00:00.000Z",
+    } satisfies WorkbenchRun;
+    expect(JSON.parse(JSON.stringify(run))).toMatchObject({
+      id: "run_with_plan",
+      operationPlan: {
+        kind: "eval",
+        variant: "local",
+        versionId: "v002",
+        skills: ["primary", "baseline"],
+        agents: ["default"],
+        samples: 2,
+      },
+    });
   });
 
   test("shapes inspection files consistently for manifests and explicit content reads", () => {
@@ -114,6 +243,33 @@ describe("workbench contract", () => {
     });
     expect(workbenchInspectionFileContentUnavailableReason({ encoding: "base64" }))
       .toBe("Base64 file content is not rendered.");
+  });
+
+  test("defines inspection file owner route vocabulary", () => {
+    expect(workbenchInspectionFileOwnerKindFromRouteSegment("versions")).toBe("version");
+    expect(workbenchInspectionFileOwnerKindFromRouteSegment("traces")).toBe("trace");
+    expect(workbenchInspectionFileOwnerKindFromRouteSegment("artifacts")).toBe("artifact");
+    expect(workbenchInspectionFileOwnerKindFromRouteSegment("cases")).toBe("case");
+    expect(workbenchInspectionFileOwnerKindFromRouteSegment("skills")).toBeNull();
+
+    expect(workbenchInspectionFileOwnerRouteSegment("version")).toBe("versions");
+    expect(workbenchInspectionFileOwnerRouteSegment("trace")).toBe("traces");
+    expect(workbenchInspectionFileOwnerRouteSegment("artifact")).toBe("artifacts");
+    expect(workbenchInspectionFileOwnerRouteSegment("case")).toBe("cases");
+  });
+
+  test("round-trips case file owner ids", () => {
+    expect(workbenchCaseFileOwnerId("eval_hash", "case-001")).toBe("eval_hash:case-001");
+    expect(parseWorkbenchCaseFileOwnerId("eval_hash:case-001")).toEqual({
+      evaluationHash: "eval_hash",
+      caseId: "case-001",
+    });
+    expect(parseWorkbenchCaseFileOwnerId("eval_hash:case:with:colon")).toEqual({
+      evaluationHash: "eval_hash",
+      caseId: "case:with:colon",
+    });
+    expect(parseWorkbenchCaseFileOwnerId("eval_hash")).toBeNull();
+    expect(parseWorkbenchCaseFileOwnerId(":case-001")).toBeNull();
   });
 
   test("normalizes source paths and identifies local Workbench metadata", () => {

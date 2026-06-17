@@ -6,6 +6,7 @@ import type {
   WorkbenchComparisonCell,
   WorkbenchEvalSnapshot,
   WorkbenchInspectionSnapshot,
+  WorkbenchJob,
   WorkbenchRun,
   WorkbenchSkillBundleSnapshot,
   WorkbenchVersion,
@@ -317,7 +318,7 @@ describe("comparison metric helpers", () => {
 
   test("builds active skill version history from recorded eval scorecards", () => {
     const snapshot = inspectionSnapshotFixture({
-      versions: [version("v001"), version("v002"), version("v003")],
+      versions: [version("v001"), version("v002")],
       skillBundles: [skillBundle({ hash: "bundle_v001" }), skillBundle({ hash: "bundle_v002" })],
       runs: [
         run({ id: "run_old", versionId: "v001", skillBundleHash: "bundle_v001", score: 0.4, createdAt: "2026-06-06T00:10:00.000Z" }),
@@ -341,9 +342,52 @@ describe("comparison metric helpers", () => {
     ]);
   });
 
+  test("prefers stronger terminal evidence over newer weaker runs", () => {
+    const snapshot = inspectionSnapshotFixture({
+      versions: [version("v001")],
+      skillBundles: [skillBundle()],
+      runs: [
+        run({
+          id: "run_stronger",
+          versionId: "v001",
+          score: 0.8,
+          latencyMs: 3_000,
+          jobIds: ["job_first", "job_second"],
+          createdAt: "2026-06-06T00:10:00.000Z",
+          finishedAt: "2026-06-06T00:11:00.000Z",
+        }),
+        run({
+          id: "run_later_weaker",
+          versionId: "v001",
+          score: 0.1,
+          latencyMs: 100,
+          jobIds: ["job_later"],
+          createdAt: "2026-06-06T00:20:00.000Z",
+          finishedAt: "2026-06-06T00:20:10.000Z",
+        }),
+      ],
+      jobs: [
+        job({ id: "job_first", runId: "run_stronger", sample: 0 }),
+        job({ id: "job_second", runId: "run_stronger", sample: 1 }),
+        job({ id: "job_later", runId: "run_later_weaker", sample: 0 }),
+      ],
+    });
+
+    const comparison = comparisonForActiveSkillVersions(snapshot);
+
+    expect(comparison.cells).toEqual([
+      expect.objectContaining({
+        runId: "run_stronger",
+        score: 0.8,
+        latencyMs: 1_500,
+        samples: 2,
+      }),
+    ]);
+  });
+
   test("builds one scorecard from current setups plus active skill history", () => {
     const snapshot = inspectionSnapshotFixture({
-      versions: [version("v001"), version("v002"), version("v003")],
+      versions: [version("v001"), version("v002")],
       skillBundles: [
         skillBundle({ hash: "bundle_v001" }),
         skillBundle({ hash: "bundle_v002" }),
@@ -354,36 +398,6 @@ describe("comparison metric helpers", () => {
         run({ id: "run_current", versionId: "v002", skillBundleHash: "bundle_v002", score: 0.9, createdAt: "2026-06-06T00:12:00.000Z" }),
         run({ id: "run_dummy", versionId: "v002", skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash", score: 0.1, createdAt: "2026-06-06T00:13:00.000Z" }),
       ],
-      comparison: {
-        versions: [version("v002")],
-        skills: [
-          skillBundle({ hash: "bundle_v002" }),
-          skillBundle({ hash: "dummy_bundle_hash", skillName: "dummy-skill", entryName: "dummy-skill" }),
-        ],
-        agents: [agentSnapshot("agent_a", "patcher")],
-        cells: [
-          {
-            versionId: "v002",
-            skillName: "primary",
-            skillBundleHash: "bundle_v002",
-            evalHash: "eval_hash",
-            agentName: "patcher",
-            agentHash: "agent_a",
-            runId: "run_current",
-            score: 0.9,
-          },
-          {
-            versionId: "v002",
-            skillName: "dummy-skill",
-            skillBundleHash: "dummy_bundle_hash",
-            evalHash: "eval_hash",
-            agentName: "patcher",
-            agentHash: "agent_a",
-            runId: "run_dummy",
-            score: 0.1,
-          },
-        ],
-      },
     });
 
     const comparison = comparisonForScorecard(snapshot);
@@ -393,9 +407,52 @@ describe("comparison metric helpers", () => {
       skillName: entry.skillName,
       runId: entry.runId,
     }))).toEqual([
-      { versionId: "v002", skillName: "primary", runId: "run_current" },
       { versionId: "v002", skillName: "dummy-skill", runId: "run_dummy" },
+      { versionId: "v002", skillName: "primary", runId: "run_current" },
       { versionId: "v001", skillName: "primary", runId: "run_old" },
+    ]);
+  });
+
+  test("scorecard renders the canonical inspection comparison when present", () => {
+    const snapshot = inspectionSnapshotFixture({
+      versions: [version("v001")],
+      runs: [
+        run({
+          id: "run_later_weaker",
+          versionId: "v001",
+          score: 0.1,
+          jobIds: ["job_later"],
+          createdAt: "2026-06-06T00:20:00.000Z",
+        }),
+      ],
+      jobs: [
+        job({ id: "job_later", runId: "run_later_weaker", sample: 0 }),
+      ],
+      comparison: {
+        versions: [version("v001")],
+        skills: [skillBundle()],
+        agents: [agentSnapshot("agent_a", "patcher")],
+        cells: [
+          cell({
+            versionId: "v001",
+            runId: "run_stronger",
+            score: 0.8,
+            latencyMs: 1_500,
+            samples: 5,
+          }),
+        ],
+      },
+    });
+
+    const comparison = comparisonForScorecard(snapshot);
+
+    expect(comparison.cells).toEqual([
+      expect.objectContaining({
+        runId: "run_stronger",
+        score: 0.8,
+        latencyMs: 1_500,
+        samples: 5,
+      }),
     ]);
   });
 
@@ -418,21 +475,6 @@ describe("comparison metric helpers", () => {
         run({ id: "run_no_skill", versionId: "v002", skillName: "no-skill", skillBundleHash: "no_skill_bundle_hash", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:21:00.000Z" }),
         run({ id: "run_dummy", versionId: "v002", skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:22:00.000Z" }),
       ],
-      comparison: {
-        versions: [version("v002")],
-        skills: [skillBundle({ hash: "active_bundle" })],
-        agents: [agentSnapshot("agent_a", "patcher")],
-        cells: [
-          {
-            versionId: "v002",
-            skillName: "primary",
-            skillBundleHash: "active_bundle",
-            evalHash: "eval_hash",
-            agentName: "patcher",
-            agentHash: "agent_a",
-          },
-        ],
-      },
     });
 
     const comparison = comparisonForScorecard(snapshot);
@@ -766,6 +808,24 @@ function run(overrides: Partial<WorkbenchRun> & { id: string; versionId: string 
   };
 }
 
+function job(overrides: Partial<WorkbenchJob> & { id: string; runId: string; sample: number }): WorkbenchJob {
+  return {
+    kind: "eval",
+    versionId: "v001",
+    skillName: "primary",
+    skillBundleHash: "skill_bundle_hash",
+    evalHash: "eval_hash",
+    agentName: "patcher",
+    agentHash: "agent_a",
+    caseId: "case_001",
+    status: "succeeded",
+    artifactIds: [],
+    traceIds: [],
+    createdAt: "2026-06-06T00:10:00.000Z",
+    ...overrides,
+  };
+}
+
 function version(id: string): WorkbenchVersion {
   return {
     id,
@@ -809,6 +869,7 @@ function evalSnapshot(hash = "eval_hash", caseCount = 1, scoreAdapter = "tests")
       encoding: "utf8",
       content: `version: 1\nscore:\n  adapter: ${scoreAdapter}\n`,
     }],
+    cases: [],
   };
 }
 

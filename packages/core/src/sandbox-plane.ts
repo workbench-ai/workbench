@@ -110,7 +110,9 @@ export async function executeValidatedSandboxExecution(
 ): Promise<ValidatedSandboxExecutionResult> {
   assertWorkbenchExecutionIsolation(execution);
   assertSandboxBackendSupportsNetworkPolicy(plane.backend, execution);
+  throwIfSandboxAborted(options.signal);
   const inputs = await options.fileStore.materializeInputs(execution);
+  throwIfSandboxAborted(options.signal);
   const now = options.now ?? new Date().toISOString();
   const timing: Record<string, Json> = {};
   timing.prepareStartedAt = new Date().toISOString();
@@ -121,6 +123,7 @@ export async function executeValidatedSandboxExecution(
         kind: execution.sandbox.kind,
         ref: execution.sandbox.ref,
       };
+  throwIfSandboxAborted(options.signal);
   timing.prepareFinishedAt = new Date().toISOString();
   const allocation = createWorkbenchSandboxAllocation(execution, {
     backend: plane.backend.name,
@@ -131,6 +134,7 @@ export async function executeValidatedSandboxExecution(
   assertScopeIssues("Sandbox allocation", collectSandboxAllocationScopeIssues(allocation, execution, { now }));
   assertScopeIssues("Execution capability", collectExecutionCapabilityScopeIssues(capability, execution, { now }));
   timing.createStartedAt = new Date().toISOString();
+  throwIfSandboxAborted(options.signal);
   const sandbox = await plane.createSandbox({
     execution,
     environment,
@@ -143,6 +147,7 @@ export async function executeValidatedSandboxExecution(
   let result: WorkbenchExecutionResult;
   try {
     timing.execStartedAt = new Date().toISOString();
+    throwIfSandboxAborted(options.signal);
     result = await plane.exec({
       execution,
       environment,
@@ -200,6 +205,12 @@ export async function executeValidatedSandboxExecution(
     result,
     payloads: validateWorkbenchExecutionOutputPayloads(execution, outputPayloads),
   };
+}
+
+function throwIfSandboxAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error("Run cancellation requested.");
+  }
 }
 
 export function assertSandboxBackendSupportsNetworkPolicy(

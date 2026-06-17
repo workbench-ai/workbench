@@ -53,11 +53,12 @@ export function formatTimestamp(value: string | null | undefined): string {
   if (Number.isNaN(date.valueOf())) {
     return value;
   }
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    timeZone: "UTC",
   }).format(date);
 }
 
