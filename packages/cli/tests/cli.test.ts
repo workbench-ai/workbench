@@ -4386,11 +4386,13 @@ describe("workbench skill-first CLI", () => {
     let inspectionReadsAfterStart = 0;
     let hostedRunId = runningRun.id;
     let remotePack = emptyObjectPack(createdAt);
+    const skillLookupUrls: string[] = [];
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
+        skillLookupUrls.push(`${url.pathname}${url.search}`);
         return jsonResponse({
           skills: [
             { id: "skill_existing", ownerSlug, name: baseSkillName },
@@ -4485,6 +4487,12 @@ describe("workbench skill-first CLI", () => {
       expect(remotesYaml).toContain(fileRemoteUrl);
       expect(remotesYaml).toContain("cloud-1:");
       expect(remotesYaml).toContain(`https://cloud.test/skills/${ownerSlug}/${skillName}`);
+      expect(skillLookupUrls.length).toBeGreaterThan(0);
+      expect(skillLookupUrls.every((entry) =>
+        entry.startsWith("/api/workbench/skills?") &&
+        entry.includes(`owner=${encodeURIComponent(ownerSlug)}`) &&
+        entry.includes("name=")
+      )).toBe(true);
 
       const install = await invoke(["install", `${ownerSlug}/${skillName}`, "--json"]);
       expect(install.code).toBe(1);
@@ -5543,7 +5551,13 @@ describe("workbench skill-first CLI", () => {
           suggestedHandle: `alice-user/${derivedSkill}-$(date +%s)`,
         },
       });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const lookupUrls = fetchMock.mock.calls.map(([input]) =>
+        new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url)
+      );
+      expect(lookupUrls.map((url) => `${url.pathname}${url.search}`)).toEqual([
+        `/api/workbench/skills?owner=alice-user&name=${encodeURIComponent(derivedSkill)}`,
+        `/api/workbench/skills?owner=alice-user&name=${encodeURIComponent(`${derivedSkill}-2`)}`,
+      ]);
       await expect(fs.access(path.join(root, ".workbench", "remotes.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       if (previousConfig === undefined) {

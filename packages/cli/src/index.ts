@@ -3573,12 +3573,7 @@ function availableCloudRemoteName(remotes: readonly WorkbenchRemote[]): string {
 }
 
 async function resolveCloudSkillId(source: ParsedWorkbenchInstallSource): Promise<string> {
-  const listed = await apiRequest<{ skills?: Array<{ id?: string; ownerSlug?: string; name?: string }> }>(
-    "/api/workbench/skills",
-    {},
-    source.baseUrl,
-  );
-  const skill = listed.skills?.find((entry) => entry.ownerSlug === source.owner && entry.name === source.skill);
+  const skill = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
   if (!skill?.id) {
     throw new WorkbenchCodedError("remote_not_found", `Workbench Cloud skill not found: ${source.owner}/${source.skill}`, {
       remediation: "workbench publish",
@@ -5525,12 +5520,11 @@ async function assertDerivedCloudHandleAvailable(
   if (!await workbenchCloudToken({ baseUrl: source.baseUrl })) {
     return;
   }
-  const listed = await listCloudSkills(source.baseUrl);
-  const existing = listed.skills?.find((entry) => entry.ownerSlug === source.owner && entry.name === source.skill);
+  const existing = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
   if (!existing) {
     return;
   }
-  const suggestedSkill = suggestedAvailableCloudSkillName(source.owner, source.skill, listed.skills ?? []);
+  const suggestedSkill = await firstAvailableCloudSkillName(source.baseUrl, source.owner, source.skill);
   const collisionResistantSkill = `${source.skill}-$(date +%s)`;
   throw new WorkbenchCodedError(options.code, `Cloud skill ${source.owner}/${source.skill} already exists; refusing to auto-link this local project to it.`, {
     remediation: options.remediation ?? `workbench publish --as ${source.owner}/${collisionResistantSkill}`,
@@ -5554,35 +5548,39 @@ async function availableCloudRemoteForHostedAutoLink(remote: WorkbenchRemote): P
       exitCode: 2,
     });
   }
-  const listed = await listCloudSkills(source.baseUrl);
-  const existing = listed.skills?.find((entry) => entry.ownerSlug === source.owner && entry.name === source.skill);
+  const existing = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
   if (!existing) {
     return remote;
   }
-  const skill = suggestedAvailableCloudSkillName(source.owner, source.skill, listed.skills ?? []);
+  const skill = await firstAvailableCloudSkillName(source.baseUrl, source.owner, source.skill);
   return {
     ...remote,
     url: `${source.baseUrl}/skills/${encodeURIComponent(source.owner)}/${encodeURIComponent(skill)}`,
   };
 }
 
-async function listCloudSkills(baseUrl: string): Promise<{ skills?: Array<{ id?: string; ownerSlug?: string; name?: string }> }> {
-  return await apiRequest<{ skills?: Array<{ id?: string; ownerSlug?: string; name?: string }> }>(
-    "/api/workbench/skills",
+async function getCloudSkillByHandle(
+  baseUrl: string,
+  owner: string,
+  skill: string,
+): Promise<{ id?: string; ownerSlug?: string; name?: string } | undefined> {
+  const params = new URLSearchParams({ owner, name: skill });
+  const listed = await apiRequest<{ skills?: Array<{ id?: string; ownerSlug?: string; name?: string }> }>(
+    `/api/workbench/skills?${params.toString()}`,
     {},
     baseUrl,
   );
+  return listed.skills?.find((entry) => entry.ownerSlug === owner && entry.name === skill);
 }
 
-function suggestedAvailableCloudSkillName(
+async function firstAvailableCloudSkillName(
+  baseUrl: string,
   owner: string,
   baseSkill: string,
-  skills: readonly { ownerSlug?: string; name?: string }[],
-): string {
-  const used = new Set(skills.flatMap((entry) => entry.ownerSlug === owner && entry.name ? [entry.name] : []));
+): Promise<string> {
   for (let index = 2; ; index += 1) {
     const candidate = `${baseSkill}-${index}`;
-    if (!used.has(candidate)) {
+    if (!await getCloudSkillByHandle(baseUrl, owner, candidate)) {
       return candidate;
     }
   }
