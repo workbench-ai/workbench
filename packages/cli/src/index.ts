@@ -1663,6 +1663,14 @@ async function retryCloudRun(
       });
     }
     interrupt.setRunIds([response.id]);
+    await cancelAcceptedCloudRunIfLocallyRequested({
+      command: "run retry",
+      core: remoteContext.core,
+      remoteName: remoteContext.remote.name,
+      source: remoteContext.source,
+      skillId,
+      run: response,
+    });
     await recordWorkbenchCloudRunSnapshot({ ...remoteContext.core, remoteName: remoteContext.remote.name, run: response });
     await clearWorkbenchLocalHostedRunHandle({ ...remoteContext.core, runId });
     prescheduledRunForCleanup = null;
@@ -2837,6 +2845,14 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       });
     }
     interrupt.setRunIds([response.id]);
+    await cancelAcceptedCloudRunIfLocallyRequested({
+      command,
+      core,
+      remoteName: remote.name,
+      source,
+      skillId,
+      run: response,
+    });
     await recordWorkbenchCloudRunSnapshot({ ...core, remoteName: remote.name, run: response });
     await clearWorkbenchLocalHostedRunHandle({ dir: root, runId });
     prescheduledRunForCleanup = null;
@@ -3013,6 +3029,45 @@ async function cloudPreScheduleStepWithProgress<T>(
     cloudPreScheduleStep(command, interrupt, step),
     renderProgress,
   );
+}
+
+async function cancelAcceptedCloudRunIfLocallyRequested(input: {
+  command: WorkbenchProgressCommand;
+  core: { dir?: string; authToken?: string };
+  remoteName: string;
+  source: ParsedWorkbenchInstallSource;
+  skillId: string;
+  run: WorkbenchRunSnapshot;
+}): Promise<void> {
+  if (!await hasWorkbenchLocalRunCancellationRequest({ ...input.core, runId: input.run.id })) {
+    return;
+  }
+  const response = await apiRequest<{ run?: WorkbenchRun; jobs?: WorkbenchJob[] }>(
+    `/api/workbench/skills/${encodeURIComponent(input.skillId)}/runs/${encodeURIComponent(input.run.id)}/cancel`,
+    {
+      method: "POST",
+      body: {
+        schema: "workbench.remote.run.cancel-request.v1",
+        reason: "user_requested",
+      },
+    },
+    input.source.baseUrl,
+  );
+  const canceledRun = response.run;
+  const jobs = response.jobs ?? [];
+  if (canceledRun) {
+    await recordWorkbenchCloudRunSnapshot({
+      ...input.core,
+      remoteName: input.remoteName,
+      run: createWorkbenchRunSnapshotForRun(canceledRun, jobs),
+    });
+  }
+  await clearWorkbenchLocalHostedRunHandle({ ...input.core, runId: input.run.id }).catch(() => undefined);
+  throw new WorkbenchCodedError("cloud_canceled", `Hosted ${input.command} was canceled after Workbench Cloud accepted the run.`, {
+    remediation: `workbench show ${input.run.id}`,
+    subject: { runId: input.run.id, status: canceledRun?.status ?? "canceled" },
+    exitCode: 130,
+  });
 }
 
 async function withCloudProgressRendering<T>(

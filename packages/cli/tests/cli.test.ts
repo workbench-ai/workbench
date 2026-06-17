@@ -3251,6 +3251,207 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
+  test("hosted retry forwards local cancellation that lands while Cloud accepts the run", async () => {
+    const root = await makeTempRoot("workbench-cli-cloud-retry-cancel-during-accept-");
+    const previousConfig = process.env.WORKBENCH_CONFIG;
+    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
+    process.env.WORKBENCH_CONFIG = configPath;
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "cloud-token",
+      username: "alice",
+    }));
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await addWorkbenchRemote("cloud", "https://cloud.test/skills/alice/cloud-skill", { dir: root });
+    const versionId = await currentVersionIdFor(root);
+    const createdAt = "2026-06-16T00:00:00.000Z";
+    const canceledRun: WorkbenchRun = {
+      id: "run_retry_cancel_source",
+      kind: "eval",
+      versionId,
+      skillName: "primary",
+      skillBundleHash: "bundle_preaccept",
+      evalHash: "eval_preaccept",
+      agentName: "default",
+      agentHash: "agent_preaccept",
+      status: "canceled",
+      jobIds: [],
+      traceIds: [],
+      createdAt,
+      finishedAt: "2026-06-16T00:00:01.000Z",
+      location: "cloud",
+      remoteName: "cloud",
+      requestedSamples: 1,
+      operationPlan: {
+        kind: "eval",
+        variant: "cloud",
+        versionId,
+        evalHash: "eval_preaccept",
+        skills: ["primary"],
+        agents: ["default"],
+        samples: 1,
+      },
+    };
+    await recordWorkbenchLocalHostedRunHandle({ dir: root, run: canceledRun });
+
+    let retryRunId = "";
+    let releaseOperation!: () => void;
+    const operationReleased = new Promise<void>((resolve) => {
+      releaseOperation = resolve;
+    });
+    let operationStarted = false;
+    let cloudCancelCalled = false;
+    let remotePack = emptyObjectPack(createdAt);
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
+      if (url.pathname === "/api/workbench/skills" && method === "GET") {
+        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
+        return jsonResponse({ objectPack: remotePack });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { objectPack?: ReturnType<typeof emptyObjectPack> };
+        remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
+        return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        retryRunId = String(body.runId);
+        operationStarted = true;
+        await operationReleased;
+        const retryJobId = "job_retry_cancel_accept";
+        const {
+          finishedAt: _finishedAt,
+          cancelRequestedAt: _cancelRequestedAt,
+          error: _error,
+          ...acceptedRunBase
+        } = canceledRun;
+        const acceptedRun: WorkbenchRun = {
+          ...acceptedRunBase,
+          id: retryRunId,
+          status: "queued",
+          jobIds: [retryJobId],
+          retryOfRunId: canceledRun.id,
+          createdAt: "2026-06-16T00:00:02.000Z",
+        };
+        const acceptedJob: WorkbenchJob = {
+          id: retryJobId,
+          runId: retryRunId,
+          kind: "eval",
+          versionId,
+          skillName: "primary",
+          skillBundleHash: "bundle_preaccept",
+          evalHash: "eval_preaccept",
+          agentName: "default",
+          agentHash: "agent_preaccept",
+          caseId: "case-001",
+          sample: 0,
+          status: "queued",
+          artifactIds: [],
+          traceIds: [],
+          createdAt: "2026-06-16T00:00:02.000Z",
+        };
+        return jsonResponse(runSnapshotFixture(acceptedRun, [acceptedJob]));
+      }
+      if (url.pathname === `/api/workbench/skills/skill_cloud/runs/${retryRunId}/cancel` && method === "POST") {
+        cloudCancelCalled = true;
+        const canceledRetryRun: WorkbenchRun = {
+          ...canceledRun,
+          id: retryRunId,
+          status: "canceled",
+          jobIds: ["job_retry_cancel_accept"],
+          retryOfRunId: canceledRun.id,
+          createdAt: "2026-06-16T00:00:02.000Z",
+          finishedAt: "2026-06-16T00:00:03.000Z",
+          cancelRequestedAt: "2026-06-16T00:00:03.000Z",
+          error: "cancelled",
+        };
+        const canceledJob: WorkbenchJob = {
+          id: "job_retry_cancel_accept",
+          runId: retryRunId,
+          kind: "eval",
+          versionId,
+          skillName: "primary",
+          skillBundleHash: "bundle_preaccept",
+          evalHash: "eval_preaccept",
+          agentName: "default",
+          agentHash: "agent_preaccept",
+          caseId: "case-001",
+          sample: 0,
+          status: "canceled",
+          artifactIds: [],
+          traceIds: [],
+          createdAt: "2026-06-16T00:00:02.000Z",
+          finishedAt: "2026-06-16T00:00:03.000Z",
+          error: "cancelled",
+        };
+        remotePack = mergeObjectPacks(remotePack, {
+          ...emptyObjectPack(createdAt),
+          runs: [canceledRetryRun],
+          jobs: [canceledJob],
+        });
+        return jsonResponse({
+          schema: "workbench.remote.run.cancel-response.v1",
+          run: canceledRetryRun,
+          jobs: [canceledJob],
+        });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/snapshot" && method === "GET") {
+        return jsonResponse(cloudInspectionEnvelope("cloud:retry", remotePack));
+      }
+      return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const running = invoke(["run", "retry", canceledRun.id, "--dir", root, "--json"]);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (operationStarted && retryRunId) {
+          break;
+        }
+        await delay(10);
+      }
+      expect(retryRunId).toMatch(/^run_/u);
+
+      const canceled = await invoke(["run", "cancel", retryRunId, "--dir", root, "--json"]);
+      expect(canceled.code, canceled.stdout || canceled.stderr).toBe(0);
+      expect(stdoutJson(canceled)).toMatchObject({
+        schema: "workbench.cli.run-cancel.v1",
+        ok: true,
+        run: { id: retryRunId, status: "canceled" },
+      });
+
+      releaseOperation();
+      const stopped = await running;
+      expect(stopped.code, stopped.stdout || stopped.stderr).toBe(130);
+      expect(stdoutJson(stopped)).toMatchObject({
+        ok: false,
+        code: "cloud_canceled",
+        remediation: `workbench show ${retryRunId}`,
+      });
+      expect(cloudCancelCalled).toBe(true);
+
+      const watched = await invoke(["run", "watch", retryRunId, "--dir", root, "--json"]);
+      expect(watched.code, watched.stdout || watched.stderr).toBe(0);
+      expect(stdoutJson(watched)).toMatchObject({
+        schema: "workbench.cli.run-watch.v1",
+        ok: true,
+        run: { id: retryRunId, status: "canceled" },
+        next: `workbench show ${retryRunId}`,
+      });
+    } finally {
+      releaseOperation();
+      if (previousConfig === undefined) {
+        delete process.env.WORKBENCH_CONFIG;
+      } else {
+        process.env.WORKBENCH_CONFIG = previousConfig;
+      }
+    }
+  });
+
   test("hosted eval stops before scheduling when a local handle is canceled during sync", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-preaccept-cancel-during-sync-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
