@@ -735,11 +735,12 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         host: stringFlag(parsed, "host"),
         port: portFlag(parsed, "port"),
       });
+      const stopped = waitForOpenServerStop(server);
       io.stdout.write(`Workbench: ${server.url}\nServing Workbench UI. Press Ctrl-C to stop.\n`);
       if (parsed.flags["no-open"] !== true) {
         await openBrowser(server.url).catch(() => undefined);
       }
-      return await new Promise<never>(() => {});
+      return await stopped;
     }
     throw new WorkbenchUserError(`Unknown command: ${command}\n\n${HELP}`);
   } catch (error) {
@@ -747,6 +748,24 @@ export async function runCli(argv: readonly string[], io: CliIo = {
     scheduleProcessExitForDetachedCloud(error, io, exitCode);
     return exitCode;
   }
+}
+
+async function waitForOpenServerStop(server: { close(): Promise<void> }): Promise<number> {
+  return await new Promise<number>((resolve) => {
+    let closed = false;
+    const stop = (code: number) => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+      void server.close().finally(() => resolve(code));
+    };
+    const onSignal = () => stop(0);
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+  });
 }
 
 function scheduleProcessExitForDetachedCloud(error: unknown, io: CliIo, exitCode: number): void {

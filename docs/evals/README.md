@@ -40,7 +40,7 @@ score:
   adapter: tests
 ```
 
-`workbench new` creates the eval definition and an empty `.workbench/cases/` directory. Add at least one case before running `workbench eval`; an eval with no cases fails with `no_eval_cases`.
+`workbench new` creates the eval definition and an empty `.workbench/cases/` directory. Add at least one case before running `workbench eval`; an eval with no cases fails with `no_eval_cases` and prints a headless command that creates a draft case plus an executable `tests/test.sh` harness.
 
 Shell tests write one public result file:
 
@@ -60,6 +60,7 @@ rubric:
   - Explains the likely investor focus areas.
   - Uses concrete, decision-useful language.
   - Avoids overclaiming facts not present in the context.
+command: sh "$CASE_DIR/tests/test.sh"
 ```
 
 ## `.workbench/agents.yaml`

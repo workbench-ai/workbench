@@ -358,17 +358,35 @@ export {
 
 export function workbenchAuthorEvalCaseCommand(caseId = "case-001"): string {
   const caseDir = `.workbench/cases/${caseId}`;
+  const testDir = `${caseDir}/tests`;
   const casePath = `${caseDir}/case.yaml`;
+  const testPath = `${testDir}/test.sh`;
+  const caseLines = [
+    "version: 1",
+    `id: ${caseId}`,
+    "prompt: Replace this with a representative workflow prompt.",
+    "rubric:",
+    "  - Replace this with observable acceptance criteria.",
+    "command: sh \"$CASE_DIR/tests/test.sh\"",
+  ];
+  const testLines = [
+    "#!/bin/sh",
+    "set -eu",
+    "mkdir -p \"$OUTPUT_DIR\"",
+    "printf '%s\\n' '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}' > \"$OUTPUT_DIR/result.json\"",
+  ];
   return [
-    `mkdir -p ${caseDir}`,
+    `mkdir -p ${shellQuote(testDir)}`,
     "&&",
     "printf '%s\\n'",
-    "'version: 1'",
-    `'id: ${caseId}'`,
-    "'prompt: Replace this with a representative workflow prompt.'",
-    "'rubric:'",
-    "'  - Replace this with observable acceptance criteria.'",
-    `> ${casePath}`,
+    ...caseLines.map((line) => shellQuote(line)),
+    `> ${shellQuote(casePath)}`,
+    "&&",
+    "printf '%s\\n'",
+    ...testLines.map((line) => shellQuote(line)),
+    `> ${shellQuote(testPath)}`,
+    "&&",
+    `chmod +x ${shellQuote(testPath)}`,
   ].join(" ");
 }
 

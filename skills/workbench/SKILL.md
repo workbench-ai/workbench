@@ -16,14 +16,14 @@ Use the small loop first:
 ```bash
 workbench new ./earnings-prep
 cd ./earnings-prep
-# run the printed next command, then edit .workbench/cases/case-001/case.yaml
+# run the printed next command, then edit .workbench/cases/case-001/case.yaml and tests/test.sh
 workbench eval --agents default -n 1
 workbench compare
 workbench log --versions
 workbench show current:SKILL.md
 ```
 
-`workbench new` creates an empty `.workbench/cases/` directory. Write representative workflow cases before running `workbench eval`; no-case evals fail with `no_eval_cases`. Workbench creates source versions automatically when commands observe changed source. Successful below-perfect evals print an executable next step: they point to `workbench improve` only when the selected agent can improve, otherwise they teach the provider-backed improver setup chain.
+`workbench new` creates an empty `.workbench/cases/` directory. Write representative workflow cases before running `workbench eval`; no-case evals fail with `no_eval_cases` and print a headless command that creates a draft case plus an executable `tests/test.sh` harness. Workbench creates source versions automatically when commands observe changed source. Successful below-perfect evals print an executable next step: they point to `workbench improve` only when the selected agent can improve, otherwise they teach the provider-backed improver setup chain.
 
 Use selector flags only when the user intentionally wants a broader or narrower matrix:
 

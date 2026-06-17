@@ -1100,6 +1100,16 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(newStatus).next).toBe(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
     await expect(fs.access(path.join(root, ".workbench", "cases", "case-001", "case.yaml")))
       .rejects.toMatchObject({ code: "ENOENT" });
+    const authorCase = spawnSync("sh", ["-c", WORKBENCH_AUTHOR_EVAL_CASE_COMMAND], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    expect(authorCase.status, authorCase.stderr).toBe(0);
+    await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
+      .resolves.toContain("command: sh \"$CASE_DIR/tests/test.sh\"");
+    await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), "utf8"))
+      .resolves.toContain("$OUTPUT_DIR/result.json");
+    await fs.rm(path.join(root, ".workbench", "cases", "case-001"), { recursive: true, force: true });
     await writePassingCaseTest(root);
     const caseStatus = await invoke(["status", "--dir", root, "--json"]);
     expect(caseStatus.code, caseStatus.stdout || caseStatus.stderr).toBe(0);
@@ -1253,7 +1263,9 @@ describe("workbench skill-first CLI", () => {
     });
     expect(authorCase.status, authorCase.stderr).toBe(0);
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
-      .resolves.toContain("id: case-001");
+      .resolves.toContain("command: sh \"$CASE_DIR/tests/test.sh\"");
+    const testStat = await fs.stat(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"));
+    expect(testStat.mode & 0o111).not.toBe(0);
   });
 
   dockerTest("local cases without a command or test script fail with actionable evidence", async () => {
@@ -6445,6 +6457,33 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       message: "Unsupported flag --json for workbench open.",
     });
+  });
+
+  test("open stops cleanly on Ctrl-C", async () => {
+    const root = await makeTempRoot("workbench-cli-open-stop-");
+    await invoke(["new", root, "--agent", "local"]);
+
+    let stdout = "";
+    let signaled = false;
+    const stdoutStream = new Writable({
+      write(chunk: unknown, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+        stdout += String(chunk);
+        if (!signaled && stdout.includes("Press Ctrl-C to stop")) {
+          signaled = true;
+          setImmediate(() => process.emit("SIGINT", "SIGINT"));
+        }
+        callback();
+      },
+    });
+    const stderr = new MemoryWritable();
+    const code = await runCli(["open", "--no-open", "--port", "0", "--dir", root], {
+      stdout: stdoutStream,
+      stderr,
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toContain("Press Ctrl-C to stop");
+    expect(stderr.value).toBe("");
   });
 
   dockerTest("reports compact sample coverage and routes publish-ready status through login", async () => {
