@@ -354,6 +354,36 @@ describe("workbench execution DAG scheduler", () => {
     expect(canceled).not.toHaveProperty("next");
   });
 
+  test("terminal eval run snapshots preserve non-default compare selectors", () => {
+    const run: WorkbenchRun = {
+      id: "run_strict",
+      kind: "eval",
+      versionId: "v001",
+      skillName: "primary",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "strict",
+      agentHash: "agent_hash",
+      status: "succeeded",
+      score: 1,
+      jobIds: [],
+      traceIds: [],
+      createdAt: "2026-06-16T00:00:00.000Z",
+      finishedAt: "2026-06-16T00:00:01.000Z",
+    };
+
+    const snapshot = createWorkbenchRunSnapshot({
+      kind: "eval",
+      variant: "local",
+      versionId: "v001",
+      evalHash: "eval_hash",
+      skill: "primary",
+      agent: "strict",
+    }, [run]);
+
+    expect(snapshot.next).toBe("workbench compare --agents 'strict'");
+  });
+
   test("local web operation defaults keep CLI current-source semantics", () => {
     const snapshot = actionCapabilitySnapshot();
     const local = createWorkbenchActionCapabilities(snapshot, {

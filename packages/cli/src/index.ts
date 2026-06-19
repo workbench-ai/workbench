@@ -850,7 +850,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       });
       const remote = await ensurePublishRemote(parsed);
       await assertPublishCloudAuth(parsed, remote);
-      writeCliProgress(parsed, io, `workbench unpublish: removing exact source availability for ${versionRef}.`);
+      writeCliProgress(parsed, io, `workbench unpublish: checking exact source availability for ${versionRef}.`);
       const result = await withProgressHeartbeat(io, "workbench unpublish: remote publication update", async () => await unpublishWorkbenchVersion({
         ...core,
         version: versionRef,
@@ -1356,7 +1356,7 @@ function readinessNextCommand(
   command: "eval" | "improve",
   readiness: WorkbenchLaunchReadiness,
 ): string | null {
-  for (const issue of readiness.issues) {
+  for (const issue of readinessIssuesForNext(readiness.issues)) {
     const setupCommand = readinessIssueSetupCommands(issue)[0];
     if (setupCommand) {
       return setupCommand;
@@ -1371,6 +1371,27 @@ function readinessNextCommand(
     }
   }
   return readiness.issues.find((issue) => issue.remediation)?.remediation ?? null;
+}
+
+function readinessIssuesForNext(
+  issues: readonly WorkbenchLaunchReadinessIssue[],
+): WorkbenchLaunchReadinessIssue[] {
+  return [...issues].sort((left, right) =>
+    readinessIssueNextPriority(left) - readinessIssueNextPriority(right)
+  );
+}
+
+function readinessIssueNextPriority(issue: WorkbenchLaunchReadinessIssue): number {
+  if (issue.code === "adapter_auth_required" || issue.code === "provider_oauth_missing") {
+    return 0;
+  }
+  if (issue.code === "auth_required") {
+    return 1;
+  }
+  if (issue.code === "plan_required") {
+    return 2;
+  }
+  return 3;
 }
 
 function commandChainParts(command: string | undefined): string[] {
@@ -2123,12 +2144,23 @@ function runWatchNextCommand(run: WorkbenchRun): string {
   if (run.status === "failed" || run.status === "canceled") {
     return `workbench show ${run.id}`;
   }
-  return "workbench compare";
+  return run.kind === "improve" ? "workbench eval --rerun -n 5" : compareNextCommandForRun(run);
 }
 
 function showRunNextCommand(run: WorkbenchRun): string | null {
   const next = runWatchNextCommand(run);
   return next === `workbench show ${run.id}` ? null : next;
+}
+
+function compareNextCommandForRun(run: WorkbenchRun): string {
+  const parts = ["workbench compare"];
+  if (run.skillName && run.skillName !== "primary") {
+    parts.push("--skills", shellQuote(run.skillName));
+  }
+  if (run.agentName && run.agentName !== "default") {
+    parts.push("--agents", shellQuote(run.agentName));
+  }
+  return parts.join(" ");
 }
 
 function formatRunWatchResult(run: WorkbenchRun, jobs: readonly WorkbenchJob[], progress?: WorkbenchRunSnapshot): string {
@@ -7388,7 +7420,7 @@ function formatJobEvidenceSummary(job: WorkbenchJob, _refs: ReadonlyMap<string, 
   return [
     job.id,
     `case=${job.caseId}`,
-    `sample=${job.sample}`,
+    `sample=${humanSampleNumber(job.sample)}`,
     job.status,
     job.score !== undefined ? `score=${job.score.toFixed(3)}` : undefined,
     job.error ? `error=${singleLine(job.error)}` : undefined,
@@ -8088,7 +8120,11 @@ function formatJob(job: WorkbenchJob): string {
   const scoreValue = scoredJobValue(job);
   const score = scoreValue === undefined ? "n/a" : scoreValue.toFixed(3);
   const duration = job.durationMs === undefined ? "n/a" : `${job.durationMs}ms`;
-  return `${displayRef(job.id)}\trun=${displayRef(job.runId)}\tcase=${job.caseId}\tsample=${job.sample}\t${job.status}\tscore=${score}\tduration=${duration}`;
+  return `${displayRef(job.id)}\trun=${displayRef(job.runId)}\tcase=${job.caseId}\tsample=${humanSampleNumber(job.sample)}\t${job.status}\tscore=${score}\tduration=${duration}`;
+}
+
+function humanSampleNumber(sample: number): number {
+  return sample + 1;
 }
 
 function formatComparison(comparison: WorkbenchComparison, fallbackNext?: string): string {

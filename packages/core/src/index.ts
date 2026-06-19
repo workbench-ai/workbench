@@ -6161,7 +6161,18 @@ function runSnapshotNext(run: WorkbenchRun): string | undefined {
   if (run.status === "failed" || run.status === "canceled") {
     return undefined;
   }
-  return run.kind === "improve" ? "workbench eval --rerun -n 5" : "workbench compare";
+  return run.kind === "improve" ? "workbench eval --rerun -n 5" : compareNextCommandForRun(run);
+}
+
+function compareNextCommandForRun(run: WorkbenchRun): string {
+  const parts = ["workbench compare"];
+  if (run.skillName && run.skillName !== "primary") {
+    parts.push("--skills", shellQuote(run.skillName));
+  }
+  if (run.agentName && run.agentName !== "default") {
+    parts.push("--agents", shellQuote(run.agentName));
+  }
+  return parts.join(" ");
 }
 
 function aggregateRunScore(runs: readonly WorkbenchRun[]): number | undefined {
@@ -12182,17 +12193,18 @@ async function httpRemoteJson<T>(
     if (!response.ok) {
       const cloudError = parseWorkbenchCloudErrorBody(text);
       if (cloudError) {
+        const normalizedCloudError = normalizeWorkbenchCloudError(cloudError);
         if (response.status === 404 && isNotFoundCloudErrorCode(cloudError.code)) {
-          throw new WorkbenchRemoteNotFoundError(cloudError.message);
+          throw new WorkbenchRemoteNotFoundError(normalizedCloudError.message);
         }
-        const codedError = new WorkbenchCodedError(cloudError.code, cloudError.message, {
-          retryable: cloudError.retryable,
-          ...(cloudError.remediation ? { remediation: cloudError.remediation } : {}),
-          ...(cloudError.subject ? { subject: cloudError.subject } : {}),
+        const codedError = new WorkbenchCodedError(normalizedCloudError.code, normalizedCloudError.message, {
+          retryable: normalizedCloudError.retryable,
+          ...(normalizedCloudError.remediation ? { remediation: normalizedCloudError.remediation } : {}),
+          ...(normalizedCloudError.subject ? { subject: normalizedCloudError.subject } : {}),
           exitCode: response.status === 400 ? 2 : 1,
         });
         lastError = codedError;
-        if (canRetry && attempt < HTTP_REMOTE_MAX_ATTEMPTS && cloudError.retryable) {
+        if (canRetry && attempt < HTTP_REMOTE_MAX_ATTEMPTS && normalizedCloudError.retryable) {
           await sleep(250 * attempt);
           continue;
         }
@@ -12273,6 +12285,32 @@ function parseWorkbenchCloudErrorBody(text: string): {
   } catch {
     return null;
   }
+}
+
+function normalizeWorkbenchCloudError(error: {
+  code: string;
+  message: string;
+  retryable: boolean;
+  remediation?: string;
+  subject?: Record<string, Json>;
+}): {
+  code: string;
+  message: string;
+  retryable: boolean;
+  remediation?: string;
+  subject?: Record<string, Json>;
+} {
+  if (
+    error.code === "validation_failed" &&
+    error.subject?.visibility === "internal" &&
+    /\binternal source visibility requires an organization-owned skill\b/iu.test(error.message)
+  ) {
+    return {
+      ...error,
+      message: "Team source visibility requires an organization-owned skill.",
+    };
+  }
+  return error;
 }
 
 function encodeHttpRemoteJsonBody(body: unknown): {
