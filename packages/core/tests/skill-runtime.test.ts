@@ -2141,7 +2141,7 @@ describe("skill-first Workbench runtime", () => {
       testTrace("trace_passed", { request: { caseId: "case-pass" }, result: { status: "succeeded", score: 1 } }),
       testTrace("trace_low_score_passed", { request: { caseId: "case-low-score" }, result: { status: "succeeded", score: 0.4 } }),
       testTrace("trace_failed", { request: { caseId: "case-fail" }, result: { status: "failed", score: 0, error: "workflow failure" } }),
-      testTrace("trace_auth_failed", { request: { caseId: "case-auth" }, result: { status: "failed", error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth." } }),
+      testTrace("trace_auth_failed", { request: { caseId: "case-auth" }, result: { status: "failed", error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth." } }),
       testTrace("trace_runtime_error", { request: { caseId: "case-runtime" }, result: { status: "error", error: "Runtime-control step host exited with status 1." } }),
       testTrace("trace_reviewed", { request: { caseId: "case-review" }, result: { status: "succeeded", score: 1, feedback: { review: "Needs clearer citation." } } }),
       testTrace("trace_case_failed", { request: { caseId: "case-structured" }, result: { status: "succeeded", cases: [{ id: "step-1", status: "failed" }] } }),
@@ -5182,7 +5182,7 @@ function expectBlockedCodexOperationPreview(
     canStart: false,
     agents: [expect.objectContaining({ name: "codex" })],
     disabledReason: expect.stringContaining("codex disconnected"),
-    setupCommands: ["codex login --device-auth && workbench login codex --method oauth"],
+    setupCommands: ["codex login --device-auth"],
   });
 }
 

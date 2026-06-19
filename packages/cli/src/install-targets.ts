@@ -87,14 +87,18 @@ export interface WorkbenchInstallTargetResult {
   root: string;
   destination: string;
   previous: "none" | "updated" | "overwritten" | "unchanged";
-  result: "installed" | "planned" | "unchanged";
+  result: "installed" | "planned" | "blocked" | "unchanged";
+  requiresOverwrite?: boolean;
+  remediation?: string;
   filesCopied: number;
   contentHash: string;
   ledgerPath: string;
 }
 
 export interface WorkbenchInstallTargetsResult {
-  result: "installed" | "planned" | "unchanged";
+  result: "installed" | "planned" | "blocked" | "unchanged";
+  requiresOverwrite?: boolean;
+  remediation?: string;
   scope: SkillAccessScope;
   dir?: string;
   target: SkillAccessTargetId;
@@ -256,13 +260,17 @@ export async function installSnapshotToSkillTargets(options: {
     }));
   }
   const filesCopied = results.reduce((sum, result) => sum + result.filesCopied, 0);
+  const blocked = results.some((entry) => entry.result === "blocked");
   const result = options.dryRun
-    ? "planned"
+    ? blocked ? "blocked" : "planned"
     : results.every((entry) => entry.result === "unchanged")
       ? "unchanged"
       : "installed";
+  const remediation = results.find((entry) => entry.remediation)?.remediation;
   return {
     result,
+    ...(blocked ? { requiresOverwrite: true } : {}),
+    ...(remediation ? { remediation } : {}),
     scope: request.scopes[0] ?? "folder",
     ...(request.dir ? { dir: request.dir } : {}),
     target,
@@ -340,6 +348,8 @@ export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventor
 export function installResultToJson(result: WorkbenchInstallTargetsResult): Record<string, Json> {
   return {
     result: result.result,
+    ...(result.requiresOverwrite ? { requiresOverwrite: true } : {}),
+    ...(result.remediation ? { remediation: result.remediation } : {}),
     scope: result.scope,
     ...(result.dir ? { dir: result.dir } : {}),
     target: result.target,
@@ -354,11 +364,13 @@ export function installResultToJson(result: WorkbenchInstallTargetsResult): Reco
       destination: target.destination,
       previous: target.previous,
       result: target.result,
+      ...(target.requiresOverwrite ? { requiresOverwrite: true } : {}),
+      ...(target.remediation ? { remediation: target.remediation } : {}),
       filesCopied: target.filesCopied,
       contentHash: target.contentHash,
       ledgerPath: target.ledgerPath,
     })),
-    next: null,
+    next: result.remediation ?? null,
   };
 }
 
@@ -759,7 +771,8 @@ async function installPackageInRoot(args: {
   const previous: WorkbenchInstallTargetResult["previous"] = existingHash
     ? existingHash === args.contentHash ? "unchanged" : canUpdateExisting ? "updated" : "overwritten"
     : "none";
-  if (!args.dryRun && existingHash && previous === "overwritten" && !args.overwrite) {
+  const requiresOverwrite = Boolean(existingHash && previous === "overwritten" && !args.overwrite);
+  if (!args.dryRun && requiresOverwrite) {
     const status = record ? "modified" : "unmanaged";
     throw new WorkbenchCodedError("install_failed", `Skill destination has ${status} content: ${destination}`, {
       remediation: args.overwriteRemediation,
@@ -786,7 +799,8 @@ async function installPackageInRoot(args: {
     root,
     destination,
     previous,
-    result: args.dryRun ? "planned" : previous === "unchanged" ? "unchanged" : "installed",
+    result: args.dryRun ? requiresOverwrite ? "blocked" : "planned" : previous === "unchanged" ? "unchanged" : "installed",
+    ...(requiresOverwrite ? { requiresOverwrite: true, remediation: args.overwriteRemediation } : {}),
     filesCopied: previous === "unchanged" ? 0 : args.files.length,
     contentHash: args.contentHash,
     ledgerPath: installsPathForRoot(root),

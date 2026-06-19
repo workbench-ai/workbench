@@ -211,7 +211,7 @@ describe("built-in Workbench adapters", () => {
       adapterId: "codex",
       requestPath,
       agentExecutor,
-    })).rejects.toThrow("ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth.");
+    })).rejects.toThrow("ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth.");
     expect(agentExecutor).not.toHaveBeenCalled();
   });
 

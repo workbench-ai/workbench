@@ -46,6 +46,7 @@ import {
   workbenchStatus,
   workbenchJobEvidenceForSnapshot,
   workbenchProviderAuthSetupCommand,
+  workbenchProviderAuthSetupCommands,
   workbenchSkillImproveAdapterRemediation,
   workbenchSkillImproveCanUseQueuedAdapter,
   workbenchStatusSnapshot,
@@ -139,18 +140,20 @@ const HELP = [
   "",
   "Bare workbench prints project status and the next useful command.",
   "",
-  "Taught commands:",
+  "Taught lifecycle commands:",
   "  workbench new DIR [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
   "  workbench init [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
-  "  workbench clone OWNER/SKILL[@VERSION] DIR [--json]",
   "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
   "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
   "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
+  "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
+  "  workbench install OWNER/SKILL[@VERSION]|URL [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
+  "",
+  "Other common commands:",
+  "  workbench clone OWNER/SKILL[@VERSION]|URL DIR [--json]",
   "  workbench versions [--dir DIR] [--json]",
   "  workbench case draft [ID] [--dir DIR] [--json]",
-  "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
-  "  workbench install OWNER/SKILL[@VERSION] [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
   "",
   "More:",
   "  workbench help --all",
@@ -161,14 +164,14 @@ const HELP_ALL = [
   "  workbench                          # = workbench status",
   "  workbench new DIR [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
   "  workbench init [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
-  "  workbench clone OWNER/SKILL[@VERSION] DIR [--json]",
+  "  workbench clone OWNER/SKILL[@VERSION]|URL DIR [--json]",
   "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
   "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
   "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
   "  workbench unpublish VERSION [--dir DIR] [--json]",
   "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
-  "  workbench install OWNER/SKILL[@VERSION] [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
+  "  workbench install OWNER/SKILL[@VERSION]|URL [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
   "",
   "Inspect:",
   "  workbench status [--dir DIR] [--json]",
@@ -217,7 +220,7 @@ const COMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   clone: [
     "Usage:",
-    "  workbench clone OWNER/SKILL[@VERSION] DIR [--json]",
+    "  workbench clone OWNER/SKILL[@VERSION]|URL DIR [--json]",
     "",
     "Creates editable Workbench source from a published skill.",
     "",
@@ -253,7 +256,7 @@ const COMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   install: [
     "Usage:",
-    "  workbench install OWNER/SKILL[@VERSION] [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
+    "  workbench install OWNER/SKILL[@VERSION]|URL [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
     "",
     "Installs the current published agent skill package, or an exact published version with @VERSION.",
     "",
@@ -1412,16 +1415,19 @@ function readinessIssuesForNext(
 }
 
 function readinessIssueNextPriority(issue: WorkbenchLaunchReadinessIssue): number {
-  if (issue.code === "adapter_auth_required" || issue.code === "provider_oauth_missing") {
+  if (issue.code === "no_eval_cases") {
     return 0;
   }
-  if (issue.code === "auth_required") {
+  if (issue.code === "adapter_auth_required" || issue.code === "provider_oauth_missing") {
     return 1;
   }
-  if (issue.code === "plan_required") {
+  if (issue.code === "auth_required") {
     return 2;
   }
-  return 3;
+  if (issue.code === "plan_required") {
+    return 3;
+  }
+  return 4;
 }
 
 function commandChainParts(command: string | undefined): string[] {
@@ -2689,12 +2695,13 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
       baseUrl: workbenchSource.baseUrl,
     },
   });
+  const next = result.remediation ?? null;
   return emitResult("workbench.cli.install.v3", {
     source: sourceSummary,
     ...installResultToJson(result),
-    next: null,
+    next: next as Json,
     ...(parsed.flags["dry-run"] === true ? { dryRun: true } : {}),
-  }, parsed, io, () => formatInstallOutcome(result, parsed.flags["dry-run"] === true));
+  }, parsed, io, () => formatInstallOutcome(result, parsed.flags["dry-run"] === true, next));
 }
 
 async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -2773,19 +2780,19 @@ async function handleClone(parsed: ParsedArgs, io: CliIo): Promise<number> {
   rejectExtraInput(parsed, {
     maxPositionals: 3,
     message: "workbench clone accepts one source and one destination directory.",
-    remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+    remediation: "workbench clone OWNER/SKILL[@VERSION]|URL DIR",
   });
   const sourceInput = optionalPositional(parsed, 1);
   if (!sourceInput) {
     throw new WorkbenchCodedError("usage", "workbench clone requires OWNER/SKILL or a Workbench Cloud skill URL.", {
-      remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+      remediation: "workbench clone OWNER/SKILL[@VERSION]|URL DIR",
       exitCode: 2,
     });
   }
   const destination = optionalPositional(parsed, 2);
   if (!destination) {
     throw new WorkbenchCodedError("usage", "workbench clone requires a destination directory.", {
-      remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+      remediation: "workbench clone OWNER/SKILL[@VERSION]|URL DIR",
       exitCode: 2,
     });
   }
@@ -2793,7 +2800,7 @@ async function handleClone(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const workbenchSource = parseWorkbenchInstallSource(source);
   if (!workbenchSource) {
     throw new WorkbenchCodedError("usage", "workbench clone requires a Workbench Cloud source URL.", {
-      remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+      remediation: "workbench clone OWNER/SKILL[@VERSION]|URL DIR",
       exitCode: 2,
     });
   }
@@ -2828,7 +2835,7 @@ async function prepareCloneDestination(destination: string): Promise<string> {
     const entries = await fs.readdir(root);
     if (entries.length > 0) {
       throw new WorkbenchCodedError("usage", `Directory is not empty: ${root}`, {
-        remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+        remediation: "workbench clone OWNER/SKILL[@VERSION]|URL DIR",
         subject: { root },
         exitCode: 2,
       });
@@ -3021,6 +3028,7 @@ interface StartedCloudExecution {
 function formatInstallOutcome(
   result: WorkbenchInstallTargetsResult,
   dryRun: boolean,
+  next: string | null = null,
 ): string {
   const target = result.targets[0];
   if (!target) {
@@ -3028,6 +3036,7 @@ function formatInstallOutcome(
   }
   const targetSummary = `${target.target} ${target.scope}`;
   if (dryRun) {
+    const nextLine = next ? `\nnext: ${next}` : "";
     if (target.previous === "unchanged") {
       return `Already installed ${result.skill} for ${targetSummary} (unchanged; dry run made no changes).`;
     }
@@ -3035,7 +3044,9 @@ function formatInstallOutcome(
       return `Would update ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
     }
     if (target.previous === "overwritten") {
-      return `Would overwrite ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
+      return target.requiresOverwrite
+        ? `Would require --yes to overwrite ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).${nextLine}`
+        : `Would overwrite ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
     }
     return `Would install ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
   }
@@ -3687,9 +3698,10 @@ function mergeLaunchReadiness(...readinesses: readonly WorkbenchLaunchReadiness[
 }
 
 function readinessFromLaunchIssues(issues: readonly WorkbenchLaunchReadinessIssue[]): WorkbenchLaunchReadiness {
+  const sorted = readinessIssuesForNext(issues);
   return {
-    ready: issues.length === 0,
-    issues: [...issues],
+    ready: sorted.length === 0,
+    issues: sorted,
   };
 }
 
@@ -3729,6 +3741,7 @@ async function cloudAdapterAuthReadiness(input: {
         adapterId: target.adapterId,
         profile: target.profile,
         ...(target.slot ? { slot: target.slot } : {}),
+        setupCommands: workbenchProviderAuthSetupCommands(target.adapterId),
       } as Json,
     }));
   return { ready: issues.length === 0, issues };
@@ -5349,6 +5362,7 @@ async function collectAdapterAuthBundle(args: {
         files: [await requiredAuthFile(args.profileRoot, ".codex/auth.json", {
           provider: "Codex",
           remediation: codexOAuthRemediation(args.profileRoot),
+          setupCommands: codexOAuthSetupCommands(args.profileRoot),
         })],
       });
     }
@@ -5413,6 +5427,7 @@ function requiredEnvVars(
 async function requiredAuthFile(root: string, relativePath: string, guidance?: {
   provider: string;
   remediation: string;
+  setupCommands?: string[];
 }): Promise<WorkbenchAdapterAuthFile> {
   const file = await readAuthFile(root, relativePath);
   if (!file) {
@@ -5421,7 +5436,11 @@ async function requiredAuthFile(root: string, relativePath: string, guidance?: {
       ? `Missing ${guidance.provider} OAuth token file: ${absolute}`
       : `Missing auth file: ${absolute}`, {
       ...(guidance ? { remediation: guidance.remediation } : {}),
-      subject: { path: absolute, relativePath },
+      subject: {
+        path: absolute,
+        relativePath,
+        ...(guidance?.setupCommands?.length ? { setupCommands: guidance.setupCommands } : {}),
+      },
       exitCode: 2,
     });
   }
@@ -5441,7 +5460,7 @@ async function collectClaudeOAuthFiles(root: string): Promise<WorkbenchAdapterAu
       claudeOAuthInvalidMessage(root),
       {
         remediation: claudeOAuthRemediation(root),
-        subject: { env: CLAUDE_OAUTH_TOKEN_ENV },
+        subject: { env: CLAUDE_OAUTH_TOKEN_ENV, setupCommands: claudeOAuthSetupCommands(root) },
         exitCode: 2,
       },
     );
@@ -5468,6 +5487,7 @@ async function collectClaudeOAuthFiles(root: string): Promise<WorkbenchAdapterAu
           relativePath: CLAUDE_OAUTH_PROFILE_PATH,
         } : {}),
         ...(!envToken ? { env: CLAUDE_OAUTH_TOKEN_ENV } : {}),
+        setupCommands: claudeOAuthSetupCommands(root),
       },
       exitCode: 2,
     },
@@ -5475,22 +5495,36 @@ async function collectClaudeOAuthFiles(root: string): Promise<WorkbenchAdapterAu
 }
 
 function codexOAuthRemediation(profileRoot: string): string {
+  return codexOAuthSetupCommands(profileRoot)[0]!;
+}
+
+function codexOAuthSetupCommands(profileRoot: string): string[] {
   const rootFlag = profileRootFlag(profileRoot);
   const codexHome = path.join(profileRoot, ".codex");
   const loginPrefix = rootFlag ? `mkdir -p ${shellQuote(codexHome)} && CODEX_HOME=${shellQuote(codexHome)} ` : "";
-  return `${loginPrefix}codex login --device-auth && workbench login codex --method oauth${rootFlag}`;
+  return [
+    `${loginPrefix}codex login --device-auth`,
+    `workbench login codex --method oauth${rootFlag}`,
+  ];
 }
 
 function claudeOAuthRemediation(profileRoot: string): string {
-  return `claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth${profileRootFlag(profileRoot)}`;
+  return claudeOAuthSetupCommands(profileRoot)[0]!;
+}
+
+function claudeOAuthSetupCommands(profileRoot: string): string[] {
+  return [
+    "claude setup-token",
+    `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth${profileRootFlag(profileRoot)}`,
+  ];
 }
 
 function claudeOAuthMissingMessage(profileRoot: string): string {
-  return `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run ${claudeOAuthRemediation(profileRoot)}.`;
+  return `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with ${claudeOAuthSetupCommands(profileRoot)[1]}.`;
 }
 
 function claudeOAuthInvalidMessage(profileRoot: string): string {
-  return `${CLAUDE_OAUTH_TOKEN_ENV} must be the OAuth token printed by claude setup-token. Run ${claudeOAuthRemediation(profileRoot)}.`;
+  return `${CLAUDE_OAUTH_TOKEN_ENV} must be the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with ${claudeOAuthSetupCommands(profileRoot)[1]}.`;
 }
 
 function profileRootFlag(profileRoot: string): string {

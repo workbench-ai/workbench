@@ -280,6 +280,11 @@ describe("workbench skill-first CLI", () => {
     expect(help.stdout).toContain("workbench publish");
     expect(help.stdout).toContain("workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]");
     expect(help.stdout).toContain("workbench install");
+    expect(help.stdout).toContain("Taught lifecycle commands:");
+    expect(help.stdout).not.toContain("Taught commands:");
+    expect(help.stdout).toContain("Other common commands:");
+    expect(help.stdout).toContain("workbench install OWNER/SKILL[@VERSION]|URL");
+    expect(help.stdout).toContain("workbench clone OWNER/SKILL[@VERSION]|URL DIR");
     expect(help.stdout).toContain("workbench help --all");
     expect(help.stdout).not.toContain("workbench log");
     expect(help.stdout).not.toContain("workbench show");
@@ -1498,8 +1503,38 @@ describe("workbench skill-first CLI", () => {
     });
 
     vi.stubEnv("WORKBENCH_CONFIG", path.join(await makeTempRoot("workbench-cli-config-file-"), "config.json"));
+    vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", await makeTempRoot("workbench-cli-empty-adapter-auth-"));
     const root = await makeTempRoot("workbench-cli-no-case-remediation-");
     expect((await invoke(["new", root, "--agent", "codex", "--json"])).code).toBe(0);
+    const evalDryRun = await invoke(["eval", "--dry-run", "--dir", root, "--json"]);
+    expect(evalDryRun.code, evalDryRun.stdout || evalDryRun.stderr).toBe(0);
+    expect(stdoutJson(evalDryRun)).toMatchObject({
+      ok: true,
+      dryRun: true,
+      plan: {
+        cases: 0,
+        readiness: {
+          ready: false,
+          issues: [
+            {
+              code: "no_eval_cases",
+              remediation: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
+            },
+            {
+              code: "adapter_auth_required",
+              remediation: "codex login --device-auth",
+              subject: {
+                setupCommands: [
+                  "codex login --device-auth",
+                  "workbench login codex --method oauth",
+                ],
+              },
+            },
+          ],
+        },
+      },
+      next: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
+    });
     const improve = await invoke(["improve", "--dir", root, "--json"]);
     expect(improve.code).toBe(2);
     const improveJson = stdoutJson<{ remediation: string }>(improve);
@@ -1640,8 +1675,14 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(codex)).toMatchObject({
       ok: false,
       code: "provider_oauth_missing",
-      remediation: `mkdir -p '${path.join(codexProfileRoot, ".codex")}' && CODEX_HOME='${path.join(codexProfileRoot, ".codex")}' codex login --device-auth && workbench login codex --method oauth --profile-root '${codexProfileRoot}'`,
-      subject: { relativePath: ".codex/auth.json" },
+      remediation: `mkdir -p '${path.join(codexProfileRoot, ".codex")}' && CODEX_HOME='${path.join(codexProfileRoot, ".codex")}' codex login --device-auth`,
+      subject: {
+        relativePath: ".codex/auth.json",
+        setupCommands: [
+          `mkdir -p '${path.join(codexProfileRoot, ".codex")}' && CODEX_HOME='${path.join(codexProfileRoot, ".codex")}' codex login --device-auth`,
+          `workbench login codex --method oauth --profile-root '${codexProfileRoot}'`,
+        ],
+      },
     });
 
     const claudeEmpty = await invoke(["login", "claude", "--profile-root", claudeProfileRoot, "--json"]);
@@ -1649,11 +1690,15 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(claudeEmpty)).toMatchObject({
       ok: false,
       code: "provider_oauth_missing",
-      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
-      remediation: `claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
+      remediation: "claude setup-token",
       subject: {
         relativePath: ".claude.json",
         env: "CLAUDE_CODE_OAUTH_TOKEN",
+        setupCommands: [
+          "claude setup-token",
+          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+        ],
       },
     });
 
@@ -1663,10 +1708,14 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(claudeProfileOnly)).toMatchObject({
       ok: false,
       code: "provider_oauth_missing",
-      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
-      remediation: `claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
+      remediation: "claude setup-token",
       subject: {
         env: "CLAUDE_CODE_OAUTH_TOKEN",
+        setupCommands: [
+          "claude setup-token",
+          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+        ],
       },
     });
 
@@ -1676,10 +1725,14 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(claudeInvalidToken)).toMatchObject({
       ok: false,
       code: "provider_oauth_invalid",
-      message: `CLAUDE_CODE_OAUTH_TOKEN must be the OAuth token printed by claude setup-token. Run claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
-      remediation: `claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+      message: `CLAUDE_CODE_OAUTH_TOKEN must be the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
+      remediation: "claude setup-token",
       subject: {
         env: "CLAUDE_CODE_OAUTH_TOKEN",
+        setupCommands: [
+          "claude setup-token",
+          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+        ],
       },
     });
 
@@ -1731,7 +1784,13 @@ describe("workbench skill-first CLI", () => {
           issues: [
             {
               code: "adapter_auth_required",
-              remediation: "codex login --device-auth && workbench login codex --method oauth",
+              remediation: "codex login --device-auth",
+              subject: {
+                setupCommands: [
+                  "codex login --device-auth",
+                  "workbench login codex --method oauth",
+                ],
+              },
             },
           ],
         },
@@ -1741,7 +1800,13 @@ describe("workbench skill-first CLI", () => {
         issues: [
           {
             code: "adapter_auth_required",
-            remediation: "codex login --device-auth && workbench login codex --method oauth",
+            remediation: "codex login --device-auth",
+            subject: {
+              setupCommands: [
+                "codex login --device-auth",
+                "workbench login codex --method oauth",
+              ],
+            },
           },
         ],
       },
@@ -1755,7 +1820,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(codexResult)).toMatchObject({
       ok: false,
       code: "adapter_auth_required",
-      remediation: "codex login --device-auth && workbench login codex --method oauth",
+      remediation: "codex login --device-auth",
     });
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", codexRoot, "--json"])).entries).toEqual([]);
     const codexRetry = await invoke(["eval", "--dir", codexRoot, "--json"]);
@@ -1763,7 +1828,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(codexRetry)).toMatchObject({
       ok: false,
       code: "adapter_auth_required",
-      remediation: "codex login --device-auth && workbench login codex --method oauth",
+      remediation: "codex login --device-auth",
     });
 
     const claudeRoot = await makeTempRoot("workbench-cli-eval-claude-auth-");
@@ -1796,7 +1861,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(improved)).toMatchObject({
       ok: false,
       code: "improve_failed",
-      remediation: "codex login --device-auth && workbench login codex --method oauth",
+      remediation: "codex login --device-auth",
     });
   });
 
@@ -3190,12 +3255,18 @@ describe("workbench skill-first CLI", () => {
       ready: false,
       issues: [
         {
-          code: "plan_required",
-          remediation: "workbench publish --as ORG/SKILL && workbench improve --cloud",
+          code: "adapter_auth_required",
+          remediation: "codex login --device-auth",
+          subject: {
+            setupCommands: [
+              "codex login --device-auth",
+              "workbench login codex --method oauth",
+            ],
+          },
         },
         {
-          code: "adapter_auth_required",
-          remediation: "codex login --device-auth && workbench login codex --method oauth",
+          code: "plan_required",
+          remediation: "workbench publish --as ORG/SKILL && workbench improve --cloud",
         },
       ],
     });
@@ -4660,7 +4731,7 @@ describe("workbench skill-first CLI", () => {
         ok: false,
         code: "adapter_auth_required",
         message: "codex disconnected.",
-        remediation: "codex login --device-auth && workbench login codex --method oauth",
+        remediation: "codex login --device-auth",
       });
       const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string }>(improved);
       expect(progress).toHaveLength(1);
@@ -6567,7 +6638,7 @@ describe("workbench skill-first CLI", () => {
         code: "validation_failed",
         message: "Team source visibility requires an organization-owned skill.",
         remediation: "workbench publish --as ORG/SKILL --team",
-        subject: { owner: "alice", visibility: "internal" },
+        subject: { owner: "alice", visibility: "team" },
       });
       expect(publish.stdout).not.toContain("internal source visibility requires");
     } finally {
@@ -8520,12 +8591,25 @@ describe("workbench skill-first CLI", () => {
       expect(dryRunModified.code, dryRunModified.stdout || dryRunModified.stderr).toBe(0);
       expect(stdoutJson(dryRunModified)).toMatchObject({
         ok: true,
-        result: "planned",
+        result: "blocked",
+        requiresOverwrite: true,
+        remediation: "workbench install alice/private-skill --target codex --scope global --yes",
+        next: "workbench install alice/private-skill --target codex --scope global --yes",
         filesCopied: 1,
-        targets: [expect.objectContaining({ previous: "overwritten", filesCopied: 1 })],
+        targets: [expect.objectContaining({
+          previous: "overwritten",
+          result: "blocked",
+          requiresOverwrite: true,
+          remediation: "workbench install alice/private-skill --target codex --scope global --yes",
+          filesCopied: 1,
+        })],
       });
       await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8"))
         .resolves.toContain("Local edit.");
+      const dryRunModifiedHuman = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run"]);
+      expect(dryRunModifiedHuman.code, dryRunModifiedHuman.stdout || dryRunModifiedHuman.stderr).toBe(0);
+      expect(dryRunModifiedHuman.stdout).toContain("Would require --yes to overwrite private-skill for codex global (1 file).");
+      expect(dryRunModifiedHuman.stdout).toContain("next: workbench install alice/private-skill --target codex --scope global --yes");
       const realOverwrite = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
       expect(realOverwrite.code).toBe(1);
       expect(stdoutJson(realOverwrite)).toMatchObject({

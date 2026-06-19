@@ -1207,14 +1207,24 @@ function workbenchAdapterAuthTargetLabel(target: WorkbenchAdapterAuthTarget): st
 }
 
 export function workbenchProviderAuthSetupCommand(adapterId: string): string {
+  return workbenchProviderAuthSetupCommands(adapterId)[0] ?? `workbench login ${adapterId.trim().toLowerCase()}`;
+}
+
+export function workbenchProviderAuthSetupCommands(adapterId: string): string[] {
   const normalized = adapterId.trim().toLowerCase();
   if (normalized === "claude") {
-    return "claude setup-token";
+    return [
+      "claude setup-token",
+      "CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth",
+    ];
   }
   if (normalized === "codex") {
-    return "codex login --device-auth && workbench login codex --method oauth";
+    return [
+      "codex login --device-auth",
+      "workbench login codex --method oauth",
+    ];
   }
-  return `workbench login ${normalized}`;
+  return [`workbench login ${normalized}`];
 }
 
 function requiredAdapterAuthTargetsForExecution(
@@ -3623,6 +3633,7 @@ async function localWorkbenchAdapterAuthReadiness(
           adapterId: target.adapterId,
           profile: target.profile,
           ...(target.slot ? { slot: target.slot } : {}),
+          setupCommands: workbenchProviderAuthSetupCommands(target.adapterId),
         },
       });
     }
@@ -4041,15 +4052,15 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
     authToken: options.authToken,
     selectionRemediationCommand: "eval",
   });
-  if (runtime.cases.length === 0) {
-    throw noEvalCasesError();
-  }
   for (const agent of runtime.selectedAgents) {
     assertSkillEvalAgentSupported(agent);
   }
-  const readiness = options.cloud === true
+  const authReadiness = options.cloud === true
     ? readyWorkbenchLaunchReadiness()
     : await localWorkbenchAdapterAuthReadiness(runtime.selectedAgents, options.adapterAuthStoreRoot);
+  const readiness = runtime.cases.length === 0
+    ? readinessFromIssues([noEvalCasesReadinessIssue(), ...authReadiness.issues])
+    : authReadiness;
   const adapterAuthTargets = uniqueLocalAdapterAuthTargets(runtime.selectedAgents.flatMap(localAdapterAuthTargetsForAgent));
   const samples = options.samples ?? 1;
   const cachedRunIds = options.cloud === true || options.rerun === true
@@ -9192,11 +9203,21 @@ function summarizeJobErrors(errors: readonly string[]): string {
 }
 
 function noEvalCasesError(): WorkbenchCodedError {
-  return new WorkbenchCodedError("no_eval_cases", "No eval cases found under .workbench/cases. Add at least one case.yaml before running eval.", {
-    remediation: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
-    subject: { directory: ".workbench/cases" },
+  const issue = noEvalCasesReadinessIssue();
+  return new WorkbenchCodedError(issue.code, issue.message, {
+    remediation: issue.remediation,
+    subject: issue.subject as Record<string, Json>,
     exitCode: 2,
   });
+}
+
+function noEvalCasesReadinessIssue(): WorkbenchLaunchReadinessIssue {
+  return {
+    code: "no_eval_cases",
+    message: "No eval cases found under .workbench/cases. Add at least one case.yaml before running eval.",
+    remediation: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
+    subject: { directory: ".workbench/cases" },
+  };
 }
 
 function selectEvalCasesForRun(
@@ -12312,11 +12333,12 @@ function normalizeWorkbenchCloudError(error: {
   if (
     error.code === "validation_failed" &&
     error.subject?.visibility === "internal" &&
-    /\binternal source visibility requires an organization-owned skill\b/iu.test(error.message)
+    /\b(?:internal|team) source visibility requires an organization-owned skill\b/iu.test(error.message)
   ) {
     return {
       ...error,
       message: "Team source visibility requires an organization-owned skill.",
+      subject: { ...error.subject, visibility: "team" },
     };
   }
   return error;
