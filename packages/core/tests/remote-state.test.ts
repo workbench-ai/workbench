@@ -15,6 +15,7 @@ import {
   clearWorkbenchLocalHostedRunHandle,
   recordWorkbenchLocalHostedRunHandle,
   removeWorkbenchRemote,
+  resolveWorkbenchRunRetryPlan,
   syncWorkbenchRemote,
   switchWorkbenchVersion,
   WorkbenchCodedError,
@@ -552,6 +553,92 @@ describe("remote state lifecycle", () => {
     await writeWorkbenchObject(root, "run", localRun.id, localRun);
     const afterLocalLifecycle = await workbenchStatusSnapshot({ dir: root });
     expect(afterLocalLifecycle.remotes.find((entry) => entry.name === "cloud")?.sync.status).toBe("local_changes");
+  });
+
+  test("cloud sync preserves local run location when portable evidence round-trips through Cloud", async () => {
+    const root = await makeTempRoot("workbench-cloud-preserve-local-run-");
+    await createNewWorkbenchSkillProject({ dir: root });
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+    expect(versionId).toBeTruthy();
+
+    const createdAt = "2026-06-19T00:00:00.000Z";
+    let remotePack = emptyPack(createdAt);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname === "/api/workbench/skills") {
+        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "roundtrip" }] });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && (init?.method ?? "GET") === "GET") {
+        return jsonResponse({ objectPack: remotePack });
+      }
+      if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { objectPack?: WorkbenchObjectPack };
+        remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyPack(createdAt));
+        return jsonResponse({ skill: { id: "skill_cloud" }, objectPack: remotePack });
+      }
+      return jsonResponse({ message: `Unexpected ${init?.method ?? "GET"} ${url.pathname}` }, 404);
+    }));
+
+    const localRun: WorkbenchRun = {
+      ...fakeRun("run_local_roundtrip", versionId!, "succeeded", createdAt),
+      requestedSamples: 1,
+      operationPlan: {
+        kind: "eval",
+        variant: "local",
+        versionId: versionId!,
+        evalHash: "eval_hash",
+        skills: ["primary"],
+        agents: ["default"],
+        samples: 1,
+      },
+    };
+    await writeWorkbenchObject(root, "run", localRun.id, localRun);
+    await addWorkbenchRemote("cloud", "https://cloud.test/skills/alice/roundtrip", {
+      dir: root,
+      authToken: "token",
+    });
+
+    await syncWorkbenchRemote({ dir: root, authToken: "token" });
+    await syncWorkbenchRemote({ dir: root, authToken: "token" });
+
+    const after = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(after.runs.find((run) => run.id === localRun.id)).toMatchObject({
+      location: "local",
+      operationPlan: expect.objectContaining({ variant: "local" }),
+    });
+    expect(after.runs.find((run) => run.id === localRun.id)).not.toHaveProperty("remoteName");
+  });
+
+  test("run retry trusts the stored operation plan when stale location metadata disagrees", async () => {
+    const root = await makeTempRoot("workbench-cloud-retry-plan-location-");
+    await createNewWorkbenchSkillProject({ dir: root });
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+    expect(versionId).toBeTruthy();
+
+    const run: WorkbenchRun = {
+      ...fakeRun("run_retry_mismatched_location", versionId!, "succeeded", "2026-06-19T00:00:00.000Z"),
+      location: "cloud",
+      remoteName: "cloud",
+      requestedSamples: 1,
+      operationPlan: {
+        kind: "eval",
+        variant: "local",
+        versionId: versionId!,
+        evalHash: "eval_hash",
+        skills: ["primary"],
+        agents: ["default"],
+        samples: 1,
+      },
+    };
+
+    expect(resolveWorkbenchRunRetryPlan(snapshot, run)).toMatchObject({
+      kind: "eval",
+      location: "local",
+      versionId,
+      retryOfRunId: run.id,
+    });
   });
 });
 

@@ -16,6 +16,7 @@ import {
   diffWorkbenchVersions,
   createNewWorkbenchSkillProject,
   initExistingWorkbenchSkillProject,
+  initializeHydratedWorkbenchSkillProject,
   listWorkbenchAgents,
   listWorkbenchVersions,
   localWorkbenchAdapterAuthStore,
@@ -48,6 +49,8 @@ import {
   workbenchSkillImproveCanUseQueuedAdapter,
   workbenchStatusSnapshot,
   workbenchAuthorEvalCaseCommand,
+  workbenchDraftEvalCaseFiles,
+  codedErrorFromUnknown,
   WorkbenchCodedError,
   WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
   WorkbenchUserError,
@@ -126,6 +129,7 @@ interface WorkbenchSkillHandle {
 }
 
 const require = createRequire(import.meta.url);
+const EDITOR_COMMAND = "${EDITOR:-vi}";
 
 const HELP = [
   "Usage:",
@@ -143,6 +147,7 @@ const HELP = [
   "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
   "  workbench versions [--dir DIR] [--json]",
+  "  workbench case draft [ID] [--dir DIR] [--json]",
   "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
   "  workbench install OWNER/SKILL[@VERSION] [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
   "",
@@ -174,6 +179,7 @@ const HELP_ALL = [
   "  workbench show REF[:PATH] [--json]",
   "  workbench diff [A..B] [--json]",
   "  workbench switch VERSION [--json]",
+  "  workbench case draft [ID] [--dir DIR] [--json]",
   "  workbench open [--host HOST] [--port PORT] [--no-open]",
   "",
   "Configure:",
@@ -328,6 +334,15 @@ const COMMAND_HELP: Record<string, string> = {
     "Example:",
     "  workbench switch 26059f9a",
   ].join("\n"),
+  case: [
+    "Usage:",
+    "  workbench case draft [ID] [--dir DIR] [--json]",
+    "",
+    "Creates a draft eval case with case.yaml and tests/test.sh. Omit ID to use the next available case id.",
+    "",
+    "Example:",
+    "  workbench case draft case-001",
+  ].join("\n"),
   versions: [
     "Usage:",
     "  workbench versions [--dir DIR] [--json]",
@@ -447,6 +462,7 @@ const COMMAND_FLAGS: Record<string, FlagSpec> = {
     samples: "positive-integer",
     skills: "string",
   },
+  case: { ...PROJECT_FLAGS, ...HELP_FLAG },
   clone: { ...COMMON_FLAGS, ...HELP_FLAG },
   install: { ...PROJECT_FLAGS, ...HELP_FLAG, "dry-run": "boolean", scope: "string", target: "string", yes: "boolean" },
   log: { ...PROJECT_FLAGS, ...HELP_FLAG, runs: "boolean", versions: "boolean" },
@@ -604,6 +620,9 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       return await handleStatus(parsed, io);
     }
     const core = await coreOptions(parsed);
+    if (command === "case") {
+      return await handleCase(parsed, io);
+    }
     if (command === "eval") {
       rejectExtraInput(parsed, {
         maxPositionals: 1,
@@ -693,7 +712,8 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         skills: stringFlag(parsed, "skills"),
         agents: stringFlag(parsed, "agents"),
       });
-      return output(manifestOnly(comparison), parsed, io, () => formatComparison(comparison));
+      const fallbackNext = stringFlag(parsed, "versions") ? undefined : compareAllVersionsCommand(parsed);
+      return output(manifestOnly(comparison), parsed, io, () => formatComparison(comparison, fallbackNext));
     }
     if (command === "switch") {
       const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.");
@@ -861,7 +881,10 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       const stopped = waitForOpenServerStop(server);
       io.stdout.write(`Workbench: ${server.url}\nServing Workbench UI. Press Ctrl-C to stop.\n`);
       if (parsed.flags["no-open"] !== true) {
-        await openBrowser(server.url).catch(() => undefined);
+        await Promise.race([
+          openBrowser(server.url).catch(() => undefined),
+          stopped,
+        ]);
       }
       return await stopped;
     }
@@ -988,8 +1011,8 @@ async function handleEvalDryRun(parsed: ParsedArgs, io: CliIo): Promise<number> 
     : preview.readiness;
   const plan = withPreviewReadiness(preview, readiness);
   const next = readiness.ready
-    ? parsed.flags.cloud === true ? "workbench eval --cloud" : "workbench eval"
-    : firstReadinessRemediation(readiness);
+    ? operationNextCommand("eval", parsed, parsed.flags.cloud === true)
+    : readinessNextCommand("eval", parsed, readiness, parsed.flags.cloud === true);
   return emitResult("workbench.cli.eval-plan.v1", {
     dryRun: true,
     plan: plan as unknown as Json,
@@ -1100,6 +1123,9 @@ async function waitForLocalRunTerminal(input: {
       const jobs = jobsForRuns(inspection, [run.id]);
       const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
       const terminal = isTerminalRun(run);
+      const progressNext = terminal && input.command === "eval" && run.status === "succeeded"
+        ? await evalSuccessNextCommand(input.core, [run])
+        : runWatchNextCommand(run);
       renderer.render(runProgressSnapshotForInspection({
         command: input.command,
         location: "local",
@@ -1107,7 +1133,7 @@ async function waitForLocalRunTerminal(input: {
         runs: [run],
         snapshot: inspection,
         startedAtMs,
-        next: runWatchNextCommand(run),
+        next: progressNext ?? undefined,
       }), { force: terminal || detached, command: input.command });
       if (detached) {
         return { snapshot: runSnapshot, run, jobs, detached: true };
@@ -1297,8 +1323,8 @@ async function handleImproveDryRun(parsed: ParsedArgs, io: CliIo): Promise<numbe
     : preview.readiness;
   const plan = withPreviewReadiness(preview, readiness);
   const next = readiness.ready
-    ? parsed.flags.cloud === true ? "workbench improve --cloud" : "workbench improve"
-    : firstReadinessRemediation(readiness);
+    ? operationNextCommand("improve", parsed, parsed.flags.cloud === true)
+    : readinessNextCommand("improve", parsed, readiness, parsed.flags.cloud === true);
   return emitResult("workbench.cli.improve-plan.v1", {
     dryRun: true,
     plan: plan as unknown as Json,
@@ -1326,8 +1352,78 @@ function withPreviewReadiness<T extends WorkbenchEvalPreview | WorkbenchImproveP
   } as T;
 }
 
-function firstReadinessRemediation(readiness: WorkbenchLaunchReadiness): string | null {
-  return readiness.issues.find((issue) => issue.remediation)?.remediation ?? null;
+function readinessNextCommand(
+  command: "eval" | "improve",
+  parsed: ParsedArgs,
+  readiness: WorkbenchLaunchReadiness,
+  cloud: boolean,
+): string | null {
+  const setup: string[] = [];
+  for (const issue of readiness.issues) {
+    for (const chunk of commandChainParts(issue.remediation)) {
+      if (isWorkbenchOperationCommand(chunk, command)) {
+        continue;
+      }
+      if (!setup.includes(chunk)) {
+        setup.push(chunk);
+      }
+    }
+  }
+  const next = operationNextCommand(command, parsed, cloud);
+  return setup.length > 0 ? [...setup, next].join(" && ") : readiness.issues.find((issue) => issue.remediation)?.remediation ?? null;
+}
+
+function commandChainParts(command: string | undefined): string[] {
+  return command?.split(/\s+&&\s+/u).map((part) => part.trim()).filter(Boolean) ?? [];
+}
+
+function isWorkbenchOperationCommand(value: string, command: "eval" | "improve"): boolean {
+  return new RegExp(`^workbench\\s+${command}(?:\\s|$)`, "u").test(value);
+}
+
+function operationNextCommand(command: "eval" | "improve", parsed: ParsedArgs, cloud: boolean): string {
+  const parts = ["workbench", command];
+  if (cloud) {
+    parts.push("--cloud");
+  }
+  appendOperationSelectorFlags(parts, parsed, command);
+  return parts.join(" ");
+}
+
+function compareAllVersionsCommand(parsed: ParsedArgs): string {
+  const parts = ["workbench", "compare"];
+  const skills = stringFlag(parsed, "skills");
+  if (skills) {
+    parts.push("--skills", shellQuoteIfNeeded(skills));
+  }
+  const agents = stringFlag(parsed, "agents");
+  if (agents) {
+    parts.push("--agents", shellQuoteIfNeeded(agents));
+  }
+  parts.push("--versions", "all");
+  return parts.join(" ");
+}
+
+function appendOperationSelectorFlags(parts: string[], parsed: ParsedArgs, command: "eval" | "improve"): void {
+  const skills = stringFlag(parsed, "skills");
+  if (skills) {
+    parts.push("--skills", shellQuote(skills));
+  }
+  const agents = stringFlag(parsed, "agents");
+  if (agents) {
+    parts.push("--agents", shellQuote(agents));
+  }
+  const samples = intFlag(parsed, "samples");
+  if (samples !== undefined) {
+    parts.push("--samples", String(samples));
+  }
+  if (command === "eval" && parsed.flags.rerun === true) {
+    parts.push("--rerun");
+  }
+  const budget = command === "improve" ? intFlag(parsed, "budget") : undefined;
+  if (budget !== undefined) {
+    parts.push("--budget", String(budget));
+  }
 }
 
 function formatLaunchReadinessLines(readiness: WorkbenchLaunchReadiness): string[] {
@@ -1766,7 +1862,7 @@ async function retryCloudRun(
   try {
     interrupt.setRunId(runId);
     await recordWorkbenchLocalHostedRunHandle({ ...remoteContext.core, run: prescheduledRun });
-    renderCloudProgress("queued", [prescheduledRun]);
+    renderCloudProgress("preflight", [prescheduledRun]);
     await abortIfLocalHostedRunCanceled("run retry", remoteContext.core, prescheduledRun);
     const syncBefore = await cloudPreScheduleStepWithLocalCancel(
       "run retry",
@@ -1882,11 +1978,13 @@ async function retryCloudRun(
       prescheduledRunForCleanup &&
       !(error instanceof WorkbenchCodedError && (error.code === "cloud_canceled" || error.code === "cloud_detached"))
     ) {
+      const contextualError = hostedRunErrorWithContext(error, prescheduledRunForCleanup.id);
       await recordWorkbenchLocalHostedRunFailure({
         ...remoteContext.core,
         run: prescheduledRunForCleanup,
-        error: singleLine(errorMessage(error)),
+        error: singleLine(errorMessage(contextualError)),
       }).catch(() => undefined);
+      throw contextualError;
     }
     throw error;
   } finally {
@@ -2525,6 +2623,64 @@ async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
   return emitResult("workbench.cli.skills.v2", installedInventoryToJson(inventory), parsed, io, () => formatInstalledInventory(inventory));
 }
 
+async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const subcommand = requiredPositional(parsed, 1, "workbench case requires draft.");
+  if (subcommand !== "draft") {
+    throw new WorkbenchCodedError("usage", `Unsupported case command: ${subcommand}`, {
+      remediation: "workbench case draft",
+      exitCode: 2,
+    });
+  }
+  rejectExtraInput(parsed, {
+    maxPositionals: 3,
+    message: "workbench case draft accepts at most one case id.",
+    remediation: "workbench case draft case-001",
+  });
+  const core = await coreOptions(parsed);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const caseId = optionalPositional(parsed, 2) ?? nextEvalCaseId(snapshot);
+  assertDraftCaseId(caseId);
+  const files = workbenchDraftEvalCaseFiles(caseId);
+  for (const file of files) {
+    const target = path.join(snapshot.root, file.path);
+    if (await pathExists(target)) {
+      throw new WorkbenchCodedError("case_exists", `Eval case file already exists: ${file.path}`, {
+        remediation: `workbench case draft ${nextEvalCaseId(snapshot, new Set([caseId]))}`,
+        subject: { caseId, path: file.path },
+        exitCode: 2,
+      });
+    }
+  }
+  for (const file of files) {
+    const target = path.join(snapshot.root, file.path);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, file.content, "utf8");
+    if (file.executable) {
+      await fs.chmod(target, 0o755);
+    }
+  }
+  const next = `${EDITOR_COMMAND} .workbench/cases/${caseId}/case.yaml`;
+  return emitResult("workbench.cli.case-draft.v1", {
+    caseId,
+    files: files.map((file) => file.path) as unknown as Json,
+    next,
+  }, parsed, io, () => [
+    `Drafted eval case ${caseId}.`,
+    ...files.map((file) => `  ${file.path}`),
+    `next: ${next}`,
+  ].join("\n"));
+}
+
+function assertDraftCaseId(caseId: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(caseId)) {
+    throw new WorkbenchCodedError("usage", "workbench case draft expects a path-safe case id.", {
+      remediation: "workbench case draft case-001",
+      subject: { caseId },
+      exitCode: 2,
+    });
+  }
+}
+
 async function handleClone(parsed: ParsedArgs, io: CliIo): Promise<number> {
   rejectExtraInput(parsed, {
     maxPositionals: 3,
@@ -2556,19 +2712,19 @@ async function handleClone(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const snapshot = await fetchWorkbenchInstallSourceSnapshot(workbenchSource, source);
   const sourceFiles = editableWorkbenchSourceFiles(snapshot);
   const authStoreRoot = adapterAuthStoreRoot();
-  const status = await createNewWorkbenchSkillProject({ dir: destination, adapterAuthStoreRoot: authStoreRoot });
-  const hydratedPaths = await hydrateWorkbenchProjectFromSource(status.root, sourceFiles);
-  const hydratedStatus = await workbenchStatus({ dir: status.root, adapterAuthStoreRoot: authStoreRoot });
+  const root = await prepareCloneDestination(destination);
+  const hydratedPaths = await hydrateWorkbenchProjectFromSource(root, sourceFiles);
+  const hydratedStatus = await initializeHydratedWorkbenchSkillProject({ dir: root, adapterAuthStoreRoot: authStoreRoot });
   const project: CloneProjectResult = {
     root: hydratedStatus.root,
     initialized: true,
     ...(hydratedStatus.currentVersionId ? { currentVersionId: hydratedStatus.currentVersionId } : {}),
     ...(hydratedStatus.defaultAgent ? { defaultAgent: hydratedStatus.defaultAgent } : {}),
   };
-  const hydratedSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: status.root });
+  const hydratedSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
   const next = snapshotHasAnyEvalCase(hydratedSnapshot)
     ? "workbench eval"
-    : projectScopedNextCommand(status.root, authorEvalCaseCommand(hydratedSnapshot));
+    : projectScopedNextCommand(root, authorEvalCaseCommand(hydratedSnapshot));
   return emitResult("workbench.cli.clone.v1", {
     result: project as unknown as Json,
     source: workbenchInstallSourceSummary(workbenchSource, snapshot),
@@ -2576,6 +2732,26 @@ async function handleClone(parsed: ParsedArgs, io: CliIo): Promise<number> {
     defaultAgent: project.defaultAgent as Json,
     next: next as Json,
   }, parsed, io, () => formatCloneResult(project, snapshot, hydratedPaths, next));
+}
+
+async function prepareCloneDestination(destination: string): Promise<string> {
+  const root = path.resolve(destination);
+  try {
+    const entries = await fs.readdir(root);
+    if (entries.length > 0) {
+      throw new WorkbenchCodedError("usage", `Directory is not empty: ${root}`, {
+        remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+        subject: { root },
+        exitCode: 2,
+      });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+  await fs.mkdir(root, { recursive: true });
+  return root;
 }
 
 function editableWorkbenchSourceFiles(snapshot: WorkbenchInstallSourceSnapshot): SurfaceSnapshotFile[] {
@@ -2871,14 +3047,14 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     prescheduledRunForCleanup = prescheduledRun;
     interrupt.setRunId(runId);
     await recordWorkbenchLocalHostedRunHandle({ dir: root, run: prescheduledRun });
-    renderCloudProgress("queued", [prescheduledRun]);
+    renderCloudProgress("preflight", [prescheduledRun]);
     await abortIfLocalHostedRunCanceled(command, core, prescheduledRun);
     const remote = await cloudPreScheduleStepWithLocalCancel(
       command,
       interrupt,
       core,
       prescheduledRun,
-      async (signal) => await ensureCloudRemoteForExecution(root, parsed, () => renderCloudProgress("queued", [prescheduledRun]), signal),
+      async (signal) => await ensureCloudRemoteForExecution(root, parsed, () => renderCloudProgress("preflight", [prescheduledRun]), signal),
     );
     const source = parseWorkbenchInstallSource(remote.url);
     if (!source) {
@@ -2895,7 +3071,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           rerun: parsed.flags.rerun === true,
-        }), () => renderCloudProgress("queued", [prescheduledRun]))
+        }), () => renderCloudProgress("preflight", [prescheduledRun]))
       : preparedImproveRequest!;
     if (requestWithoutRunId.versionId !== preview.versionId) {
       throw new WorkbenchCodedError("source_changed", `Source changed while preparing hosted ${command}.`, {
@@ -3011,16 +3187,31 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       prescheduledRunForCleanup &&
       !(error instanceof WorkbenchCodedError && (error.code === "cloud_canceled" || error.code === "cloud_detached"))
     ) {
+      const contextualError = hostedRunErrorWithContext(error, prescheduledRunForCleanup.id);
       await recordWorkbenchLocalHostedRunFailure({
         dir: root,
         run: prescheduledRunForCleanup,
-        error: singleLine(errorMessage(error)),
+        error: singleLine(errorMessage(contextualError)),
       }).catch(() => undefined);
+      throw command === "improve" ? await cloudImproveErrorWithHostedRemediation(contextualError, parsed) : contextualError;
     }
     throw command === "improve" ? await cloudImproveErrorWithHostedRemediation(error, parsed) : error;
   } finally {
     interrupt.dispose();
   }
+}
+
+function hostedRunErrorWithContext(error: unknown, runId: string): WorkbenchCodedError {
+  const coded = codedErrorFromUnknown(error);
+  return new WorkbenchCodedError(coded.code, coded.message, {
+    retryable: coded.retryable,
+    ...(coded.remediation ? { remediation: coded.remediation } : {}),
+    subject: {
+      ...(coded.subject ?? {}),
+      runId,
+    },
+    exitCode: coded.exitCode,
+  });
 }
 
 async function cloudImproveErrorWithHostedRemediation(error: unknown, parsed: ParsedArgs): Promise<unknown> {
@@ -3305,7 +3496,7 @@ async function cloudDryRunReadiness(
     };
   }
   const targets = cloudAdapterAuthTargetsFromPreview(preview);
-  const targetReadiness = await cloudHostedOperationTargetReadiness({ command, parsed, config, baseUrl });
+  const targetReadiness = await cloudHostedOperationTargetReadiness({ command, parsed, config });
   const adapterReadiness = await cloudAdapterAuthReadiness({ baseUrl, targets });
   return mergeLaunchReadiness(targetReadiness, adapterReadiness);
 }
@@ -3314,7 +3505,6 @@ async function cloudHostedOperationTargetReadiness(input: {
   command: "eval" | "improve";
   parsed: ParsedArgs;
   config: WorkbenchConfig;
-  baseUrl: string;
 }): Promise<WorkbenchLaunchReadiness> {
   const root = path.resolve(dirFlag(input.parsed) ?? process.cwd());
   let remote: WorkbenchRemote;
@@ -3325,12 +3515,7 @@ async function cloudHostedOperationTargetReadiness(input: {
     remote = link.existing ?? await derivePublishCloudRemote(input.parsed, "workbench --cloud", link.name);
   } catch (error) {
     if (error instanceof WorkbenchCodedError) {
-      return readinessFromLaunchIssues([{
-        code: error.code,
-        message: error.message,
-        ...(error.remediation ? { remediation: error.remediation } : {}),
-        ...(error.subject ? { subject: error.subject } : {}),
-      }]);
+      return readinessFromLaunchIssues([readinessIssueFromCodedError(error)]);
     }
     throw error;
   }
@@ -3345,7 +3530,8 @@ async function cloudHostedOperationTargetReadiness(input: {
     }]);
   }
 
-  if (!linked && source.owner === input.config.username?.trim()) {
+  const isPersonalOwner = source.owner === input.config.username?.trim();
+  if (!linked && isPersonalOwner) {
     return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
   }
 
@@ -3357,7 +3543,7 @@ async function cloudHostedOperationTargetReadiness(input: {
     return await cloudOrganizationHostedOperationReadiness(source.baseUrl, existing.ownerSlug ?? source.owner);
   }
 
-  if (source.owner === input.config.username?.trim()) {
+  if (isPersonalOwner) {
     return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
   }
   return await cloudOrganizationHostedOperationReadiness(source.baseUrl, source.owner);
@@ -3376,15 +3562,19 @@ async function cloudOrganizationHostedOperationReadiness(
     return readinessFromLaunchIssues([]);
   } catch (error) {
     if (error instanceof WorkbenchCodedError) {
-      return readinessFromLaunchIssues([{
-        code: error.code,
-        message: error.message,
-        ...(error.remediation ? { remediation: error.remediation } : {}),
-        ...(error.subject ? { subject: error.subject } : {}),
-      }]);
+      return readinessFromLaunchIssues([readinessIssueFromCodedError(error)]);
     }
     throw error;
   }
+}
+
+function readinessIssueFromCodedError(error: WorkbenchCodedError): WorkbenchLaunchReadinessIssue {
+  return {
+    code: error.code,
+    message: error.message,
+    ...(error.remediation ? { remediation: error.remediation } : {}),
+    ...(error.subject ? { subject: error.subject } : {}),
+  };
 }
 
 function personalHostedOperationPlanIssue(
@@ -3395,7 +3585,7 @@ function personalHostedOperationPlanIssue(
   return {
     code: "plan_required",
     message: `A Team or Enterprise organization plan is required to run hosted ${command} operations for ${owner}.`,
-    remediation: "workbench publish --as ORG/SKILL && workbench " + command + " --cloud",
+    remediation: `workbench publish --as ORG/SKILL && workbench ${command} --cloud`,
     subject: {
       owner,
       remote: remoteName,
@@ -4317,13 +4507,21 @@ async function fetchWorkbenchInstallSourceSnapshot(
     });
   }
   const snapshot = parseWorkbenchInstallSourceSnapshot(parsed, displaySource);
-  if (source.version && snapshot.versionId !== source.version) {
+  if (source.version && !workbenchSourceVersionRefMatches(snapshot.versionId, source.version)) {
     throw new WorkbenchCodedError("install_failed", `Workbench source ${displaySource} resolved ${snapshot.versionId} instead of requested version ${source.version}.`, {
       subject: { source: displaySource, resolvedVersionId: snapshot.versionId, requestedVersionId: source.version },
       exitCode: 1,
     });
   }
   return snapshot;
+}
+
+function workbenchSourceVersionRefMatches(versionId: string, ref: string): boolean {
+  const normalized = ref.trim();
+  const withoutVersionPrefix = normalized.startsWith("v_") ? normalized.slice(2) : normalized;
+  return versionId === normalized ||
+    versionId.startsWith(normalized) ||
+    versionId.startsWith(`v_${withoutVersionPrefix}`);
 }
 
 function parseWorkbenchInstallSourceSnapshot(value: unknown, displaySource: string): WorkbenchInstallSourceSnapshot {
@@ -5208,6 +5406,10 @@ function profileRootFlag(profileRoot: string): string {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/gu, "'\\''")}'`;
+}
+
+function shellQuoteIfNeeded(value: string): string {
+  return /^[A-Za-z0-9._:@/+,-]+$/u.test(value) ? value : shellQuote(value);
 }
 
 function parseClaudeOauthTokenEnv(value: string): string | null {
@@ -6379,6 +6581,10 @@ function snapshotHasAnyEvalCase(snapshot: InspectionSnapshot): boolean {
 }
 
 function authorEvalCaseCommand(snapshot: InspectionSnapshot | null, caseIds: ReadonlySet<string> = new Set()): string {
+  return workbenchAuthorEvalCaseCommand(nextEvalCaseId(snapshot, caseIds));
+}
+
+function nextEvalCaseId(snapshot: InspectionSnapshot | null, caseIds: ReadonlySet<string> = new Set()): string {
   const currentVersion = snapshot ? snapshotVersionByRef(snapshot, snapshot.status.currentVersionId ?? snapshot.refs.current ?? "") : undefined;
   const existingCaseIds = new Set([...caseIds, ...(currentVersion?.files ?? []).flatMap((file) => {
     const match = isEvalCaseFile(file) ? file.path.match(/^\.workbench\/cases\/([^/]+)\/case\.ya?ml$/u) : null;
@@ -6387,7 +6593,7 @@ function authorEvalCaseCommand(snapshot: InspectionSnapshot | null, caseIds: Rea
   for (let index = 1; ; index += 1) {
     const id = `case-${String(index).padStart(3, "0")}`;
     if (!existingCaseIds.has(id)) {
-      return workbenchAuthorEvalCaseCommand(id);
+      return id;
     }
   }
 }
@@ -7758,8 +7964,16 @@ function formatAgent(agent: WorkbenchAgent): string {
 function formatRun(run: WorkbenchRun): string {
   const scoreValue = scoredRunValue(run);
   const score = scoreValue === undefined ? "n/a" : scoreValue.toFixed(3);
-  const latency = run.latencyMs === undefined ? "n/a" : `${run.latencyMs}ms`;
-  return `${displayRef(run.id)}\t${run.kind}\t${run.status}\tversion=${displayRef(run.versionId)}\tskill=${run.skillName}\tagent=${run.agentName}\tscore=${score}\tlatency=${latency}`;
+  return [
+    displayRef(run.id),
+    run.kind,
+    run.status,
+    `version=${displayRef(run.versionId)}`,
+    `skill=${run.skillName}`,
+    `agent=${run.agentName}`,
+    `score=${score}`,
+    ...latencySummaryParts(run.latencyMs, run.requestedSamples),
+  ].join("\t");
 }
 
 function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
@@ -7784,7 +7998,6 @@ function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
   const measurements = snapshot.measurements.length > 1
     ? snapshot.measurements.map((measurement) => {
         const measurementScore = measurement.score === undefined ? "n/a" : measurement.score.toFixed(3);
-        const latency = measurement.latencyMs === undefined ? "n/a" : `${measurement.latencyMs}ms`;
         return [
           "  measurement",
           `run=${displayRef(measurement.runId)}`,
@@ -7794,11 +8007,24 @@ function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
           measurement.status,
           `score=${measurementScore}`,
           `samples=${measurement.samples ?? "n/a"}`,
-          `latency=${latency}`,
+          ...latencySummaryParts(measurement.latencyMs, measurement.samples),
         ].join("\t");
       })
     : [];
   return [header, ...measurements].join("\n");
+}
+
+function latencySummaryParts(latencyMs: number | undefined, samples: number | undefined): string[] {
+  if (latencyMs === undefined) {
+    return ["latency=n/a"];
+  }
+  if (samples !== undefined && samples > 1) {
+    return [
+      `total_latency=${latencyMs}ms`,
+      `avg_latency=${Math.round(latencyMs / samples)}ms`,
+    ];
+  }
+  return [`latency=${latencyMs}ms`];
 }
 
 function formatJob(job: WorkbenchJob): string {
@@ -7808,7 +8034,7 @@ function formatJob(job: WorkbenchJob): string {
   return `${displayRef(job.id)}\trun=${displayRef(job.runId)}\tcase=${job.caseId}\tsample=${job.sample}\t${job.status}\tscore=${score}\tduration=${duration}`;
 }
 
-function formatComparison(comparison: WorkbenchComparison): string {
+function formatComparison(comparison: WorkbenchComparison, fallbackNext?: string): string {
   const lines = ["version\tskill\tagent\tstatus\tscore\tsamples\tcost\tavg latency\trun"];
   const evidenceCells = comparison.cells.filter((cell) => cell.runId || cell.status);
   for (const cell of evidenceCells) {
@@ -7824,7 +8050,12 @@ function formatComparison(comparison: WorkbenchComparison): string {
       cell.runId ? displayRef(cell.runId) : "n/a",
     ].join("\t"));
   }
-  return lines.length === 1 ? "No comparable runs." : lines.join("\n");
+  if (lines.length === 1) {
+    return fallbackNext && comparison.cells.length > 0
+      ? `No comparable runs for the selected version.\nnext: ${fallbackNext}`
+      : "No comparable runs.";
+  }
+  return lines.join("\n");
 }
 
 function formatDiff(entries: readonly { path: string; status: string; before?: string; after?: string }[]): string {
@@ -8022,6 +8253,10 @@ function isSurfaceFile(value: unknown): value is SurfaceSnapshotFile {
 
 function singleLine(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  return fs.stat(filePath).then(() => true, () => false);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

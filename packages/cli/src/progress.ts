@@ -189,14 +189,14 @@ function runSnapshotPhase(
   phase: WorkbenchProgressPhase,
   fallback: WorkbenchRunPhase,
 ): WorkbenchRunPhase {
+  if (phase === "preflight" || phase === "provider_auth") {
+    return "planning";
+  }
   if (fallback === "complete" && phase !== "sync") {
     return "complete";
   }
   if (fallback === "queued" && phase !== "sync") {
     return "queued";
-  }
-  if (phase === "preflight" || phase === "provider_auth") {
-    return "planning";
   }
   if (phase === "sync") {
     return "syncing";
@@ -320,7 +320,7 @@ function formatProgressSummaryParts(snapshot: WorkbenchRunSnapshot): string[] {
 function progressPhaseText(snapshot: WorkbenchRunSnapshot): string {
   switch (snapshot.phase) {
     case "planning":
-      return "preflight";
+      return snapshot.variant === "cloud" ? "preparing Workbench Cloud run" : "preflight";
     case "queued":
       return snapshot.variant === "cloud" ? "queued on Workbench Cloud" : "queued";
     case "syncing":
@@ -353,7 +353,9 @@ function progressCounterParts(snapshot: WorkbenchRunSnapshot): string[] {
     const label = snapshot.kind === "improve" || snapshot.phase === "proof" ? "partial proof score" : "partial score";
     parts.push(`${label} ${formatScore(progress.partialScore)}`);
   }
-  parts.push(`failed ${progress.failed}`);
+  if (progress.planned > 0 || progress.failed > 0) {
+    parts.push(`failed ${progress.failed}`);
+  }
   if (progress.canceled > 0) {
     parts.push(`canceled ${progress.canceled}`);
   }

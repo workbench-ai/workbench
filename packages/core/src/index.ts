@@ -356,7 +356,13 @@ export {
   mergeWorkbenchExecutionTracesByJob,
 } from "./execution-traces.ts";
 
-export function workbenchAuthorEvalCaseCommand(caseId = "case-001"): string {
+export interface WorkbenchDraftEvalCaseFile {
+  path: string;
+  content: string;
+  executable?: boolean;
+}
+
+export function workbenchDraftEvalCaseFiles(caseId = "case-001"): WorkbenchDraftEvalCaseFile[] {
   const caseDir = `.workbench/cases/${caseId}`;
   const testDir = `${caseDir}/tests`;
   const casePath = `${caseDir}/case.yaml`;
@@ -376,18 +382,13 @@ export function workbenchAuthorEvalCaseCommand(caseId = "case-001"): string {
     "printf '%s\\n' '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}' > \"$OUTPUT_DIR/result.json\"",
   ];
   return [
-    `mkdir -p ${shellQuote(testDir)}`,
-    "&&",
-    "printf '%s\\n'",
-    ...caseLines.map((line) => shellQuote(line)),
-    `> ${shellQuote(casePath)}`,
-    "&&",
-    "printf '%s\\n'",
-    ...testLines.map((line) => shellQuote(line)),
-    `> ${shellQuote(testPath)}`,
-    "&&",
-    `chmod +x ${shellQuote(testPath)}`,
-  ].join(" ");
+    { path: casePath, content: `${caseLines.join("\n")}\n` },
+    { path: testPath, content: `${testLines.join("\n")}\n`, executable: true },
+  ];
+}
+
+export function workbenchAuthorEvalCaseCommand(caseId = "case-001"): string {
+  return `workbench case draft ${shellQuote(caseId)}`;
 }
 
 export const WORKBENCH_AUTHOR_EVAL_CASE_COMMAND = workbenchAuthorEvalCaseCommand();
@@ -3310,11 +3311,48 @@ export async function initExistingWorkbenchSkillProject(options: WorkbenchInitOp
   ]);
 }
 
+export async function initializeHydratedWorkbenchSkillProject(options: WorkbenchInitOptions = {}): Promise<WorkbenchStatus> {
+  const root = resolveRoot(options.dir);
+  if (!await exists(path.join(root, SKILL_FILE))) {
+    throw new WorkbenchCodedError("usage", `Workbench clone requires ${SKILL_FILE} in the hydrated source.`, {
+      remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+      subject: { root, requiredFile: SKILL_FILE },
+      exitCode: 2,
+    });
+  }
+  const defaultAgentSelection = await selectNewDefaultAgent(options);
+  const createdPaths = await ensureWorkbenchProjectScaffold(root, defaultAgentSelection);
+  const state = await loadState(root, { allowMissing: true });
+  await refreshLocalWorkbenchFiles(root, state);
+  await saveState(root, state);
+  return {
+    ...await workbenchStatus({ dir: root, adapterAuthStoreRoot: options.adapterAuthStoreRoot }),
+    ...(createdPaths.length ? { createdPaths } : {}),
+    ...(createdPaths.includes(`.workbench/${AGENTS_FILE}`) ? { defaultAgentSelection } : {}),
+  };
+}
+
 async function initializeWorkbenchProjectControls(
   root: string,
   defaultAgentSelection: WorkbenchDefaultAgentSelection,
   createdPaths: readonly string[],
 ): Promise<WorkbenchStatus> {
+  await ensureWorkbenchProjectScaffold(root, defaultAgentSelection);
+  const state = await loadState(root, { allowMissing: true });
+  await refreshLocalWorkbenchFiles(root, state);
+  await saveState(root, state);
+  return {
+    ...await workbenchStatus({ dir: root }),
+    defaultAgentSelection,
+    createdPaths: [...createdPaths],
+  };
+}
+
+async function ensureWorkbenchProjectScaffold(
+  root: string,
+  defaultAgentSelection: WorkbenchDefaultAgentSelection,
+): Promise<string[]> {
+  const createdPaths: string[] = [];
   const workbenchRoot = workbenchDir(root);
   await fs.mkdir(path.join(workbenchRoot, CASES_DIR), { recursive: true });
   await ensureWorkbenchLocalMetadataIgnore(root);
@@ -3324,29 +3362,30 @@ async function initializeWorkbenchProjectControls(
     fs.mkdir(syncDir(root), { recursive: true }),
     fs.mkdir(path.join(workbenchRoot, TMP_DIR), { recursive: true }),
   ]);
-  await ensureFile(
-    path.join(workbenchRoot, EVAL_FILE),
-    [
-      "version: 1",
-      `name: ${safeName(path.basename(root) || "skill")}`,
-      "description: Workflow eval definition. Add cases under .workbench/cases before running eval.",
-      "score:",
-      `  adapter: ${starterEvalScoreAdapter(defaultAgentSelection)}`,
-      "",
-    ].join("\n"),
-  );
-  await ensureFile(
-    path.join(workbenchRoot, AGENTS_FILE),
-    agentsYamlForNewDefault(defaultAgentSelection),
-  );
-  const state = await loadState(root, { allowMissing: true });
-  await refreshLocalWorkbenchFiles(root, state);
-  await saveState(root, state);
-  return {
-    ...await workbenchStatus({ dir: root }),
-    defaultAgentSelection,
-    createdPaths: [...createdPaths],
-  };
+  const evalPath = path.join(workbenchRoot, EVAL_FILE);
+  if (!await exists(evalPath)) {
+    await ensureFile(
+      evalPath,
+      [
+        "version: 1",
+        `name: ${safeName(path.basename(root) || "skill")}`,
+        "description: Workflow eval definition. Add cases under .workbench/cases before running eval.",
+        "score:",
+        `  adapter: ${starterEvalScoreAdapter(defaultAgentSelection)}`,
+        "",
+      ].join("\n"),
+    );
+    createdPaths.push(`.workbench/${EVAL_FILE}`);
+  }
+  const agentsPath = path.join(workbenchRoot, AGENTS_FILE);
+  if (!await exists(agentsPath)) {
+    await ensureFile(
+      agentsPath,
+      agentsYamlForNewDefault(defaultAgentSelection),
+    );
+    createdPaths.push(`.workbench/${AGENTS_FILE}`);
+  }
+  return createdPaths;
 }
 
 function starterEvalScoreAdapter(selection: WorkbenchDefaultAgentSelection): "rubric" | "tests" {
@@ -3458,30 +3497,30 @@ async function providerReadiness(
     providerNativeAuthState(adapter, homeDir, env),
   ]);
   const executable = executableOnPath(defaults.executable);
-  const workbenchAuth = authStatus.status === "connected" ? "connected" : "missing";
+  const workbenchProviderAuth = authStatus.status === "connected" ? "connected" : "missing";
   const apiKeyPresent = Boolean(env[defaults.apiKeyEnv]?.trim());
-  const state = executable && workbenchAuth === "connected"
+  const state = executable && workbenchProviderAuth === "connected"
     ? "ready"
-    : executable || workbenchAuth === "connected" || nativeAuth !== "missing" || apiKeyPresent
+    : executable || workbenchProviderAuth === "connected" || nativeAuth !== "missing" || apiKeyPresent
       ? "partial"
       : "missing";
   const warnings: string[] = [];
-  if (nativeAuth === "present" && workbenchAuth !== "connected") {
+  if (nativeAuth === "present" && workbenchProviderAuth !== "connected") {
     warnings.push(`${capitalize(adapter)} native auth exists, but Workbench adapter auth is not captured.`);
   }
   if (state !== "ready") {
     warnings.push(`${capitalize(adapter)} is not ready for provider-backed Workbench runs yet.`);
   }
-  const effectiveNativeAuth = workbenchAuth === "connected" ? "not_required" : nativeAuth;
+  const effectiveNativeAuth = workbenchProviderAuth === "connected" ? "not_required" : nativeAuth;
   return {
     state,
     executable,
-    workbenchAuth,
+    workbenchProviderAuth,
     nativeAuth: effectiveNativeAuth,
     setupCommands: providerSetupCommands(adapter, {
       executable,
       nativeAuth: effectiveNativeAuth,
-      workbenchAuth,
+      workbenchProviderAuth,
       profile,
       env,
     }),
@@ -3510,7 +3549,7 @@ function providerSetupCommands(
   readiness: {
     executable: boolean;
     nativeAuth: "present" | "partial" | "missing" | "not_required";
-    workbenchAuth: "connected" | "missing";
+    workbenchProviderAuth: "connected" | "missing";
     profile: string;
     env: Record<string, string | undefined>;
   },
@@ -3520,7 +3559,7 @@ function providerSetupCommands(
   if (!readiness.executable) {
     commands.push(defaults.installCommand);
   }
-  if (readiness.workbenchAuth === "connected") {
+  if (readiness.workbenchProviderAuth === "connected") {
     return commands;
   }
   if (adapter === "codex") {
@@ -4110,9 +4149,6 @@ function retryOperationPlanForRun(run: WorkbenchRun): WorkbenchOperationPlanSumm
   if (plan.kind !== run.kind) {
     throw retryIncompleteError(run, `Run ${run.id} records operationPlan.kind ${plan.kind} but run kind is ${run.kind}.`);
   }
-  if (plan.variant !== (run.location ?? "local")) {
-    throw retryIncompleteError(run, `Run ${run.id} records operationPlan.variant ${plan.variant} but run location is ${run.location ?? "local"}.`);
-  }
   return plan;
 }
 
@@ -4283,16 +4319,7 @@ export async function prepareWorkbenchCloudImproveRequest(
       ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
     });
     const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
-    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && (
-      improvementEvidence.length > 0 ||
-      hasNonPerfectTerminalEvalRunForImprove(state, {
-        versionId: base.id,
-        skillName: skillBundle.skillName,
-        skillBundleHash: skillBundle.hash,
-        evalHash: runtime.evalSnapshot.hash,
-        agent: evalAgent,
-      })
-    )) {
+    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
       throw workbenchSkillImproveAdapterRequirementError(evalAgent);
     }
     if (improvementEvidence.length === 0) {
@@ -4302,6 +4329,8 @@ export async function prepareWorkbenchCloudImproveRequest(
         skillName: skillBundle.skillName,
         evalHash: runtime.evalSnapshot.hash,
         cases: runtime.cases,
+        agentName: evalAgent.name,
+        preserveAgentSelection: options.agent !== undefined,
       });
     }
     requireWorkbenchImproveAgentAdapter(evalAgent);
@@ -5093,16 +5122,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
       ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
     });
     const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
-    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && (
-      improvementEvidence.length > 0 ||
-      hasNonPerfectTerminalEvalRunForImprove(state, {
-        versionId: base.id,
-        skillName: skillBundle.skillName,
-        skillBundleHash: skillBundle.hash,
-        evalHash: runtime.evalSnapshot.hash,
-        agent: evalAgent,
-      })
-    )) {
+    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
       throw workbenchSkillImproveAdapterRequirementError(evalAgent);
     }
     if (improvementEvidence.length === 0) {
@@ -5112,6 +5132,8 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
         skillName: skillBundle.skillName,
         evalHash: runtime.evalSnapshot.hash,
         cases: runtime.cases,
+        agentName: evalAgent.name,
+        preserveAgentSelection: options.agent !== undefined,
       });
     }
     const evalSnapshot = runtime.evalSnapshot;
@@ -5370,16 +5392,7 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
     ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
   });
   const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
-  if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && (
-    improvementEvidence.length > 0 ||
-    hasNonPerfectTerminalEvalRunForImprove(state, {
-      versionId: base.id,
-      skillName: skillBundle.skillName,
-      skillBundleHash: skillBundle.hash,
-      evalHash: runtime.evalSnapshot.hash,
-      agent: evalAgent,
-    })
-  )) {
+  if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
     throw workbenchSkillImproveAdapterRequirementError(evalAgent);
   }
   if (improvementEvidence.length === 0) {
@@ -5389,6 +5402,8 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
       skillName: skillBundle.skillName,
       evalHash: runtime.evalSnapshot.hash,
       cases: runtime.cases,
+      agentName: evalAgent.name,
+      preserveAgentSelection: options.agent !== undefined,
     });
   }
   requireWorkbenchImproveAgentAdapter(evalAgent);
@@ -6578,6 +6593,8 @@ function workbenchImproveEvidenceRequirementError(args: {
   skillName: string;
   evalHash: string;
   cases: readonly WorkbenchEvalCaseRuntime[];
+  agentName?: string;
+  preserveAgentSelection?: boolean;
 }): WorkbenchCodedError {
   return new WorkbenchCodedError("improve_evidence_required", workbenchImproveEvidenceRequirementMessage(), {
     remediation: workbenchImproveEvidenceRequirementRemediation(args),
@@ -6591,6 +6608,8 @@ function workbenchImproveEvidenceRequirementRemediation(args: {
   skillName: string;
   evalHash: string;
   cases: readonly WorkbenchEvalCaseRuntime[];
+  agentName?: string;
+  preserveAgentSelection?: boolean;
 }): string {
   const currentEvalRuns = args.state.runs
     .filter((run) =>
@@ -6601,7 +6620,7 @@ function workbenchImproveEvidenceRequirementRemediation(args: {
     )
     .sort((left, right) => workbenchRunObservedAt(right).localeCompare(workbenchRunObservedAt(left)));
   if (currentEvalRuns.length === 0) {
-    return "workbench eval";
+    return workbenchImproveEvidenceEvalCommand(args);
   }
   const latestAuthRemediation = currentEvalRuns
     .map((run) => adapterAuthRemediationFromError(run.error))
@@ -6611,9 +6630,19 @@ function workbenchImproveEvidenceRequirementRemediation(args: {
   }
   if (!currentEvalRuns.some((run) => typeof run.score === "number" && Number.isFinite(run.score))) {
     const latestTerminal = currentEvalRuns.find(isTerminalRun);
-    return latestTerminal ? `workbench show ${latestTerminal.id}` : "workbench eval";
+    return latestTerminal ? `workbench show ${latestTerminal.id}` : workbenchImproveEvidenceEvalCommand(args);
   }
   return nextWorkbenchEvalCaseCommand(args.cases);
+}
+
+function workbenchImproveEvidenceEvalCommand(args: {
+  agentName?: string;
+  preserveAgentSelection?: boolean;
+}): string {
+  if (args.preserveAgentSelection && args.agentName) {
+    return `workbench eval --agents ${shellQuote(args.agentName)}`;
+  }
+  return "workbench eval";
 }
 
 function workbenchRunObservedAt(run: WorkbenchRun): string {
@@ -8257,11 +8286,24 @@ function exportObjectPackForRemote(state: WorkbenchProjectState): WorkbenchObjec
 function objectPackWithCloudLifecycleOwner(pack: WorkbenchObjectPack, remoteName: string): WorkbenchObjectPack {
   return {
     ...pack,
-    runs: pack.runs.map((run) => ({
-      ...copyRun(run),
+    runs: pack.runs.map((run) => runWithCloudLifecycleOwner(run, remoteName)),
+  };
+}
+
+function runWithCloudLifecycleOwner(run: WorkbenchRun, remoteName: string): WorkbenchRun {
+  const copied = copyRun(run);
+  const location = copied.operationPlan?.variant ?? copied.location ?? "cloud";
+  if (location === "cloud") {
+    return {
+      ...copied,
       location: "cloud",
-      remoteName,
-    })),
+      remoteName: copied.remoteName ?? remoteName,
+    };
+  }
+  const { remoteName: _remoteName, ...withoutRemoteName } = copied;
+  return {
+    ...withoutRemoteName,
+    location: "local",
   };
 }
 
@@ -12654,31 +12696,6 @@ function bestScoredComparableRun(args: {
     ...(evidence.latencyMs !== undefined ? { latencyMs: evidence.latencyMs } : {}),
     ...(evidence.error ? { error: evidence.error } : {}),
   } : undefined;
-}
-
-function hasNonPerfectTerminalEvalRunForImprove(
-  state: WorkbenchProjectState,
-  args: {
-    versionId: string;
-    skillName: string;
-    skillBundleHash: string;
-    evalHash: string;
-    agent: WorkbenchAgent;
-  },
-): boolean {
-  return latestMatchingRun({
-    runs: state.runs,
-    versionId: args.versionId,
-    skillName: args.skillName,
-    skillBundleHash: args.skillBundleHash,
-    evalHash: args.evalHash,
-    agentName: args.agent.name,
-    agentHash: hashJson(args.agent),
-  }, (run) =>
-    run.kind === "eval" &&
-    isTerminalRunStatus(run.status) &&
-    (run.status !== "succeeded" || (typeof run.score === "number" && run.score < 1))
-  ) !== undefined;
 }
 
 type WorkbenchComparisonEvidence = {

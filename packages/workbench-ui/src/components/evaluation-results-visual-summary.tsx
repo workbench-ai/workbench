@@ -20,7 +20,6 @@ import {
   ToggleGroupItem,
 } from "@workbench-ai/cli-web-ui/components/ui/toggle-group";
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
-import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
 import {
   buildComparisonCategoryAxisLayout,
@@ -84,10 +83,7 @@ export function EvaluationResultsVisualSummary({
       className="grid min-w-0 gap-3"
       data-testid="evaluation-results-visual-summary"
     >
-      <div className={cn(
-        "grid min-w-0 gap-3",
-        tradeoffPairs.length > 0 && "xl:grid-cols-[minmax(0,1fr)_minmax(20rem,0.78fr)] xl:items-start",
-      )}>
+      <div className="grid min-w-0 gap-3">
         {chartDescriptors.length > 0 ? (
           <div className="grid min-w-0 gap-3">
             {chartDescriptors.map((descriptor) => (

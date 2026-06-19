@@ -40,7 +40,7 @@ score:
   adapter: tests
 ```
 
-`workbench new` creates the eval definition and an empty `.workbench/cases/` directory. Add at least one case before running `workbench eval`; an eval with no cases fails with `no_eval_cases` and prints a headless command that creates a draft case plus an executable `tests/test.sh` harness.
+`workbench new` creates the eval definition and an empty `.workbench/cases/` directory. Add at least one case before running `workbench eval`; an eval with no cases fails with `no_eval_cases` and prints `workbench case draft CASE_ID`, which creates a draft case plus an executable `tests/test.sh` harness.
 
 Shell tests write one public result file:
 
@@ -82,14 +82,15 @@ Skill eval jobs support Docker-style command tests through `local` or `command` 
 ```bash
 workbench new ./earnings-prep
 cd ./earnings-prep
-# run the printed next command, then edit .workbench/cases/case-001/case.yaml
+workbench case draft case-001
+# edit .workbench/cases/case-001/case.yaml and tests/test.sh
 workbench eval --agents default -n 1
 workbench compare
 workbench log --versions
 workbench show current:SKILL.md
 ```
 
-Use scored below-perfect, failed, or reviewed eval evidence for better cases and skill edits. `workbench improve` refuses to create cosmetic versions from perfect eval history or unscored runtime/auth failures, and the selected agent must have a skill-improvement adapter once actionable evidence exists. Perfect-only evidence errors print a headless draft-case command; to create a regression case from a run, inspect it with `workbench show RUN_ID` and edit the `.workbench/cases/*` files directly.
+Use scored below-perfect, failed, or reviewed eval evidence for better cases and skill edits. `workbench improve` refuses to create cosmetic versions from perfect eval history or unscored runtime/auth failures, and the selected agent must have a skill-improvement adapter once actionable evidence exists. Perfect-only evidence errors print `workbench case draft CASE_ID`; to create a regression case from a run, inspect it with `workbench show RUN_ID` and edit the `.workbench/cases/*` files directly.
 
 ```bash
 codex login --device-auth

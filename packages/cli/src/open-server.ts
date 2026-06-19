@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { promises as fs } from "node:fs";
+import type { Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,8 +51,15 @@ export async function startWorkbenchOpenServer(
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 0;
   const assetRoot = await resolveDevOpenAssetRoot();
+  const shutdown = new AbortController();
   const server = createServer((request, response) => {
-    void handleRequest({ request, response, assetRoot, dir: options.dir, authToken: options.authToken });
+    void handleRequest({ request, response, assetRoot, dir: options.dir, authToken: options.authToken, signal: shutdown.signal });
+  });
+  const sockets = new Set<Socket>();
+  let closePromise: Promise<void> | undefined;
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -67,15 +75,23 @@ export async function startWorkbenchOpenServer(
   const display = displayHost(host);
   return {
     url: `http://${display}:${address.port}/`,
-    close: () => new Promise((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve();
+    close: () => {
+      closePromise ??= new Promise((resolve, reject) => {
+        shutdown.abort();
+        for (const socket of sockets) {
+          socket.destroy();
         }
+        server.closeAllConnections();
+        server.close((error) => {
+          if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
       });
-    }),
+      return closePromise;
+    },
   };
 }
 
@@ -102,14 +118,17 @@ async function handleRequest({
   assetRoot,
   dir,
   authToken,
+  signal,
 }: {
   request: IncomingMessage;
   response: ServerResponse;
   assetRoot: string;
   dir?: string;
   authToken?: string;
+  signal: AbortSignal;
 }): Promise<void> {
   try {
+    const requestSignal = requestAbortSignal(signal, request);
     const url = new URL(request.url ?? "/", "http://workbench.local");
     if (url.pathname === "/api/snapshot") {
       const envelope = await createInspectionSnapshotEnvelope({ dir, authToken });
@@ -141,6 +160,7 @@ async function handleRequest({
         authToken,
         cursor: url.searchParams.get("cursor") ?? undefined,
         timeoutMs: parseInspectionWaitTimeout(url.searchParams.get("timeoutMs")),
+        signal: requestSignal,
       });
       sendText(response, 200, `${JSON.stringify(notice, null, 2)}\n`, "application/json; charset=utf-8");
       return;
@@ -152,6 +172,7 @@ async function handleRequest({
         dir,
         authToken,
         cursor: url.searchParams.get("cursor") ?? undefined,
+        signal: requestSignal,
       });
       return;
     }
@@ -199,8 +220,23 @@ async function handleRequest({
     }
     sendText(response, 200, html(), "text/html; charset=utf-8");
   } catch (error) {
+    if (signal.aborted || response.destroyed || response.writableEnded) {
+      return;
+    }
     sendText(response, 500, `${error instanceof Error ? error.message : String(error)}\n`, "text/plain; charset=utf-8");
   }
+}
+
+function requestAbortSignal(signal: AbortSignal, request: IncomingMessage): AbortSignal {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal.aborted) {
+    abort();
+  } else {
+    signal.addEventListener("abort", abort, { once: true });
+  }
+  request.on("close", abort);
+  return controller.signal;
 }
 
 async function createInspectionSnapshotEnvelope(options: {
@@ -273,12 +309,14 @@ async function sendStateEventStream({
   dir,
   authToken,
   cursor,
+  signal,
 }: {
   request: IncomingMessage;
   response: ServerResponse;
   dir?: string;
   authToken?: string;
   cursor?: string;
+  signal: AbortSignal;
 }): Promise<void> {
   response.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -296,6 +334,7 @@ async function sendStateEventStream({
       authToken,
       cursor: currentCursor,
       timeoutMs: 25_000,
+      signal,
     });
     if (closed) {
       return;

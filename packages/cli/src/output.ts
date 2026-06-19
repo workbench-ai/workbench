@@ -19,6 +19,7 @@ export interface WorkbenchCliErrorEnvelope {
   message: string;
   retryable: boolean;
   remediation?: string;
+  runId?: string;
   subject?: Record<string, Json>;
 }
 
@@ -45,6 +46,7 @@ export function emitResult(
 
 export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): number {
   const coded = codedErrorFromUnknown(error);
+  const runId = typeof coded.subject?.runId === "string" ? coded.subject.runId : undefined;
   const envelope: WorkbenchCliErrorEnvelope = {
     schema: "workbench.cli.error.v1",
     ok: false,
@@ -52,6 +54,7 @@ export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): nu
     message: coded.message,
     retryable: coded.retryable,
     ...(coded.remediation ? { remediation: coded.remediation } : {}),
+    ...(runId ? { runId } : {}),
     ...(coded.subject ? { subject: coded.subject } : {}),
   };
   if (parsed.flags.json === true) {

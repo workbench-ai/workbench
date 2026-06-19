@@ -1291,6 +1291,34 @@ function EvaluationSurface({
   );
 }
 
+/**
+ * Build the sorted scorecard comparison rows for a snapshot, mirroring what the
+ * Evaluation → Results view renders. Exposed so the comparison summary can be
+ * rendered standalone (for example embedded in a marketing page) without the
+ * full workspace shell. By default it returns rows for the snapshot's default
+ * evaluation; pass `evaluationId` to select a specific one, or `null` for all.
+ */
+export function buildEvaluationResultRows(
+  snapshot: WorkbenchInspectionSnapshot,
+  options: { evaluationId?: string | null } = {},
+): ComparisonEvidenceRow[] {
+  const comparison = comparisonForScorecard(snapshot);
+  const context = comparisonLabelContext(snapshot);
+  const groups = buildComparisonGroups(comparison, context);
+  const rows = sortLeaderboardRows(
+    buildComparisonEvidenceRows({
+      groups,
+      context,
+      agents: comparison.agents,
+      runs: snapshot.runs,
+    }),
+  );
+  const evaluationId = "evaluationId" in options
+    ? options.evaluationId
+    : defaultEvaluationIdForScorecard(evaluationOptionsForScorecard(snapshot, comparison));
+  return evaluationId ? rows.filter((row) => row.evalHash === evaluationId) : rows;
+}
+
 function EvaluationResults({
   evaluationId,
   hasComparison,
