@@ -289,6 +289,9 @@ describe("workbench skill-first CLI", () => {
     expect(help.stdout).toContain("Other common commands:");
     expect(help.stdout).toContain("workbench install OWNER/SKILL[@VERSION]|URL");
     expect(help.stdout).toContain("workbench clone OWNER/SKILL[@VERSION]|URL DIR");
+    expect(help.stdout).toContain("workbench run watch RUN_ID");
+    expect(help.stdout).toContain("workbench run cancel RUN_ID");
+    expect(help.stdout).toContain("workbench run retry RUN_ID");
     expect(help.stdout).toContain("workbench help --all");
     expect(help.stdout).not.toContain("workbench log");
     expect(help.stdout).not.toContain("workbench show");
@@ -782,6 +785,137 @@ describe("workbench skill-first CLI", () => {
     const retried = await invoke(["run", "retry", evaluatedRunId, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
     expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench results --agents 'strict'");
+  });
+
+  test("terminal run summaries preserve multi-agent measurement context", async () => {
+    const root = await makeTempRoot("workbench-cli-run-multi-agent-summary-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+    expect((await invoke(["agent", "add", "strict", "--adapter", "local", "--dir", root, "--json"])).code).toBe(0);
+
+    const evaluated = await invoke(["eval", "--agents", "all", "-n", "2", "--dir", root, "--json"]);
+    expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
+    const evaluatedJson = stdoutJson<{ run: { id: string; measurements: Array<{ agentName: string }> }; next: string }>(evaluated);
+    expect(evaluatedJson.run.measurements.map((measurement) => measurement.agentName).sort()).toEqual(["default", "strict"]);
+
+    const watched = await invoke(["run", "watch", evaluatedJson.run.id, "--dir", root]);
+    expect(watched.code, watched.stdout || watched.stderr).toBe(0);
+    expect(watched.stdout).toContain("measurement");
+    expect(watched.stdout).toContain("agent=default");
+    expect(watched.stdout).toContain("agent=strict");
+    expect(watched.stdout).toContain("next: workbench results --agents 'default,strict'");
+
+    const shown = await invoke(["show", evaluatedJson.run.id, "--dir", root]);
+    expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+    expect(shown.stdout).toContain("agent=default");
+    expect(shown.stdout).toContain("agent=strict");
+    expect(shown.stdout).toContain("next: workbench results --agents 'default,strict'");
+
+    const logRuns = await invoke(["log", "--runs", "--dir", root]);
+    expect(logRuns.code, logRuns.stdout || logRuns.stderr).toBe(0);
+    expect(logRuns.stdout).toContain("agent=default,strict");
+
+    const retried = await invoke(["run", "retry", evaluatedJson.run.id, "--dir", root, "--json"]);
+    expect(retried.code, retried.stdout || retried.stderr).toBe(0);
+    expect(stdoutJson<{ next: string; run: { measurements: Array<{ agentName: string }> } }>(retried)).toMatchObject({
+      next: "workbench results --agents 'default,strict'",
+      run: {
+        measurements: expect.arrayContaining([
+          expect.objectContaining({ agentName: "default" }),
+          expect.objectContaining({ agentName: "strict" }),
+        ]),
+      },
+    });
+  });
+
+  test("results preserve canceled run status when a canceled run has failed jobs", async () => {
+    const root = await makeTempRoot("workbench-cli-results-canceled-status-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+    expect((await invoke(["eval", "--dir", root, "--json"])).code).toBe(0);
+    const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    const versionId = snapshot.status.currentVersionId;
+    const bundle = snapshot.skillBundles.find((entry) => entry.skillName === "current");
+    const agent = snapshot.agents[0];
+    const evalSnapshot = snapshot.evals[0];
+    if (!versionId || !bundle || !agent || !evalSnapshot) {
+      throw new Error("Expected new local project to expose version, bundle, agent, and eval snapshots.");
+    }
+    const createdAt = "2026-06-19T00:00:00.000Z";
+    const run: WorkbenchRun = {
+      id: "run_canceled_mixed",
+      kind: "eval",
+      versionId,
+      skillName: bundle.skillName,
+      skillBundleHash: bundle.hash,
+      evalHash: evalSnapshot.hash,
+      agentName: agent.agent.name,
+      agentHash: agent.hash,
+      status: "canceled",
+      score: 0,
+      jobIds: ["job_canceled_mixed_failed", "job_canceled_mixed_canceled"],
+      traceIds: [],
+      createdAt,
+      finishedAt: "2026-06-19T00:00:02.000Z",
+      location: "local",
+      requestedSamples: 2,
+      operationPlan: {
+        kind: "eval",
+        variant: "local",
+        versionId,
+        evalHash: evalSnapshot.hash,
+        skills: [bundle.skillName],
+        agents: [agent.agent.name],
+        samples: 2,
+      },
+    };
+    const failedJob: WorkbenchJob = {
+      id: "job_canceled_mixed_failed",
+      runId: run.id,
+      kind: "eval",
+      versionId,
+      skillName: bundle.skillName,
+      skillBundleHash: bundle.hash,
+      evalHash: evalSnapshot.hash,
+      agentName: agent.agent.name,
+      agentHash: agent.hash,
+      caseId: "case-001",
+      sample: 0,
+      status: "failed",
+      score: 0,
+      artifactIds: [],
+      traceIds: [],
+      createdAt,
+      startedAt: createdAt,
+      finishedAt: "2026-06-19T00:00:01.000Z",
+      durationMs: 1000,
+      error: "case failed before cancellation",
+    };
+    const canceledJob: WorkbenchJob = {
+      ...failedJob,
+      id: "job_canceled_mixed_canceled",
+      sample: 1,
+      status: "canceled",
+      score: undefined,
+      finishedAt: "2026-06-19T00:00:02.000Z",
+      error: "canceled by user",
+    };
+    await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench", "objects", "job"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "objects", "run", `${run.id}.json`), JSON.stringify(run));
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${failedJob.id}.json`), JSON.stringify(failedJob));
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${canceledJob.id}.json`), JSON.stringify(canceledJob));
+
+    const results = await invoke(["results", "--dir", root, "--json"]);
+
+    expect(results.code, results.stdout || results.stderr).toBe(0);
+    expect(stdoutJson<{ result: { cells: Array<{ runId?: string; status?: string }> } }>(results).result.cells)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ runId: run.id, status: "canceled" }),
+      ]));
+    const human = await invoke(["results", "--dir", root]);
+    expect(human.code, human.stdout || human.stderr).toBe(0);
+    expect(human.stdout).toContain("\tcanceled\t");
   });
 
   test("rejects unsupported and context-invalid flags before handlers run", async () => {
@@ -8773,7 +8907,7 @@ describe("workbench skill-first CLI", () => {
         next: "workbench install alice/private-skill --target codex --scope global --yes",
         filesCopied: 0,
         targets: [expect.objectContaining({
-          previous: "overwritten",
+          previous: "modified",
           result: "blocked",
           requiresOverwrite: true,
           remediation: "workbench install alice/private-skill --target codex --scope global --yes",

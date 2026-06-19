@@ -153,6 +153,9 @@ const HELP = [
   "",
   "Other common commands:",
   "  workbench clone OWNER/SKILL[@VERSION]|URL DIR [--json]",
+  "  workbench run watch RUN_ID [--dir DIR] [--json]",
+  "  workbench run cancel RUN_ID [--dir DIR] [--json]",
+  "  workbench run retry RUN_ID [--dir DIR] [--json]",
   "  workbench versions [--dir DIR] [--json]",
   "  workbench case draft [ID] [--dir DIR] [--json]",
   "",
@@ -672,7 +675,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         deltas: deltas as unknown as Json,
         next: next as Json,
       }, parsed, io, () => [
-        formatRunSnapshot(snapshot),
+        formatRunSnapshot(snapshot, completed.run),
         ...formatEvalCoverageLines(coverage),
         ...formatEvalDeltaLines(deltas),
         ...(next ? [`next: ${next}`] : []),
@@ -1563,8 +1566,8 @@ async function handleLog(parsed: ParsedArgs, io: CliIo): Promise<number> {
       createdAt: run.createdAt,
       status: run.status,
       versionId: run.versionId,
-      skillName: run.skillName,
-      agentName: run.agentName,
+      skillName: run.operationPlan?.skills.join(",") || run.skillName,
+      agentName: run.operationPlan?.agents.join(",") || run.agentName,
       ...(scoredRunValue(run) !== undefined ? { score: scoredRunValue(run) } : {}),
     })) : []),
   ].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -2150,7 +2153,7 @@ function emitRetryResult(
     next: first ? runWatchNextCommand(first) as Json : "workbench log --runs",
   }, parsed, io, () => [
     `Retried ${displayRef(oldRun.id)}${first ? ` as ${displayRef(first.id)}` : ""}.`,
-    ...runs.map(formatRun),
+    formatRunSnapshot(runSnapshot, first),
     ...(first ? [`next: ${runWatchNextCommand(first)}`] : []),
   ].join("\n"), code);
 }
@@ -2200,11 +2203,13 @@ function runProgressNextCommand(run: WorkbenchRun): string | null {
 
 function resultsNextCommandForRun(run: WorkbenchRun): string {
   const parts = ["workbench results"];
-  if (run.skillName && run.skillName !== CURRENT_SKILL_VERSION_NAME) {
-    parts.push("--versions", shellQuote(run.skillName));
+  const skillSelection = run.operationPlan?.skills.join(",") || run.skillName;
+  const agentSelection = run.operationPlan?.agents.join(",") || run.agentName;
+  if (skillSelection && skillSelection !== CURRENT_SKILL_VERSION_NAME) {
+    parts.push("--versions", shellQuote(skillSelection));
   }
-  if (run.agentName && run.agentName !== "default") {
-    parts.push("--agents", shellQuote(run.agentName));
+  if (agentSelection && agentSelection !== "default") {
+    parts.push("--agents", shellQuote(agentSelection));
   }
   return parts.join(" ");
 }
@@ -2218,7 +2223,7 @@ function formatRunWatchResult(
   const failed = jobs.filter((job) => job.status === "failed").length;
   const canceled = jobs.filter((job) => job.status === "canceled").length;
   return [
-    formatRun(run),
+    progress ? formatRunSnapshot(progress, run) : formatRun(run),
     ...(progress ? [`progress=${formatProgressSummary(progress)}`] : []),
     `jobs=${jobs.length} failed=${failed}${canceled > 0 ? ` canceled=${canceled}` : ""}`,
     ...(next ? [`next: ${next}`] : []),
@@ -2932,7 +2937,7 @@ async function handleCloudEval(parsed: ParsedArgs, io: CliIo): Promise<number> {
     cloud: cloudExecutionSummary(started),
   }, parsed, io, () => [
     `Completed hosted eval on ${started.remote.url}.`,
-    formatRunSnapshot(snapshot),
+    formatRunSnapshot(snapshot, run),
     ...formatEvalCoverageLines(coverage),
     ...formatEvalDeltaLines(deltas),
     ...(next ? [`next: ${next}`] : []),
@@ -2982,7 +2987,7 @@ async function handleCloudImprove(parsed: ParsedArgs, io: CliIo): Promise<number
     cloud: cloudExecutionSummary(started),
   }, parsed, io, () => [
     `Completed hosted improve on ${started.remote.url}.`,
-    formatRunSnapshot(snapshot),
+    formatRunSnapshot(snapshot, run),
     ...(switchedVersion ? [`Switched local source to ${displayRef(switchedVersion.id)}.`] : []),
     ...(next ? [`next: ${next}`] : []),
   ].filter(Boolean).join("\n"));
@@ -3045,7 +3050,7 @@ function formatInstallOutcome(
     if (target.previous === "updated") {
       return `Would update ${result.skill} for ${targetSummary} (dry run made no changes).`;
     }
-    if (target.previous === "overwritten") {
+    if (target.previous === "modified" || target.previous === "unmanaged") {
       return target.requiresOverwrite
         ? `Would require --yes to overwrite ${result.skill} for ${targetSummary} (dry run made no changes).${nextLine}`
         : `Would overwrite ${result.skill} for ${targetSummary} (dry run made no changes).`;
@@ -3058,8 +3063,8 @@ function formatInstallOutcome(
   if (target.previous === "updated") {
     return `Updated ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
   }
-  const detail = target.previous === "overwritten"
-    ? `overwrote existing copy, ${formatFileCount(result.filesCopied)}`
+  const detail = target.previous === "modified" || target.previous === "unmanaged"
+    ? `overwrote ${target.previous} copy, ${formatFileCount(result.filesCopied)}`
     : formatFileCount(result.filesCopied);
   return `Installed ${result.skill} for ${targetSummary} (${detail}).`;
 }
@@ -6493,7 +6498,7 @@ function emitEvalFailure(
   }
   io.stdout.write([
     "Eval failed; evidence was saved.",
-    formatRunSnapshot(snapshot),
+    formatRunSnapshot(snapshot, failedRuns[0]),
     ...formatEvalCoverageLines(coverage),
     ...formatEvalDeltaLines(deltas),
     ...(next ? [`next: ${next}`] : []),
@@ -7433,7 +7438,7 @@ function formatRunEvidenceSummary(
 ): string {
   const failures = runFailureGroups(jobs);
   return [
-    formatRun(run),
+    progress ? formatRunSnapshot(progress, run) : formatRun(run),
     `location=${run.location ?? "local"}${run.retryOfRunId ? ` retry_of=${displayRef(run.retryOfRunId)}` : ""}${run.outputVersionId ? ` output=${displayRef(run.outputVersionId)}` : ""}`,
     ...(progress ? [`Progress: ${formatProgressSummary(progress)}`] : []),
     ...(run.error ? [`error=${singleLine(run.error)}`] : []),
@@ -8239,13 +8244,18 @@ function formatRun(run: WorkbenchRun): string {
   ].join("\t");
 }
 
-function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
+function formatRunSnapshot(
+  snapshot: WorkbenchRunSnapshot,
+  run?: Pick<WorkbenchRun, "latencyMs" | "requestedSamples">,
+): string {
   const progress = snapshot.progress.planned > 0
     ? `${snapshot.progress.completed}/${snapshot.progress.planned}`
     : "n/a";
   const scoreValue = snapshot.result?.score ?? snapshot.progress.partialScore;
   const score = scoreValue === undefined ? "n/a" : scoreValue.toFixed(3);
   const cost = snapshot.progress.costUsd === undefined ? "n/a" : `$${snapshot.progress.costUsd.toFixed(4)}`;
+  const singleMeasurement = snapshot.measurements.length === 1 ? snapshot.measurements[0] : undefined;
+  const latencyParts = snapshotLatencySummaryParts(snapshot, run ?? singleMeasurement);
   const header = [
     displayRef(snapshot.id),
     snapshot.kind,
@@ -8257,6 +8267,7 @@ function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
     `canceled=${snapshot.progress.canceled}`,
     `score=${score}`,
     `cost=${cost}`,
+    ...latencyParts,
   ].join("\t");
   const measurements = snapshot.measurements.length > 1
     ? snapshot.measurements.map((measurement) => {
@@ -8275,6 +8286,21 @@ function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
       })
     : [];
   return [header, ...measurements].join("\n");
+}
+
+function snapshotLatencySummaryParts(
+  snapshot: WorkbenchRunSnapshot,
+  source: Pick<WorkbenchRun, "latencyMs" | "requestedSamples"> | WorkbenchRunSnapshot["measurements"][number] | undefined,
+): string[] {
+  if (!source || source.latencyMs === undefined) {
+    return [];
+  }
+  const samples = "requestedSamples" in source
+    ? source.requestedSamples
+    : "samples" in source
+      ? source.samples ?? snapshot.progress.planned
+      : snapshot.progress.planned;
+  return latencySummaryParts(source.latencyMs, samples);
 }
 
 function latencySummaryParts(latencyMs: number | undefined, samples: number | undefined): string[] {

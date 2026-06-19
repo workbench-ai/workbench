@@ -159,6 +159,26 @@ describe("comparison metric helpers", () => {
     expect(rows[0]?.statusLabel).toBe("Succeeded");
   });
 
+  test("keeps canceled result evidence labeled as canceled", () => {
+    const results = resultsFixture([
+      resultCell({ skillVersionId: "v002", runId: "run_eval", status: "canceled", quality: undefined }),
+    ]);
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups: buildComparisonGroups(results),
+      runs: [
+        run({
+          id: "run_eval",
+          versionId: "v002",
+          status: "canceled",
+          score: 0,
+        }),
+      ],
+    });
+
+    expect(rows[0]?.statusLabel).toBe("Canceled");
+  });
+
   test("builds metric chart rows grouped by result version", () => {
     const results = resultsFixture([
       resultCell({ skillVersionId: "v001", agentVersionId: "agent_codex", quality: 0.7 }),

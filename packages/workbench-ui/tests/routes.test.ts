@@ -151,6 +151,35 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).not.toContain("data-testid=\"workbench-detail-pane\"");
   });
 
+  test("counts About cases from the latest authored evaluation", () => {
+    const snapshot = inspectionSnapshot();
+    const [latestEval] = snapshot.evals;
+    if (!latestEval) {
+      throw new Error("Expected evaluation fixture.");
+    }
+    snapshot.evals = [{
+      ...latestEval,
+      hash: "eval_old",
+      caseCount: 4,
+      createdAt: "2026-06-06T00:05:00.000Z",
+      updatedAt: "2026-06-06T00:05:00.000Z",
+    }, {
+      ...latestEval,
+      hash: "eval_current",
+      caseCount: 2,
+      createdAt: "2026-06-06T00:15:00.000Z",
+      updatedAt: "2026-06-06T00:15:00.000Z",
+    }];
+
+    const html = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(snapshot),
+      routeBasePath: "/skills/alice/earnings",
+    }));
+
+    expect(html).toContain("2 cases");
+    expect(html).not.toContain("6 cases");
+  });
+
   test("does not auto-select a file when opening a folder", () => {
     const html = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
       initialEnvelope: inspectionEnvelope(inspectionSnapshot()),

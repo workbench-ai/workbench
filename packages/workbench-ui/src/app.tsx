@@ -2337,7 +2337,7 @@ function AboutSidebar({
   identity: SkillIdentity;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const casesCount = snapshot.evals.reduce((total, entry) => total + entry.caseCount, 0);
+  const casesCount = selectedEvalSnapshot(snapshot, null)?.caseCount ?? 0;
   return (
     <aside className="grid min-w-0 gap-4 rounded-lg border border-border/70 bg-background p-4 text-sm xl:sticky xl:top-6">
       <div className="grid gap-1">

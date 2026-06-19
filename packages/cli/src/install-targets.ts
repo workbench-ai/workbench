@@ -86,7 +86,7 @@ export interface WorkbenchInstallTargetResult {
   scope: SkillAccessScope;
   root: string;
   destination: string;
-  previous: "none" | "updated" | "overwritten" | "unchanged";
+  previous: "none" | "updated" | "modified" | "unmanaged" | "unchanged";
   result: "installed" | "planned" | "blocked" | "unchanged";
   requiresOverwrite?: boolean;
   remediation?: string;
@@ -772,9 +772,9 @@ async function installPackageInRoot(args: {
       record.baseUrl === args.provenance.baseUrl,
   );
   const previous: WorkbenchInstallTargetResult["previous"] = existingHash
-    ? existingHash === args.contentHash ? "unchanged" : canUpdateExisting ? "updated" : "overwritten"
+    ? existingHash === args.contentHash ? "unchanged" : canUpdateExisting ? "updated" : record ? "modified" : "unmanaged"
     : "none";
-  const requiresOverwrite = Boolean(existingHash && previous === "overwritten" && !args.overwrite);
+  const requiresOverwrite = Boolean(existingHash && (previous === "modified" || previous === "unmanaged") && !args.overwrite);
   if (!args.dryRun && requiresOverwrite) {
     const status = record ? "modified" : "unmanaged";
     throw new WorkbenchCodedError("install_failed", `Skill destination has ${status} content: ${destination}`, {

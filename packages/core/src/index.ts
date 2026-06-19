@@ -6216,11 +6216,13 @@ function runSnapshotNext(run: WorkbenchRun): string | undefined {
 
 function resultsNextCommandForRun(run: WorkbenchRun): string {
   const parts = ["workbench results"];
-  if (run.skillName && run.skillName !== CURRENT_SKILL_VERSION_NAME) {
-    parts.push("--versions", shellQuote(run.skillName));
+  const skillSelection = run.operationPlan?.skills.join(",") || run.skillName;
+  const agentSelection = run.operationPlan?.agents.join(",") || run.agentName;
+  if (skillSelection && skillSelection !== CURRENT_SKILL_VERSION_NAME) {
+    parts.push("--versions", shellQuote(skillSelection));
   }
-  if (run.agentName && run.agentName !== "default") {
-    parts.push("--agents", shellQuote(run.agentName));
+  if (agentSelection && agentSelection !== "default") {
+    parts.push("--agents", shellQuote(agentSelection));
   }
   return parts.join(" ");
 }
@@ -13443,6 +13445,9 @@ function comparisonJobStatus(jobs: readonly WorkbenchJob[], fallback: WorkbenchR
   }
   if (jobs.some((job) => job.status === "queued")) {
     return "queued";
+  }
+  if (fallback === "canceled" && jobs.some((job) => job.status === "canceled")) {
+    return "canceled";
   }
   if (jobs.some((job) => job.status === "failed")) {
     return "failed";
