@@ -107,6 +107,7 @@ import { StatusBadge } from "./components/status-badge";
 import { SurfaceSection } from "./components/surface-section";
 import { LineageGraph } from "./components/lineage-graph";
 import { RepositoryFilesView } from "./components/repository-files-view";
+import { EvaluationResultsVisualSummary } from "./components/evaluation-results-visual-summary";
 import { WorkbenchActionBar } from "./components/workbench-action-bar";
 import {
   caseFileOwnerId,
@@ -1325,7 +1326,8 @@ function EvaluationResults({
     );
   }
   return (
-    <section className="min-w-0" aria-label="Results">
+    <section className="grid min-w-0 gap-4" aria-label="Results">
+      <EvaluationResultsVisualSummary rows={sortedRows} />
       <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
         <Table data-testid="evaluation-results-leaderboard" className="min-w-[58rem]">
           <TableHeader>

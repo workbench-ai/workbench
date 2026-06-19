@@ -2890,12 +2890,19 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", root, "--json"])).entries).toEqual([]);
   });
 
-  test("cloud dry-run previews edited case source without requiring the would-create version to exist", async () => {
+  test("cloud dry-run previews edited case source and reports personal hosted plan readiness", async () => {
     const configRoot = await makeTempRoot("workbench-cli-cloud-dry-run-edited-config-");
-    vi.stubEnv("WORKBENCH_CONFIG", path.join(configRoot, "config.json"));
-    vi.stubEnv("WORKBENCH_API_TOKEN", "cloud-token");
+    const configPath = path.join(configRoot, "config.json");
+    vi.stubEnv("WORKBENCH_CONFIG", configPath);
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
     vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", "");
     vi.stubEnv("WORKBENCH_API_URL", "https://cloud.test");
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "cloud-token",
+      username: "alice",
+    }));
     const root = await makeTempRoot("workbench-cli-cloud-dry-run-edited-project-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await writePassingCaseTest(root);
@@ -2913,6 +2920,92 @@ describe("workbench skill-first CLI", () => {
       plan: {
         location: "cloud",
         sourceState: "would_create",
+        readiness: {
+          ready: false,
+          issues: [
+            {
+              code: "plan_required",
+              remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
+              subject: {
+                owner: "alice",
+                remote: "cloud",
+                ownerKind: "user",
+              },
+            },
+          ],
+        },
+      },
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: "plan_required",
+            remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
+            subject: {
+              owner: "alice",
+              remote: "cloud",
+              ownerKind: "user",
+            },
+          },
+        ],
+      },
+      next: "workbench publish --as ORG/SKILL && workbench eval --cloud",
+    });
+    expect(stdoutJson(dryRun).plan).not.toHaveProperty("adapterAuthTargets");
+    expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", root, "--json"])).entries).toEqual([]);
+  });
+
+  test("cloud dry-run reports ready for an explicitly linked organization skill", async () => {
+    const configRoot = await makeTempRoot("workbench-cli-cloud-dry-run-org-config-");
+    const configPath = path.join(configRoot, "config.json");
+    vi.stubEnv("WORKBENCH_CONFIG", configPath);
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", "");
+    vi.stubEnv("WORKBENCH_API_URL", "https://cloud.test");
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      accessToken: "cloud-token",
+      username: "alice",
+    }));
+    const root = await makeTempRoot("workbench-cli-cloud-dry-run-org-project-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+    await fs.writeFile(path.join(root, ".workbench", "remotes.yaml"), [
+      "schema: workbench.remotes.v1",
+      "remotes:",
+      "  cloud:",
+      "    url: https://cloud.test/skills/acme/cloud-skill",
+      "    kind: workbench-cloud",
+      "",
+    ].join("\n"));
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      if (url.pathname === "/api/workbench/skills") {
+        expect(url.searchParams.get("owner")).toBe("acme");
+        expect(url.searchParams.get("name")).toBe("cloud-skill");
+        return jsonResponse({
+          skills: [{
+            id: "skill_org",
+            ownerSlug: "acme",
+            ownerKind: "organization",
+            name: "cloud-skill",
+          }],
+        });
+      }
+      if (url.pathname === "/api/workbench/organizations/acme") {
+        return jsonResponse({ organization: { organization: { namespace: { slug: "acme" } } } });
+      }
+      return jsonResponse({ message: `Unexpected ${url.pathname}` }, 500);
+    }));
+
+    const dryRun = await invoke(["eval", "--dry-run", "--cloud", "--dir", root, "--json"]);
+
+    expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
+    expect(stdoutJson(dryRun)).toMatchObject({
+      ok: true,
+      plan: {
+        location: "cloud",
         readiness: {
           ready: true,
           issues: [],

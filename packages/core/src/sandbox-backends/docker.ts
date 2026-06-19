@@ -797,24 +797,32 @@ function findDockerMonorepoRoot(): string | null {
   if (configured) {
     return configured;
   }
-  const cwd = process.cwd();
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const roots = [
-    cwd,
-    path.resolve(cwd, ".."),
-    path.resolve(cwd, "../.."),
-    path.resolve(cwd, "../../.."),
-    path.resolve(moduleDir, "../../../../../.."),
-  ];
-  for (const root of roots) {
-    if (
-      existsSync(path.join(root, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
-      existsSync(path.join(root, "products/workbench/packages/core/dist/index.js"))
-    ) {
+  for (const start of [process.cwd(), path.dirname(fileURLToPath(import.meta.url))]) {
+    const root = findAncestorDirectory(start, isDockerMonorepoRoot);
+    if (root) {
       return root;
     }
   }
   return null;
+}
+
+function findAncestorDirectory(start: string, predicate: (candidate: string) => boolean): string | null {
+  let current = path.resolve(start);
+  for (;;) {
+    if (predicate(current)) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+function isDockerMonorepoRoot(root: string): boolean {
+  return existsSync(path.join(root, "products/workbench/packages/core/worker/sandbox-adapter-runner.cjs")) &&
+    existsSync(path.join(root, "products/workbench/packages/core/dist/index.js"));
 }
 
 function readRequiredMetadataString(metadata: Record<string, unknown>, key: string, backend: string): string {

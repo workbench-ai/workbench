@@ -179,22 +179,20 @@ export function comparisonForActiveSkillVersions(snapshot: WorkbenchInspectionSn
 
 export function comparisonForScorecard(snapshot: WorkbenchInspectionSnapshot): WorkbenchComparison {
   const canonical = comparisonForSnapshot(snapshot);
-  if (canonical.cells.length > 0) {
-    return canonical;
-  }
-
   const current = comparisonForCurrentVersionRuns(snapshot);
   const history = comparisonForActiveSkillVersions(snapshot);
-  const cells = [...current.cells];
+  const cells = [...canonical.cells];
   const seenCells = new Set(cells.map(comparisonCellKey));
 
-  for (const cell of history.cells) {
-    const key = comparisonCellKey(cell);
-    if (seenCells.has(key)) {
-      continue;
+  for (const source of [current, history]) {
+    for (const cell of source.cells) {
+      const key = comparisonCellKey(cell);
+      if (seenCells.has(key)) {
+        continue;
+      }
+      seenCells.add(key);
+      cells.push(cell);
     }
-    seenCells.add(key);
-    cells.push(cell);
   }
 
   const versionIds = new Set(cells.map((cell) => cell.versionId));
@@ -206,15 +204,15 @@ export function comparisonForScorecard(snapshot: WorkbenchInspectionSnapshot): W
   return {
     ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
     versions: unionById(
-      [...current.versions, ...history.versions, ...snapshot.versions],
+      [...canonical.versions, ...current.versions, ...history.versions, ...snapshot.versions],
       (version) => version.id,
     ).filter((version) => versionIds.has(version.id)),
     skills: unionById(
-      [...current.skills, ...history.skills, ...snapshot.skillBundles],
+      [...canonical.skills, ...current.skills, ...history.skills, ...snapshot.skillBundles],
       (skill) => skill.hash,
     ).filter((skill) => skillBundleHashes.has(skill.hash)),
     agents: unionById(
-      [...current.agents, ...history.agents, ...snapshot.agents],
+      [...canonical.agents, ...current.agents, ...history.agents, ...snapshot.agents],
       (agent) => agent.hash,
     ).filter((agent) => agentHashes.has(agent.hash)),
     cells,

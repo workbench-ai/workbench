@@ -176,6 +176,12 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).toContain("Results");
     expect(html).toContain("Cases");
     expect(html).toContain("Evaluation 1");
+    expect(html).toContain("data-testid=\"evaluation-results-visual-summary\"");
+    expect(html).toContain("data-testid=\"evaluation-quality-chart\"");
+    expect(html).toContain("data-testid=\"evaluation-latency-chart\"");
+    expect(html).toContain("data-testid=\"evaluation-cost-chart\"");
+    expect(html).toContain("data-testid=\"evaluation-tradeoff-chart\"");
+    expect(html).toContain("Quality vs Latency");
     expect(html).toContain("data-testid=\"evaluation-results-leaderboard\"");
     expect(html).toContain(">#</th>");
     expect(html).toContain(">Mode</th>");
@@ -186,8 +192,10 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).toContain(">When</th>");
     expect(html).toContain(">Agent</th>");
     expect(html).toContain("0.920");
+    expect(html).toContain("0.700");
     expect(html).toContain("$0.1234");
     expect(html).toContain("750ms");
+    expect(html).toContain("1.5s");
     expect(html).toContain("1/1");
     expect(html).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash\"");
     expect(html).not.toContain("Skill version");
@@ -434,7 +442,7 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       versionCount: 2,
       skillCount: 1,
       agentCount: 1,
-      runCount: 2,
+      runCount: 3,
       remoteCount: 1,
     },
     versions,
@@ -487,6 +495,18 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       skills: [skillBundle],
       agents,
       cells: [{
+        versionId: "v001",
+        skillName: "primary",
+        skillBundleHash: "skill_bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "patcher",
+        agentHash: "agent_hash",
+        runId: "run_eval_baseline",
+        score: 0.7,
+        costUsd: 0.05,
+        latencyMs: 1500,
+        samples: 1,
+      }, {
         versionId: "v002",
         skillName: "primary",
         skillBundleHash: "skill_bundle_hash",
@@ -501,6 +521,23 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       }],
     },
     runs: [{
+      id: "run_eval_baseline",
+      kind: "eval",
+      versionId: "v001",
+      skillName: "primary",
+      skillBundleHash: "skill_bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "patcher",
+      agentHash: "agent_hash",
+      status: "succeeded",
+      score: 0.7,
+      latencyMs: 1500,
+      costUsd: 0.05,
+      jobIds: ["job_baseline"],
+      traceIds: [],
+      createdAt: "2026-06-06T00:08:00.000Z",
+      finishedAt: "2026-06-06T00:09:00.000Z",
+    }, {
       id: "run_eval",
       kind: "eval",
       versionId: "v002",
@@ -535,6 +572,27 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       finishedAt: "2026-06-06T00:06:00.000Z",
     }],
     jobs: [{
+      id: "job_baseline",
+      runId: "run_eval_baseline",
+      kind: "eval",
+      versionId: "v001",
+      skillName: "primary",
+      skillBundleHash: "skill_bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "patcher",
+      agentHash: "agent_hash",
+      caseId: "case_001",
+      sample: 0,
+      status: "succeeded",
+      score: 0.7,
+      dockerImage: "node:22",
+      artifactIds: [],
+      traceIds: [],
+      createdAt: "2026-06-06T00:08:00.000Z",
+      startedAt: "2026-06-06T00:08:01.000Z",
+      finishedAt: "2026-06-06T00:08:02.000Z",
+      durationMs: 1000,
+    }, {
       id: "job_001",
       runId: "run_eval",
       kind: "eval",

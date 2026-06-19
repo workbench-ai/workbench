@@ -65,6 +65,7 @@ import {
   type WorkbenchEvalPreview,
   type WorkbenchImprovePreview,
   type WorkbenchLaunchReadiness,
+  type WorkbenchLaunchReadinessIssue,
   type WorkbenchOperationRequest,
   type WorkbenchPreparedCloudEvalRequest,
   type WorkbenchPreparedCloudImproveRequest,
@@ -3304,7 +3305,114 @@ async function cloudDryRunReadiness(
     };
   }
   const targets = cloudAdapterAuthTargetsFromPreview(preview);
-  return await cloudAdapterAuthReadiness({ baseUrl, targets });
+  const targetReadiness = await cloudHostedOperationTargetReadiness({ command, parsed, config, baseUrl });
+  const adapterReadiness = await cloudAdapterAuthReadiness({ baseUrl, targets });
+  return mergeLaunchReadiness(targetReadiness, adapterReadiness);
+}
+
+async function cloudHostedOperationTargetReadiness(input: {
+  command: "eval" | "improve";
+  parsed: ParsedArgs;
+  config: WorkbenchConfig;
+  baseUrl: string;
+}): Promise<WorkbenchLaunchReadiness> {
+  const root = path.resolve(dirFlag(input.parsed) ?? process.cwd());
+  let remote: WorkbenchRemote;
+  let linked = false;
+  try {
+    const link = await cloudRemoteLinkTarget(root);
+    linked = Boolean(link.existing);
+    remote = link.existing ?? await derivePublishCloudRemote(input.parsed, "workbench --cloud", link.name);
+  } catch (error) {
+    if (error instanceof WorkbenchCodedError) {
+      return readinessFromLaunchIssues([{
+        code: error.code,
+        message: error.message,
+        ...(error.remediation ? { remediation: error.remediation } : {}),
+        ...(error.subject ? { subject: error.subject } : {}),
+      }]);
+    }
+    throw error;
+  }
+
+  const source = parseWorkbenchInstallSource(remote.url);
+  if (!source) {
+    return readinessFromLaunchIssues([{
+      code: "remote_invalid_url",
+      message: `Workbench remote is not a Cloud skill URL: ${remote.url}`,
+      remediation: "workbench publish",
+      subject: { remote: remote.name, url: remote.url },
+    }]);
+  }
+
+  if (!linked && source.owner === input.config.username?.trim()) {
+    return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
+  }
+
+  const existing = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
+  if (existing) {
+    if (existing.ownerKind !== "organization") {
+      return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
+    }
+    return await cloudOrganizationHostedOperationReadiness(source.baseUrl, existing.ownerSlug ?? source.owner);
+  }
+
+  if (source.owner === input.config.username?.trim()) {
+    return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
+  }
+  return await cloudOrganizationHostedOperationReadiness(source.baseUrl, source.owner);
+}
+
+async function cloudOrganizationHostedOperationReadiness(
+  baseUrl: string,
+  organizationSlug: string,
+): Promise<WorkbenchLaunchReadiness> {
+  try {
+    await apiRequest<{ organization?: unknown }>(
+      `/api/workbench/organizations/${encodeURIComponent(organizationSlug)}`,
+      {},
+      baseUrl,
+    );
+    return readinessFromLaunchIssues([]);
+  } catch (error) {
+    if (error instanceof WorkbenchCodedError) {
+      return readinessFromLaunchIssues([{
+        code: error.code,
+        message: error.message,
+        ...(error.remediation ? { remediation: error.remediation } : {}),
+        ...(error.subject ? { subject: error.subject } : {}),
+      }]);
+    }
+    throw error;
+  }
+}
+
+function personalHostedOperationPlanIssue(
+  command: "eval" | "improve",
+  owner: string,
+  remoteName: string,
+): WorkbenchLaunchReadinessIssue {
+  return {
+    code: "plan_required",
+    message: `A Team or Enterprise organization plan is required to run hosted ${command} operations for ${owner}.`,
+    remediation: "workbench publish --as ORG/SKILL && workbench " + command + " --cloud",
+    subject: {
+      owner,
+      remote: remoteName,
+      ownerKind: "user",
+    },
+  };
+}
+
+function mergeLaunchReadiness(...readinesses: readonly WorkbenchLaunchReadiness[]): WorkbenchLaunchReadiness {
+  return readinessFromLaunchIssues(readinesses.flatMap((readiness) => readiness.issues));
+}
+
+function readinessFromLaunchIssues(issues: readonly WorkbenchLaunchReadinessIssue[]): WorkbenchLaunchReadiness {
+  return {
+    ready: issues.length === 0,
+    issues: [...issues],
+  };
 }
 
 function cloudAdapterAuthTargetsFromPreview(
@@ -5767,9 +5875,9 @@ async function getCloudSkillByHandle(
   owner: string,
   skill: string,
   signal?: AbortSignal,
-): Promise<{ id?: string; ownerSlug?: string; name?: string } | undefined> {
+): Promise<{ id?: string; ownerSlug?: string; ownerKind?: "user" | "organization"; name?: string } | undefined> {
   const params = new URLSearchParams({ owner, name: skill });
-  const listed = await apiRequest<{ skills?: Array<{ id?: string; ownerSlug?: string; name?: string }> }>(
+  const listed = await apiRequest<{ skills?: Array<{ id?: string; ownerSlug?: string; ownerKind?: "user" | "organization"; name?: string }> }>(
     `/api/workbench/skills?${params.toString()}`,
     { signal },
     baseUrl,
