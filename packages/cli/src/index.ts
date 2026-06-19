@@ -2049,7 +2049,7 @@ async function retryCloudRun(
       await recordWorkbenchLocalHostedRunFailure({
         ...remoteContext.core,
         run: prescheduledRunForCleanup,
-        error: singleLine(errorMessage(contextualError)),
+        error: hostedRunFailureMessage(contextualError),
       }).catch(() => undefined);
       throw contextualError;
     }
@@ -2677,7 +2677,9 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
       exitCode: 2,
     });
   }
-  const snapshot = await fetchWorkbenchInstallSourceSnapshot(workbenchSource, source);
+  const snapshot = await fetchWorkbenchInstallSourceSnapshot(workbenchSource, source, {
+    sourceVersionNotFoundRemediation: installCurrentPublishedSourceCommand(workbenchSource, sourceInput, parsed),
+  });
   const sourceSummary = workbenchInstallSourceSummary(workbenchSource, snapshot);
   const result = await installSnapshotToSkillTargets({
     snapshot,
@@ -2802,7 +2804,9 @@ async function handleClone(parsed: ParsedArgs, io: CliIo): Promise<number> {
       exitCode: 2,
     });
   }
-  const snapshot = await fetchWorkbenchInstallSourceSnapshot(workbenchSource, source);
+  const snapshot = await fetchWorkbenchInstallSourceSnapshot(workbenchSource, source, {
+    sourceVersionNotFoundRemediation: cloneCurrentPublishedSourceCommand(workbenchSource, sourceInput, destination),
+  });
   const sourceFiles = editableWorkbenchSourceFiles(snapshot);
   const authStoreRoot = adapterAuthStoreRoot();
   const root = await prepareCloneDestination(destination);
@@ -3039,14 +3043,14 @@ function formatInstallOutcome(
       return `Already installed ${result.skill} for ${targetSummary} (unchanged; dry run made no changes).`;
     }
     if (target.previous === "updated") {
-      return `Would update ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
+      return `Would update ${result.skill} for ${targetSummary} (dry run made no changes).`;
     }
     if (target.previous === "overwritten") {
       return target.requiresOverwrite
-        ? `Would require --yes to overwrite ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).${nextLine}`
-        : `Would overwrite ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
+        ? `Would require --yes to overwrite ${result.skill} for ${targetSummary} (dry run made no changes).${nextLine}`
+        : `Would overwrite ${result.skill} for ${targetSummary} (dry run made no changes).`;
     }
-    return `Would install ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
+    return `Would install ${result.skill} for ${targetSummary} (dry run made no changes).`;
   }
   if (result.result === "unchanged") {
     return `Already installed ${result.skill} for ${targetSummary} (unchanged).`;
@@ -3288,7 +3292,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       await recordWorkbenchLocalHostedRunFailure({
         dir: root,
         run: prescheduledRunForCleanup,
-        error: singleLine(errorMessage(contextualError)),
+        error: hostedRunFailureMessage(contextualError),
       }).catch(() => undefined);
       throw command === "improve" ? await cloudImproveErrorWithHostedRemediation(contextualError, parsed) : contextualError;
     }
@@ -3309,6 +3313,15 @@ function hostedRunErrorWithContext(error: unknown, runId: string): WorkbenchCode
     },
     exitCode: coded.exitCode,
   });
+}
+
+function hostedRunFailureMessage(error: unknown): string {
+  const coded = codedErrorFromUnknown(error);
+  return singleLine([
+    coded.message,
+    coded.remediation ? `Next: ${coded.remediation}.` : undefined,
+    typeof coded.subject?.requirement === "string" ? coded.subject.requirement : undefined,
+  ].filter(Boolean).join(" "));
 }
 
 async function cloudImproveErrorWithHostedRemediation(error: unknown, parsed: ParsedArgs): Promise<unknown> {
@@ -3682,6 +3695,7 @@ function personalHostedOperationPlanIssue(
   return {
     code: "plan_required",
     message: `A Team or Enterprise organization plan is required to run hosted ${command} operations for ${owner}.`,
+    remediation: `workbench publish --as ORG/SKILL && workbench ${command} --cloud`,
     subject: {
       owner,
       remote: remoteName,
@@ -4559,6 +4573,7 @@ function parseWorkbenchInstallSource(source: string): ParsedWorkbenchInstallSour
 async function fetchWorkbenchInstallSourceSnapshot(
   source: ParsedWorkbenchInstallSource,
   displaySource: string,
+  options: { sourceVersionNotFoundRemediation?: string } = {},
 ): Promise<WorkbenchInstallSourceSnapshot> {
   const token = await workbenchCloudToken({ baseUrl: source.baseUrl });
   const apiPath = source.version
@@ -4579,9 +4594,12 @@ async function fetchWorkbenchInstallSourceSnapshot(
         exitCode: response.status === 400 ? 2 : 1,
       });
     }
+    const remediation = cloudError.code === "source_version_not_found" && source.version
+      ? options.sourceVersionNotFoundRemediation ?? cloudError.remediation
+      : cloudError.remediation;
     throw new WorkbenchCodedError(cloudError.code, cloudError.message, {
       retryable: cloudError.retryable,
-      ...(cloudError.remediation ? { remediation: cloudError.remediation } : {}),
+      ...(remediation ? { remediation } : {}),
       ...(cloudError.subject ? { subject: cloudError.subject } : {}),
       exitCode: response.status === 400 ? 2 : 1,
     });
@@ -5252,13 +5270,45 @@ function parseWorkbenchCloudErrorBody(text: string): {
 
 function commandRemediationOrUndefined(remediation: string): string | undefined {
   const trimmed = remediation.trim();
-  if (!trimmed || /\bORG\/SKILL\b/u.test(trimmed)) {
+  if (!trimmed) {
     return undefined;
   }
   if (!/^(?:workbench|codex|claude|npm|mkdir)\b/u.test(trimmed) && !/^[A-Z_][A-Z0-9_]*=.*\bworkbench\b/u.test(trimmed)) {
     return undefined;
   }
   return trimmed;
+}
+
+function installCurrentPublishedSourceCommand(source: ParsedWorkbenchInstallSource, input: string, parsed: ParsedArgs): string {
+  const parts = ["workbench", "install", currentPublishedInstallSourceArgument(source, input)];
+  appendInstallTargetFlags(parts, parsed);
+  return parts.join(" ");
+}
+
+function cloneCurrentPublishedSourceCommand(source: ParsedWorkbenchInstallSource, input: string, destination: string): string {
+  return `workbench clone ${currentPublishedInstallSourceArgument(source, input)} ${shellQuote(destination)}`;
+}
+
+function currentPublishedInstallSourceArgument(source: ParsedWorkbenchInstallSource, input: string): string {
+  if (/^https?:\/\//u.test(input)) {
+    return `${source.baseUrl}/skills/${encodeURIComponent(source.owner)}/${encodeURIComponent(source.skill)}`;
+  }
+  return `${source.owner}/${source.skill}`;
+}
+
+function appendInstallTargetFlags(parts: string[], parsed: ParsedArgs): void {
+  const target = stringFlag(parsed, "target");
+  if (target) {
+    parts.push("--target", target);
+  }
+  const scope = stringFlag(parsed, "scope");
+  if (scope) {
+    parts.push("--scope", scope);
+  }
+  const dir = stringFlag(parsed, "dir");
+  if (dir) {
+    parts.push("--dir", shellQuote(dir));
+  }
 }
 
 function isTransientFetchError(error: unknown): boolean {
@@ -6839,6 +6889,14 @@ async function statusWithCausalNext(
   if ((lastRun?.status === "queued" || lastRun?.status === "running") && lastRun.id) {
     return { ...status, next: `workbench run watch ${displayRef(lastRun.id)}` };
   }
+  const cloudAuthMissing = auth.workbenchCloud.status !== "authenticated";
+  const cloudRemoteNeedsAuth = status.remotes.some((remote) =>
+    remote.kind === "workbench-cloud" &&
+    remote.sync.status === "auth_required"
+  );
+  if (cloudAuthMissing && cloudRemoteNeedsAuth) {
+    return { ...status, next: "workbench login" };
+  }
   if ((lastRun?.status === "failed" || lastRun?.status === "canceled") && lastRun.id) {
     return { ...status, next: `workbench show ${displayRef(lastRun.id)}` };
   }
@@ -6858,11 +6916,6 @@ async function statusWithCausalNext(
   if (promotedImproveVersionId) {
     return { ...status, next: `workbench switch ${displayRef(promotedImproveVersionId)}` };
   }
-  const cloudAuthMissing = auth.workbenchCloud.status !== "authenticated";
-  const cloudRemoteNeedsAuth = status.remotes.some((remote) =>
-    remote.kind === "workbench-cloud" &&
-    (remote.sync.status !== "up_to_date" || remote.publication.status === "unpublished")
-  );
   if (failedRemote) {
     return { ...status, next: `workbench sync ${failedRemote.name}` };
   }

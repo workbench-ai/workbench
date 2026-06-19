@@ -14,7 +14,14 @@ export function formatScore(value: number | null | undefined): string {
 }
 
 export function formatCost(value: number | null | undefined): string {
-  return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(4)}` : "n/a";
+  return typeof value === "number" && Number.isFinite(value)
+    ? new Intl.NumberFormat("en-US", {
+        currency: "USD",
+        maximumFractionDigits: 2,
+        minimumFractionDigits: 0,
+        style: "currency",
+      }).format(value)
+    : "n/a";
 }
 
 export function formatRunCost(run: Pick<WorkbenchRun, "costUsd" | "status" | "id"> | null | undefined): string {

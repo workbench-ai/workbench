@@ -12696,7 +12696,7 @@ function normalizeWorkbenchCloudError(error: {
 
 function cloudCommandRemediationOrUndefined(remediation: string | undefined): string | undefined {
   const trimmed = remediation?.trim();
-  if (!trimmed || /\bORG\/SKILL\b/u.test(trimmed)) {
+  if (!trimmed) {
     return undefined;
   }
   if (!/^(?:workbench|codex|claude|npm|mkdir)\b/u.test(trimmed) && !/^[A-Z_][A-Z0-9_]*=.*\bworkbench\b/u.test(trimmed)) {

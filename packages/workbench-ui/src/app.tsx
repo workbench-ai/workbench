@@ -157,6 +157,7 @@ import {
   formatEvaluationDisplayName,
   formatVersionDisplayName,
   missingCostLabelForStatus,
+  resultVersionGroupId,
   type ComparisonEvaluationOption,
   type ComparisonEvidenceRow,
   type ComparisonLabelContext,
@@ -1314,8 +1315,6 @@ function EvaluationResults({
   snapshot: WorkbenchInspectionSnapshot;
 }) {
   const sortedRows = useMemo(() => sortLeaderboardRows(rows), [rows]);
-  const runsById = useMemo(() => new Map(snapshot.runs.map((run) => [run.id, run])), [snapshot.runs]);
-  const jobsByRunId = useMemo(() => groupJobsByRunId(snapshot.jobs), [snapshot.jobs]);
   if (rows.length === 0) {
     return (
       <EmptyState
@@ -1333,90 +1332,141 @@ function EvaluationResults({
   return (
     <section className="grid min-w-0 gap-4" aria-label="Results">
       <EvaluationResultsVisualSummary rows={sortedRows} />
-      <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
-        <Table data-testid="evaluation-results-leaderboard" className="min-w-[52rem]">
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-[3rem]">#</TableHead>
-              <TableHead className="w-[16rem]">Version</TableHead>
-              <TableHead className="w-[12rem]">Agent</TableHead>
-              <TableHead className="w-[7.5rem]">Status</TableHead>
-              <TableHead className="w-[5.5rem]">Cases</TableHead>
-              <TableHead className="w-[5.5rem]">Quality</TableHead>
-              <TableHead className="w-[6.5rem]">Latency</TableHead>
-              <TableHead className="w-[8rem]">Cost</TableHead>
-              <TableHead className="w-[8.5rem]">When</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {sortedRows.map((row, index) => {
-              const run = row.runId ? runsById.get(row.runId) ?? null : null;
-              const jobs = run ? jobsByRunId.get(run.id) ?? [] : [];
-              const versionDetail = visibleLeaderboardVersionDetail(row);
-              const runRoute = row.runId
-                ? createRunRoute({ runId: row.runId, source: "evaluation", evaluationId })
-                : null;
-              return (
-                <TableRow
-                  key={row.rowId}
-                  className={runRoute ? "cursor-pointer" : undefined}
-                  onClick={runRoute ? onRouteClick(runRoute) : undefined}
-                >
-                  <TableCell className="align-top text-muted-foreground">{index + 1}</TableCell>
-                  <TableCell className="align-top">
-                    <div className="grid min-w-0 gap-1">
-                      {runRoute ? (
+      <EvaluationLeaderboard
+        evaluationId={evaluationId}
+        hrefFor={hrefFor}
+        onRouteClick={onRouteClick}
+        rows={sortedRows}
+        snapshot={snapshot}
+      />
+    </section>
+  );
+}
+
+export function EvaluationLeaderboard({
+  evaluationId = null,
+  hrefFor,
+  maxRows,
+  onRouteClick,
+  rows,
+  snapshot,
+}: {
+  evaluationId?: string | null;
+  hrefFor?: (route: WorkbenchRoute) => string;
+  maxRows?: number;
+  onRouteClick?: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  rows: ComparisonEvidenceRow[];
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const sorted = useMemo(() => sortLeaderboardRows(rows), [rows]);
+  const visible = useMemo(
+    () => (typeof maxRows === "number" ? sorted.slice(0, maxRows) : sorted),
+    [maxRows, sorted],
+  );
+  const groups = useMemo(() => buildLeaderboardGroups(visible), [visible]);
+  const runsById = useMemo(
+    () => new Map(snapshot.runs.map((run) => [run.id, run])),
+    [snapshot.runs],
+  );
+  const jobsByRunId = useMemo(() => groupJobsByRunId(snapshot.jobs), [snapshot.jobs]);
+  return (
+    <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+      <Table data-testid="evaluation-results-leaderboard" className="min-w-[49rem]">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="w-[12rem]">Agent</TableHead>
+            <TableHead className="w-[7.5rem]">Status</TableHead>
+            <TableHead className="w-[5.5rem]">Cases</TableHead>
+            <TableHead className="w-[5.5rem]">Quality</TableHead>
+            <TableHead className="w-[6.5rem]">Latency</TableHead>
+            <TableHead className="w-[8rem]">Cost</TableHead>
+            <TableHead className="w-[8.5rem]">When</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {groups.map((group) => (
+            <Fragment key={group.id}>
+              <TableRow data-testid="evaluation-results-version-group" className="hover:bg-transparent">
+                <TableCell colSpan={7} className="bg-muted/35 py-2 font-medium text-foreground">
+                  <span className="break-words [overflow-wrap:anywhere]">
+                    {group.label}
+                  </span>
+                </TableCell>
+              </TableRow>
+              {group.rows.map((row) => {
+                const run = row.runId ? runsById.get(row.runId) ?? null : null;
+                const jobs = run ? jobsByRunId.get(run.id) ?? [] : [];
+                const runRoute = hrefFor && onRouteClick && row.runId
+                  ? createRunRoute({ runId: row.runId, source: "evaluation", evaluationId })
+                  : null;
+                return (
+                  <TableRow
+                    key={row.rowId}
+                    className={runRoute ? "cursor-pointer" : undefined}
+                    onClick={runRoute ? onRouteClick?.(runRoute) : undefined}
+                  >
+                    <TableCell className="align-top">
+                      {runRoute && hrefFor ? (
                         <a
                           className="break-words font-medium text-primary underline-offset-4 hover:underline [overflow-wrap:anywhere]"
                           href={hrefFor(runRoute)}
-                          onClick={onRouteClick(runRoute)}
+                          onClick={onRouteClick?.(runRoute)}
                         >
-                          {row.versionLabel}
+                          {row.agentDetail}
                         </a>
                       ) : (
-                        <span className="break-words font-medium text-foreground [overflow-wrap:anywhere]">
-                          {row.versionLabel}
+                        <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">
+                          {row.agentDetail}
                         </span>
                       )}
-                      {versionDetail ? (
-                        <span className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                          {versionDetail}
-                        </span>
-                      ) : null}
-                      <div className="flex min-w-0 flex-wrap gap-1">
-                        {row.versionBadges.map((badge) => (
-                          <Badge key={badge} variant="outline" className="w-fit">
-                            {badge}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                  </TableCell>
-                  <TableCell className="align-top">
-                    <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">
-                      {row.agentDetail}
-                    </span>
-                  </TableCell>
-                  <TableCell className="align-top">
-                    {row.status ? (
-                      <StatusBadge status={row.status} />
-                    ) : (
-                      <Badge variant="outline">{row.statusLabel}</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="align-top text-muted-foreground">{formatLeaderboardCases(row, jobs)}</TableCell>
-                  <TableCell className="align-top font-medium">{formatScore(row.score)}</TableCell>
-                  <TableCell className="align-top text-muted-foreground">{formatDurationMs(row.latencyMs)}</TableCell>
-                  <TableCell className="align-top text-muted-foreground">{formatLeaderboardCost(row)}</TableCell>
-                  <TableCell className="align-top text-muted-foreground">{formatTimestamp(run?.finishedAt ?? run?.createdAt)}</TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
-    </section>
+                    </TableCell>
+                    <TableCell className="align-top">
+                      {row.status ? (
+                        <StatusBadge status={row.status} />
+                      ) : (
+                        <Badge variant="outline">{row.statusLabel}</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="align-top text-muted-foreground">{formatLeaderboardCases(row, jobs)}</TableCell>
+                    <TableCell className="align-top font-medium">{formatScore(row.score)}</TableCell>
+                    <TableCell className="align-top text-muted-foreground">{formatDurationMs(row.latencyMs)}</TableCell>
+                    <TableCell className="align-top text-muted-foreground">{formatLeaderboardCost(row)}</TableCell>
+                    <TableCell className="align-top text-muted-foreground">{formatTimestamp(run?.finishedAt ?? run?.createdAt)}</TableCell>
+                  </TableRow>
+                );
+              })}
+            </Fragment>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
   );
+}
+
+interface LeaderboardGroup {
+  id: string;
+  label: string;
+  rows: ComparisonEvidenceRow[];
+}
+
+function buildLeaderboardGroups(rows: readonly ComparisonEvidenceRow[]): LeaderboardGroup[] {
+  const rowsByGroup = new Map<string, ComparisonEvidenceRow[]>();
+  const groupLabels = new Map<string, string>();
+  for (const row of rows) {
+    const groupId = resultVersionGroupId(row);
+    const groupRows = rowsByGroup.get(groupId);
+    if (groupRows) {
+      groupRows.push(row);
+    } else {
+      rowsByGroup.set(groupId, [row]);
+      groupLabels.set(groupId, row.versionLabel);
+    }
+  }
+  return [...rowsByGroup.entries()].map(([id, groupRows]) => ({
+    id,
+    label: groupLabels.get(id) ?? groupRows[0]?.versionLabel ?? id,
+    rows: groupRows,
+  }));
 }
 
 function EvaluationSelect({
@@ -1493,14 +1543,6 @@ function formatLeaderboardCost(row: ComparisonEvidenceRow): string {
   return typeof row.costUsd === "number" && Number.isFinite(row.costUsd)
     ? formatCost(row.costUsd)
     : missingCostLabelForStatus(row.statusLabel, Boolean(row.runId));
-}
-
-function visibleLeaderboardVersionDetail(row: ComparisonEvidenceRow): string | null {
-  const detail = row.versionDetail.trim();
-  if (!detail || detail === "none" || detail.startsWith("local:")) {
-    return null;
-  }
-  return detail;
 }
 
 function compareOptionalNumber(

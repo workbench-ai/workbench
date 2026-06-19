@@ -1,7 +1,9 @@
 @import "./styles/preset.css";
 @import "./styles/extensions.css";
 @import "./styles/base.css";
-@source "./components/**/*.{ts,tsx}";
-@source "./lib/**/*.{ts,tsx}";
+@source "./components/**/*.ts";
+@source "./components/**/*.tsx";
+@source "./lib/**/*.ts";
+@source "./lib/**/*.tsx";
 @source "./node_modules/streamdown/dist/*.js";
 @source "./node_modules/@streamdown/code/dist/*.js";

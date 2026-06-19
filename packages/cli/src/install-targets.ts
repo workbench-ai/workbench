@@ -798,6 +798,7 @@ async function installPackageInRoot(args: {
   if (!args.dryRun && (previous !== "unchanged" || ledgerChanged)) {
     await writeInstallLedgerRecord(root, args.skillName, nextLedgerRecord);
   }
+  const filesCopied = !args.dryRun && previous !== "unchanged" ? args.files.length : 0;
   return {
     target: args.target.id,
     scope: args.target.scope,
@@ -808,7 +809,7 @@ async function installPackageInRoot(args: {
       ? requiresOverwrite ? "blocked" : "planned"
       : previous === "unchanged" && !ledgerChanged ? "unchanged" : "installed",
     ...(requiresOverwrite ? { requiresOverwrite: true, remediation: args.overwriteRemediation } : {}),
-    filesCopied: previous === "unchanged" ? 0 : args.files.length,
+    filesCopied,
     contentHash: args.contentHash,
     ledgerPath: installsPathForRoot(root),
   };

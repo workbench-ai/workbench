@@ -50,23 +50,37 @@ const TRADEOFF_CHART_HEIGHT = 320;
 export function EvaluationResultsVisualSummary({
   rows,
   dense = false,
+  metricIds,
+  showBarCharts = true,
+  showTradeoff = true,
 }: {
   rows: ComparisonEvidenceRow[];
   /**
-   * Compact layout for constrained surfaces: smaller metric charts and the
-   * tradeoff scatter omitted so the summary fits without scrolling.
+   * Compact layout for constrained surfaces: smaller metric charts so the
+   * summary fits without scrolling.
    */
   dense?: boolean;
+  /**
+   * Restrict the rendered metric charts to this set of ids (for example
+   * `["score", "costUsd"]`). When omitted, all primary metrics are shown.
+   */
+  metricIds?: readonly string[];
+  /** Render the per-metric bar charts. Defaults to true. */
+  showBarCharts?: boolean;
+  /** Render the metric tradeoff scatter chart. Defaults to true. */
+  showTradeoff?: boolean;
 }) {
   const groups = React.useMemo(() => buildVisualSummaryGroups(rows), [rows]);
   const groupColorById = React.useMemo(
     () => new Map(groups.map((group) => [group.id, group.color])),
     [groups],
   );
-  const metricDescriptors = React.useMemo(
-    () => selectPrimaryComparisonMetrics(buildComparisonMetricDescriptors(rows)),
-    [rows],
-  );
+  const metricDescriptors = React.useMemo(() => {
+    const primary = selectPrimaryComparisonMetrics(buildComparisonMetricDescriptors(rows));
+    return metricIds
+      ? primary.filter((descriptor) => metricIds.includes(descriptor.id))
+      : primary;
+  }, [metricIds, rows]);
   const chartDescriptors = React.useMemo(
     () => metricDescriptors.filter((descriptor) =>
       buildComparisonMetricData(rows, descriptor, groupColorById).length >= 2
@@ -91,7 +105,7 @@ export function EvaluationResultsVisualSummary({
       data-testid="evaluation-results-visual-summary"
     >
       <div className="grid min-w-0 gap-3">
-        {chartDescriptors.length > 0 ? (
+        {showBarCharts && chartDescriptors.length > 0 ? (
           <div className="grid min-w-0 gap-3">
             {chartDescriptors.map((descriptor) => (
               <EvaluationMetricBarChart
@@ -105,7 +119,7 @@ export function EvaluationResultsVisualSummary({
             ))}
           </div>
         ) : null}
-        {!dense && tradeoffPairs.length > 0 ? (
+        {showTradeoff && tradeoffPairs.length > 0 ? (
           <EvaluationTradeoffChart
             groupColorById={groupColorById}
             groups={groups}
@@ -336,6 +350,7 @@ function EvaluationTradeoffChart({
       <ChartContainer
         config={chartConfig}
         className="w-full min-w-0 !aspect-auto"
+        data-testid="evaluation-tradeoff-plot"
         style={{ aspectRatio: "auto", height: TRADEOFF_CHART_HEIGHT }}
       >
         <ScatterChart
@@ -378,27 +393,30 @@ function EvaluationTradeoffChart({
                 }}
                 formatter={(_value, _name, item) => {
                   const datum = item.payload as ComparisonTradeoffDatum;
-                  return (
-                    <div className="grid gap-1">
-                      {renderMetricTooltipLine(displayMetricLabel(pair.xMetric), datum.xDisplay)}
-                      {renderMetricTooltipLine(displayMetricLabel(pair.yMetric), datum.yDisplay)}
-                    </div>
-                  );
+                  if (item.dataKey === "x") {
+                    return renderMetricTooltipLine(displayMetricLabel(pair.xMetric), datum.xDisplay);
+                  }
+                  if (item.dataKey === "y") {
+                    return renderMetricTooltipLine(displayMetricLabel(pair.yMetric), datum.yDisplay);
+                  }
+                  return null;
                 }}
               />
             )}
             cursor={{ strokeDasharray: "3 3" }}
             isAnimationActive={false}
           />
-          {data.map((datum) => (
-            <Scatter
-              data={[datum]}
-              fill={datum.color}
-              isAnimationActive={false}
-              key={datum.rowId}
-              name={datum.rowLabel}
-            />
-          ))}
+          <Scatter
+            dataKey="y"
+            data={data}
+            fill="var(--chart-1)"
+            isAnimationActive={false}
+            name="Runs"
+          >
+            {data.map((datum) => (
+              <Cell fill={datum.color} key={datum.rowId} />
+            ))}
+          </Scatter>
         </ScatterChart>
       </ChartContainer>
     </section>

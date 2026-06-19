@@ -35,15 +35,16 @@ describe("format helpers", () => {
     expect(formatScore(null)).toBe("n/a");
   });
 
-  test("formatCost renders USD with four decimals", () => {
-    expect(formatCost(0.1234)).toBe("$0.1234");
-    expect(formatCost(0)).toBe("$0.0000");
+  test("formatCost renders USD with up to two decimals", () => {
+    expect(formatCost(0.1234)).toBe("$0.12");
+    expect(formatCost(0.126)).toBe("$0.13");
+    expect(formatCost(0)).toBe("$0");
     expect(formatCost(Number.POSITIVE_INFINITY)).toBe("n/a");
     expect(formatCost(undefined)).toBe("n/a");
   });
 
   test("formatRunCost explains missing usage states", () => {
-    expect(formatRunCost({ id: "run_cost", status: "succeeded", costUsd: 0.0123 })).toBe("$0.0123");
+    expect(formatRunCost({ id: "run_cost", status: "succeeded", costUsd: 0.0123 })).toBe("$0.01");
     expect(formatRunCost({ id: "run_failed", status: "failed" })).toBe("Failed before usage");
     expect(formatRunCost({ id: "run_no_usage", status: "succeeded" })).toBe("Not reported");
     expect(formatRunCost(null)).toBe("Not tested");

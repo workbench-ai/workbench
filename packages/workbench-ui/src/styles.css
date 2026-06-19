@@ -3,8 +3,10 @@
 @import "@xyflow/react/dist/style.css";
 
 @source "./app.tsx";
-@source "./components/**/*.{ts,tsx}";
-@source "./lib/**/*.{ts,tsx}";
+@source "./components/**/*.ts";
+@source "./components/**/*.tsx";
+@source "./lib/**/*.ts";
+@source "./lib/**/*.tsx";
 
 .workbench-loading-mark {
   overflow: visible;

@@ -35,7 +35,7 @@ await build({
 
 const cssInputPath = path.resolve(packageRoot, "..", "workbench-ui", "src", "styles.css");
 const css = await fs.readFile(cssInputPath, "utf8");
-const result = await postcss([tailwindcss()]).process(css, {
+const result = await postcss([tailwindcss({ base: path.dirname(cssInputPath) })]).process(css, {
   from: cssInputPath,
   to: path.join(outdir, "client.css"),
 });

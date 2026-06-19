@@ -1,6 +1,7 @@
 "use client";
 
 export {
+  EvaluationLeaderboard,
   WorkbenchWorkspace,
   type WorkbenchWorkspaceProps,
   buildEvaluationResultRows,
