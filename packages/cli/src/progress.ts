@@ -58,21 +58,54 @@ export function runProgressSnapshotFromRuns(input: RunProgressSnapshotInput): Wo
   const jobs = progressJobs(input.command, input.phase, input.jobs);
   const base = createWorkbenchRunSnapshot(request, input.runs, { jobs });
   const phase = runSnapshotPhase(input.phase, base.phase);
+  const status = runSnapshotStatus(input, base);
+  const measurements = status === "running" && base.status === "queued"
+    ? base.measurements.map((measurement) =>
+      measurement.status === "queued" ? { ...measurement, status } : measurement
+    )
+    : base.measurements;
   const nowMs = input.nowMs ?? terminalProgressObservedAtMs(phase, input.runs, jobs) ?? Date.now();
   const elapsedMs = Math.max(0, nowMs - input.startedAtMs);
   const partialScore = progressPartialScore(base, jobs);
   const evidenceCount = progressEvidenceCount(input.evidence);
+  const next = progressSnapshotNext(input.next, base);
   return {
     ...base,
+    status,
     phase,
+    measurements,
     progress: {
       ...base.progress,
       ...(partialScore !== undefined ? { partialScore } : {}),
       ...(evidenceCount !== undefined ? { evidenceCount } : {}),
       elapsedMs,
     },
-    ...(input.next ? { next: input.next } : {}),
+    ...(next ? { next } : {}),
   };
+}
+
+function runSnapshotStatus(
+  input: RunProgressSnapshotInput,
+  base: WorkbenchRunSnapshot,
+): WorkbenchRunSnapshot["status"] {
+  if (
+    input.location === "cloud" &&
+    base.status === "queued" &&
+    (input.phase === "preflight" || input.phase === "provider_auth" || input.phase === "sync")
+  ) {
+    return "running";
+  }
+  return base.status;
+}
+
+function progressSnapshotNext(
+  next: string | undefined,
+  base: WorkbenchRunSnapshot,
+): string | undefined {
+  if ((base.status === "failed" || base.status === "canceled") && /^workbench\s+show\b/u.test(next ?? "")) {
+    return undefined;
+  }
+  return next;
 }
 
 export function createProgressRenderer(input: {

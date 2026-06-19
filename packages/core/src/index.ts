@@ -4318,14 +4318,13 @@ export async function prepareWorkbenchCloudImproveRequest(
     if (runtime.cases.length === 0) {
       throw noEvalCasesError();
     }
-    const selectedEvidenceTraceIds = options.evidenceTraceIds?.length
-      ? new Set(options.evidenceTraceIds)
-      : null;
-    const historicalTraces = workbenchImprovementEvidenceTracesForVersion(state, {
+    const historicalTraces = improvementEvidenceTracesForImproveRequest(state, {
       versionId: base.id,
       skillName: skillBundle.skillName,
+      skillBundleHash: skillBundle.hash,
       evalHash: runtime.evalSnapshot.hash,
-      ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
+      agent: evalAgent,
+      traceIds: options.evidenceTraceIds,
     });
     const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
     if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
@@ -4672,6 +4671,41 @@ export function workbenchImprovementEvidenceTracesForVersion(
     }
     return true;
   }));
+}
+
+function improvementEvidenceTracesForImproveRequest(
+  state: WorkbenchProjectState,
+  options: {
+    versionId: string;
+    skillName: string;
+    skillBundleHash: string;
+    evalHash: string;
+    agent: WorkbenchAgent;
+    traceIds?: readonly string[];
+  },
+): WorkbenchTrace[] {
+  const explicitTraceIds = options.traceIds?.length ? options.traceIds : undefined;
+  if (!explicitTraceIds) {
+    const incumbent = bestScoredComparableRun({
+      runs: state.runs,
+      jobs: state.jobs,
+      versionId: options.versionId,
+      skillName: options.skillName,
+      skillBundleHash: options.skillBundleHash,
+      evalHash: options.evalHash,
+      agentName: options.agent.name,
+      agentHash: hashJson(options.agent),
+    });
+    if (typeof incumbent?.score === "number" && incumbent.score >= 1) {
+      return [];
+    }
+  }
+  return workbenchImprovementEvidenceTracesForVersion(state, {
+    versionId: options.versionId,
+    skillName: options.skillName,
+    evalHash: options.evalHash,
+    ...(explicitTraceIds ? { traceIds: explicitTraceIds } : {}),
+  });
 }
 
 function improvementEvidenceTraces(traces: readonly WorkbenchTrace[]): WorkbenchTrace[] {
@@ -5162,14 +5196,13 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
       upsertByHash(state.skillBundles, bundle);
     }
     upsertAgentSnapshots(state.agents, runtime.agents);
-    const selectedEvidenceTraceIds = options.evidenceTraceIds?.length
-      ? new Set(options.evidenceTraceIds)
-      : null;
-    const historicalTraces = workbenchImprovementEvidenceTracesForVersion(state, {
+    const historicalTraces = improvementEvidenceTracesForImproveRequest(state, {
       versionId: base.id,
       skillName: skillBundle.skillName,
+      skillBundleHash: skillBundle.hash,
       evalHash: runtime.evalSnapshot.hash,
-      ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
+      agent: evalAgent,
+      traceIds: options.evidenceTraceIds,
     });
     const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
     if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
@@ -5432,14 +5465,13 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
   if (runtime.cases.length === 0) {
     throw noEvalCasesError();
   }
-  const selectedEvidenceTraceIds = options.evidenceTraceIds?.length
-    ? new Set(options.evidenceTraceIds)
-    : null;
-  const historicalTraces = workbenchImprovementEvidenceTracesForVersion(state, {
+  const historicalTraces = improvementEvidenceTracesForImproveRequest(state, {
     versionId: base.id,
     skillName: skillBundle.skillName,
+    skillBundleHash: skillBundle.hash,
     evalHash: runtime.evalSnapshot.hash,
-    ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
+    agent: evalAgent,
+    traceIds: options.evidenceTraceIds,
   });
   const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
   if (improvementEvidence.length === 0) {
@@ -6127,7 +6159,7 @@ function runSnapshotNext(run: WorkbenchRun): string | undefined {
     return `workbench run watch ${run.id}`;
   }
   if (run.status === "failed" || run.status === "canceled") {
-    return `workbench show ${run.id}`;
+    return undefined;
   }
   return run.kind === "improve" ? "workbench eval --rerun -n 5" : "workbench compare";
 }

@@ -3307,7 +3307,7 @@ describe("workbench skill-first CLI", () => {
       });
       expect(progress[0]).toMatchObject({
         schema: "workbench.run.v1",
-        status: "queued",
+        status: "running",
         phase: "planning",
         variant: "cloud",
       });
@@ -3770,7 +3770,7 @@ describe("workbench skill-first CLI", () => {
       expect(progress[0]).toMatchObject({
         schema: "workbench.run.v1",
         id: retryRunId,
-        status: "queued",
+        status: "running",
         phase: "planning",
         variant: "cloud",
       });
@@ -3862,7 +3862,7 @@ describe("workbench skill-first CLI", () => {
       const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string }>(retried);
       expect(progress[0]).toMatchObject({
         schema: "workbench.run.v1",
-        status: "queued",
+        status: "running",
         phase: "planning",
         variant: "cloud",
       });
@@ -4473,6 +4473,41 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
+  test("improve dry-run ignores stale below-perfect evidence after selected agent has perfect current eval", async () => {
+    const root = await makeTempRoot("workbench-cli-improve-perfect-current-evidence-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const agentAdd = await invoke([
+      "agent",
+      "add",
+      "improver",
+      "--dir",
+      root,
+      "--adapter",
+      "command",
+      "--with",
+      "improveCommand=printf improved >> \"$SKILL_DIR/SKILL.md\"",
+    ]);
+    expect(agentAdd.code, agentAdd.stdout || agentAdd.stderr).toBe(0);
+    await seedFailedImproveEvidence(root, "improver", { status: "succeeded", score: 0.5 });
+
+    const beforePerfect = await invoke(["improve", "--dir", root, "--agents", "improver", "--dry-run", "--json"]);
+    expect(beforePerfect.code, beforePerfect.stdout || beforePerfect.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(beforePerfect).next).toBe("workbench improve --agents 'improver'");
+
+    const perfectEval = await invoke(["eval", "--dir", root, "--agents", "improver", "--rerun", "--json"]);
+    expect(perfectEval.code, perfectEval.stdout || perfectEval.stderr).toBe(0);
+    expect(stdoutJson<{ run: { result: { score?: number } } }>(perfectEval).run.result.score).toBe(1);
+
+    const afterPerfect = await invoke(["improve", "--dir", root, "--agents", "improver", "--dry-run", "--json"]);
+    expect(afterPerfect.code, afterPerfect.stdout || afterPerfect.stderr).toBe(2);
+    expect(stdoutJson(afterPerfect)).toMatchObject({
+      ok: false,
+      code: "improve_evidence_required",
+      remediation: "workbench case draft 'case-002'",
+    });
+    expect(afterPerfect.stdout).not.toContain("workbench improve --agents");
+  });
+
   test("perfect-only default evidence teaches case drafting before adapter setup", async () => {
     const root = await makeTempRoot("workbench-cli-perfect-default-improve-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -4624,7 +4659,7 @@ describe("workbench skill-first CLI", () => {
       expect(progress).toHaveLength(1);
       expect(progress[0]).toMatchObject({
         schema: "workbench.run.v1",
-        status: "queued",
+        status: "running",
         phase: "planning",
         variant: "cloud",
       });

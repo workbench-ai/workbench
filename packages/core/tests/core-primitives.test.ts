@@ -316,6 +316,44 @@ describe("workbench execution DAG scheduler", () => {
     ]);
   });
 
+  test("terminal failed and canceled run snapshots do not point back to themselves", () => {
+    const base: WorkbenchRun = {
+      id: "run_terminal",
+      kind: "eval",
+      versionId: "v001",
+      skillName: "primary",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      status: "failed",
+      jobIds: [],
+      traceIds: [],
+      createdAt: "2026-06-16T00:00:00.000Z",
+      finishedAt: "2026-06-16T00:00:01.000Z",
+    };
+
+    const failed = createWorkbenchRunSnapshot({
+      kind: "eval",
+      variant: "local",
+      versionId: "v001",
+      evalHash: "eval_hash",
+      skill: "primary",
+      agent: "default",
+    }, [base]);
+    const canceled = createWorkbenchRunSnapshot({
+      kind: "eval",
+      variant: "local",
+      versionId: "v001",
+      evalHash: "eval_hash",
+      skill: "primary",
+      agent: "default",
+    }, [{ ...base, status: "canceled" }]);
+
+    expect(failed).not.toHaveProperty("next");
+    expect(canceled).not.toHaveProperty("next");
+  });
+
   test("local web operation defaults keep CLI current-source semantics", () => {
     const snapshot = actionCapabilitySnapshot();
     const local = createWorkbenchActionCapabilities(snapshot, {

@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench-contract",
-  "version": "0.0.166",
+  "version": "0.0.167",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/workbench-ai/workbench.git",
