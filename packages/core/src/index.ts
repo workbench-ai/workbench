@@ -12335,13 +12335,35 @@ function normalizeWorkbenchCloudError(error: {
     error.subject?.visibility === "internal" &&
     /\b(?:internal|team) source visibility requires an organization-owned skill\b/iu.test(error.message)
   ) {
+    const remediation = cloudCommandRemediationOrUndefined(error.remediation);
+    const { remediation: _staleRemediation, ...rest } = error;
     return {
-      ...error,
+      ...rest,
       message: "Team source visibility requires an organization-owned skill.",
+      ...(remediation ? { remediation } : {}),
       subject: { ...error.subject, visibility: "team" },
     };
   }
-  return error;
+  const remediation = cloudCommandRemediationOrUndefined(error.remediation);
+  if (remediation === error.remediation) {
+    return error;
+  }
+  const { remediation: _staleRemediation, ...rest } = error;
+  return {
+    ...rest,
+    ...(remediation ? { remediation } : {}),
+  };
+}
+
+function cloudCommandRemediationOrUndefined(remediation: string | undefined): string | undefined {
+  const trimmed = remediation?.trim();
+  if (!trimmed || /\bORG\/SKILL\b/u.test(trimmed)) {
+    return undefined;
+  }
+  if (!/^(?:workbench|codex|claude|npm|mkdir)\b/u.test(trimmed) && !/^[A-Z_][A-Z0-9_]*=.*\bworkbench\b/u.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
 }
 
 function encodeHttpRemoteJsonBody(body: unknown): {

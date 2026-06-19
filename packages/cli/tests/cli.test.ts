@@ -1335,7 +1335,8 @@ describe("workbench skill-first CLI", () => {
       kind: "provider",
     });
     expect(createdJson.result.defaultAgentSelection.reason).toMatch(/codex|product_default/u);
-    expect(createdJson.next).toBe(`cd ${shellQuote(root)} && ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`);
+    expect(createdJson.result.defaultAgentSelection.readiness.setupCommands.length).toBeGreaterThan(0);
+    expect(createdJson.next).toBe(createdJson.result.defaultAgentSelection.readiness.setupCommands[0]);
     expect(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND).toBe("workbench case draft 'case-001'");
     expect(createdJson.setupCommands.every((command) => typeof command === "string")).toBe(true);
     const newStatus = await invoke(["status", "--dir", root, "--json"]);
@@ -2364,6 +2365,61 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench compare");
   });
 
+  test("logged-out Cloud status reports auth_required instead of actionable local_changes", async () => {
+    const root = await makeTempRoot("workbench-cli-status-cloud-auth-required-");
+    const configRoot = await makeTempRoot("workbench-cli-status-cloud-auth-required-config-");
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(configRoot, "missing-config.json"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", "");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+    const evalResult = await invoke(["eval", "--dir", root, "--json"]);
+    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
+    const currentVersionId = stdoutJson<{ run: { plan: { versionId: string } } }>(evalResult).run.plan.versionId;
+
+    const remoteUrl = "https://cloud.test/skills/alice/status-skill";
+    await addWorkbenchRemote("cloud", remoteUrl, { dir: root });
+    const syncedAt = "2026-06-11T00:00:00.000Z";
+    await fs.mkdir(path.join(root, ".workbench", "sync"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "sync", "cloud.json"), JSON.stringify({
+      schema: "workbench.remote-sync-state.v1",
+      remote: "cloud",
+      url: remoteUrl,
+      status: "synced",
+      lastSyncedAt: syncedAt,
+      lastAttemptAt: syncedAt,
+      lastError: null,
+    }, null, 2));
+    await writeRef(root, "remotes/cloud/publication/current-version", currentVersionId);
+    await writeRef(root, `remotes/cloud/publication/versions/${currentVersionId}`, currentVersionId);
+    await writeRef(root, "remotes/cloud/publication/visibility", "private");
+    await writeRef(root, "remotes/cloud/publication/install-handle", "alice/status-skill");
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nLogged out edit.\n");
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{
+      next: string | null;
+      remotes: Array<{ name: string; sync: { status: string; lastError: { code: string; message: string } | null } }>;
+    }>(status)).toMatchObject({
+      next: "workbench login",
+      remotes: [expect.objectContaining({
+        name: "cloud",
+        sync: expect.objectContaining({
+          status: "auth_required",
+          lastError: {
+            code: "auth_required",
+            message: "Log in to reconcile Workbench Cloud sync state.",
+          },
+        }),
+      })],
+    });
+    const human = await invoke(["status", "--dir", root]);
+    expect(human.stdout).toContain("sync=auth_required");
+    expect(human.stdout).toContain("next: workbench login");
+  });
+
   test("status recommends eval before login when the current version has no scored proof", async () => {
     const root = await makeTempRoot("workbench-cli-status-current-proof-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "missing-config.json");
@@ -3178,11 +3234,11 @@ describe("workbench skill-first CLI", () => {
           issues: [
             {
               code: "plan_required",
-              remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
               subject: {
                 owner: "alice",
                 remote: "cloud",
                 ownerKind: "user",
+                requirement: "Publish under an organization-owned skill with an active Team or Enterprise plan, then rerun the hosted command.",
               },
             },
           ],
@@ -3193,17 +3249,25 @@ describe("workbench skill-first CLI", () => {
         issues: [
           {
             code: "plan_required",
-            remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
             subject: {
               owner: "alice",
               remote: "cloud",
               ownerKind: "user",
+              requirement: "Publish under an organization-owned skill with an active Team or Enterprise plan, then rerun the hosted command.",
             },
           },
         ],
       },
-      next: "workbench publish --as ORG/SKILL",
+      next: null,
     });
+    const dryRunJson = stdoutJson<{
+      readiness: { issues: Array<{ code: string; remediation?: string }> };
+      plan: { readiness: { issues: Array<{ code: string; remediation?: string }> } };
+    }>(dryRun);
+    expect(dryRunJson.plan.readiness.issues.find((issue) => issue.code === "plan_required"))
+      .not.toHaveProperty("remediation");
+    expect(dryRunJson.readiness.issues.find((issue) => issue.code === "plan_required"))
+      .not.toHaveProperty("remediation");
     expect(stdoutJson(dryRun).plan).not.toHaveProperty("adapterAuthTargets");
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", root, "--json"])).entries).toEqual([]);
   });
@@ -3248,7 +3312,7 @@ describe("workbench skill-first CLI", () => {
 
     expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
     const body = stdoutJson<{
-      readiness: { ready: boolean; issues: Array<{ code: string; remediation: string }> };
+      readiness: { ready: boolean; issues: Array<{ code: string; remediation?: string; subject?: Record<string, unknown> }> };
       next: string | null;
     }>(dryRun);
     expect(body.readiness).toMatchObject({
@@ -3266,10 +3330,17 @@ describe("workbench skill-first CLI", () => {
         },
         {
           code: "plan_required",
-          remediation: "workbench publish --as ORG/SKILL && workbench improve --cloud",
+          subject: {
+            owner: "alice",
+            remote: "cloud",
+            ownerKind: "user",
+            requirement: "Publish under an organization-owned skill with an active Team or Enterprise plan, then rerun the hosted command.",
+          },
         },
       ],
     });
+    expect(body.readiness.issues.find((issue) => issue.code === "plan_required"))
+      .not.toHaveProperty("remediation");
     expect(body.next).toBe("codex login --device-auth");
   });
 
@@ -3944,15 +4015,16 @@ describe("workbench skill-first CLI", () => {
         phase: "planning",
         variant: "cloud",
       });
-      expect(stdoutJson(retried)).toMatchObject({
+      const retriedJson = stdoutJson(retried);
+      expect(retriedJson).toMatchObject({
         ok: false,
         code: "plan_required",
         runId: progress[0]!.id,
-        remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
         subject: {
           runId: progress[0]!.id,
         },
       });
+      expect(retriedJson).not.toHaveProperty("remediation");
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -6633,13 +6705,14 @@ describe("workbench skill-first CLI", () => {
       const publish = await invoke(["publish", "--as", "alice/team-wording", "--team", "--dir", root, "--json"]);
 
       expect(publish.code, publish.stdout || publish.stderr).toBe(2);
-      expect(stdoutJson(publish)).toMatchObject({
+      const body = stdoutJson(publish);
+      expect(body).toMatchObject({
         ok: false,
         code: "validation_failed",
         message: "Team source visibility requires an organization-owned skill.",
-        remediation: "workbench publish --as ORG/SKILL --team",
         subject: { owner: "alice", visibility: "team" },
       });
+      expect(body).not.toHaveProperty("remediation");
       expect(publish.stdout).not.toContain("internal source visibility requires");
     } finally {
       if (previousConfig === undefined) {
@@ -6864,7 +6937,7 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
-  test("install names the target directory by frontmatter identity when it differs from the handle", async () => {
+  test("install names the target directory by the published handle when frontmatter differs", async () => {
     const root = await makeTempRoot("workbench-cli-install-identity-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
     const previousConfig = process.env.WORKBENCH_CONFIG;
@@ -6904,17 +6977,17 @@ describe("workbench skill-first CLI", () => {
         schema: "workbench.cli.install.v3",
         ok: true,
         result: "installed",
-        skill: "branded-skill",
+        skill: "private-skill",
         targets: [expect.objectContaining({
           target: "codex",
-          destination: path.join(root, ".agents", "skills", "branded-skill"),
+          destination: path.join(root, ".agents", "skills", "private-skill"),
         })],
       });
-      await expect(fs.readFile(path.join(root, ".agents", "skills", "branded-skill", "SKILL.md"), "utf8")).resolves.toBe(brandedMarkdown);
+      await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8")).resolves.toBe(brandedMarkdown);
       const provenance = JSON.parse(await fs.readFile(path.join(root, ".agents", "skills", ".workbench-installs.json"), "utf8")) as {
         skills: Record<string, { handle: string }>;
       };
-      expect(provenance.skills["branded-skill"]).toMatchObject({ handle: "alice/private-skill" });
+      expect(provenance.skills["private-skill"]).toMatchObject({ handle: "alice/private-skill" });
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -8430,7 +8503,9 @@ describe("workbench skill-first CLI", () => {
     expect(first.code).toBe(0);
     expect(stdoutJson(first)).toMatchObject({ result: "installed", filesCopied: 1 });
     const installedPath = path.join(root, ".agents", "skills", "private-skill", "SKILL.md");
+    const ledgerPath = path.join(root, ".agents", "skills", ".workbench-installs.json");
     await expect(fs.readFile(installedPath, "utf8")).resolves.toBe(privateSkillMarkdown);
+    const ledgerAfterFirstInstall = await fs.readFile(ledgerPath, "utf8");
 
     const second = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
     expect(second.code).toBe(0);
@@ -8442,6 +8517,7 @@ describe("workbench skill-first CLI", () => {
         destination: path.join(root, ".agents", "skills", "private-skill"),
       })],
     });
+    await expect(fs.readFile(ledgerPath, "utf8")).resolves.toBe(ledgerAfterFirstInstall);
     const dryRun = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run", "--json"]);
     expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
     expect(stdoutJson(dryRun)).toMatchObject({

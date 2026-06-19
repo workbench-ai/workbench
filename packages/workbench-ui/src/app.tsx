@@ -172,14 +172,6 @@ export interface WorkbenchWorkspaceProps {
   initialEnvelope?: WorkbenchInspectionSnapshotEnvelope | null;
   initialRoute?: WorkbenchRoute;
   hostContext?: WorkbenchHostContext;
-  /**
-   * Render the workspace as an inert, self-contained surface for embedding
-   * (for example in a marketing page). When true, the workspace renders from
-   * `initialEnvelope` only: it does not sync the browser URL/history, listen to
-   * `popstate`, poll for live state, or render the shell header. Defaults to
-   * false, which preserves the full-page application behavior.
-   */
-  embedded?: boolean;
 }
 
 export interface WorkbenchHostContext {
@@ -242,11 +234,9 @@ const VERSION_HISTORY_VIEW_ITEMS: Array<{
 function useWorkbenchInspection({
   apiBasePath,
   initialEnvelope,
-  live = true,
 }: {
   apiBasePath: string;
   initialEnvelope: WorkbenchInspectionSnapshotEnvelope | null;
-  live?: boolean;
 }): {
   cursor: string | null;
   error: string | null;
@@ -301,7 +291,7 @@ function useWorkbenchInspection({
   }, [apiBasePath, initialEnvelope, refreshKey]);
 
   useEffect(() => {
-    if (!live || !envelope?.cursor) {
+    if (!envelope?.cursor) {
       return;
     }
     let cancelled = false;
@@ -380,7 +370,7 @@ function useWorkbenchInspection({
       waitController?.abort();
       eventSource?.close();
     };
-  }, [apiBasePath, envelope?.cursor, live]);
+  }, [apiBasePath, envelope?.cursor]);
 
   return {
     cursor: envelope?.cursor ?? null,
@@ -437,7 +427,6 @@ export function WorkbenchWorkspace({
   initialEnvelope = null,
   initialRoute,
   hostContext,
-  embedded = false,
 }: WorkbenchWorkspaceProps) {
   const {
     cursor: inspectionCursor,
@@ -447,7 +436,7 @@ export function WorkbenchWorkspace({
     refreshing,
     actions,
     snapshot,
-  } = useWorkbenchInspection({ apiBasePath, initialEnvelope, live: !embedded });
+  } = useWorkbenchInspection({ apiBasePath, initialEnvelope });
   const [route, setRoute] = useState<WorkbenchRoute>(() =>
     initialRoute ?? parseWorkbenchLocation(undefined, routeBasePath));
   const [routePending, startRouteTransition] = useTransition();
@@ -468,34 +457,24 @@ export function WorkbenchWorkspace({
   }, []);
 
   useEffect(() => {
-    if (embedded) {
-      return;
-    }
     const updateRoute = () => setRoute(parseWorkbenchLocation(undefined, routeBasePath));
     updateRoute();
     window.addEventListener("popstate", updateRoute);
     return () => window.removeEventListener("popstate", updateRoute);
-  }, [embedded, routeBasePath]);
+  }, [routeBasePath]);
 
   const hrefFor = useCallback(
     (nextRoute: WorkbenchRoute) => buildWorkbenchLocationHref(nextRoute, routeBasePath),
     [routeBasePath],
   );
   useEffect(() => {
-    if (embedded) {
-      return;
-    }
     const canonicalHref = hrefFor(route);
     const current = `${window.location.pathname}${window.location.search}`;
     if (current !== canonicalHref) {
       window.history.replaceState({}, "", canonicalHref);
     }
-  }, [embedded, hrefFor, route]);
+  }, [hrefFor, route]);
   const navigate = useCallback((nextRoute: WorkbenchRoute, options: { replace?: boolean } = {}) => {
-    if (embedded) {
-      startRouteTransition(() => setRoute(nextRoute));
-      return;
-    }
     const href = hrefFor(nextRoute);
     const current = `${window.location.pathname}${window.location.search}`;
     startRouteTransition(() => {
@@ -504,7 +483,7 @@ export function WorkbenchWorkspace({
       }
       setRoute(nextRoute);
     });
-  }, [embedded, hrefFor, startRouteTransition]);
+  }, [hrefFor, startRouteTransition]);
   const onRouteClick = useCallback((nextRoute: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
@@ -518,7 +497,7 @@ export function WorkbenchWorkspace({
     navigate(routeForWorkbenchRunSnapshot(started));
   }, [navigate, refreshSnapshot]);
 
-  const header = embedded ? null : (
+  const header = (
     <WorkbenchShellHeader
       brandHref={brandHref}
       error={error}

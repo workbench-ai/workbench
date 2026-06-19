@@ -610,7 +610,7 @@ export interface WorkbenchStatusSnapshot {
     kind: WorkbenchRemoteKind;
     url: string;
     sync: {
-      status: "up_to_date" | "local_changes" | "error" | "never";
+      status: "up_to_date" | "local_changes" | "auth_required" | "error" | "never";
       lastSyncedAt?: string;
       lastAttemptAt?: string;
       lastError?: {

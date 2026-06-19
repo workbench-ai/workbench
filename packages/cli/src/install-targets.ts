@@ -403,6 +403,9 @@ export function installPackageFiles(files: readonly SurfaceSnapshotFile[]): Surf
 }
 
 export function canonicalSkillDirectoryName(snapshot: WorkbenchInstallSnapshot): string {
+  if (isValidDirectoryName(snapshot.name.trim())) {
+    return installStoreSkillDirectoryName(snapshot.name);
+  }
   const skillFile = snapshot.files.find((file) => normalizeInstallSnapshotPath(file.path) === "SKILL.md");
   if (skillFile && skillFile.encoding !== "base64") {
     const metadata = parseSkillMetadata(skillFile.content);
@@ -780,18 +783,20 @@ async function installPackageInRoot(args: {
       exitCode: 1,
     });
   }
+  const nextLedgerRecord: WorkbenchInstallLedgerRecord = {
+    ...args.provenance,
+    targetId: args.target.id,
+    skillName: args.skillName,
+    installedAt: record?.installedAt ?? args.installedAt ?? new Date().toISOString(),
+    contentHash: args.contentHash,
+  };
+  const ledgerChanged = !record || !installLedgerRecordEquals(record, nextLedgerRecord);
   if (!args.dryRun && previous !== "unchanged") {
     await fs.rm(destination, { recursive: true, force: true });
     await writeSnapshotFiles(destination, args.files);
   }
-  if (!args.dryRun) {
-    await writeInstallLedgerRecord(root, args.skillName, {
-      ...args.provenance,
-      targetId: args.target.id,
-      skillName: args.skillName,
-      installedAt: args.installedAt ?? new Date().toISOString(),
-      contentHash: args.contentHash,
-    });
+  if (!args.dryRun && (previous !== "unchanged" || ledgerChanged)) {
+    await writeInstallLedgerRecord(root, args.skillName, nextLedgerRecord);
   }
   return {
     target: args.target.id,
@@ -799,7 +804,9 @@ async function installPackageInRoot(args: {
     root,
     destination,
     previous,
-    result: args.dryRun ? requiresOverwrite ? "blocked" : "planned" : previous === "unchanged" ? "unchanged" : "installed",
+    result: args.dryRun
+      ? requiresOverwrite ? "blocked" : "planned"
+      : previous === "unchanged" && !ledgerChanged ? "unchanged" : "installed",
     ...(requiresOverwrite ? { requiresOverwrite: true, remediation: args.overwriteRemediation } : {}),
     filesCopied: previous === "unchanged" ? 0 : args.files.length,
     contentHash: args.contentHash,
@@ -859,6 +866,19 @@ function validLedgerRecord(value: unknown, targetId?: SkillAccessTargetId): Work
     return null;
   }
   return { targetId: parsedTarget, handle, versionId, baseUrl, skillName, installedAt, contentHash };
+}
+
+function installLedgerRecordEquals(
+  left: WorkbenchInstallLedgerRecord,
+  right: WorkbenchInstallLedgerRecord,
+): boolean {
+  return left.handle === right.handle &&
+    left.versionId === right.versionId &&
+    left.baseUrl === right.baseUrl &&
+    left.targetId === right.targetId &&
+    left.skillName === right.skillName &&
+    left.installedAt === right.installedAt &&
+    left.contentHash === right.contentHash;
 }
 
 async function writeInstallLedgerRecord(

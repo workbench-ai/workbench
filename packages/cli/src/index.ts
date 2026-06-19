@@ -587,7 +587,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         auth: stringFlag(parsed, "auth"),
         adapterAuthStoreRoot: adapterAuthStoreRoot(),
       });
-      const next = projectScopedNextCommand(status.root, WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
+      const next = newProjectNextCommand(status.root, status);
       return emitResult("workbench.cli.new.v1", {
         result: status as unknown as Json,
         defaultAgent: status.defaultAgentSelection as unknown as Json,
@@ -610,7 +610,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         auth: stringFlag(parsed, "auth"),
         adapterAuthStoreRoot: adapterAuthStoreRoot(),
       });
-      const next = projectScopedNextCommand(status.root, WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
+      const next = newProjectNextCommand(status.root, status);
       return emitResult("workbench.cli.init.v1", {
         result: status as unknown as Json,
         defaultAgent: status.defaultAgentSelection as unknown as Json,
@@ -976,6 +976,17 @@ function formatInitResult(status: WorkbenchStatus, next: string | null): string 
     "Add eval cases under .workbench/cases before running eval.",
     ...(next ? [`next: ${next}`] : []),
   ].filter(Boolean).join("\n");
+}
+
+function newProjectNextCommand(projectRoot: string, status: WorkbenchStatus): string | null {
+  const selection = status.defaultAgentSelection;
+  if (selection?.kind === "provider" && selection.readiness.state !== "ready") {
+    const setupCommand = selection.readiness.setupCommands.find((command) => command.trim().length > 0);
+    if (setupCommand) {
+      return setupCommand;
+    }
+  }
+  return projectScopedNextCommand(projectRoot, WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
 }
 
 function formatCloneResult(
@@ -1507,9 +1518,10 @@ function formatLaunchReadinessLines(readiness: WorkbenchLaunchReadiness): string
 
 async function handleStatus(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const core = await coreOptions(parsed);
-  const status = await workbenchStatusSnapshot(core);
+  const baseStatus = await workbenchStatusSnapshot(core);
   const auth = await workbenchCliAuthStatus();
   const machine = await workbenchMachineStatus(auth, core);
+  const status = statusWithCloudAuthContext(baseStatus, auth);
   const inspection = status.project.initialized
     ? await createWorkbenchReadOnlyInspectionSnapshot(core).catch(() => null)
     : null;
@@ -3684,11 +3696,11 @@ function personalHostedOperationPlanIssue(
   return {
     code: "plan_required",
     message: `A Team or Enterprise organization plan is required to run hosted ${command} operations for ${owner}.`,
-    remediation: `workbench publish --as ORG/SKILL && workbench ${command} --cloud`,
     subject: {
       owner,
       remote: remoteName,
       ownerKind: "user",
+      requirement: "Publish under an organization-owned skill with an active Team or Enterprise plan, then rerun the hosted command.",
     },
   };
 }
@@ -5237,16 +5249,30 @@ function parseWorkbenchCloudErrorBody(text: string): {
       return null;
     }
     const subject = asRecord(record.subject);
+    const remediation = typeof record.remediation === "string"
+      ? commandRemediationOrUndefined(record.remediation)
+      : undefined;
     return {
       code: record.code,
       message: record.message,
       retryable: record.retryable === true,
-      ...(typeof record.remediation === "string" ? { remediation: record.remediation } : {}),
+      ...(remediation ? { remediation } : {}),
       ...(subject ? { subject: subject as Record<string, Json> } : {}),
     };
   } catch {
     return null;
   }
+}
+
+function commandRemediationOrUndefined(remediation: string): string | undefined {
+  const trimmed = remediation.trim();
+  if (!trimmed || /\bORG\/SKILL\b/u.test(trimmed)) {
+    return undefined;
+  }
+  if (!/^(?:workbench|codex|claude|npm|mkdir)\b/u.test(trimmed) && !/^[A-Z_][A-Z0-9_]*=.*\bworkbench\b/u.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
 }
 
 function isTransientFetchError(error: unknown): boolean {
@@ -6673,6 +6699,34 @@ function statusWithActiveRunProgress(
   };
 }
 
+function statusWithCloudAuthContext(
+  status: WorkbenchStatusSnapshotForCli,
+  auth: WorkbenchCliAuthStatus,
+): WorkbenchStatusSnapshotForCli {
+  if (auth.workbenchCloud.status === "authenticated") {
+    return status;
+  }
+  let changed = false;
+  const remotes = status.remotes.map((remote) => {
+    if (remote.kind !== "workbench-cloud" || remote.sync.status !== "local_changes") {
+      return remote;
+    }
+    changed = true;
+    return {
+      ...remote,
+      sync: {
+        ...remote.sync,
+        status: "auth_required" as const,
+        lastError: {
+          code: "auth_required",
+          message: "Log in to reconcile Workbench Cloud sync state.",
+        },
+      },
+    };
+  });
+  return changed ? { ...status, remotes } : status;
+}
+
 function scoredRunValue(run: WorkbenchRun): number | undefined {
   return typeof run.score === "number" ? run.score : undefined;
 }
@@ -8051,7 +8105,7 @@ function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
         : "publication=unpublished";
       return [
         `  ${remote.name}\tkind=${remote.kind}\tsync=${remote.sync.status}\turl=${remote.url}\t${publication}`,
-        ...(remote.sync.status === "error" && remote.sync.lastError
+        ...((remote.sync.status === "error" || remote.sync.status === "auth_required") && remote.sync.lastError
           ? [
             `    error[${remote.sync.lastError.code}]: ${remote.sync.lastError.message}`,
             ...(remote.sync.lastAttemptAt ? [`    last attempt: ${remote.sync.lastAttemptAt}`] : []),
