@@ -557,7 +557,7 @@ export function resolveComparisonGroupChartColor(
 }
 
 export function resultVersionGroupId(row: ComparisonEvidenceRow): string {
-  if (row.versionDetail === "local:." && /^Your skill v\d+/u.test(row.versionLabel)) {
+  if (row.versionDetail === "local:.") {
     return row.versionId;
   }
   return `${row.versionLabel}\0${row.versionDetail}`;

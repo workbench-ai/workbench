@@ -11,7 +11,7 @@ The core runtime and CLI remain the canonical source of truth for Workbench beha
 - Skill: an agent skill package.
 - Included skill: a skill installed beside a measured version for one run. It is hashed into the measured version bundle but is not a result row.
 - Skill bundle: one measured entry skill version plus its included skills and files.
-- Version: the exact skill version evaluated, such as `Your skill v2`, `No skill`, or `alice/summarizer@v1`.
+- Version: the exact skill version evaluated, such as `earnings-prep v2`, `No skill`, or `alice/summarizer@v1`.
 - Project snapshot: the internal immutable source capture Workbench creates at command boundaries.
 - Eval: the rubric and cases that measure skill performance.
 - Case: one representative workflow input.
@@ -51,8 +51,9 @@ default: current
 versions:
   current:
     source: local:.
-    label: Your skill
 ```
+
+Local result labels default to the `name` frontmatter in `SKILL.md`, with the measured version ordinal appended.
 
 Advanced projects may add `.workbench/versions.yaml`:
 
@@ -61,7 +62,6 @@ default: all
 versions:
   current:
     source: local:.
-    label: Your skill
     includes:
       - name: helper
         source: local:skills/helper

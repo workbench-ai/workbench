@@ -198,8 +198,8 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).not.toContain(">Run</th>");
     expect(html).not.toContain(">Mode</th>");
     expect(html).not.toContain(">Version</th>");
-    expect(html).toContain("Your skill v2");
-    expect(html).toContain("Your skill v1");
+    expect(html).toContain("earnings-prep v2");
+    expect(html).toContain("earnings-prep v1");
     expect(html).toContain("0.920");
     expect(html).toContain("0.700");
     expect(html).not.toContain("1 setup");
@@ -281,7 +281,7 @@ describe("hub-shaped Workbench UI", () => {
     expect(runsHtml).not.toContain(">Score</th>");
     expect(runsHtml).toContain(">Eval</a>");
     expect(runsHtml).not.toContain(">run_eval</a>");
-    expect(runsHtml).toContain("Your skill v2");
+    expect(runsHtml).toContain("earnings-prep v2");
     expect(runsHtml).toContain("No skill");
     expect(runsHtml).toContain("command / deterministic");
     expect(runsHtml).toContain("href=\"/skills/alice/earnings/runs/run_eval\"");
@@ -291,7 +291,7 @@ describe("hub-shaped Workbench UI", () => {
       initialRoute: createRunRoute({ runId: "run_eval", source: "evaluation", evaluationId: "eval_hash" }),
       routeBasePath: "/skills/alice/earnings",
     }));
-    expect(summaryHtml).toContain("Eval: Your skill v2 on Evaluation 1");
+    expect(summaryHtml).toContain("Eval: earnings-prep v2 on Evaluation 1");
     expect(summaryHtml).toContain("aria-label=\"Run sections\"");
     expect(summaryHtml).toContain("1 / 1 passed");
     expect(summaryHtml).toContain("Case results");
@@ -537,7 +537,7 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
     results: {
       versions: [{
         id: "v001",
-        label: "Your skill v1",
+        label: "earnings-prep v1",
         source: "local:.",
         sourceKind: "local",
         projectVersionId: "v001",
@@ -545,7 +545,7 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
         files: skillBundle.files,
       }, {
         id: "v002",
-        label: "Your skill v2",
+        label: "earnings-prep v2",
         source: "local:.",
         sourceKind: "local",
         projectVersionId: "v002",

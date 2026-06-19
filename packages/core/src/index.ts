@@ -7199,7 +7199,7 @@ function resultSkillVersionLabel(skill: WorkbenchSkillBundleSnapshot, localOrdin
     return sourceLabel || "No skill";
   }
   if (skill.source.kind === "local" && (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".")) {
-    return `${sourceLabel || "Your skill"} v${localOrdinal}`;
+    return `${sourceLabel || skillBundleFrontmatterName(skill) || readableResultLabel(skill.skillName)} v${localOrdinal}`;
   }
   if (sourceLabel) {
     return sourceLabel;
@@ -7208,6 +7208,32 @@ function resultSkillVersionLabel(skill: WorkbenchSkillBundleSnapshot, localOrdin
     return skill.source.source.slice("workbench:".length);
   }
   return readableResultLabel(skill.skillName);
+}
+
+function skillBundleFrontmatterName(skill: WorkbenchSkillBundleSnapshot): string | undefined {
+  const entrySkillPath = `${normalizeRelativePath(skill.entryName)}/${SKILL_FILE}`;
+  const isTextSkillFile = (file: SurfaceSnapshotFile) =>
+    (file.kind ?? "text") === "text" && (file.encoding ?? "utf8") === "utf8";
+  const skillFile = skill.files.find((file) => file.path === entrySkillPath && isTextSkillFile(file)) ??
+    skill.files.find((file) => file.path === SKILL_FILE && isTextSkillFile(file));
+  if (!skillFile?.content) {
+    return undefined;
+  }
+  return skillFrontmatterName(skillFile.content);
+}
+
+function skillFrontmatterName(content: string): string | undefined {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(content);
+  if (!match) {
+    return undefined;
+  }
+  try {
+    const record = parseYamlRecord(match[1] ?? "");
+    const name = record.name;
+    return typeof name === "string" && name.trim() ? name.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function resultLocalVersionOrdinals(comparison: InternalComparison): Map<string, number> {
@@ -11183,7 +11209,7 @@ async function assertNoLegacySkillManifest(root: string): Promise<void> {
 
 async function currentRootSkillSource(root: string): Promise<WorkbenchSkillSource | null> {
   return await exists(path.join(root, SKILL_FILE))
-    ? { name: CURRENT_SKILL_VERSION_NAME, kind: "local", source: "local:.", label: "Your skill", path: "." }
+    ? { name: CURRENT_SKILL_VERSION_NAME, kind: "local", source: "local:.", path: "." }
     : null;
 }
 

@@ -597,6 +597,21 @@ describe("skill-first Workbench runtime", () => {
   dockerTest("inspection results include historical local skill versions", async () => {
     const root = await makeTempRoot("workbench-results-inspection-local-versions-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await fs.writeFile(
+      path.join(root, "SKILL.md"),
+      [
+        "---",
+        "name: earnings-prep",
+        "description: Test skill.",
+        "---",
+        "",
+        "# Earnings Prep",
+        "",
+        "Initial measured skill behavior.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
     await writePassingCaseTest(root);
     await addWorkbenchAgent({
       dir: root,
@@ -617,11 +632,11 @@ describe("skill-first Workbench runtime", () => {
     const resultCellVersionIds = new Set(snapshot.results?.cells.map((cell) => cell.skillVersionId));
 
     expect(resultVersionsById.get(firstRun.versionId)).toMatchObject({
-      label: "Your skill v1",
+      label: "earnings-prep v1",
       source: "local:.",
     });
     expect(resultVersionsById.get(secondRun.versionId)).toMatchObject({
-      label: "Your skill v2",
+      label: "earnings-prep v2",
       source: "local:.",
       current: true,
     });
@@ -1359,6 +1374,86 @@ describe("skill-first Workbench runtime", () => {
       runId: "run_new",
       quality: 0.9,
     });
+  });
+
+  test("labels local result versions from the measured skill frontmatter", () => {
+    const source = { name: "current", kind: "local" as const, path: "." };
+    const state: WorkbenchProjectState = {
+      schema: "workbench.skill.state.v1",
+      root: "/tmp/comparison-skill-frontmatter-label",
+      refs: { current: "v001" },
+      remotes: {},
+      versions: [{
+        id: "v001",
+        hash: "version_hash",
+        message: "Initial",
+        parentIds: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+        files: [],
+      }],
+      skillSources: [source],
+      skillBundles: [{
+        hash: "bundle_hash",
+        skillName: "current",
+        entryName: "current",
+        source,
+        files: [
+          textFixture("SKILL.md", [
+            "---",
+            "name: root-fallback",
+            "---",
+            "",
+            "# Root Fallback",
+            "",
+          ].join("\n")),
+          textFixture("aaa-helper/SKILL.md", [
+            "---",
+            "name: helper-skill",
+            "---",
+            "",
+            "# Helper Skill",
+            "",
+          ].join("\n")),
+          textFixture("current/SKILL.md", [
+            "---",
+            "name: earnings-prep",
+            "---",
+            "",
+            "# Earnings Prep",
+            "",
+          ].join("\n")),
+        ],
+        includedSkills: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+      }],
+      evals: [evalFixture()],
+      agents: [],
+      runs: [{
+        id: "run_eval",
+        kind: "eval",
+        versionId: "v001",
+        skillName: "current",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash: "agent_hash",
+        status: "succeeded",
+        score: 0.9,
+        traceIds: [],
+        createdAt: "2026-06-09T00:01:00.000Z",
+      }],
+      jobs: [],
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+
+    const comparison = buildWorkbenchResultsFromState(state);
+
+    expect(comparison.versions).toEqual([
+      expect.objectContaining({ id: "v001", label: "earnings-prep v1" }),
+    ]);
   });
 
   test("keeps failed scored runs in persisted comparison cells", () => {

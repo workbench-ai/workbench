@@ -183,6 +183,10 @@ function withTraceRunId<T extends { runId: string }>(trace: T, runId: string): T
   return { ...trace, runId };
 }
 
+function expectedLocalSkillLabel(root: string, ordinal: number): string {
+  return `${path.basename(root).toLowerCase().replace(/[^a-z0-9-]+/gu, "-").replace(/^-+|-+$/gu, "") || "skill"} v${ordinal}`;
+}
+
 const hasDocker = spawnSync("docker", ["info"], { encoding: "utf8" }).status === 0;
 const dockerTest = hasDocker ? test : test.skip;
 const tempRoots: string[] = [];
@@ -772,7 +776,7 @@ describe("workbench skill-first CLI", () => {
 
     const contextualResults = await invoke(["results", "--agents", "strict", "--dir", root]);
     expect(contextualResults.code, contextualResults.stdout || contextualResults.stderr).toBe(0);
-    expect(contextualResults.stdout).toContain("Your skill v1");
+    expect(contextualResults.stdout).toContain(expectedLocalSkillLabel(root, 1));
     expect(contextualResults.stdout).toContain("\tstrict\t");
 
     const retried = await invoke(["run", "retry", evaluatedRunId, "--dir", root, "--json"]);
@@ -2425,10 +2429,13 @@ describe("workbench skill-first CLI", () => {
       schema: "workbench.remote-sync-state.v1",
       remote: "cloud",
       url: remoteUrl,
-      status: "synced",
-      lastSyncedAt: syncedAt,
+      status: "error",
+      lastSyncedAt: null,
       lastAttemptAt: syncedAt,
-      lastError: null,
+      lastError: {
+        code: "auth_required",
+        message: "Authentication is required.",
+      },
     }, null, 2));
     await writeRef(root, "remotes/cloud/publication/current-version", currentVersionId);
     await writeRef(root, `remotes/cloud/publication/versions/${currentVersionId}`, currentVersionId);
@@ -8995,8 +9002,8 @@ describe("workbench skill-first CLI", () => {
     const results = await invoke(["results", "--dir", root, "--agents", "patcher"]);
     expect(results.stdout).toContain("version\tagent\tstatus\tquality\tsamples\tcost\tlatency\trun");
     expect(results.stdout).toContain("\tpatcher\tfailed\t");
-    expect(results.stdout).toContain("Your skill v1");
-    expect(results.stdout).toContain("Your skill v2");
+    expect(results.stdout).toContain(expectedLocalSkillLabel(root, 1));
+    expect(results.stdout).toContain(expectedLocalSkillLabel(root, 2));
     expect(results.stdout).toContain("\tfailed\t");
     expect(results.stdout).toContain("\t0.000\t");
     const resultsJson = await invoke(["results", "--dir", root, "--agents", "patcher", "--json"]);
@@ -9012,8 +9019,8 @@ describe("workbench skill-first CLI", () => {
     expect(allAgentsResults.code, allAgentsResults.stdout || allAgentsResults.stderr).toBe(0);
     expect(allAgentsResults.stdout).not.toContain("\tnot-run\t");
     expect(allAgentsResults.stdout).not.toContain("observer@");
-    expect(allAgentsResults.stdout).toContain("Your skill v1");
-    expect(allAgentsResults.stdout).toContain("Your skill v4");
+    expect(allAgentsResults.stdout).toContain(expectedLocalSkillLabel(root, 1));
+    expect(allAgentsResults.stdout).toContain(expectedLocalSkillLabel(root, 4));
     const improveSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
     const improveRun = [...improveSnapshot.runs].reverse()
       .find((run) => run.kind === "improve" && run.agentName === "patcher");

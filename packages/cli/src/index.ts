@@ -6744,7 +6744,10 @@ function statusWithCloudAuthContext(
   }
   let changed = false;
   const remotes = status.remotes.map((remote) => {
-    if (remote.kind !== "workbench-cloud" || remote.sync.status !== "local_changes") {
+    if (
+      remote.kind !== "workbench-cloud" ||
+      (remote.sync.status !== "local_changes" && remote.sync.lastError?.code !== "auth_required")
+    ) {
       return remote;
     }
     changed = true;

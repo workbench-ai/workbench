@@ -62,15 +62,15 @@ describe("comparison metric helpers", () => {
     });
 
     expect(scorecard.cells).toHaveLength(2);
-    expect(groups.map((group) => group.label)).toEqual(["Your skill v2", "Your skill v1"]);
+    expect(groups.map((group) => group.label)).toEqual(["earnings-prep v2", "earnings-prep v1"]);
     expect(rows.map((row) => ({
       version: row.versionLabel,
       agent: row.agentDetail,
       score: row.score,
       detail: row.versionDetail,
     }))).toEqual([
-      { version: "Your skill v2", agent: "codex / gpt-5.5", score: 0.9, detail: "local:." },
-      { version: "Your skill v1", agent: "codex / gpt-5.5", score: 0.7, detail: "local:." },
+      { version: "earnings-prep v2", agent: "codex / gpt-5.5", score: 0.9, detail: "local:." },
+      { version: "earnings-prep v1", agent: "codex / gpt-5.5", score: 0.7, detail: "local:." },
     ]);
   });
 
@@ -175,8 +175,8 @@ describe("comparison metric helpers", () => {
       row: datum.rowLabel,
       value: datum.value,
     }))).toEqual([
-      { group: "Your skill v2", row: "Your skill v2 / claude / opus-4.8", value: 0.9 },
-      { group: "Your skill v1", row: "Your skill v1 / codex / gpt-5.5", value: 0.7 },
+      { group: "earnings-prep v2", row: "earnings-prep v2 / claude / opus-4.8", value: 0.9 },
+      { group: "earnings-prep v1", row: "earnings-prep v1 / codex / gpt-5.5", value: 0.7 },
     ]);
   });
 
@@ -236,8 +236,8 @@ function resultsFixture(
 ): WorkbenchResults {
   return {
     versions: options.versions ?? [
-      skillVersion({ id: "v001", label: "Your skill v1", projectVersionId: "v001" }),
-      skillVersion({ id: "v002", label: "Your skill v2", projectVersionId: "v002", current: true }),
+      skillVersion({ id: "v001", label: "earnings-prep v1", projectVersionId: "v001" }),
+      skillVersion({ id: "v002", label: "earnings-prep v2", projectVersionId: "v002", current: true }),
     ],
     evaluations: options.evaluations ?? [
       { id: "eval_hash", caseCount: 2, scoreAdapter: "tests", createdAt: "2026-06-06T00:00:00.000Z", updatedAt: "2026-06-06T00:00:00.000Z" },
@@ -267,7 +267,7 @@ function resultCell(overrides: Partial<WorkbenchResultCell> = {}): WorkbenchResu
 function skillVersion(overrides: Partial<WorkbenchSkillVersion>): WorkbenchSkillVersion {
   return {
     id: "v001",
-    label: "Your skill v1",
+    label: "earnings-prep v1",
     source: "local:.",
     sourceKind: "local",
     projectVersionId: "v001",

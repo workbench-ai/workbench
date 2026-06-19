@@ -80,7 +80,6 @@ default: all
 versions:
   current:
     source: local:.
-    label: Your skill
     includes:
       - name: helper
         source: local:skills/helper
@@ -90,6 +89,8 @@ versions:
   upstream:
     source: github:anthropics/skills//skills/frontend-design@<40-character-commit-sha>
 ```
+
+For the implicit root `current` version, result labels default to the `name` frontmatter in `SKILL.md` with the measured version ordinal appended. Use `label` only when a configured version needs an explicit display override.
 
 Top-level entries are measured versions. Each measured version defines one `source:` string. `source: local:PATH` must stay inside the project root, `source: none` is the no-skill baseline, and external sources must be immutable pins such as `workbench:OWNER/SKILL@VERSION` or `github:OWNER/REPO//PATH@COMMIT`; GitHub `COMMIT` must be the full 40-character SHA, not a branch, tag, or short prefix. Nested `includes` are installed beside one measured version and affect that bundle hash, but they are not result rows.
 
