@@ -70,7 +70,7 @@
 :root {
     /* Ink-on-white palette: near-black text, hairline borders, light-gray
        canvases. Primary actions are ink pills; green is reserved for
-       success states, lime for the scarce highlight accent. */
+       success states, warm taupe for the scarce highlight accent. */
     --background: oklch(1 0 0);
     --foreground: oklch(0.167 0.016 236.04);
     --card: oklch(1 0 0);

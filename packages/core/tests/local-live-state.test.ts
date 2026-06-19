@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import {
   createWorkbenchReadOnlyInspectionSnapshot,
-  initWorkbenchSkill,
+  createNewWorkbenchSkillProject,
   readWorkbenchReadOnlyInspectionCursor,
   waitForWorkbenchReadOnlyInspectionNotice,
   workbenchExecutionEventBatchId,
@@ -33,7 +33,7 @@ afterEach(async () => {
 describe("local live inspection state", () => {
   test("execution-event-only object writes can invalidate read-only inspection", async () => {
     const root = await makeTempRoot("workbench-local-live-state-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const cursor = await readWorkbenchReadOnlyInspectionCursor({ dir: root });
     const batch: WorkbenchProjectState["executionEvents"][number] = {
       projectId: "local",

@@ -9,7 +9,7 @@ import {
   addWorkbenchRemote,
   createWorkbenchInspectionSnapshot,
   createWorkbenchReadOnlyInspectionSnapshot,
-  initWorkbenchSkill,
+  createNewWorkbenchSkillProject,
   listWorkbenchRemotes,
   publishWorkbenchVersion,
   clearWorkbenchLocalHostedRunHandle,
@@ -63,7 +63,7 @@ afterEach(async () => {
 describe("remote state lifecycle", () => {
   test("local hosted run handles are read-only live state and never durable run objects", async () => {
     const root = await makeTempRoot("workbench-local-hosted-handle-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     const versionId = (await createWorkbenchInspectionSnapshot({ dir: root })).refs.current;
     expect(versionId).toBeTruthy();
     const run: WorkbenchRun = {
@@ -100,7 +100,7 @@ describe("remote state lifecycle", () => {
     const root = await makeTempRoot("workbench-remote-add-");
     const remoteA = await makeTempRoot("workbench-remote-add-a-");
     const remoteB = await makeTempRoot("workbench-remote-add-b-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
 
     const added = await addWorkbenchRemote("origin", pathToFileURL(remoteA).toString(), { dir: root });
     expect(added.operation).toBe("added");
@@ -144,7 +144,7 @@ describe("remote state lifecycle", () => {
   test("remove deletes the remote and its sync record", async () => {
     const root = await makeTempRoot("workbench-remote-remove-");
     const remote = await makeTempRoot("workbench-remote-remove-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
     expect(await exists(syncStateFile(root, "origin"))).toBe(true);
@@ -165,7 +165,7 @@ describe("remote state lifecycle", () => {
   test("sync writes a success record and status reports the remote up to date", async () => {
     const root = await makeTempRoot("workbench-sync-success-");
     const remote = await makeTempRoot("workbench-sync-success-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
 
@@ -192,7 +192,7 @@ describe("remote state lifecycle", () => {
   test("status reports local changes after a successful sync when local objects move", async () => {
     const root = await makeTempRoot("workbench-sync-local-changes-");
     const remote = await makeTempRoot("workbench-sync-local-changes-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
 
@@ -214,7 +214,7 @@ describe("remote state lifecycle", () => {
   test("switching between already synced versions does not dirty remote sync", async () => {
     const root = await makeTempRoot("workbench-sync-switch-clean-");
     const remote = await makeTempRoot("workbench-sync-switch-clean-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
     const firstVersionId = (await workbenchStatusSnapshot({ dir: root })).project.currentVersionId;
@@ -240,7 +240,7 @@ describe("remote state lifecycle", () => {
   test("file remotes are sync-only and reject publication", async () => {
     const root = await makeTempRoot("workbench-file-remote-publish-");
     const remote = await makeTempRoot("workbench-file-remote-publish-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
 
     const error = await codedErrorFrom(publishWorkbenchVersion({ dir: root }));
@@ -253,7 +253,7 @@ describe("remote state lifecycle", () => {
     const remoteParent = await makeTempRoot("workbench-sync-failure-remote-");
     const remotePath = path.join(remoteParent, "not-a-directory");
     await fs.writeFile(remotePath, "plain file\n");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remotePath).toString(), { dir: root });
 
     await expect(syncWorkbenchRemote({ dir: root })).rejects.toThrow(/not a directory/u);
@@ -273,7 +273,7 @@ describe("remote state lifecycle", () => {
 
   test("aborted cloud sync preserves previous sync health", async () => {
     const root = await makeTempRoot("workbench-sync-abort-preserves-health-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     const createdAt = "2026-06-17T00:00:00.000Z";
     let remotePack = emptyPack(createdAt);
     let blockObjectRead = false;
@@ -336,7 +336,7 @@ describe("remote state lifecycle", () => {
   test("a sync record for a different URL is ignored and the remote reads as never synced", async () => {
     const root = await makeTempRoot("workbench-sync-stale-url-");
     const remote = await makeTempRoot("workbench-sync-stale-url-remote-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
 
@@ -356,7 +356,7 @@ describe("remote state lifecycle", () => {
 
   test("status snapshot reports the reconciled current version without stale dirty flags", async () => {
     const root = await makeTempRoot("workbench-status-worktree-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
 
     const clean = await workbenchStatusSnapshot({ dir: root });
     expect(clean.worktree).not.toHaveProperty("hasUnversionedChanges");
@@ -373,7 +373,7 @@ describe("remote state lifecycle", () => {
 
   test("invalid remote names are rejected with remote_invalid_name", async () => {
     const root = await makeTempRoot("workbench-remote-name-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     const error = await codedErrorFrom(
       addWorkbenchRemote("Bad Name", "file:///tmp/workbench-remote", { dir: root })
     );
@@ -382,7 +382,7 @@ describe("remote state lifecycle", () => {
 
   test("http remotes allow IPv6 loopback for local Cloud testing", async () => {
     const root = await makeTempRoot("workbench-remote-ipv6-loopback-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
 
     const added = await addWorkbenchRemote(
       "local",
@@ -403,7 +403,7 @@ describe("remote state lifecycle", () => {
 
   test("cloud sync does not push lifecycle objects already owned by the remote", async () => {
     const root = await makeTempRoot("workbench-cloud-lifecycle-owner-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
     if (!versionId) {
@@ -484,7 +484,7 @@ describe("remote state lifecycle", () => {
 
   test("cloud-owned lifecycle snapshots do not dirty sync status", async () => {
     const root = await makeTempRoot("workbench-cloud-lifecycle-clean-status-");
-    await initWorkbenchSkill({ dir: root });
+    await createNewWorkbenchSkillProject({ dir: root });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
     expect(versionId).toBeTruthy();

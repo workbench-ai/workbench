@@ -16,6 +16,7 @@ import type {
 } from "@workbench-ai/workbench-contract";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
 import { Badge } from "@workbench-ai/cli-web-ui/components/ui/badge";
+import { Skeleton } from "@workbench-ai/cli-web-ui/components/ui/skeleton";
 import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
 import { formatScore, formatTimestamp } from "../lib/format";
@@ -147,11 +148,7 @@ function LineageGraphCanvas({
   }
 
   if (flowState.loading && flowState.nodes.length === 0) {
-    return (
-      <div className="flex min-h-[28rem] min-w-0 items-center justify-center text-sm text-muted-foreground">
-        Preparing lineage graph
-      </div>
-    );
+    return <LineageGraphLoadingSkeleton className={className} />;
   }
 
   return (
@@ -177,6 +174,39 @@ function LineageGraphCanvas({
         nodeTypes={NODE_TYPES}
         onNodeClick={(_event: ReactMouseEvent, node) => onVersionClick(node.data.version.id)}
       />
+    </div>
+  );
+}
+
+function LineageGraphLoadingSkeleton({ className }: { className?: string }) {
+  return (
+    <div
+      aria-busy="true"
+      aria-label="Preparing lineage graph"
+      data-testid="lineage-graph-loading"
+      className={cn(
+        "relative flex h-full min-h-[28rem] min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-card p-6",
+        className,
+      )}
+    >
+      <span className="sr-only">Preparing lineage graph</span>
+      <div className="flex h-full min-h-[23rem] w-full items-center justify-center">
+        <div className="flex w-full max-w-3xl flex-col items-center">
+          <Skeleton className="h-24 w-full max-w-64 rounded-lg" />
+          <Skeleton className="h-8 w-px rounded-none" />
+          <div className="relative w-full max-w-2xl">
+            <Skeleton className="absolute left-1/4 right-1/4 top-0 h-px rounded-none" />
+            <Skeleton className="absolute left-1/4 top-0 h-8 w-px -translate-x-1/2 rounded-none" />
+            <Skeleton className="absolute right-1/4 top-0 h-8 w-px translate-x-1/2 rounded-none" />
+            <div className="grid grid-cols-2 gap-4 pt-8 sm:gap-10">
+              <Skeleton className="h-24 min-w-0 rounded-lg" />
+              <Skeleton className="h-24 min-w-0 rounded-lg" />
+            </div>
+          </div>
+          <Skeleton className="h-8 w-px rounded-none" />
+          <Skeleton className="h-20 w-full max-w-64 rounded-lg" />
+        </div>
+      </div>
     </div>
   );
 }

@@ -167,13 +167,23 @@ export interface WorkbenchWorkspaceProps {
   routeBasePath?: string;
   brandHref?: string;
   headerControls?: ReactNode;
+  identityControls?: ReactNode;
   initialEnvelope?: WorkbenchInspectionSnapshotEnvelope | null;
   initialRoute?: WorkbenchRoute;
   hostContext?: WorkbenchHostContext;
+  /**
+   * Render the workspace as an inert, self-contained surface for embedding
+   * (for example in a marketing page). When true, the workspace renders from
+   * `initialEnvelope` only: it does not sync the browser URL/history, listen to
+   * `popstate`, poll for live state, or render the shell header. Defaults to
+   * false, which preserves the full-page application behavior.
+   */
+  embedded?: boolean;
 }
 
 export interface WorkbenchHostContext {
   handle?: string;
+  ownerHref?: string;
   ownerSlug?: string;
   skillName?: string;
   sourceVisibility?: string;
@@ -231,9 +241,11 @@ const VERSION_HISTORY_VIEW_ITEMS: Array<{
 function useWorkbenchInspection({
   apiBasePath,
   initialEnvelope,
+  live = true,
 }: {
   apiBasePath: string;
   initialEnvelope: WorkbenchInspectionSnapshotEnvelope | null;
+  live?: boolean;
 }): {
   cursor: string | null;
   error: string | null;
@@ -288,7 +300,7 @@ function useWorkbenchInspection({
   }, [apiBasePath, initialEnvelope, refreshKey]);
 
   useEffect(() => {
-    if (!envelope?.cursor) {
+    if (!live || !envelope?.cursor) {
       return;
     }
     let cancelled = false;
@@ -367,7 +379,7 @@ function useWorkbenchInspection({
       waitController?.abort();
       eventSource?.close();
     };
-  }, [apiBasePath, envelope?.cursor]);
+  }, [apiBasePath, envelope?.cursor, live]);
 
   return {
     cursor: envelope?.cursor ?? null,
@@ -420,9 +432,11 @@ export function WorkbenchWorkspace({
   routeBasePath = "/",
   brandHref = "/",
   headerControls,
+  identityControls,
   initialEnvelope = null,
   initialRoute,
   hostContext,
+  embedded = false,
 }: WorkbenchWorkspaceProps) {
   const {
     cursor: inspectionCursor,
@@ -432,7 +446,7 @@ export function WorkbenchWorkspace({
     refreshing,
     actions,
     snapshot,
-  } = useWorkbenchInspection({ apiBasePath, initialEnvelope });
+  } = useWorkbenchInspection({ apiBasePath, initialEnvelope, live: !embedded });
   const [route, setRoute] = useState<WorkbenchRoute>(() =>
     initialRoute ?? parseWorkbenchLocation(undefined, routeBasePath));
   const [routePending, startRouteTransition] = useTransition();
@@ -453,24 +467,34 @@ export function WorkbenchWorkspace({
   }, []);
 
   useEffect(() => {
+    if (embedded) {
+      return;
+    }
     const updateRoute = () => setRoute(parseWorkbenchLocation(undefined, routeBasePath));
     updateRoute();
     window.addEventListener("popstate", updateRoute);
     return () => window.removeEventListener("popstate", updateRoute);
-  }, [routeBasePath]);
+  }, [embedded, routeBasePath]);
 
   const hrefFor = useCallback(
     (nextRoute: WorkbenchRoute) => buildWorkbenchLocationHref(nextRoute, routeBasePath),
     [routeBasePath],
   );
   useEffect(() => {
+    if (embedded) {
+      return;
+    }
     const canonicalHref = hrefFor(route);
     const current = `${window.location.pathname}${window.location.search}`;
     if (current !== canonicalHref) {
       window.history.replaceState({}, "", canonicalHref);
     }
-  }, [hrefFor, route]);
+  }, [embedded, hrefFor, route]);
   const navigate = useCallback((nextRoute: WorkbenchRoute, options: { replace?: boolean } = {}) => {
+    if (embedded) {
+      startRouteTransition(() => setRoute(nextRoute));
+      return;
+    }
     const href = hrefFor(nextRoute);
     const current = `${window.location.pathname}${window.location.search}`;
     startRouteTransition(() => {
@@ -479,7 +503,7 @@ export function WorkbenchWorkspace({
       }
       setRoute(nextRoute);
     });
-  }, [hrefFor, startRouteTransition]);
+  }, [embedded, hrefFor, startRouteTransition]);
   const onRouteClick = useCallback((nextRoute: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
@@ -493,7 +517,7 @@ export function WorkbenchWorkspace({
     navigate(routeForWorkbenchRunSnapshot(started));
   }, [navigate, refreshSnapshot]);
 
-  const header = (
+  const header = embedded ? null : (
     <WorkbenchShellHeader
       brandHref={brandHref}
       error={error}
@@ -549,6 +573,7 @@ export function WorkbenchWorkspace({
           apiBasePath={apiBasePath}
           hrefFor={hrefFor}
           identity={identity}
+          identityControls={identityControls}
           onOperationStarted={onOperationStarted}
           onRouteClick={onRouteClick}
           snapshot={snapshot}
@@ -734,6 +759,7 @@ function SkillIdentityHeader({
   hrefFor,
   hostContext,
   identity,
+  identityControls,
   onOperationStarted,
   onRouteClick,
   snapshot,
@@ -743,6 +769,7 @@ function SkillIdentityHeader({
   hrefFor: (route: WorkbenchRoute) => string;
   hostContext: WorkbenchHostContext | undefined;
   identity: SkillIdentity;
+  identityControls: ReactNode;
   onOperationStarted: (started: WorkbenchRunSnapshot) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   snapshot: WorkbenchInspectionSnapshot;
@@ -752,28 +779,44 @@ function SkillIdentityHeader({
   return (
     <section className="grid min-w-0 gap-4 border-b border-border/70 pb-5">
       <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="grid min-w-0 gap-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            {ownerLabel ? (
-              <>
-                <span className="font-mono text-sm text-muted-foreground">{ownerLabel}</span>
-                <span className="text-muted-foreground">/</span>
-              </>
+        <div className="grid min-w-0 flex-1 gap-1">
+          <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {ownerLabel ? (
+                <>
+                  {hostContext?.ownerHref ? (
+                    <a
+                      className="rounded-sm font-mono text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      href={hostContext.ownerHref}
+                    >
+                      {ownerLabel}
+                    </a>
+                  ) : (
+                    <span className="font-mono text-sm text-muted-foreground">{ownerLabel}</span>
+                  )}
+                  <span className="text-muted-foreground">/</span>
+                </>
+              ) : null}
+              <h1 className="break-words font-mono text-[1.45rem] font-semibold leading-tight tracking-normal text-foreground [overflow-wrap:anywhere]">
+                <a
+                  className="rounded-sm text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  href={hrefFor(homeRoute)}
+                  onClick={onRouteClick(homeRoute)}
+                >
+                  {identity.name}
+                </a>
+              </h1>
+              {identity.handle ? (
+                <CopyIconButton label="handle" value={identity.handle} />
+              ) : null}
+              {hostContext?.sourceVisibility ? <Badge variant="outline">{hostContext.sourceVisibility}</Badge> : null}
+              {hostContext?.evidenceAccess === "source" ? <Badge variant="outline">source only</Badge> : null}
+            </div>
+            {identityControls ? (
+              <div className="flex shrink-0 flex-wrap items-center gap-2 md:justify-end">
+                {identityControls}
+              </div>
             ) : null}
-            <h1 className="break-words font-mono text-[1.45rem] font-semibold leading-tight tracking-normal text-foreground [overflow-wrap:anywhere]">
-              <a
-                className="rounded-sm text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                href={hrefFor(homeRoute)}
-                onClick={onRouteClick(homeRoute)}
-              >
-                {identity.name}
-              </a>
-            </h1>
-            {identity.handle ? (
-              <CopyIconButton label="handle" value={identity.handle} />
-            ) : null}
-            {hostContext?.sourceVisibility ? <Badge variant="outline">{hostContext.sourceVisibility}</Badge> : null}
-            {hostContext?.evidenceAccess === "source" ? <Badge variant="outline">source only</Badge> : null}
           </div>
         </div>
         {actions ? (
@@ -2860,7 +2903,7 @@ function orderedVersions(snapshot: WorkbenchInspectionSnapshot): WorkbenchVersio
 }
 
 function publishedVersionId(snapshot: WorkbenchInspectionSnapshot): string | null {
-  return snapshot.publication?.versionId ?? snapshot.refs.published ?? null;
+  return snapshot.publication?.currentVersionId ?? snapshot.refs["publication/current-version"] ?? null;
 }
 
 function WorkbenchLoadingIcon({ className, ...props }: SVGProps<SVGSVGElement>) {

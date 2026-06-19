@@ -35,7 +35,7 @@ import {
   hashJson,
   improveWorkbenchSkill,
   importObjectPack,
-  initWorkbenchSkill,
+  createNewWorkbenchSkillProject,
   readWorkbenchSkillRunOutputUsage,
   previewWorkbenchImprove,
   recordWorkbenchCloudRunSnapshot,
@@ -50,6 +50,7 @@ import {
   previewLocalWorkbenchOperation,
   switchWorkbenchVersion,
   syncWorkbenchRemote,
+  unpublishWorkbenchVersion,
   type Json,
   type SandboxPlane,
   type WorkbenchProjectState,
@@ -76,6 +77,22 @@ async function makeTempRoot(prefix: string): Promise<string> {
 
 async function exists(filePath: string): Promise<boolean> {
   return fs.stat(filePath).then(() => true, () => false);
+}
+
+async function writeWorkbenchRef(root: string, name: string, value: string): Promise<void> {
+  const refPath = path.join(root, ".workbench", "refs", ...name.split("/"));
+  await fs.mkdir(path.dirname(refPath), { recursive: true });
+  await fs.writeFile(refPath, `${value}\n`);
+}
+
+function publicationRefNames(refs: Record<string, unknown>): string[] {
+  return Object.keys(refs)
+    .filter((name) =>
+      name === "published" ||
+      name.startsWith("releases/") ||
+      name.startsWith("publication/")
+    )
+    .sort();
 }
 
 function stubFetchHeader(init: RequestInit | undefined, name: string): string | undefined {
@@ -121,7 +138,7 @@ afterEach(async () => {
 describe("skill-first Workbench runtime", () => {
   dockerTest("versions, evaluates, improves, compares, and switches a skill with Docker jobs", async () => {
     const root = await makeTempRoot("workbench-skill-runtime-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
 
     const runs = await evalWorkbenchSkill({ dir: root });
@@ -201,7 +218,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("rejects improve when the selected agent has no improvement adapter", async () => {
     const root = await makeTempRoot("workbench-improve-agent-requirement-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writeFailingCaseTest(root, "selected agent cannot improve");
     const [failingRun] = await evalWorkbenchSkill({ dir: root, agent: "default" });
 
@@ -218,7 +235,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("preserves command-provided Workbench result payloads in sandbox evals", async () => {
     const root = await makeTempRoot("workbench-command-result-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchAgent({
       dir: root,
       name: "scored-command",
@@ -270,7 +287,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("lets OUTPUT_DIR result.json mark an exit-zero shell test as failed evidence", async () => {
     const root = await makeTempRoot("workbench-public-result-status-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
       "version: 1",
@@ -315,7 +332,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("read-only inspection exposes active local eval state while the eval is running", async () => {
     const root = await makeTempRoot("workbench-active-eval-snapshot-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchAgent({
       dir: root,
       name: "slow-command",
@@ -399,7 +416,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("compares active, no-skill, and dummy-skill configurations through real eval runs", async () => {
     const root = await makeTempRoot("workbench-skill-comparison-baselines-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.mkdir(path.join(root, "baselines", "dummy-skill"), { recursive: true });
     await fs.writeFile(path.join(root, "baselines", "dummy-skill", "SKILL.md"), "# Dummy skill\n\nDo not use the active skill workflow.\n");
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
@@ -517,7 +534,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("bare compare uses the current version and manifest default agent", async () => {
     const root = await makeTempRoot("workbench-compare-default-agent-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     await addWorkbenchAgent({
       dir: root,
@@ -557,7 +574,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("compare prefers higher-sample scored evidence over a later smaller rerun", async () => {
     const root = await makeTempRoot("workbench-compare-samples-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     await addWorkbenchAgent({
       dir: root,
@@ -587,7 +604,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("improve preview uses the same higher-sample incumbent as compare", async () => {
     const root = await makeTempRoot("workbench-improve-incumbent-samples-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     await addWorkbenchAgent({
       dir: root,
@@ -620,7 +637,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("local operation eval preview reports blocked adapter auth readiness", async () => {
     const root = await makeTempRoot("workbench-operation-eval-preview-auth-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     await addWorkbenchAgent({
       dir: root,
@@ -642,7 +659,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("local operation improve preview reports blocked adapter auth readiness", async () => {
     const root = await makeTempRoot("workbench-operation-improve-preview-auth-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writeFailingCaseTest(root, "needs provider-backed improvement");
     await addWorkbenchAgent({
       dir: root,
@@ -672,7 +689,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("records scheduled cloud run snapshots locally before terminal sync", async () => {
     const root = await makeTempRoot("workbench-cloud-scheduled-run-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     const [seedRun] = await evalWorkbenchSkill({ dir: root, samples: 1, rerun: true });
     if (!seedRun) {
@@ -722,7 +739,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("compare reads matrix measurements from jobs inside one run", async () => {
     const root = await makeTempRoot("workbench-compare-job-measurements-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     const defaultAgent = { name: "default", adapter: "command" as const, config: { command: scoreCommand(0.4) } };
     const patcherAgent = { name: "patcher", adapter: "command" as const, config: { command: scoreCommand(0.9) } };
@@ -811,7 +828,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("compare fills unrun cells for valid selected versions when recorded evidence exists", async () => {
     const root = await makeTempRoot("workbench-compare-selected-matrix-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     const [initialRun] = await evalWorkbenchSkill({ dir: root });
     const initialVersionId = initialRun?.versionId;
@@ -845,7 +862,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("runs explicit version evals from the selected version source snapshot", async () => {
     const root = await makeTempRoot("workbench-selected-version-eval-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     const initialRuns = await evalWorkbenchSkill({ dir: root });
     const initial = (await listWorkbenchVersions({ dir: root })).find((version) => version.id === initialRuns[0]?.versionId)!;
@@ -870,7 +887,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("does not reuse eval runs when the same-name agent hash differs", async () => {
     const root = await makeTempRoot("workbench-agent-hash-reuse-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     const [firstRun] = await evalWorkbenchSkill({ dir: root });
     expect(firstRun).toBeDefined();
@@ -886,7 +903,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("fails on corrupt Workbench objects instead of starting from empty history", async () => {
     const root = await makeTempRoot("workbench-corrupt-state-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
     const versionPath = path.join(root, ".workbench", "objects", "version", `${initial.id}.json`);
     const validVersion = await fs.readFile(versionPath, "utf8");
@@ -923,7 +940,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("show and files reconcile manual edits before resolving current", async () => {
     const root = await makeTempRoot("workbench-show-files-current-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const initial = await workbenchStatus({ dir: root });
     expect(initial.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
 
@@ -943,7 +960,7 @@ describe("skill-first Workbench runtime", () => {
   test("remote configuration is local metadata, not versioned skill source", async () => {
     const root = await makeTempRoot("workbench-remote-config-source-");
     const remote = await makeTempRoot("workbench-remote-config-source-remote-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const workbenchGitignore = await fs.readFile(path.join(root, ".workbench", ".gitignore"), "utf8");
     expect(workbenchGitignore).toContain("/.gitignore");
     expect(workbenchGitignore).toContain("/remotes.yaml");
@@ -973,7 +990,7 @@ describe("skill-first Workbench runtime", () => {
   test("switching versions preserves local remote configuration", async () => {
     const root = await makeTempRoot("workbench-switch-remotes-");
     const remote = await makeTempRoot("workbench-switch-remotes-remote-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual branch edit.\n");
     const edited = await workbenchStatus({ dir: root });
@@ -1001,7 +1018,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("project commands recreate the local metadata ignore guard before lock writes", async () => {
     const root = await makeTempRoot("workbench-local-ignore-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.rm(path.join(root, ".workbench", ".gitignore"), { force: true });
 
     await checkWorkbenchSkill({ dir: root });
@@ -1021,7 +1038,7 @@ describe("skill-first Workbench runtime", () => {
   test("file remotes reject installable source publication", async () => {
     const root = await makeTempRoot("workbench-file-publish-reject-");
     const remote = await makeTempRoot("workbench-file-publish-reject-remote-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
 
     await expect(publishWorkbenchVersion({ dir: root })).rejects.toMatchObject({
@@ -1033,7 +1050,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("serializes concurrent project commands and keeps object state intact", async () => {
     const root = await makeTempRoot("workbench-project-lock-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual concurrent edit.\n");
 
     let active = 0;
@@ -1065,7 +1082,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("recovers previous object state after an interrupted directory swap", async () => {
     const root = await makeTempRoot("workbench-object-recover-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const objects = path.join(root, ".workbench", "objects");
     const previous = path.join(root, ".workbench", "tmp", "objects.previous");
     await fs.rm(previous, { recursive: true, force: true });
@@ -1080,7 +1097,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("discards stale previous refs when current refs already exist", async () => {
     const root = await makeTempRoot("workbench-refs-recover-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const currentRef = (await listWorkbenchVersions({ dir: root }))[0]!.id;
     const previous = path.join(root, ".workbench", "tmp", "refs.previous");
     await fs.rm(previous, { recursive: true, force: true });
@@ -1096,7 +1113,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("explicit-version improve reconciles manual edits before resolving the base version", async () => {
     const root = await makeTempRoot("workbench-improve-explicit-dirty-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty edit before explicit-version improve.\n");
@@ -1112,7 +1129,7 @@ describe("skill-first Workbench runtime", () => {
   test("keeps local current refs out of ordinary remote sync", async () => {
     const root = await makeTempRoot("workbench-ref-sync-");
     const remote = await makeTempRoot("workbench-ref-sync-remote-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
     const before = await workbenchStatus({ dir: root });
@@ -1135,8 +1152,8 @@ describe("skill-first Workbench runtime", () => {
     const localRoot = await makeTempRoot("workbench-evidenced-local-");
     const peerRoot = await makeTempRoot("workbench-evidenced-peer-");
     const remote = await makeTempRoot("workbench-unevidenced-remote-");
-    await initWorkbenchSkill({ dir: localRoot, agent: "local" });
-    await initWorkbenchSkill({ dir: peerRoot, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: localRoot, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: peerRoot, agent: "local" });
     await writePassingCaseTest(localRoot);
     await writePassingCaseTest(peerRoot);
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: localRoot });
@@ -1157,7 +1174,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("preserves historical agent snapshots by hash", async () => {
     const root = await makeTempRoot("workbench-agent-snapshots-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const agentObjectDir = path.join(root, ".workbench", "objects", "agent");
     const initialAgents = await fs.readdir(agentObjectDir);
 
@@ -1175,7 +1192,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("keeps agent manifest writes canonical around reserved names and defaults", async () => {
     const root = await makeTempRoot("workbench-agent-manifest-canonical-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
 
     await expect(addWorkbenchAgent({
       dir: root,
@@ -1654,7 +1671,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("skips historical versions that cannot define explicit compare axes", async () => {
     const root = await makeTempRoot("workbench-compare-axis-history-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
     await addWorkbenchAgent({
       dir: root,
@@ -1685,7 +1702,7 @@ describe("skill-first Workbench runtime", () => {
   test("status records automatic versions locally without syncing them", async () => {
     const root = await makeTempRoot("workbench-status-sync-");
     const remote = await makeTempRoot("workbench-status-sync-remote-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
 
@@ -1700,7 +1717,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("rejects unpinned remote skill sources", async () => {
     const root = await makeTempRoot("workbench-unpinned-skill-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: upstream",
       "skills:",
@@ -1714,7 +1731,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("accepts only the built-in none baseline for no-skill comparisons", async () => {
     const root = await makeTempRoot("workbench-none-baseline-source-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: no-skill",
       "skills:",
@@ -1741,7 +1758,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("requires canonical top-level skill defaults for explicit skill manifests", async () => {
     const root = await makeTempRoot("workbench-skill-default-required-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "skills:",
       "  primary:",
@@ -1768,9 +1785,21 @@ describe("skill-first Workbench runtime", () => {
     expect((await workbenchStatus({ dir: root })).defaultSkill).toBe("all");
   });
 
+  test("treats schema-only skill manifests as the root skill when SKILL.md exists", async () => {
+    const root = await makeTempRoot("workbench-empty-skill-manifest-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), "schema: workbench.skills.v1\n");
+
+    const status = await workbenchStatus({ dir: root });
+    expect(status.defaultSkill).toBe("primary");
+    expect(status.skillCount).toBe(1);
+    expect((await createWorkbenchReadOnlyInspectionSnapshot({ dir: root })).skillSources)
+      .toEqual([expect.objectContaining({ name: "primary", kind: "local", path: "." })]);
+  });
+
   test("reserves all as a selector name for skills and agents", async () => {
     const root = await makeTempRoot("workbench-all-selector-reserved-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: all",
       "skills:",
@@ -1797,7 +1826,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("resolves Workbench Cloud source URLs as pinned remote skill sources", async () => {
     const root = await makeTempRoot("workbench-cloud-source-skill-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: cloud",
       "skills:",
@@ -1808,7 +1837,7 @@ describe("skill-first Workbench runtime", () => {
     ].join("\n"));
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
-      if (url.pathname === "/api/workbench/source/skills/alice/cloud-skill/releases/v003/source") {
+      if (url.pathname === "/api/workbench/source/skills/alice/cloud-skill/versions/v003/source") {
         return Response.json({
           schema: "workbench.source.snapshot.v1",
           owner: "alice",
@@ -1841,14 +1870,14 @@ describe("skill-first Workbench runtime", () => {
     expect(checked.ok).toBe(true);
     expect(checked.plan.skills[0]?.fileCount).toBe(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL("https://cloud.test/api/workbench/source/skills/alice/cloud-skill/releases/v003/source"),
+      new URL("https://cloud.test/api/workbench/source/skills/alice/cloud-skill/versions/v003/source"),
       expect.any(Object),
     );
   });
 
   test("rejects unsafe Workbench source snapshot file paths", async () => {
     const root = await makeTempRoot("workbench-unsafe-cloud-source-skill-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: cloud",
       "skills:",
@@ -1859,7 +1888,7 @@ describe("skill-first Workbench runtime", () => {
     ].join("\n"));
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
-      if (url.pathname === "/api/workbench/source/skills/alice/cloud-skill/releases/v003/source") {
+      if (url.pathname === "/api/workbench/source/skills/alice/cloud-skill/versions/v003/source") {
         return Response.json({
           schema: "workbench.source.snapshot.v1",
           owner: "alice",
@@ -1884,7 +1913,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("uses the command auth token when resolving private Workbench skill URLs", async () => {
     const root = await makeTempRoot("workbench-private-cloud-source-skill-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
       "default: private_cloud",
       "skills:",
@@ -1897,7 +1926,7 @@ describe("skill-first Workbench runtime", () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       seenAuthHeaders.push(new Headers(init?.headers).get("authorization"));
-      if (url.pathname === "/api/workbench/source/skills/alice/private-skill/releases/v007/source") {
+      if (url.pathname === "/api/workbench/source/skills/alice/private-skill/versions/v007/source") {
         return Response.json({
           schema: "workbench.source.snapshot.v1",
           owner: "alice",
@@ -1928,7 +1957,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("fails on missing or incomplete agent files instead of creating implicit agents", async () => {
     const root = await makeTempRoot("workbench-agent-required-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
 
     await fs.rm(path.join(root, ".workbench", "agents.yaml"), { force: true });
     await expect(workbenchStatus({ dir: root })).rejects.toThrow(/Missing \.workbench\/agents\.yaml/u);
@@ -1942,7 +1971,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("reports zero eval cases without inflating project readiness", async () => {
     const root = await makeTempRoot("workbench-zero-cases-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.rm(path.join(root, ".workbench", "cases"), { recursive: true, force: true });
 
     const check = await checkWorkbenchSkill({ dir: root });
@@ -1953,7 +1982,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("inspection snapshot exposes authored eval cases as typed snapshot data", async () => {
     const root = await makeTempRoot("workbench-typed-cases-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.rm(path.join(root, ".workbench", "cases"), { recursive: true, force: true });
     await fs.mkdir(path.join(root, ".workbench", "cases", "case-custom"), { recursive: true });
     await fs.writeFile(
@@ -2519,7 +2548,7 @@ describe("skill-first Workbench runtime", () => {
     const temp = await makeTempRoot("workbench-object-sync-");
     const remote = path.join(temp, "remote");
     const root = path.join(temp, "source");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.mkdir(path.join(root, "assets"), { recursive: true });
     const binaryAsset = Buffer.from([0, 255, 1, 2, 3, 0, 128]);
     await fs.writeFile(path.join(root, "assets", "template.bin"), binaryAsset);
@@ -2582,7 +2611,7 @@ describe("skill-first Workbench runtime", () => {
     expect(await fs.readFile(path.join(remote, "indexes", "measurements.jsonl"), "utf8")).toContain("run_");
 
     const portableRoot = path.join(temp, "portable");
-    await initWorkbenchSkill({ dir: portableRoot, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: portableRoot, agent: "local" });
     await addWorkbenchRemote("origin", remoteUrl, { dir: portableRoot });
     const pulled = await syncWorkbenchRemote({ dir: portableRoot });
     const portableSnapshot = await createWorkbenchInspectionSnapshot({ dir: portableRoot });
@@ -2610,21 +2639,44 @@ describe("skill-first Workbench runtime", () => {
     const temp = await makeTempRoot("workbench-publication-ref-");
     const remote = path.join(temp, "remote");
     const root = path.join(temp, "source");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
     const currentVersionId = (await workbenchStatus({ dir: root })).currentVersionId!;
 
     await fs.writeFile(path.join(remote, "refs.json"), JSON.stringify({
       current: currentVersionId,
+      "publication/current-version": currentVersionId,
       published: currentVersionId,
+      [`releases/${currentVersionId}`]: currentVersionId,
     }, null, 2));
     await syncWorkbenchRemote({ dir: root });
 
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(snapshot.refs["publication/current-version"]).toBeUndefined();
+    expect(snapshot.refs[`publication/versions/${currentVersionId}`]).toBeUndefined();
     expect(snapshot.refs.published).toBeUndefined();
     expect(snapshot.refs[`releases/${currentVersionId}`]).toBeUndefined();
     expect(snapshot.publication).toBeUndefined();
+  });
+
+  test("file remote sync does not export publication refs", async () => {
+    const temp = await makeTempRoot("workbench-publication-ref-export-");
+    const remote = path.join(temp, "remote");
+    const root = path.join(temp, "source");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    const currentVersionId = (await workbenchStatus({ dir: root })).currentVersionId!;
+    await writeWorkbenchRef(root, "published", currentVersionId);
+    await writeWorkbenchRef(root, `releases/${currentVersionId}`, currentVersionId);
+    await writeWorkbenchRef(root, "publication/current-version", currentVersionId);
+    await writeWorkbenchRef(root, `publication/versions/${currentVersionId}`, currentVersionId);
+    await writeWorkbenchRef(root, "publication/visibility", "public");
+
+    await syncWorkbenchRemote({ dir: root });
+
+    const remoteRefs = JSON.parse(await fs.readFile(path.join(remote, "refs.json"), "utf8")) as Record<string, unknown>;
+    expect(publicationRefNames(remoteRefs)).toEqual([]);
   });
 
   test("sync accepts same skill bundle hash with different creation metadata", async () => {
@@ -2853,7 +2905,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("fails check when a case.yaml is malformed", async () => {
     const root = await makeTempRoot("workbench-broken-case-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const caseDir = path.join(root, ".workbench", "cases", "broken");
     await fs.mkdir(caseDir, { recursive: true });
     await fs.writeFile(path.join(caseDir, "case.yaml"), "id: [unterminated\ncommand: 'echo ok\n");
@@ -2870,7 +2922,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("fails check when a case.yaml is not a mapping", async () => {
     const root = await makeTempRoot("workbench-non-mapping-case-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const caseDir = path.join(root, ".workbench", "cases", "listy");
     await fs.mkdir(caseDir, { recursive: true });
     await fs.writeFile(path.join(caseDir, "case.yaml"), "- not\n- a\n- mapping\n");
@@ -2880,7 +2932,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("HTTP sync writes only missing objects for remote-present skill bundles", async () => {
     const root = await makeTempRoot("workbench-http-delta-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const bundle = {
       hash: hashJson({ bundle: "same-content" }),
       skillName: "primary",
@@ -2999,7 +3051,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("HTTP sync treats remote-present lifecycle ids as Cloud-owned", async () => {
     const root = await makeTempRoot("workbench-http-lifecycle-delta-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const run: WorkbenchProjectState["runs"][number] = {
       id: "run_delta",
       kind: "eval",
@@ -3129,11 +3181,12 @@ describe("skill-first Workbench runtime", () => {
 
   test("syncs and publishes through an HTTP Workbench remote", async () => {
     const root = await makeTempRoot("workbench-http-remote-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/http-skill", { dir: root });
     let storedState: WorkbenchProjectState | null = null;
     let visibility = "private";
     const putBodies: Array<{ objectPack: ReturnType<typeof exportObjectPack>; publishVersionId?: string; visibility?: "private" | "internal" | "public" }> = [];
+    const deletePaths: string[] = [];
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const method = init?.method ?? "GET";
@@ -3151,7 +3204,7 @@ describe("skill-first Workbench runtime", () => {
         expect(body.ownerSlug).toBe("alice");
         expect(body.state.remotes).toEqual({});
         expect(Object.keys(body.state.refs).filter((name) => name.startsWith("remotes/"))).toEqual([]);
-        expect(body.state.refs.published).toBeUndefined();
+        expect(body.state.refs["publication/current-version"]).toBeUndefined();
         storedState = body.state;
         return Response.json({
           skill: { id: "skill_http", ownerSlug: "alice", name: "http-skill" },
@@ -3188,17 +3241,48 @@ describe("skill-first Workbench runtime", () => {
         }
         nextState.refs = { ...nextState.refs, ...body.objectPack.refs };
         if (body.publishVersionId) {
-          nextState.refs.published = body.publishVersionId;
-          nextState.refs[`releases/${body.publishVersionId}`] = body.publishVersionId;
+          nextState.refs["publication/current-version"] = body.publishVersionId;
+          nextState.refs[`publication/versions/${body.publishVersionId}`] = body.publishVersionId;
           nextState.refs["publication/install-handle"] = "alice/http-skill";
           visibility = body.visibility ?? visibility;
         }
         storedState = nextState;
         return Response.json({ skill: { id: "skill_http", visibility } });
       }
+      if (url.pathname.startsWith("/api/workbench/source/skills/alice/http-skill/versions/") && method === "DELETE") {
+        const versionId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+        deletePaths.push(url.pathname);
+        if (!storedState?.refs[`publication/versions/${versionId}`]) {
+          return Response.json({ message: "not found" }, { status: 404 });
+        }
+        delete storedState.refs[`publication/versions/${versionId}`];
+        const currentPublishedVersionId = storedState.refs["publication/current-version"];
+        const publishedVersionIds = Object.entries(storedState.refs)
+          .flatMap(([key, value]) =>
+            typeof value === "string" && key.startsWith("publication/versions/") && key === `publication/versions/${value}`
+              ? [value]
+              : []
+          )
+          .sort();
+        return Response.json({
+          publication: {
+            currentVersionId: currentPublishedVersionId,
+            publishedVersionIds,
+            installHandle: "alice/http-skill",
+            visibility,
+          },
+        });
+      }
       throw new Error(`Unexpected fetch ${method} ${url.pathname}`);
     });
     vi.stubGlobal("fetch", fetchMock);
+
+    const legacyPublishedVersionId = (await workbenchStatus({ dir: root })).currentVersionId!;
+    await writeWorkbenchRef(root, "published", legacyPublishedVersionId);
+    await writeWorkbenchRef(root, `releases/${legacyPublishedVersionId}`, legacyPublishedVersionId);
+    await writeWorkbenchRef(root, "publication/current-version", legacyPublishedVersionId);
+    await writeWorkbenchRef(root, `publication/versions/${legacyPublishedVersionId}`, legacyPublishedVersionId);
+    await writeWorkbenchRef(root, "publication/visibility", "public");
 
     const synced = await syncWorkbenchRemote({ dir: root, authToken: "test-token" });
     expect(synced.pushed).toBeGreaterThan(0);
@@ -3209,6 +3293,11 @@ describe("skill-first Workbench runtime", () => {
     expect(syncedSnapshot.refs["remotes/origin/current"]).toBeUndefined();
     expect(storedState?.refs.current).toBeUndefined();
     expect(storedState?.refs["remotes/origin/current"]).toBeUndefined();
+    expect(publicationRefNames(storedState?.refs ?? {})).toEqual([]);
+    expect(syncedSnapshot.refs.published).toBeUndefined();
+    expect(syncedSnapshot.refs[`releases/${legacyPublishedVersionId}`]).toBeUndefined();
+    expect(syncedSnapshot.refs["publication/current-version"]).toBeUndefined();
+    expect(syncedSnapshot.refs[`publication/versions/${legacyPublishedVersionId}`]).toBeUndefined();
     const statusAfterSync = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
     expect(statusAfterSync.next).toBeNull();
 
@@ -3228,16 +3317,16 @@ describe("skill-first Workbench runtime", () => {
     expect(privatePublishPut?.objectPack.skillBundles).toHaveLength(0);
     expect(privatePublishPut?.objectPack.runs).toHaveLength(0);
     expect(visibility).toBe("private");
-    expect(storedState?.refs.published).toBe(currentVersionId);
-    expect(storedState?.refs[`releases/${currentVersionId}`]).toBe(currentVersionId);
+    expect(storedState?.refs["publication/current-version"]).toBe(currentVersionId);
+    expect(storedState?.refs[`publication/versions/${currentVersionId}`]).toBe(currentVersionId);
     expect(storedState?.refs["publication/install-handle"]).toBe("alice/http-skill");
     const privateSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     expect(privateSnapshot.publication).toMatchObject({
-      versionId: currentVersionId,
+      currentVersionId,
       installHandle: "alice/http-skill",
     });
-    expect(privateSnapshot.refs["remotes/origin/published"]).toBe(currentVersionId);
-    expect(privateSnapshot.refs[`remotes/origin/releases/${currentVersionId}`]).toBe(currentVersionId);
+    expect(privateSnapshot.refs["remotes/origin/publication/current-version"]).toBe(currentVersionId);
+    expect(privateSnapshot.refs[`remotes/origin/publication/versions/${currentVersionId}`]).toBe(currentVersionId);
     expect(privateSnapshot.refs["remotes/origin/publication/install-handle"])
       .toBe("alice/http-skill");
 
@@ -3253,7 +3342,7 @@ describe("skill-first Workbench runtime", () => {
     expect(visibility).toBe("public");
     const publicPublicationSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     expect(publicPublicationSnapshot.publication).toMatchObject({
-      versionId: currentVersionId,
+      currentVersionId,
       installHandle: "alice/http-skill",
     });
     expect(publicPublicationSnapshot.refs["remotes/origin/publication/install-handle"])
@@ -3272,11 +3361,48 @@ describe("skill-first Workbench runtime", () => {
     expect(visibility).toBe("public");
     const statusAfterPublish = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
     expect(statusAfterPublish.next).toBeNull();
+
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond published version.\n");
+    const secondPublished = await publishWorkbenchVersion({
+      dir: root,
+      visibility: "public",
+      authToken: "test-token",
+    });
+    const secondVersionId = secondPublished.version.id;
+    expect(secondVersionId).not.toBe(currentVersionId);
+    expect(storedState?.refs["publication/current-version"]).toBe(secondVersionId);
+    expect(storedState?.refs[`publication/versions/${currentVersionId}`]).toBe(currentVersionId);
+    expect(storedState?.refs[`publication/versions/${secondVersionId}`]).toBe(secondVersionId);
+
+    await expect(unpublishWorkbenchVersion({
+      dir: root,
+      version: secondVersionId,
+      authToken: "test-token",
+    })).rejects.toMatchObject({
+      code: "published_version_current",
+    });
+    expect(deletePaths).toEqual([]);
+
+    const unpublished = await unpublishWorkbenchVersion({
+      dir: root,
+      version: currentVersionId,
+      authToken: "test-token",
+    });
+    expect(unpublished.currentVersionId).toBe(secondVersionId);
+    expect(unpublished.publishedVersionIds).toEqual([secondVersionId]);
+    expect(deletePaths).toEqual([
+      `/api/workbench/source/skills/alice/http-skill/versions/${currentVersionId}`,
+    ]);
+    const afterUnpublishSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(afterUnpublishSnapshot.refs[`publication/versions/${currentVersionId}`]).toBeUndefined();
+    expect(afterUnpublishSnapshot.refs[`publication/versions/${secondVersionId}`]).toBe(secondVersionId);
+    expect(afterUnpublishSnapshot.refs[`remotes/origin/publication/versions/${currentVersionId}`]).toBeUndefined();
+    expect(afterUnpublishSnapshot.refs[`remotes/origin/publication/versions/${secondVersionId}`]).toBe(secondVersionId);
   });
 
   test("retries retryable HTTP Workbench object writes", async () => {
     const root = await makeTempRoot("workbench-http-retry-put-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/http-skill", { dir: root });
     let putCalls = 0;
     let storedState: WorkbenchProjectState = {
@@ -3336,7 +3462,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("resolves HTTP Workbench owner remotes by exact namespace", async () => {
     const root = await makeTempRoot("workbench-http-remote-exact-owner-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", "https://cloud.test/skills/me/http-skill", { dir: root });
     let storedState: WorkbenchProjectState | null = null;
     let createdOwnerSlug: string | undefined;
@@ -3400,7 +3526,7 @@ describe("skill-first Workbench runtime", () => {
 
   test("gzips large HTTP remote object-pack writes", async () => {
     const root = await makeTempRoot("workbench-http-remote-gzip-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, "large-source.txt"), "x".repeat(1024 * 1024 + 1));
     await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/large-http-skill", { dir: root });
     const encodings: string[] = [];
@@ -3440,7 +3566,7 @@ describe("skill-first Workbench runtime", () => {
   dockerTest("detects divergent remote objects and records pending sync failures", async () => {
     const root = await makeTempRoot("workbench-sync-conflict-");
     const remote = await makeTempRoot("workbench-sync-conflict-remote-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     await evalWorkbenchSkill({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
@@ -3464,7 +3590,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("runs command-backed improve through a bounded skill patch", async () => {
     const root = await makeTempRoot("workbench-command-improve-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchAgent({
       dir: root,
       name: "patcher",
@@ -4464,7 +4590,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("persists multi-sample eval jobs without racing state commits", async () => {
     const root = await makeTempRoot("workbench-samples-persist-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
 
     const [run] = await evalWorkbenchSkill({ dir: root, samples: 5 });
@@ -4606,7 +4732,7 @@ describe("skill-first Workbench runtime", () => {
 
   dockerTest("fails provider-backed skill evals through adapter auth when disconnected", async () => {
     const root = await makeTempRoot("workbench-skill-adapter-");
-    await initWorkbenchSkill({ dir: root, agent: "local" });
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
     await addWorkbenchAgent({
       dir: root,

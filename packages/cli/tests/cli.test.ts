@@ -847,10 +847,149 @@ describe("workbench skill-first CLI", () => {
       message: expect.stringContaining("Workbench project already exists"),
       remediation: `cd ${root} && workbench`,
     });
+
+    const existingSkillRoot = await makeTempRoot("workbench-cli-new-existing-skill-");
+    await fs.writeFile(path.join(existingSkillRoot, "SKILL.md"), privateSkillMarkdown);
+    const existingSkill = await invoke(["new", existingSkillRoot, "--agent", "local", "--json"]);
+    expect(existingSkill.code).toBe(2);
+    expect(stdoutJson(existingSkill)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: `Directory already contains SKILL.md: ${existingSkillRoot}`,
+      remediation: `cd ${existingSkillRoot} && workbench init`,
+    });
   });
 
-  test("new --from hydrates editable package source and authored Workbench controls", async () => {
-    const root = await makeTempRoot("workbench-cli-new-from-");
+  test("init adopts an existing skill directory without rewriting SKILL.md", async () => {
+    const root = await makeTempRoot("workbench-cli-init-existing-");
+    const previousCwd = process.cwd();
+    await fs.writeFile(path.join(root, "SKILL.md"), privateSkillMarkdown);
+    const realRoot = await fs.realpath(root);
+    const before = await fs.readFile(path.join(root, "SKILL.md"), "utf8");
+    process.chdir(root);
+    try {
+      const initialized = await invoke(["init", "--agent", "local", "--json"]);
+      expect(initialized.code, initialized.stdout || initialized.stderr).toBe(0);
+      expect(stdoutJson(initialized)).toMatchObject({
+        schema: "workbench.cli.init.v1",
+        ok: true,
+        result: {
+          root: realRoot,
+          initialized: true,
+          createdPaths: [
+            ".workbench/eval.yaml",
+            ".workbench/agents.yaml",
+            ".workbench/.gitignore",
+          ],
+          defaultAgentSelection: {
+            adapter: "local",
+            kind: "deterministic",
+          },
+        },
+      });
+      await expect(fs.readFile(path.join(root, "SKILL.md"), "utf8")).resolves.toBe(before);
+      await expect(fs.access(path.join(root, ".workbench", "cases"))).resolves.toBeUndefined();
+
+      const duplicate = await invoke(["init", "--agent", "local", "--json"]);
+      expect(duplicate.code).toBe(2);
+      expect(stdoutJson(duplicate)).toMatchObject({
+        ok: false,
+        code: "already_initialized",
+        remediation: "workbench status",
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    const missingRoot = await makeTempRoot("workbench-cli-init-missing-skill-");
+    process.chdir(missingRoot);
+    try {
+      const missing = await invoke(["init", "--json"]);
+      expect(missing.code).toBe(2);
+      expect(stdoutJson(missing)).toMatchObject({
+        ok: false,
+        code: "usage",
+        message: expect.stringContaining("SKILL.md"),
+        remediation: "workbench new DIR",
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    const pathArg = await invoke(["init", root, "--json"]);
+    expect(pathArg.code).toBe(2);
+    expect(stdoutJson(pathArg)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "workbench init does not accept a directory argument.",
+      remediation: "workbench init",
+    });
+  });
+
+  test("removed source and skill-target grammar is rejected through generic usage paths", async () => {
+    const root = path.join(await makeTempRoot("workbench-cli-removed-grammar-parent-"), "skill");
+
+    const newFrom = await invoke(["new", root, "--from", "alice/private-skill", "--json"]);
+    expect(newFrom.code).toBe(2);
+    expect(stdoutJson(newFrom)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Unsupported flag --from for workbench new.",
+    });
+
+    const newDirFlag = await invoke(["new", "--dir", root, "--json"]);
+    expect(newDirFlag.code).toBe(2);
+    expect(stdoutJson(newDirFlag)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Unsupported flag --dir for workbench new.",
+    });
+
+    const newMissingDir = await invoke(["new", "--json"]);
+    expect(newMissingDir.code).toBe(2);
+    expect(stdoutJson(newMissingDir)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "workbench new requires a directory.",
+      remediation: "workbench new DIR",
+    });
+
+    const skillsScan = await invoke(["skills", "scan", "--json"]);
+    expect(skillsScan.code).toBe(2);
+    expect(stdoutJson(skillsScan)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "workbench skills does not accept positional arguments.",
+    });
+
+    const skillsGlobal = await invoke(["skills", "--global", "--json"]);
+    expect(skillsGlobal.code).toBe(2);
+    expect(stdoutJson(skillsGlobal)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Unsupported flag --global for workbench skills.",
+    });
+
+    const installFor = await invoke(["install", "alice/private-skill", "--for", "codex", "--json"]);
+    expect(installFor.code).toBe(2);
+    expect(stdoutJson(installFor)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Unsupported flag --for for workbench install.",
+    });
+
+    const targetAll = await invoke(["skills", "--target", "all", "--json"]);
+    expect(targetAll.code).toBe(2);
+    expect(stdoutJson(targetAll)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "workbench skills/install --target expects codex or claude.",
+      subject: { target: "all" },
+    });
+  });
+
+  test("clone hydrates editable package source and authored Workbench controls", async () => {
+    const root = path.join(await makeTempRoot("workbench-cli-clone-parent-"), "private-skill");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
     vi.stubEnv("WORKBENCH_CONFIG", configPath);
     await fs.writeFile(configPath, JSON.stringify({
@@ -944,12 +1083,13 @@ describe("workbench skill-first CLI", () => {
       ],
     })));
 
-    const created = await invoke(["new", root, "--from", "alice/private-skill", "--agent", "local", "--json"]);
+    const created = await invoke(["clone", "alice/private-skill", root, "--json"]);
     expect(created.code, created.stdout || created.stderr).toBe(0);
     expect(stdoutJson(created)).toMatchObject({
-      schema: "workbench.cli.new.v1",
+      schema: "workbench.cli.clone.v1",
       ok: true,
       source: {
+        kind: "workbench-cloud",
         owner: "alice",
         skill: "private-skill",
         versionId: "v010",
@@ -997,8 +1137,8 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(hydratedStatus).next).toBe("workbench eval");
   });
 
-  test("new --from with published smoke cases points to eval", async () => {
-    const root = await makeTempRoot("workbench-cli-new-from-smoke-");
+  test("clone with published smoke cases points to eval", async () => {
+    const root = path.join(await makeTempRoot("workbench-cli-clone-smoke-parent-"), "smoke");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
     vi.stubEnv("WORKBENCH_CONFIG", configPath);
     await fs.writeFile(configPath, JSON.stringify({
@@ -1047,7 +1187,7 @@ describe("workbench skill-first CLI", () => {
       ],
     })));
 
-    const created = await invoke(["new", root, "--from", "test/workbench-smoke", "--agent", "local", "--json"]);
+    const created = await invoke(["clone", "test/workbench-smoke", root, "--json"]);
 
     expect(created.code, created.stdout || created.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(created).next).toBe("workbench eval");
@@ -1575,7 +1715,7 @@ describe("workbench skill-first CLI", () => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer install-token");
       if (
-        url.pathname === "/api/workbench/source/skills/alice/private-skill/releases/v007/source" ||
+        url.pathname === "/api/workbench/source/skills/alice/private-skill/versions/v007/source" ||
         url.pathname === "/api/workbench/source/skills/alice/private-skill/source"
       ) {
         return jsonResponse({
@@ -1614,17 +1754,18 @@ describe("workbench skill-first CLI", () => {
     try {
       const installed = await invoke([
         "install",
-        "https://cloud.test/skills/alice/private-skill/releases/v007",
-        "--for",
+        "https://cloud.test/skills/alice/private-skill/versions/v007",
+        "--target",
         "codex",
-        "--global",
+        "--scope",
+        "global",
         "--dry-run",
         "--json",
       ]);
 
       expect(installed.code).toBe(0);
       expect(stdoutJson(installed)).toMatchObject({
-        schema: "workbench.cli.install.v2",
+        schema: "workbench.cli.install.v3",
         ok: true,
         source: {
           kind: "workbench-cloud",
@@ -1645,14 +1786,14 @@ describe("workbench skill-first CLI", () => {
           filesCopied: 1,
         })],
       });
-      expect(stdoutJson(installed)).not.toHaveProperty("fanout");
       expect(installed.stdout).not.toContain("\u001b[");
       const handleInstall = await invoke([
         "install",
         "Alice/Private.Skill",
-        "--for",
+        "--target",
         "codex",
-        "--global",
+        "--scope",
+        "global",
         "--dry-run",
         "--json",
       ]);
@@ -1664,12 +1805,32 @@ describe("workbench skill-first CLI", () => {
           installHandle: "alice/private-skill",
         },
       });
+      const handleVersionInstall = await invoke([
+        "install",
+        "Alice/Private.Skill@v007",
+        "--target",
+        "codex",
+        "--scope",
+        "global",
+        "--dry-run",
+        "--json",
+      ]);
+      expect(handleVersionInstall.code).toBe(0);
+      expect(stdoutJson(handleVersionInstall)).toMatchObject({
+        source: {
+          owner: "alice",
+          skill: "private-skill",
+          versionId: "v007",
+          installHandle: "alice/private-skill",
+        },
+      });
       const missing = await invoke([
         "install",
         "alice/missing-skill",
-        "--for",
+        "--target",
         "codex",
-        "--global",
+        "--scope",
+        "global",
         "--dry-run",
         "--json",
       ]);
@@ -1682,7 +1843,7 @@ describe("workbench skill-first CLI", () => {
         subject: { authenticated: true },
       });
       expect(missingJson).not.toHaveProperty("remediation");
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -1847,6 +2008,23 @@ describe("workbench skill-first CLI", () => {
     });
   });
 
+  test("versions lists immutable source versions", async () => {
+    const root = await makeTempRoot("workbench-cli-versions-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const currentVersionId = await currentVersionIdFor(root);
+
+    const result = await invoke(["versions", "--dir", root, "--json"]);
+    expect(result.code, result.stdout || result.stderr).toBe(0);
+    expect(stdoutJson<{ schema: string; versions: Array<{ id: string; fileCount: number }> }>(result))
+      .toMatchObject({
+        schema: "workbench.cli.versions.v1",
+        versions: [expect.objectContaining({
+          id: currentVersionId,
+          fileCount: expect.any(Number),
+        })],
+      });
+  });
+
   test("status switches forward instead of publishing when current source is older than the published Cloud version", async () => {
     const root = await makeTempRoot("workbench-cli-status-published-descendant-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
@@ -1884,8 +2062,8 @@ describe("workbench skill-first CLI", () => {
       lastAttemptAt: publishedAt,
       lastError: null,
     }, null, 2));
-    await writeRef(root, "remotes/cloud/published", descendantVersionId);
-    await writeRef(root, `remotes/cloud/releases/${descendantVersionId}`, descendantVersionId);
+    await writeRef(root, "remotes/cloud/publication/current-version", descendantVersionId);
+    await writeRef(root, `remotes/cloud/publication/versions/${descendantVersionId}`, descendantVersionId);
     await writeRef(root, "remotes/cloud/publication/visibility", "private");
     await writeRef(root, "remotes/cloud/publication/install-handle", "alice/lineage-skill");
 
@@ -1946,8 +2124,8 @@ describe("workbench skill-first CLI", () => {
       lastAttemptAt: publishedAt,
       lastError: null,
     }, null, 2));
-    await writeRef(root, "remotes/cloud/published", currentVersionId);
-    await writeRef(root, `remotes/cloud/releases/${currentVersionId}`, currentVersionId);
+    await writeRef(root, "remotes/cloud/publication/current-version", currentVersionId);
+    await writeRef(root, `remotes/cloud/publication/versions/${currentVersionId}`, currentVersionId);
     await writeRef(root, "remotes/cloud/publication/visibility", "private");
     await writeRef(root, "remotes/cloud/publication/install-handle", "alice/published-skill");
 
@@ -4987,8 +5165,8 @@ describe("workbench skill-first CLI", () => {
       files: [],
     };
     const publishedRefs = {
-      published: baseVersion.id,
-      [`releases/${baseVersion.id}`]: baseVersion.id,
+      "publication/current-version": baseVersion.id,
+      [`publication/versions/${baseVersion.id}`]: baseVersion.id,
       "publication/install-handle": "alice/cloud-skill",
       "publication/visibility": "public",
     };
@@ -5099,13 +5277,13 @@ describe("workbench skill-first CLI", () => {
       await writePassingCaseTest(root);
       const status = await invoke(["status", "--dir", root, "--json"]);
       expect(status.code, status.stdout || status.stderr).toBe(0);
-      expect(stdoutJson<{ next: string | null; remotes: Array<{ publication: { versionId?: string } }> }>(status))
+      expect(stdoutJson<{ next: string | null; remotes: Array<{ publication: { currentVersionId?: string } }> }>(status))
         .toMatchObject({
           next: "workbench eval --rerun -n 5",
           remotes: [
             expect.objectContaining({
               sync: expect.objectContaining({ status: "up_to_date" }),
-              publication: expect.objectContaining({ versionId: baseVersion.id }),
+              publication: expect.objectContaining({ currentVersionId: baseVersion.id }),
             }),
           ],
         });
@@ -5269,8 +5447,8 @@ describe("workbench skill-first CLI", () => {
       ...emptyObjectPack(createdAt),
       refs: {
         current: improvedVersionId,
-        published: baseVersion.id,
-        [`releases/${baseVersion.id}`]: baseVersion.id,
+        "publication/current-version": baseVersion.id,
+        [`publication/versions/${baseVersion.id}`]: baseVersion.id,
         "publication/install-handle": "alice/cloud-skill",
         "publication/visibility": "public",
       },
@@ -5837,8 +6015,8 @@ describe("workbench skill-first CLI", () => {
           remotePack = mergeObjectPacks(remotePack, {
             ...emptyObjectPack("2026-06-11T00:00:00.000Z"),
             refs: {
-              published: body.publishVersionId,
-              [`releases/${body.publishVersionId}`]: body.publishVersionId,
+              "publication/current-version": body.publishVersionId,
+              [`publication/versions/${body.publishVersionId}`]: body.publishVersionId,
               "publication/install-handle": "alice/progress-skill",
               "publication/visibility": body.visibility ?? "private",
             },
@@ -5945,10 +6123,10 @@ describe("workbench skill-first CLI", () => {
       ],
     })));
     try {
-      const installed = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--json"]);
+      const installed = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
       expect(installed.code).toBe(0);
       expect(stdoutJson(installed)).toMatchObject({
-        schema: "workbench.cli.install.v2",
+        schema: "workbench.cli.install.v3",
         ok: true,
         result: "installed",
         filesCopied: 3,
@@ -5961,7 +6139,6 @@ describe("workbench skill-first CLI", () => {
           filesCopied: 3,
         })],
       });
-      expect(stdoutJson(installed)).not.toHaveProperty("fanout");
       await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8")).resolves.toBe(privateSkillMarkdown);
       await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "references", "guide.md"), "utf8"))
         .resolves.toContain("Use this private skill carefully.");
@@ -5976,10 +6153,10 @@ describe("workbench skill-first CLI", () => {
       await expectNoInstallFanout(root);
       publishedVersionId = "v008";
       publishedMarkdown = updatedPrivateSkillMarkdown;
-      const updated = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--json"]);
+      const updated = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
       expect(updated.code, updated.stdout || updated.stderr).toBe(0);
       expect(stdoutJson(updated)).toMatchObject({
-        schema: "workbench.cli.install.v2",
+        schema: "workbench.cli.install.v3",
         ok: true,
         result: "installed",
         filesCopied: 3,
@@ -5988,9 +6165,8 @@ describe("workbench skill-first CLI", () => {
       await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8")).resolves.toBe(updatedPrivateSkillMarkdown);
       await expect(fs.readFile(path.join(root, ".agents", "skills", ".workbench-installs.json"), "utf8"))
         .resolves.toContain("\"v008\"");
-      const repeatedHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--yes"]);
+      const repeatedHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--yes"]);
       expect(repeatedHuman.code, repeatedHuman.stdout || repeatedHuman.stderr).toBe(0);
-      expect(repeatedHuman.stdout).not.toContain("fanout");
       await expectNoInstallFanout(root);
     } finally {
       if (previousConfig === undefined) {
@@ -6040,10 +6216,10 @@ describe("workbench skill-first CLI", () => {
       }],
     })));
     try {
-      const installed = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--json"]);
+      const installed = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
       expect(installed.code).toBe(0);
       expect(stdoutJson(installed)).toMatchObject({
-        schema: "workbench.cli.install.v2",
+        schema: "workbench.cli.install.v3",
         ok: true,
         result: "installed",
         skill: "branded-skill",
@@ -6071,7 +6247,7 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
-  test("install --for all writes Codex and Claude targets only", async () => {
+  test("explicit install commands write Codex and Claude targets separately", async () => {
     const homeRoot = await makeTempRoot("workbench-cli-install-all-home-");
     const claudeRoot = await makeTempRoot("workbench-cli-install-all-claude-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
@@ -6098,37 +6274,48 @@ describe("workbench skill-first CLI", () => {
       }],
     })));
 
-    const installed = await invoke(["install", "alice/private-skill", "--for", "all", "--global", "--json"]);
-    expect(installed.code, installed.stdout || installed.stderr).toBe(0);
-    expect(stdoutJson(installed)).toMatchObject({
-      schema: "workbench.cli.install.v2",
+    const codexInstall = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
+    expect(codexInstall.code, codexInstall.stdout || codexInstall.stderr).toBe(0);
+    expect(stdoutJson(codexInstall)).toMatchObject({
+      schema: "workbench.cli.install.v3",
       ok: true,
       result: "installed",
-      for: "all",
+      target: "codex",
       scope: "global",
-      filesCopied: 2,
-      targets: expect.arrayContaining([
-        expect.objectContaining({
-          target: "codex",
-          root: path.join(homeRoot, ".agents", "skills"),
-          destination: path.join(homeRoot, ".agents", "skills", "private-skill"),
-          filesCopied: 1,
-        }),
-        expect.objectContaining({
-          target: "claude",
-          root: path.join(claudeRoot, "skills"),
-          destination: path.join(claudeRoot, "skills", "private-skill"),
-          filesCopied: 1,
-        }),
-      ]),
+      filesCopied: 1,
+      targets: [expect.objectContaining({
+        target: "codex",
+        root: path.join(homeRoot, ".agents", "skills"),
+        destination: path.join(homeRoot, ".agents", "skills", "private-skill"),
+        filesCopied: 1,
+      })],
     });
+    expect(stdoutJson(codexInstall)).not.toHaveProperty("for");
+
+    const claudeInstall = await invoke(["install", "alice/private-skill", "--target", "claude", "--scope", "global", "--json"]);
+    expect(claudeInstall.code, claudeInstall.stdout || claudeInstall.stderr).toBe(0);
+    expect(stdoutJson(claudeInstall)).toMatchObject({
+      schema: "workbench.cli.install.v3",
+      ok: true,
+      result: "installed",
+      target: "claude",
+      scope: "global",
+      filesCopied: 1,
+      targets: [expect.objectContaining({
+        target: "claude",
+        root: path.join(claudeRoot, "skills"),
+        destination: path.join(claudeRoot, "skills", "private-skill"),
+        filesCopied: 1,
+      })],
+    });
+    expect(stdoutJson(claudeInstall)).not.toHaveProperty("for");
     await expect(fs.readFile(path.join(homeRoot, ".agents", "skills", "private-skill", "SKILL.md"), "utf8"))
       .resolves.toBe(privateSkillMarkdown);
     await expect(fs.readFile(path.join(claudeRoot, "skills", "private-skill", "SKILL.md"), "utf8"))
       .resolves.toBe(privateSkillMarkdown);
     await expectNoInstallFanout(homeRoot);
 
-    const inventory = await invoke(["skills", "--for", "all", "--global", "--json"]);
+    const inventory = await invoke(["skills", "--scope", "global", "--json"]);
     expect(inventory.code, inventory.stdout || inventory.stderr).toBe(0);
     expect(stdoutJson<{ skills: Array<{ target: string; name: string; status: string }> }>(inventory).skills)
       .toEqual(expect.arrayContaining([
@@ -6137,7 +6324,7 @@ describe("workbench skill-first CLI", () => {
       ]));
   });
 
-  test("install --for all reports mixed unchanged and installed targets", async () => {
+  test("install without target writes only the detected current folder target", async () => {
     const root = await makeTempRoot("workbench-cli-install-all-mixed-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
     const previousCwd = process.cwd();
@@ -6164,21 +6351,20 @@ describe("workbench skill-first CLI", () => {
 
     process.chdir(root);
     try {
-      const codexOnly = await invoke(["install", "alice/private-skill", "--for", "codex", "--json"]);
-      expect(codexOnly.code, codexOnly.stdout || codexOnly.stderr).toBe(0);
-      expect(stdoutJson(codexOnly)).toMatchObject({
+      const detected = await invoke(["install", "alice/private-skill", "--json"]);
+      expect(detected.code, detected.stdout || detected.stderr).toBe(0);
+      expect(stdoutJson(detected)).toMatchObject({
+        schema: "workbench.cli.install.v3",
         result: "installed",
+        target: "codex",
+        scope: "folder",
+        currentAgent: "codex",
         targets: [expect.objectContaining({ target: "codex", result: "installed", filesCopied: 1 })],
       });
-
-      const mixed = await invoke(["install", "alice/private-skill", "--for", "all"]);
-      expect(mixed.code, mixed.stdout || mixed.stderr).toBe(0);
-      expect(mixed.stdout).toContain("Installed private-skill: codex folder unchanged; claude folder installed (1 file).");
-      expect(mixed.stdout).not.toContain("Installed private-skill for codex folder, claude folder");
       await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8"))
         .resolves.toBe(privateSkillMarkdown);
-      await expect(fs.readFile(path.join(root, ".claude", "skills", "private-skill", "SKILL.md"), "utf8"))
-        .resolves.toBe(privateSkillMarkdown);
+      await expect(fs.access(path.join(root, ".claude", "skills", "private-skill", "SKILL.md")))
+        .rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       process.chdir(previousCwd);
     }
@@ -7393,7 +7579,7 @@ describe("workbench skill-first CLI", () => {
       files: [{ path: "SKILL.md", kind: "text", encoding: "utf8", executable: false, content: privateSkillMarkdown }],
     })));
 
-    const conflicted = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--json"]);
+    const conflicted = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
     expect(conflicted.code).toBe(1);
     expect(stdoutJson(conflicted)).toMatchObject({
       ok: false,
@@ -7417,10 +7603,10 @@ describe("workbench skill-first CLI", () => {
       files: [{ path: "SKILL.md", kind: "text", encoding: "utf8", executable: false, content: privateSkillMarkdown }],
     })));
 
-    const dryRun = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--dry-run", "--json"]);
+    const dryRun = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run", "--json"]);
     expect(dryRun.code).toBe(0);
     expect(stdoutJson(dryRun)).toMatchObject({
-      schema: "workbench.cli.install.v2",
+      schema: "workbench.cli.install.v3",
       ok: true,
       result: "planned",
       filesCopied: 1,
@@ -7433,18 +7619,16 @@ describe("workbench skill-first CLI", () => {
         filesCopied: 1,
       })],
     });
-    expect(stdoutJson(dryRun)).not.toHaveProperty("fanout");
     await expect(fs.stat(path.join(root, ".agents", "skills", "private-skill"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.stat(path.join(root, ".agents", "skills", ".workbench-installs.json"))).rejects.toMatchObject({ code: "ENOENT" });
 
-    const dryRunHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--dry-run"]);
+    const dryRunHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run"]);
     expect(dryRunHuman.code, dryRunHuman.stdout || dryRunHuman.stderr).toBe(0);
     expect(dryRunHuman.stdout).toContain("Would install private-skill for codex global (1 file).");
-    expect(dryRunHuman.stdout).not.toContain("fanout");
     expect(dryRunHuman.stdout).not.toContain("machine\t");
     expect(dryRunHuman.stdout).not.toContain("\tnone\t");
 
-    const copyFlag = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--copy", "--json"]);
+    const copyFlag = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--copy", "--json"]);
     expect(copyFlag.code).toBe(2);
     expect(stdoutJson(copyFlag)).toMatchObject({
       ok: false,
@@ -7453,7 +7637,7 @@ describe("workbench skill-first CLI", () => {
     });
 
     const deletedToFlag = `--${"to"}`;
-    const toFlag = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", deletedToFlag, "codex", "--json"]);
+    const toFlag = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", deletedToFlag, "codex", "--json"]);
     expect(toFlag.code).toBe(2);
     expect(stdoutJson(toFlag)).toMatchObject({
       ok: false,
@@ -7474,13 +7658,13 @@ describe("workbench skill-first CLI", () => {
       files: [{ path: "SKILL.md", kind: "text", encoding: "utf8", executable: false, content: privateSkillMarkdown }],
     })));
 
-    const first = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--json"]);
+    const first = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
     expect(first.code).toBe(0);
     expect(stdoutJson(first)).toMatchObject({ result: "installed", filesCopied: 1 });
     const installedPath = path.join(root, ".agents", "skills", "private-skill", "SKILL.md");
     await expect(fs.readFile(installedPath, "utf8")).resolves.toBe(privateSkillMarkdown);
 
-    const second = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--json"]);
+    const second = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
     expect(second.code).toBe(0);
     expect(stdoutJson(second)).toMatchObject({
       result: "unchanged",
@@ -7490,7 +7674,7 @@ describe("workbench skill-first CLI", () => {
         destination: path.join(root, ".agents", "skills", "private-skill"),
       })],
     });
-    const dryRun = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--dry-run", "--json"]);
+    const dryRun = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run", "--json"]);
     expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
     expect(stdoutJson(dryRun)).toMatchObject({
       result: "planned",
@@ -7501,10 +7685,9 @@ describe("workbench skill-first CLI", () => {
         destination: path.join(root, ".agents", "skills", "private-skill"),
       })],
     });
-    const dryRunHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--for", "codex", "--global", "--dry-run"]);
+    const dryRunHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run"]);
     expect(dryRunHuman.code, dryRunHuman.stdout || dryRunHuman.stderr).toBe(0);
     expect(dryRunHuman.stdout).toContain("Already installed private-skill for codex global (unchanged; dry run made no changes).");
-    expect(dryRunHuman.stdout).not.toContain("fanout");
     expect(dryRunHuman.stdout).not.toContain("Would install private-skill");
     await expect(fs.readFile(installedPath, "utf8")).resolves.toBe(privateSkillMarkdown);
     await expectNoInstallFanout(root);
@@ -7557,19 +7740,25 @@ describe("workbench skill-first CLI", () => {
       });
 
       const bareSkills = await invoke(["skills", "--json"]);
-      expect(bareSkills.code).toBe(2);
+      expect(bareSkills.code, bareSkills.stdout || bareSkills.stderr).toBe(0);
       expect(stdoutJson(bareSkills)).toMatchObject({
-        ok: false,
-        code: "usage",
-        message: "workbench skills could not detect the current coding agent.",
-        remediation: "workbench skills --for codex",
-        subject: { supportedTargets: ["codex", "claude"] },
+        schema: "workbench.cli.skills.v2",
+        ok: true,
+        scopes: ["folder", "global"],
+        targets: expect.arrayContaining([
+          expect.objectContaining({ id: "codex", scope: "folder" }),
+          expect.objectContaining({ id: "codex", scope: "global" }),
+          expect.objectContaining({ id: "claude", scope: "folder" }),
+          expect.objectContaining({ id: "claude", scope: "global" }),
+        ]),
+        skills: [expect.objectContaining({ target: "codex", scope: "folder", name: "help-skill", status: "unmanaged" })],
+        next: null,
       });
 
-      const empty = await invoke(["skills", "--for", "codex", "--global", "--json"]);
+      const empty = await invoke(["skills", "--target", "codex", "--scope", "global", "--json"]);
       expect(empty.code).toBe(0);
       expect(stdoutJson(empty)).toMatchObject({
-        schema: "workbench.cli.skills.v1",
+        schema: "workbench.cli.skills.v2",
         ok: true,
         scope: "global",
         targets: [expect.objectContaining({
@@ -7580,18 +7769,18 @@ describe("workbench skill-first CLI", () => {
         next: null,
       });
 
-      const folder = await invoke(["skills", "--for", "codex", "--dir", cwdRoot, "--json"]);
+      const folder = await invoke(["skills", "--target", "codex", "--dir", cwdRoot, "--json"]);
       expect(folder.code).toBe(0);
       expect(stdoutJson<{ skills: Array<{ name: string; status: string; target: string }> }>(folder).skills)
         .toEqual([expect.objectContaining({ target: "codex", name: "help-skill", status: "unmanaged" })]);
 
-      const installed = await invoke(["install", "alice/private-skill", "--for", "codex", "--global", "--json"]);
+      const installed = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
       expect(installed.code, installed.stdout || installed.stderr).toBe(0);
 
       vi.stubGlobal("fetch", vi.fn(async () => {
         throw new Error("offline");
       }));
-      const current = await invoke(["skills", "--for", "codex", "--global", "--json"]);
+      const current = await invoke(["skills", "--target", "codex", "--scope", "global", "--json"]);
       expect(current.code).toBe(0);
       expect(stdoutJson<{ skills: Array<{ name: string; status: string; versionId?: string; handle?: string }>; next: string | null }>(current))
         .toMatchObject({
@@ -7614,14 +7803,14 @@ describe("workbench skill-first CLI", () => {
         "# Unmanaged",
         "",
       ].join("\n"));
-      const changed = await invoke(["skills", "--for", "codex", "--global", "--json"]);
+      const changed = await invoke(["skills", "--target", "codex", "--scope", "global", "--json"]);
       expect(stdoutJson<{ skills: Array<{ name: string; status: string }> }>(changed).skills)
         .toEqual(expect.arrayContaining([
           expect.objectContaining({ name: "private-skill", status: "modified" }),
           expect.objectContaining({ name: "unmanaged-skill", status: "unmanaged" }),
         ]));
       vi.stubGlobal("fetch", fetchMock);
-      const dryRunModified = await invoke(["install", "alice/private-skill", "--for", "codex", "--global", "--dry-run", "--json"]);
+      const dryRunModified = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run", "--json"]);
       expect(dryRunModified.code, dryRunModified.stdout || dryRunModified.stderr).toBe(0);
       expect(stdoutJson(dryRunModified)).toMatchObject({
         ok: true,
@@ -7631,29 +7820,29 @@ describe("workbench skill-first CLI", () => {
       });
       await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8"))
         .resolves.toContain("Local edit.");
-      const realOverwrite = await invoke(["install", "alice/private-skill", "--for", "codex", "--global", "--json"]);
+      const realOverwrite = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
       expect(realOverwrite.code).toBe(1);
       expect(stdoutJson(realOverwrite)).toMatchObject({
         ok: false,
         code: "install_failed",
         message: `Skill destination has modified content: ${path.join(root, ".agents", "skills", "private-skill")}`,
-        remediation: "workbench install alice/private-skill --for codex --global --yes",
+        remediation: "workbench install alice/private-skill --target codex --scope global --yes",
         subject: {
           destination: path.join(root, ".agents", "skills", "private-skill"),
           status: "modified",
           target: "codex",
         },
       });
-      const folderInstall = await invoke(["install", "alice/private-skill", "--for", "codex", "--dir", cwdRoot, "--json"]);
+      const folderInstall = await invoke(["install", "alice/private-skill", "--target", "codex", "--dir", cwdRoot, "--json"]);
       expect(folderInstall.code, folderInstall.stdout || folderInstall.stderr).toBe(0);
       await fs.appendFile(path.join(cwdRoot, ".agents", "skills", "private-skill", "SKILL.md"), "\nFolder-local edit.\n");
-      const folderOverwrite = await invoke(["install", "alice/private-skill", "--for", "codex", "--dir", cwdRoot, "--json"]);
+      const folderOverwrite = await invoke(["install", "alice/private-skill", "--target", "codex", "--dir", cwdRoot, "--json"]);
       expect(folderOverwrite.code).toBe(1);
       expect(stdoutJson(folderOverwrite)).toMatchObject({
         ok: false,
         code: "install_failed",
         message: `Skill destination has modified content: ${path.join(cwdRoot, ".agents", "skills", "private-skill")}`,
-        remediation: `workbench install alice/private-skill --for codex --dir ${cwdRoot} --yes`,
+        remediation: `workbench install alice/private-skill --target codex --dir ${cwdRoot} --yes`,
         subject: {
           destination: path.join(cwdRoot, ".agents", "skills", "private-skill"),
           status: "modified",

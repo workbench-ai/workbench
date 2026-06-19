@@ -9,7 +9,6 @@ const INSTALLS_SCHEMA = "workbench.skill-installs.v1";
 const INSTALLS_FILE = ".workbench-installs.json";
 
 export type SkillAccessTargetId = "codex" | "claude";
-export type SkillAccessFor = SkillAccessTargetId | "all";
 export type SkillAccessScope = "folder" | "global";
 export type WorkbenchSkillAccessStatus = "current" | "modified" | "missing" | "unmanaged" | "duplicate-name";
 
@@ -72,9 +71,9 @@ export interface WorkbenchInstalledSkill {
 }
 
 export interface WorkbenchSkillAccessInventory {
-  scope: SkillAccessScope;
+  scopes: SkillAccessScope[];
   dir?: string;
-  requestedFor?: SkillAccessFor;
+  target?: SkillAccessTargetId;
   currentAgent?: SkillAccessTargetId;
   targets: SkillAccessTargetView[];
   skills: WorkbenchInstalledSkill[];
@@ -97,7 +96,7 @@ export interface WorkbenchInstallTargetsResult {
   result: "installed" | "planned" | "unchanged";
   scope: SkillAccessScope;
   dir?: string;
-  requestedFor?: SkillAccessFor;
+  target: SkillAccessTargetId;
   currentAgent?: SkillAccessTargetId;
   skill: string;
   filesCopied: number;
@@ -106,47 +105,59 @@ export interface WorkbenchInstallTargetsResult {
 }
 
 export function resolveSkillAccessTargets(options: {
-  requestedFor?: string;
-  global?: boolean;
+  target?: string;
+  scope?: string;
   dir?: string;
   write: boolean;
   env?: NodeJS.ProcessEnv;
   sourceForRemediation?: string;
 }): {
-  scope: SkillAccessScope;
+  scopes: SkillAccessScope[];
   dir?: string;
-  requestedFor?: SkillAccessFor;
+  target?: SkillAccessTargetId;
   currentAgent?: SkillAccessTargetId;
   targets: SkillAccessTargetView[];
 } {
   const env = options.env ?? process.env;
-  const requestedFor = parseRequestedFor(options.requestedFor);
+  const target = parseRequestedTarget(options.target);
+  const requestedScope = parseRequestedScope(options.scope);
+  if (options.dir && requestedScope === "global") {
+    throw new WorkbenchCodedError("usage", "workbench skills/install --dir is only valid with folder scope.", {
+      remediation: options.write
+        ? `workbench install ${options.sourceForRemediation ?? "OWNER/SKILL"} --scope folder --dir ${commandArg(path.resolve(options.dir))}`
+        : `workbench skills --scope folder --dir ${commandArg(path.resolve(options.dir))}`,
+      subject: { scope: requestedScope, dir: path.resolve(options.dir) },
+      exitCode: 2,
+    });
+  }
   const detected = detectCurrentSkillAccessTargets(env);
-  const targetIds = requestedFor
-    ? requestedFor === "all" ? ["codex", "claude"] as SkillAccessTargetId[] : [requestedFor]
-    : detected.length === 1
-      ? detected
-      : failUndetectedTarget(options.write ? "install" : "skills", options.sourceForRemediation);
-  const scope: SkillAccessScope = options.global === true ? "global" : "folder";
-  const resolvedDir = scope === "folder" ? path.resolve(options.dir ?? process.cwd()) : undefined;
+  const targetIds = target
+    ? [target]
+    : options.write
+      ? detected.length === 1
+        ? detected
+        : failUndetectedInstallTarget(options.sourceForRemediation)
+      : ["codex", "claude"] as SkillAccessTargetId[];
+  const scopes = requestedScope ? [requestedScope] : options.write ? ["folder"] as SkillAccessScope[] : ["folder", "global"] as SkillAccessScope[];
+  const resolvedDir = scopes.includes("folder") ? path.resolve(options.dir ?? process.cwd()) : undefined;
   return {
-    scope,
+    scopes,
     ...(resolvedDir ? { dir: resolvedDir } : {}),
-    ...(requestedFor ? { requestedFor } : {}),
+    ...(target ? { target } : {}),
     ...(detected.length === 1 ? { currentAgent: detected[0] } : {}),
-    targets: targetIds.map((target) => targetView(target, scope, resolvedDir, env)),
+    targets: targetIds.flatMap((targetId) => scopes.map((scope) => targetView(targetId, scope, resolvedDir, env))),
   };
 }
 
 export async function readInstalledSkillsInventory(options: {
-  requestedFor?: string;
-  global?: boolean;
+  target?: string;
+  scope?: string;
   dir?: string;
   env?: NodeJS.ProcessEnv;
 } = {}): Promise<WorkbenchSkillAccessInventory> {
   return readInventoryForRequest(resolveSkillAccessTargets({
-    requestedFor: options.requestedFor,
-    global: options.global,
+    target: options.target,
+    scope: options.scope,
     dir: options.dir,
     write: false,
     env: options.env,
@@ -154,7 +165,7 @@ export async function readInstalledSkillsInventory(options: {
 }
 
 export async function observeCurrentInstalledSkillsInventory(options: {
-  global?: boolean;
+  scope?: string;
   dir?: string;
   env?: NodeJS.ProcessEnv;
 } = {}): Promise<WorkbenchSkillAccessInventory> {
@@ -162,9 +173,9 @@ export async function observeCurrentInstalledSkillsInventory(options: {
 }
 
 async function readInventoryForRequest(request: {
-  scope: SkillAccessScope;
+  scopes: SkillAccessScope[];
   dir?: string;
-  requestedFor?: SkillAccessFor;
+  target?: SkillAccessTargetId;
   currentAgent?: SkillAccessTargetId;
   targets: SkillAccessTargetView[];
 }): Promise<WorkbenchSkillAccessInventory> {
@@ -183,9 +194,9 @@ async function readInventoryForRequest(request: {
     (left.path ?? "").localeCompare(right.path ?? "")
   );
   return {
-    scope: request.scope,
+    scopes: [...request.scopes],
     ...(request.dir ? { dir: request.dir } : {}),
-    ...(request.requestedFor ? { requestedFor: request.requestedFor } : {}),
+    ...(request.target ? { target: request.target } : {}),
     ...(request.currentAgent ? { currentAgent: request.currentAgent } : {}),
     targets: request.targets,
     skills,
@@ -198,15 +209,15 @@ export async function installSnapshotToSkillTargets(options: {
   overwrite: boolean;
   dryRun: boolean;
   provenance: WorkbenchInstallProvenanceInput;
-  requestedFor?: string;
-  global?: boolean;
+  target?: string;
+  scope?: string;
   dir?: string;
   installedAt?: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<WorkbenchInstallTargetsResult> {
   const request = resolveSkillAccessTargets({
-    requestedFor: options.requestedFor,
-    global: options.global,
+    target: options.target,
+    scope: options.scope,
     dir: options.dir,
     write: true,
     env: options.env,
@@ -221,11 +232,12 @@ export async function installSnapshotToSkillTargets(options: {
   }
   const skillName = canonicalSkillDirectoryName({ name: options.snapshot.name, files: packageFiles });
   const contentHash = contentHashForFiles(packageFiles);
+  const target = request.targets[0]!.id;
   const overwriteRemediation = installOverwriteRemediation({
     handle: options.provenance.handle,
-    requestedFor: request.requestedFor,
-    global: request.scope === "global",
-    dir: request.scope === "folder" && options.dir ? request.dir : undefined,
+    target,
+    scope: request.scopes[0] ?? "folder",
+    dir: request.scopes.includes("folder") && options.dir ? request.dir : undefined,
   });
   const results: WorkbenchInstallTargetResult[] = [];
   for (const target of request.targets) {
@@ -249,9 +261,9 @@ export async function installSnapshotToSkillTargets(options: {
       : "installed";
   return {
     result,
-    scope: request.scope,
+    scope: request.scopes[0] ?? "folder",
     ...(request.dir ? { dir: request.dir } : {}),
-    ...(request.requestedFor ? { requestedFor: request.requestedFor } : {}),
+    target,
     ...(request.currentAgent ? { currentAgent: request.currentAgent } : {}),
     skill: skillName,
     filesCopied,
@@ -262,16 +274,16 @@ export async function installSnapshotToSkillTargets(options: {
 
 function installOverwriteRemediation(input: {
   handle: string;
-  requestedFor?: SkillAccessFor;
-  global: boolean;
+  target?: SkillAccessTargetId;
+  scope: SkillAccessScope;
   dir?: string;
 }): string {
   return [
     "workbench",
     "install",
     commandArg(input.handle),
-    ...(input.requestedFor ? ["--for", input.requestedFor] : []),
-    ...(input.global ? ["--global"] : []),
+    ...(input.target ? ["--target", input.target] : []),
+    ...(input.scope !== "folder" ? ["--scope", input.scope] : []),
     ...(input.dir ? ["--dir", commandArg(input.dir)] : []),
     "--yes",
   ].join(" ");
@@ -283,9 +295,10 @@ function commandArg(value: string): string {
 
 export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventory): Record<string, Json> {
   return {
-    scope: inventory.scope,
+    scopes: inventory.scopes,
+    ...(inventory.scopes.length === 1 ? { scope: inventory.scopes[0] } : {}),
     ...(inventory.dir ? { dir: inventory.dir } : {}),
-    ...(inventory.requestedFor ? { for: inventory.requestedFor } : {}),
+    ...(inventory.target ? { target: inventory.target } : {}),
     ...(inventory.currentAgent ? { currentAgent: inventory.currentAgent } : {}),
     targets: inventory.targets.map((target) => ({
       id: target.id,
@@ -326,7 +339,7 @@ export function installResultToJson(result: WorkbenchInstallTargetsResult): Reco
     result: result.result,
     scope: result.scope,
     ...(result.dir ? { dir: result.dir } : {}),
-    ...(result.requestedFor ? { for: result.requestedFor } : {}),
+    target: result.target,
     ...(result.currentAgent ? { currentAgent: result.currentAgent } : {}),
     skill: result.skill,
     filesCopied: result.filesCopied,
@@ -385,48 +398,60 @@ export function canonicalSkillDirectoryName(snapshot: WorkbenchInstallSnapshot):
   return installStoreSkillDirectoryName(snapshot.name);
 }
 
-function parseRequestedFor(value: string | undefined): SkillAccessFor | undefined {
+function parseRequestedTarget(value: string | undefined): SkillAccessTargetId | undefined {
   if (!value) {
     return undefined;
   }
-  if (value === "codex" || value === "claude" || value === "all") {
+  if (value === "codex" || value === "claude") {
     return value;
   }
-  throw new WorkbenchCodedError("usage", "workbench skills/install --for expects codex, claude, or all.", {
-    remediation: "workbench skills --for all",
-    subject: { for: value },
+  throw new WorkbenchCodedError("usage", "workbench skills/install --target expects codex or claude.", {
+    remediation: "workbench skills --target codex",
+    subject: { target: value },
     exitCode: 2,
   });
 }
 
-function failUndetectedTarget(command: "install" | "skills", source: string | undefined): never {
+function parseRequestedScope(value: string | undefined): SkillAccessScope | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === "folder" || value === "global") {
+    return value;
+  }
+  throw new WorkbenchCodedError("usage", "workbench skills/install --scope expects folder or global.", {
+    remediation: "workbench skills --scope global",
+    subject: { scope: value },
+    exitCode: 2,
+  });
+}
+
+function failUndetectedInstallTarget(source: string | undefined): never {
   const remediationSource = source ?? "OWNER/SKILL";
-  throw new WorkbenchCodedError("usage", `workbench ${command} could not detect the current coding agent.`, {
-    remediation: command === "install"
-      ? `workbench install ${remediationSource} --for codex`
-      : "workbench skills --for codex",
+  throw new WorkbenchCodedError("usage", "workbench install could not detect the current coding agent.", {
+    remediation: `workbench install ${remediationSource} --target codex`,
     subject: { supportedTargets: ["codex", "claude"] },
     exitCode: 2,
   });
 }
 
 function observeCurrentSkillAccessTargets(options: {
-  global?: boolean;
+  scope?: string;
   dir?: string;
   env?: NodeJS.ProcessEnv;
 }): {
-  scope: SkillAccessScope;
+  scopes: SkillAccessScope[];
   dir?: string;
   currentAgent?: SkillAccessTargetId;
   targets: SkillAccessTargetView[];
 } {
   const env = options.env ?? process.env;
   const detected = detectCurrentSkillAccessTargets(env);
-  const scope: SkillAccessScope = options.global === true ? "global" : "folder";
+  const scope: SkillAccessScope = parseRequestedScope(options.scope) ?? "folder";
   const resolvedDir = scope === "folder" ? path.resolve(options.dir ?? process.cwd()) : undefined;
   const currentAgent = detected.length === 1 ? detected[0] : undefined;
   return {
-    scope,
+    scopes: [scope],
     ...(resolvedDir ? { dir: resolvedDir } : {}),
     ...(currentAgent ? { currentAgent } : {}),
     targets: currentAgent ? [targetView(currentAgent, scope, resolvedDir, env)] : [],

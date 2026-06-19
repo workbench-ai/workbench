@@ -621,7 +621,8 @@ export interface WorkbenchStatusSnapshot {
     publication: {
       status: "published" | "unpublished";
       visibility?: string;
-      versionId?: string;
+      currentVersionId?: string;
+      publishedVersionIds?: string[];
       installHandle?: string;
     };
   }>;
@@ -712,8 +713,10 @@ export type WorkbenchStateNotice =
     };
 
 export interface WorkbenchPublication {
-  versionId: string;
+  currentVersionId: string;
+  publishedVersionIds: string[];
   installHandle: string;
+  visibility?: string;
 }
 
 export interface WorkbenchObjectPack {

@@ -58,10 +58,10 @@
   --destructive-soft: oklch(0.954 0.02 25.17);
   --warning: oklch(0.795 0.163 82.84);
   --warning-foreground: oklch(0.205 0 0);
-  /* Lime: the scarce highlight accent — chosen rows, rerun chips, live
+  /* Warm taupe: the scarce highlight accent — chosen rows, rerun chips, live
      spinners. Never a default surface or button color. */
-  --highlight: oklch(0.94 0.214 120.61);
-  --highlight-foreground: oklch(0.181 0.042 118.45);
+  --highlight: #e8e4d9;
+  --highlight-foreground: #3f3b33;
   /* Light-gray canvas that holds white cards */
   --surface: oklch(0.967 0.003 106.45);
   --chart-1: oklch(0.512 0.125 150.89);
@@ -85,8 +85,8 @@
   --destructive-soft: oklch(0.31 0.045 25.17);
   --warning: oklch(0.84 0.162 84.43);
   --warning-foreground: oklch(0.205 0 0);
-  --highlight: oklch(0.94 0.214 120.61);
-  --highlight-foreground: oklch(0.181 0.042 118.45);
+  --highlight: #e8e4d9;
+  --highlight-foreground: #3f3b33;
   --surface: oklch(0.225 0 0);
   --chart-1: oklch(0.705 0.138 151.54);
   --chart-2: oklch(0.707 0.165 254.62);

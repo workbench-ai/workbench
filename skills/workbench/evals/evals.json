@@ -133,7 +133,7 @@
       "title": "Publish and install a Workbench skill",
       "category": "sharing",
       "prompt": "Share a Workbench-managed skill through Workbench Cloud and explain what gets published.",
-      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench new DIR --from OWNER/SKILL. It explains that publish exposes an installable agent skill package for use and editable Workbench source for evaluation or improvement, while object sync stores versions, evidence, refs, traces, and artifacts.",
+      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench clone OWNER/SKILL DIR. It explains that publish exposes an installable agent skill package for use and editable Workbench source for evaluation or improvement, while object sync stores versions, evidence, refs, traces, and artifacts.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -166,7 +166,7 @@
           "text": "hydrates editable source",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+new\\s+\\S+\\s+--from\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\b"
+          "value": "(?:^|\\s)workbench\\s+clone\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\s+\\S+\\b"
         },
         {
           "text": "describes object remote",

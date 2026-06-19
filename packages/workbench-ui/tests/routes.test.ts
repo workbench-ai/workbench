@@ -595,11 +595,12 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
     }],
     refs: {
       current: "v002",
-      published: "v002",
-      "releases/v002": "v002",
+      "publication/current-version": "v002",
+      "publication/versions/v002": "v002",
     },
     publication: {
-      versionId: "v002",
+      currentVersionId: "v002",
+      publishedVersionIds: ["v002"],
       installHandle: "acme/skill",
     },
   };

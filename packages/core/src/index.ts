@@ -3020,6 +3020,21 @@ export interface WorkbenchPublishResult {
   unchanged?: boolean;
 }
 
+export interface WorkbenchUnpublishOptions extends WorkbenchCommandOptions {
+  version: string;
+  remote?: string;
+  authToken?: string;
+}
+
+export interface WorkbenchUnpublishResult {
+  remote: WorkbenchRemote;
+  version: WorkbenchVersion;
+  visibility?: WorkbenchPublishVisibility;
+  installHandle?: string;
+  currentVersionId?: string;
+  publishedVersionIds: string[];
+}
+
 export interface WorkbenchAddRemoteOptions extends WorkbenchCommandOptions {
   replace?: boolean;
   dryRun?: boolean;
@@ -3210,7 +3225,7 @@ const WORKBENCH_PROVIDER_AGENT_DEFAULTS: Record<WorkbenchProviderAgentAdapter, {
   },
 };
 
-export async function initWorkbenchSkill(options: WorkbenchInitOptions = {}): Promise<WorkbenchStatus> {
+export async function createNewWorkbenchSkillProject(options: WorkbenchInitOptions = {}): Promise<WorkbenchStatus> {
   const root = resolveRoot(options.dir);
   const rootExists = await exists(root);
   if (rootExists && await exists(workbenchDir(root))) {
@@ -3223,8 +3238,11 @@ export async function initWorkbenchSkill(options: WorkbenchInitOptions = {}): Pr
   if (rootExists && !await exists(workbenchDir(root))) {
     const entries = await fs.readdir(root);
     if (entries.length > 0) {
-      throw new WorkbenchCodedError("usage", `Directory is not empty: ${root}`, {
-        remediation: "To adopt an existing folder, write SKILL.md yourself, then run a Workbench command from that folder.",
+      const containsSkill = await exists(path.join(root, SKILL_FILE));
+      throw new WorkbenchCodedError("usage", containsSkill
+        ? `Directory already contains ${SKILL_FILE}: ${root}`
+        : `Directory is not empty: ${root}`, {
+        remediation: containsSkill ? `cd ${root} && workbench init` : "workbench new DIR",
         subject: { root },
         exitCode: 2,
       });
@@ -3246,6 +3264,57 @@ export async function initWorkbenchSkill(options: WorkbenchInitOptions = {}): Pr
       "",
     ].join("\n"),
   );
+  return await initializeWorkbenchProjectControls(root, defaultAgentSelection, [...STARTER_CREATED_PATHS]);
+}
+
+export async function initExistingWorkbenchSkillProject(options: WorkbenchInitOptions = {}): Promise<WorkbenchStatus> {
+  const root = resolveRoot(options.dir);
+  if (!await exists(path.join(root, SKILL_FILE))) {
+    throw new WorkbenchCodedError("usage", `Workbench init requires ${SKILL_FILE} in the current directory.`, {
+      remediation: "workbench new DIR",
+      subject: { root, requiredFile: SKILL_FILE },
+      exitCode: 2,
+    });
+  }
+  if (await exists(workbenchDir(root))) {
+    const required = [
+      path.join(workbenchDir(root), EVAL_FILE),
+      path.join(workbenchDir(root), AGENTS_FILE),
+      objectsDir(root),
+      refsDir(root),
+    ];
+    const missing = [];
+    for (const entry of required) {
+      if (!await exists(entry)) {
+        missing.push(path.relative(root, entry));
+      }
+    }
+    if (missing.length > 0) {
+      throw new WorkbenchCodedError("invalid_workbench_project", `Workbench metadata already exists but is incomplete: ${root}`, {
+        remediation: "Inspect .workbench, repair the missing files, or move .workbench aside before rerunning workbench init.",
+        subject: { root, missing },
+        exitCode: 2,
+      });
+    }
+    throw new WorkbenchCodedError("already_initialized", `Workbench project already exists: ${root}`, {
+      remediation: "workbench status",
+      subject: { root },
+      exitCode: 2,
+    });
+  }
+  const defaultAgentSelection = await selectNewDefaultAgent(options);
+  return await initializeWorkbenchProjectControls(root, defaultAgentSelection, [
+    ".workbench/eval.yaml",
+    ".workbench/agents.yaml",
+    ".workbench/.gitignore",
+  ]);
+}
+
+async function initializeWorkbenchProjectControls(
+  root: string,
+  defaultAgentSelection: WorkbenchDefaultAgentSelection,
+  createdPaths: readonly string[],
+): Promise<WorkbenchStatus> {
   const workbenchRoot = workbenchDir(root);
   await fs.mkdir(path.join(workbenchRoot, CASES_DIR), { recursive: true });
   await ensureWorkbenchLocalMetadataIgnore(root);
@@ -3276,7 +3345,7 @@ export async function initWorkbenchSkill(options: WorkbenchInitOptions = {}): Pr
   return {
     ...await workbenchStatus({ dir: root }),
     defaultAgentSelection,
-    createdPaths: [...STARTER_CREATED_PATHS],
+    createdPaths: [...createdPaths],
   };
 }
 
@@ -6100,7 +6169,7 @@ function workbenchAcquisitionOptions(
       id: "editable-source",
       label: "Create editable project",
       kind: "copy-command",
-      value: `workbench new ${normalizeWorkbenchSkillName(options.skillName ?? handle.split("/").at(-1) ?? "skill") || "skill"} --from ${handle}`,
+      value: `workbench clone ${handle} ${normalizeWorkbenchSkillName(options.skillName ?? handle.split("/").at(-1) ?? "skill") || "skill"}`,
     });
   }
   if (options.variant === "local") {
@@ -7360,7 +7429,7 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
     if (
       options.dryRun !== true &&
       localPublication.status === "published" &&
-      localPublication.versionId === version.id &&
+      localPublication.currentVersionId === version.id &&
       (localPublication.visibility ?? "private") === localVisibility &&
       localPublication.installHandle === localInstallHandle
     ) {
@@ -7388,7 +7457,7 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
     const currentPublication = publicationStatusFromRefs(syncedState.refs, sync.remote.name);
     if (
       currentPublication.status === "published" &&
-      currentPublication.versionId === version.id &&
+      currentPublication.currentVersionId === version.id &&
       (currentPublication.visibility ?? "private") === visibility &&
       currentPublication.installHandle === installHandle
     ) {
@@ -7418,6 +7487,61 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
       version,
       visibility,
       installHandle: publication.installHandle,
+    };
+  });
+}
+
+export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptions): Promise<WorkbenchUnpublishResult> {
+  const root = resolveRoot(options.dir);
+  return withWorkbenchProjectLockIfInitialized(root, async () => {
+    await requireInitialized(root);
+    const state = await loadState(root);
+    const version = resolveVersion(state, options.version);
+    const remote = resolveRemote(state, options.remote);
+    assertPublishableRemote(remote);
+    await saveState(root, state);
+    const sync = await syncWorkbenchRemote({ dir: root, remote: remote.name, authToken: options.authToken });
+    const syncedState = await loadState(root);
+    const publication = publicationStatusFromRefs(syncedState.refs, sync.remote.name);
+    if (publication.status !== "published" || !publication.publishedVersionIds?.includes(version.id)) {
+      throw new WorkbenchCodedError("published_version_not_found", `Published version not found: ${version.id}.`, {
+        remediation: "workbench publish VERSION",
+        subject: { versionId: version.id },
+        exitCode: 1,
+      });
+    }
+    if (publication.currentVersionId === version.id) {
+      throw new WorkbenchCodedError("published_version_current", `Version ${version.id} is the current published version and cannot be unpublished directly.`, {
+        remediation: "workbench publish OTHER_VERSION",
+        subject: {
+          versionId: version.id,
+          ...(publication.installHandle ? { installHandle: publication.installHandle } : {}),
+        },
+        exitCode: 1,
+      });
+    }
+    const remotePublication = await deleteRemotePublishedVersion(sync.remote, version.id, {
+      authToken: options.authToken,
+      state: syncedState,
+    });
+    removePublishedVersionRef(syncedState.refs, version.id);
+    syncedState.refs = withMergedRemoteTrackingRefs(syncedState.refs, sync.remote.name, {
+      ...publicationRefsForVersion(
+        remotePublication.currentVersionId,
+        remotePublication.installHandle ? { installHandle: remotePublication.installHandle } : undefined,
+        remotePublication.visibility,
+      ),
+      ...Object.fromEntries(remotePublication.publishedVersionIds.map((id) => [`publication/versions/${id}`, id])),
+    });
+    removeRemotePublishedVersionRef(syncedState.refs, sync.remote.name, version.id);
+    await saveState(root, syncedState);
+    return {
+      remote: sync.remote,
+      version,
+      visibility: remotePublication.visibility,
+      installHandle: remotePublication.installHandle,
+      currentVersionId: remotePublication.currentVersionId,
+      publishedVersionIds: remotePublication.publishedVersionIds,
     };
   });
 }
@@ -8079,8 +8203,8 @@ function workbenchPublicationForSnapshot(
   state: WorkbenchProjectState,
   remotes: readonly WorkbenchRemote[],
 ): Pick<WorkbenchInspectionSnapshot, "publication"> {
-  const versionId = state.refs.published;
-  if (!versionId || state.refs[`releases/${versionId}`] !== versionId) {
+  const versionId = publishedVersionIdFromRefs(state.refs);
+  if (!versionId) {
     return {};
   }
   const remote = remotes.find((entry) => entry.name === "origin") ?? remotes[0];
@@ -8095,7 +8219,8 @@ function workbenchPublicationForSnapshot(
     }
     return {
       publication: {
-        versionId,
+        currentVersionId: versionId,
+        publishedVersionIds: publishedVersionIdsFromRefs(state.refs),
         installHandle: `${parsed.owner}/${parsed.name}`,
       },
     };
@@ -8145,19 +8270,26 @@ function refsForRemoteSync(refs: WorkbenchRefs): WorkbenchRefs {
     .filter(([name]) =>
       !name.startsWith("remotes/") &&
       name !== "current" &&
-      name !== "published" &&
-      !name.startsWith("releases/") &&
-      !name.startsWith("publication/")
+      !isPublicationRef(name)
     ));
+}
+
+function isCanonicalPublicationRef(name: string): boolean {
+  return name.startsWith("publication/");
+}
+
+// Pre-publication/* publish refs remain publication metadata so sync cannot resurrect them.
+function isLegacyPublicationRef(name: string): boolean {
+  return name === "published" || name.startsWith("releases/");
+}
+
+function isPublicationRef(name: string): boolean {
+  return isCanonicalPublicationRef(name) || isLegacyPublicationRef(name);
 }
 
 function publicationRefs(refs: WorkbenchRefs): WorkbenchRefs {
   return Object.fromEntries(Object.entries(refs)
-    .filter(([name]) =>
-      name === "published" ||
-      name.startsWith("releases/") ||
-      name.startsWith("publication/")
-    ));
+    .filter(([name]) => isCanonicalPublicationRef(name)));
 }
 
 function remoteTrackingRefsForCloudSync(mergedRefs: WorkbenchRefs, remoteRefs: WorkbenchRefs): WorkbenchRefs {
@@ -8206,8 +8338,8 @@ function publicationRefsForVersion(
   visibility?: WorkbenchPublishVisibility,
 ): WorkbenchRefs {
   return {
-    published: versionId,
-    [`releases/${versionId}`]: versionId,
+    "publication/current-version": versionId,
+    [`publication/versions/${versionId}`]: versionId,
     ...(publication?.installHandle ? { "publication/install-handle": publication.installHandle } : {}),
     ...(visibility ? { "publication/visibility": visibility } : {}),
   };
@@ -8222,9 +8354,20 @@ function publicationFromRefs(
     return undefined;
   }
   return {
-    versionId,
+    currentVersionId: versionId,
+    publishedVersionIds: publishedVersionIdsFromRefs(refs),
     installHandle,
+    ...(refs["publication/visibility"] ? { visibility: refs["publication/visibility"] } : {}),
   };
+}
+
+function publishedVersionIdFromRefs(refs: WorkbenchRefs): string | undefined {
+  const versionId = refs["publication/current-version"];
+  return versionId && refs[`publication/versions/${versionId}`] === versionId ? versionId : undefined;
+}
+
+function publishedVersionIdsFromRefs(refs: WorkbenchRefs): string[] {
+  return publishedVersionIdsFromRefsWithPrefix(refs, "");
 }
 
 function publicationStatusFromRefs(
@@ -8232,16 +8375,40 @@ function publicationStatusFromRefs(
   remoteName?: string,
 ): WorkbenchStatusSnapshot["remotes"][number]["publication"] {
   const prefix = remoteName ? `remotes/${safeObjectFileName(remoteName)}/` : "";
-  const versionId = refs[`${prefix}published`];
-  if (!versionId || refs[`${prefix}releases/${versionId}`] !== versionId) {
+  const versionId = publishedVersionIdFromRefsWithPrefix(refs, prefix);
+  if (!versionId) {
     return { status: "unpublished" };
   }
   return {
     status: "published",
-    versionId,
+    currentVersionId: versionId,
+    publishedVersionIds: publishedVersionIdsFromRefsWithPrefix(refs, prefix),
     ...(refs[`${prefix}publication/visibility`] ? { visibility: refs[`${prefix}publication/visibility`] } : {}),
     ...(refs[`${prefix}publication/install-handle`] ? { installHandle: refs[`${prefix}publication/install-handle`] } : {}),
   };
+}
+
+function publishedVersionIdFromRefsWithPrefix(refs: WorkbenchRefs, prefix: string): string | undefined {
+  const versionId = refs[`${prefix}publication/current-version`];
+  return versionId && refs[`${prefix}publication/versions/${versionId}`] === versionId ? versionId : undefined;
+}
+
+function publishedVersionIdsFromRefsWithPrefix(refs: WorkbenchRefs, prefix: string): string[] {
+  return Object.entries(refs)
+    .flatMap(([name, value]) =>
+      typeof value === "string" && name.startsWith(`${prefix}publication/versions/`) && name === `${prefix}publication/versions/${value}`
+        ? [value]
+        : []
+    )
+    .sort();
+}
+
+function removePublishedVersionRef(refs: WorkbenchRefs, versionId: string): void {
+  delete refs[`publication/versions/${versionId}`];
+}
+
+function removeRemotePublishedVersionRef(refs: WorkbenchRefs, remoteName: string, versionId: string): void {
+  delete refs[`remotes/${safeObjectFileName(remoteName)}/publication/versions/${versionId}`];
 }
 
 function publicationVisibilityFromRefs(
@@ -8266,11 +8433,7 @@ function withPublicationRefsFromRemote(
   remoteRefs: WorkbenchRefs,
 ): WorkbenchRefs {
   const nonPublicationRefs = Object.fromEntries(Object.entries(refs)
-    .filter(([name]) =>
-      name !== "published" &&
-      !name.startsWith("releases/") &&
-      !name.startsWith("publication/")
-    ));
+    .filter(([name]) => !isPublicationRef(name)));
   const localVisibility = normalizePublishVisibilityRef(refs["publication/visibility"]);
   return {
     ...nonPublicationRefs,
@@ -10543,8 +10706,9 @@ async function readSkillFiles(root: string): Promise<SurfaceSnapshotFile[]> {
 async function readSkillSources(root: string): Promise<WorkbenchSkillSource[]> {
   const filePath = path.join(workbenchDir(root), SKILLS_FILE);
   if (!await exists(filePath)) {
-    if (await exists(path.join(root, SKILL_FILE))) {
-      return [{ name: PRIMARY_SKILL_NAME, kind: "local", path: "." }];
+    const rootSkill = await primaryRootSkillSource(root);
+    if (rootSkill) {
+      return [rootSkill];
     }
     throw new WorkbenchUserError(`Missing ${path.join(".workbench", SKILLS_FILE)}. Projects without a root ${SKILL_FILE} must declare measured skills.`);
   }
@@ -10558,6 +10722,10 @@ async function readSkillSources(root: string): Promise<WorkbenchSkillSource[]> {
   }
   const skillsRecord = asRecord(record.skills);
   if (!skillsRecord || Object.keys(skillsRecord).length === 0) {
+    const rootSkill = await primaryRootSkillSource(root);
+    if (rootSkill) {
+      return [rootSkill];
+    }
     throw new WorkbenchUserError(`No skills configured in ${path.join(".workbench", SKILLS_FILE)}.`);
   }
   const sources = Object.entries(skillsRecord)
@@ -10577,7 +10745,17 @@ async function readDefaultSkillSelection(root: string, sources: readonly Workben
     throw new WorkbenchUserError(`Missing ${path.join(".workbench", SKILLS_FILE)}. Projects without a root ${SKILL_FILE} must declare measured skills.`);
   }
   const record = parseYamlRecord(await fs.readFile(filePath, "utf8"));
+  const skillsRecord = asRecord(record.skills);
+  if ((!skillsRecord || Object.keys(skillsRecord).length === 0) && sources.some((source) => source.name === PRIMARY_SKILL_NAME)) {
+    return PRIMARY_SKILL_NAME;
+  }
   return readManifestDefaultSelection(record, path.join(".workbench", SKILLS_FILE), sources, "skill");
+}
+
+async function primaryRootSkillSource(root: string): Promise<WorkbenchSkillSource | null> {
+  return await exists(path.join(root, SKILL_FILE))
+    ? { name: PRIMARY_SKILL_NAME, kind: "local", path: "." }
+    : null;
 }
 
 function parseSkillSource(name: string, raw: unknown, label: string): WorkbenchSkillSource {
@@ -10928,7 +11106,7 @@ function workbenchSourceSnapshotUrl(from: string, ref: string): URL {
   const skill = segments[2];
   let version = ref;
   if (segments.length > 3) {
-    if (segments[3] !== "releases" || !segments[4] || segments.length !== 5) {
+    if (segments[3] !== "versions" || !segments[4] || segments.length !== 5) {
       throw new WorkbenchUserError(`Invalid Workbench skill URL: ${from}`);
     }
     version = segments[4];
@@ -10938,7 +11116,7 @@ function workbenchSourceSnapshotUrl(from: string, ref: string): URL {
   } else if (segments.length !== 3) {
     throw new WorkbenchUserError(`Invalid Workbench skill URL: ${from}`);
   }
-  url.pathname = `/api/workbench/source/skills/${encodeURIComponent(owner)}/${encodeURIComponent(skill)}/releases/${encodeURIComponent(version)}/source`;
+  url.pathname = `/api/workbench/source/skills/${encodeURIComponent(owner)}/${encodeURIComponent(skill)}/versions/${encodeURIComponent(version)}/source`;
   url.search = "";
   url.hash = "";
   return url;
@@ -11072,10 +11250,7 @@ function workbenchSourceName(from: string): string | null {
     if (sourceIndex < 0) {
       return null;
     }
-    const releaseIndex = segments.lastIndexOf("releases");
-    const beforeSource = releaseIndex >= 0
-      ? segments.slice(0, releaseIndex)
-      : segments.slice(0, sourceIndex);
+    const beforeSource = segments.slice(0, sourceIndex);
     const skillsIndex = beforeSource.lastIndexOf("skills");
     if (skillsIndex >= 0 && beforeSource[skillsIndex + 1]) {
       const maybeOwnerName = beforeSource[skillsIndex + 2];
@@ -11656,6 +11831,64 @@ async function writeRemotePublishedSource(
   });
 }
 
+async function deleteRemotePublishedVersion(
+  remote: WorkbenchRemote,
+  versionId: string,
+  options: WorkbenchRemoteWriteOptions,
+): Promise<{
+  currentVersionId: string;
+  publishedVersionIds: string[];
+  installHandle?: string;
+  visibility?: WorkbenchPublishVisibility;
+}> {
+  if (isHttpRemote(remote)) {
+    const target = await resolveHttpRemoteSkill(remote, options, options.state);
+    if (!target.owner || !target.name) {
+      throw new WorkbenchUserError(`Workbench Cloud remote did not return owner/name identity for ${remote.url}.`);
+    }
+    const response = await httpRemoteJson<{
+      publication?: {
+        currentVersionId?: unknown;
+        publishedVersionIds?: unknown;
+        installHandle?: unknown;
+        visibility?: unknown;
+      };
+    }>(
+      target.baseUrl,
+      `/api/workbench/source/skills/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/versions/${encodeURIComponent(versionId)}`,
+      {
+        authToken: options.authToken,
+        signal: options.signal,
+        method: "DELETE",
+      },
+    );
+    const publication = response.publication;
+    const currentVersionId = typeof publication?.currentVersionId === "string" ? publication.currentVersionId : "";
+    const publishedVersionIds = Array.isArray(publication?.publishedVersionIds)
+      ? publication.publishedVersionIds.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+      : [];
+    if (!currentVersionId || !publishedVersionIds.includes(currentVersionId)) {
+      throw new WorkbenchCodedError("unpublish_failed", "Workbench Cloud returned an invalid publication summary after unpublish.", {
+        subject: { remote: remote.name, versionId },
+        exitCode: 1,
+      });
+    }
+    return {
+      currentVersionId,
+      publishedVersionIds,
+      ...(typeof publication?.installHandle === "string" ? { installHandle: publication.installHandle } : {}),
+      ...(publication?.visibility === "private" || publication?.visibility === "internal" || publication?.visibility === "public"
+        ? { visibility: publication.visibility }
+        : {}),
+    };
+  }
+  throw new WorkbenchCodedError("unpublish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can unpublish source.`, {
+    remediation: "workbench login && workbench unpublish VERSION",
+    subject: { remote: remote.name, kind: remote.kind, url: remote.url },
+    exitCode: 1,
+  });
+}
+
 function remoteObjectPackRoot(remote: WorkbenchRemote): string {
   if (remote.kind === "file") {
     return fileURLToPath(remote.url);
@@ -11687,7 +11920,7 @@ function workbenchRemoteSourceUrl(remote: WorkbenchRemote): string {
   return `${parsed.baseUrl}/skills/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}`;
 }
 
-function workbenchRemoteReleaseSourceUrl(remote: WorkbenchRemote, versionId: string): string {
+function workbenchRemoteVersionSourceUrl(remote: WorkbenchRemote, versionId: string): string {
   if (!isHttpRemote(remote)) {
     throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes have install URLs.`, {
       subject: { remote: remote.name, kind: remote.kind, url: remote.url, versionId },
@@ -11695,7 +11928,7 @@ function workbenchRemoteReleaseSourceUrl(remote: WorkbenchRemote, versionId: str
     });
   }
   const parsed = parseHttpRemote(remote);
-  return `${parsed.baseUrl}/skills/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}/releases/${encodeURIComponent(versionId)}`;
+  return `${parsed.baseUrl}/skills/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}/versions/${encodeURIComponent(versionId)}`;
 }
 
 function isHttpRemote(remote: WorkbenchRemote): boolean {
