@@ -367,6 +367,8 @@ export function workbenchDraftEvalCaseFiles(caseId = "case-001"): WorkbenchDraft
   const testDir = `${caseDir}/tests`;
   const casePath = `${caseDir}/case.yaml`;
   const testPath = `${testDir}/test.sh`;
+  const placeholderSummary =
+    `Draft case ${caseId} still contains placeholder assertions. Replace ${casePath} and ${testPath} before using eval evidence.`;
   const caseLines = [
     "version: 1",
     `id: ${caseId}`,
@@ -379,7 +381,14 @@ export function workbenchDraftEvalCaseFiles(caseId = "case-001"): WorkbenchDraft
     "#!/bin/sh",
     "set -eu",
     "mkdir -p \"$OUTPUT_DIR\"",
-    "printf '%s\\n' '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}' > \"$OUTPUT_DIR/result.json\"",
+    `printf '%s\\n' ${shellQuote(JSON.stringify({
+      ok: false,
+      score: 0,
+      metrics: { score: 0 },
+      summary: placeholderSummary,
+    }))} > "$OUTPUT_DIR/result.json"`,
+    `printf '%s\\n' ${shellQuote(placeholderSummary)} >&2`,
+    "exit 1",
   ];
   return [
     { path: casePath, content: `${caseLines.join("\n")}\n` },
@@ -4034,7 +4043,7 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
     : await localWorkbenchAdapterAuthReadiness(runtime.selectedAgents, options.adapterAuthStoreRoot);
   const adapterAuthTargets = uniqueLocalAdapterAuthTargets(runtime.selectedAgents.flatMap(localAdapterAuthTargetsForAgent));
   const samples = options.samples ?? 1;
-  const cachedRunIds = options.rerun === true
+  const cachedRunIds = options.cloud === true || options.rerun === true
     ? []
     : runtime.skillBundles.flatMap((skillBundle) =>
       runtime.selectedAgents.flatMap((agent) => {
@@ -4761,25 +4770,66 @@ export function workbenchSkillImproveAdapterRequirementMessage(agent: WorkbenchA
   return `Agent ${agent.name} cannot run improve because it has no skill-improvement adapter. Configure the selected agent with an improvement-capable adapter.`;
 }
 
-function providerAgentSetupCommand(adapter: WorkbenchProviderAgentAdapter, agentName: string): string {
+function providerAgentAuthSetupCommands(adapter: WorkbenchProviderAgentAdapter): string[] {
   if (adapter === "claude") {
-    return `claude setup-token && CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth && workbench agent add ${agentName} --adapter claude --model sonnet --with auth=default`;
+    return [
+      "claude setup-token",
+      "CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth",
+    ];
   }
-  return `codex login --device-auth && workbench login codex --method oauth && workbench agent add ${agentName} --adapter codex --model gpt-5.4-mini --with auth=default`;
+  return [
+    "codex login --device-auth",
+    "workbench login codex --method oauth",
+  ];
+}
+
+function providerAgentAddCommand(adapter: WorkbenchProviderAgentAdapter, agentName: string): string {
+  if (adapter === "claude") {
+    return `workbench agent add ${agentName} --adapter claude --model sonnet --with auth=default`;
+  }
+  return `workbench agent add ${agentName} --adapter codex --model gpt-5.4-mini --with auth=default`;
+}
+
+function providerAgentSetupCommand(adapter: WorkbenchProviderAgentAdapter, agentName: string): string {
+  return [...providerAgentAuthSetupCommands(adapter), providerAgentAddCommand(adapter, agentName)].join(" && ");
+}
+
+export function workbenchSkillImproveAdapterSetupCommands(agent: WorkbenchAgent): string[] {
+  const adapter = agent.adapter.trim().toLowerCase();
+  if (adapter === "codex" || adapter === "claude") {
+    return [...providerAgentAuthSetupCommands(adapter), providerAgentAddCommand(adapter, agent.name)];
+  }
+  return [
+    providerAgentAddCommand("codex", "improver"),
+    ...providerAgentAuthSetupCommands("codex"),
+    "workbench eval --agents improver --rerun",
+    "workbench improve --agents improver",
+  ];
 }
 
 export function workbenchSkillImproveAdapterRemediation(agent: WorkbenchAgent): string {
-  const adapter = agent.adapter.trim().toLowerCase();
-  if (adapter === "codex" || adapter === "claude") {
-    return providerAgentSetupCommand(adapter, agent.name);
-  }
-  return `${providerAgentSetupCommand("codex", "improver")} && workbench eval --agents improver --rerun && workbench improve --agents improver`;
+  return workbenchSkillImproveAdapterSetupCommands(agent)[0] ?? providerAgentAddCommand("codex", "improver");
+}
+
+function workbenchSkillImproveAdapterRequirementIssue(agent: WorkbenchAgent): WorkbenchLaunchReadinessIssue {
+  return {
+    code: "improve_adapter_required",
+    message: workbenchSkillImproveAdapterRequirementMessage(agent),
+    remediation: workbenchSkillImproveAdapterRemediation(agent),
+    subject: {
+      agent: agent.name,
+      setupCommands: workbenchSkillImproveAdapterSetupCommands(agent),
+    },
+  };
 }
 
 function workbenchSkillImproveAdapterRequirementError(agent: WorkbenchAgent): WorkbenchCodedError {
   return new WorkbenchCodedError("usage", workbenchSkillImproveAdapterRequirementMessage(agent), {
     remediation: workbenchSkillImproveAdapterRemediation(agent),
-    subject: { agent: agent.name },
+    subject: {
+      agent: agent.name,
+      setupCommands: workbenchSkillImproveAdapterSetupCommands(agent),
+    },
     exitCode: 2,
   });
 }
@@ -5392,9 +5442,6 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
     ...(selectedEvidenceTraceIds ? { traceIds: [...selectedEvidenceTraceIds] } : {}),
   });
   const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
-  if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
-    throw workbenchSkillImproveAdapterRequirementError(evalAgent);
-  }
   if (improvementEvidence.length === 0) {
     throw workbenchImproveEvidenceRequirementError({
       state,
@@ -5406,11 +5453,15 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
       preserveAgentSelection: options.agent !== undefined,
     });
   }
-  requireWorkbenchImproveAgentAdapter(evalAgent);
-  const readiness = options.cloud === true
-    ? readyWorkbenchLaunchReadiness()
-    : await localWorkbenchAdapterAuthReadiness([evalAgent], options.adapterAuthStoreRoot);
-  const adapterAuthTargets = uniqueLocalAdapterAuthTargets([evalAgent].flatMap(localAdapterAuthTargetsForAgent));
+  const canImproveWithSelectedAgent = workbenchSkillImproveCanUseQueuedAdapter(evalAgent);
+  const readiness = canImproveWithSelectedAgent
+    ? options.cloud === true
+      ? readyWorkbenchLaunchReadiness()
+      : await localWorkbenchAdapterAuthReadiness([evalAgent], options.adapterAuthStoreRoot)
+    : readinessFromIssues([workbenchSkillImproveAdapterRequirementIssue(evalAgent)]);
+  const adapterAuthTargets = canImproveWithSelectedAgent
+    ? uniqueLocalAdapterAuthTargets([evalAgent].flatMap(localAdapterAuthTargetsForAgent))
+    : [];
   const incumbentRun = bestScoredComparableRun({
     runs: state.runs,
     jobs: state.jobs,

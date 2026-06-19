@@ -383,6 +383,34 @@ describe("workbench skill-first CLI", () => {
     const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
     expect(stdoutJson<{ entries: unknown[] }>(runs).entries).toEqual([]);
 
+    const seeded = await seedFailedImproveEvidence(root);
+    const evaluatedRunId = "run_seed_default";
+    const evaluatedVersionId = seeded.prepared.versionId;
+    const cachedLocalDryRun = await invoke(["eval", "--dry-run", "--dir", root, "--json"]);
+    expect(cachedLocalDryRun.code, cachedLocalDryRun.stdout || cachedLocalDryRun.stderr).toBe(0);
+    expect(stdoutJson(cachedLocalDryRun)).toMatchObject({
+      plan: {
+        location: "local",
+        cachedRunIds: [evaluatedRunId],
+      },
+    });
+
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(await makeTempRoot("workbench-cli-cloud-cache-config-"), "config.json"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", "");
+    const hostedDryRun = await invoke(["eval", "--dry-run", "--cloud", "--dir", root, "--json"]);
+    expect(hostedDryRun.code, hostedDryRun.stdout || hostedDryRun.stderr).toBe(0);
+    expect(stdoutJson(hostedDryRun)).toMatchObject({
+      plan: {
+        location: "cloud",
+        cachedRunIds: [],
+      },
+      readiness: {
+        ready: false,
+        issues: [expect.objectContaining({ code: "auth_required" })],
+      },
+    });
+
     await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty dry-run source.\n");
     const dirtyDryRun = await invoke(["eval", "--dry-run", "--dir", root, "--json"]);
     expect(dirtyDryRun.code, dirtyDryRun.stdout || dirtyDryRun.stderr).toBe(0);
@@ -399,14 +427,46 @@ describe("workbench skill-first CLI", () => {
       wouldCreateVersionId: dirtyPlan.versionId,
     });
     const snapshotAfterDryRun = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
-    expect(snapshotAfterDryRun.refs.current).toBe(currentVersionId);
+    expect(snapshotAfterDryRun.refs.current).toBe(evaluatedVersionId);
     expect(snapshotAfterDryRun.versions.some((version) => version.id === dirtyPlan.versionId)).toBe(false);
   });
 
-  test("below-perfect eval with a non-improvement agent teaches improver setup", async () => {
+  test("below-perfect evidence with a non-improvement agent teaches improver setup", async () => {
     const root = await makeTempRoot("workbench-cli-eval-improve-next-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
-    await writePassingCaseTest(root);
+    await seedFailedImproveEvidence(root, "default", { status: "succeeded", score: 0.5 });
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(status).next)
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
+    const human = await invoke(["status", "--dir", root]);
+    expect(human.code, human.stdout || human.stderr).toBe(0);
+    expect(human.stdout).toContain("next: workbench agent add improver --adapter codex");
+    expect(human.stdout).not.toContain("next: workbench improve\n");
+
+    const added = await invoke(["agent", "add", "improver", "--dir", root, "--adapter", "codex", "--model", "gpt-5.4-mini"]);
+    expect(added.code, added.stdout || added.stderr).toBe(0);
+    const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
+    expect(stdoutJson<{ next: string | null }>(statusAfterAdd).next)
+      .toBe("workbench eval --agents 'improver' --rerun");
+  });
+
+  test("explicit below-perfect local eval does not pivot to generated default provider agent", async () => {
+    const root = await makeTempRoot("workbench-cli-eval-explicit-agent-next-");
+    expect((await invoke(["new", root, "--agent", "codex", "--json"])).code).toBe(0);
+    expect((await invoke(["agent", "add", "harness", "--dir", root, "--adapter", "local"])).code).toBe(0);
+    await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+      "version: 1",
+      "id: case-001",
+      "prompt: Exercise the workflow happy path.",
+      "rubric:",
+      "  - Captures workflow-specific success evidence.",
+      "command: sh \"$CASE_DIR/tests/test.sh\"",
+      "",
+    ].join("\n"));
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
       "#!/bin/sh",
       "set -eu",
@@ -416,15 +476,11 @@ describe("workbench skill-first CLI", () => {
     ].join("\n"));
     await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
 
-    const evaluated = await invoke(["eval", "--dir", root, "--json"]);
+    const evaluated = await invoke(["eval", "--agents", "harness", "--rerun", "--dir", root, "--json"]);
 
     expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(evaluated).next)
-      .toBe("codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver");
-    const human = await invoke(["eval", "--dir", root]);
-    expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toContain("next: codex login --device-auth && workbench login codex --method oauth && workbench agent add improver");
-    expect(human.stdout).not.toContain("next: workbench improve\n");
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
   });
 
   test("below-perfect smoke eval teaches improver setup instead of authoring another case", async () => {
@@ -452,12 +508,12 @@ describe("workbench skill-first CLI", () => {
 
     expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(evaluated).next)
-      .toBe("codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver");
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(stdoutJson<{ next: string | null }>(status).next)
-      .toBe("codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver");
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
     const human = await invoke(["eval", "--dir", root]);
-    expect(human.stdout).toContain("next: codex login --device-auth && workbench login codex --method oauth && workbench agent add improver");
+    expect(human.stdout).toContain("next: workbench agent add improver --adapter codex");
     expect(human.stdout).not.toContain("case-002");
   });
 
@@ -1428,6 +1484,29 @@ describe("workbench skill-first CLI", () => {
     expect(testStat.mode & 0o111).not.toBe(0);
   });
 
+  dockerTest("draft case placeholders fail until authored", async () => {
+    const root = await makeTempRoot("workbench-cli-draft-case-placeholder-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const authorCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
+    expect(authorCase.code, authorCase.stdout || authorCase.stderr).toBe(0);
+
+    const evalResult = await invoke(["eval", "--dir", root, "--json"]);
+
+    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
+    const body = stdoutJson<{ failedMeasurements: Array<{ runId: string; status: string; score?: number }> }>(evalResult);
+    expect(body).toMatchObject({
+      ok: false,
+      code: "eval_runs_failed",
+      evidenceSaved: true,
+      failedMeasurements: [{
+        status: "failed",
+        score: 0,
+      }],
+    });
+    const stderr = await invoke(["show", `${body.failedMeasurements[0]!.runId}:stderr.log`, "--dir", root]);
+    expect(stderr.stdout).toContain("Draft case case-001 still contains placeholder assertions.");
+  });
+
   dockerTest("local cases without a command or test script fail with actionable evidence", async () => {
     const root = await makeTempRoot("workbench-cli-local-case-shape-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -1633,7 +1712,7 @@ describe("workbench skill-first CLI", () => {
           },
         ],
       },
-      next: "codex login --device-auth && workbench login codex --method oauth && workbench eval",
+      next: "codex login --device-auth",
     });
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", codexRoot, "--json"])).entries).toEqual([]);
 
@@ -2293,7 +2372,7 @@ describe("workbench skill-first CLI", () => {
 
     expect(unauthenticatedStatus.code, unauthenticatedStatus.stdout || unauthenticatedStatus.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(unauthenticatedStatus).next)
-      .toBe("codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver");
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
 
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
     vi.stubEnv("WORKBENCH_CONFIG", configPath);
@@ -2307,7 +2386,7 @@ describe("workbench skill-first CLI", () => {
 
     expect(authenticatedStatus.code, authenticatedStatus.stdout || authenticatedStatus.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(authenticatedStatus).next)
-      .toBe("codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver");
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
   });
 
   dockerTest("status preserves the higher-sample rerun guidance after a promoted one-sample improve", async () => {
@@ -2990,7 +3069,7 @@ describe("workbench skill-first CLI", () => {
           },
         ],
       },
-      next: "workbench login --base-url https://cloud.test && workbench eval --cloud",
+      next: "workbench login --base-url https://cloud.test",
     });
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", root, "--json"])).entries).toEqual([]);
   });
@@ -3054,7 +3133,7 @@ describe("workbench skill-first CLI", () => {
           },
         ],
       },
-      next: "workbench publish --as ORG/SKILL && workbench eval --cloud",
+      next: "workbench publish --as ORG/SKILL",
     });
     expect(stdoutJson(dryRun).plan).not.toHaveProperty("adapterAuthTargets");
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", root, "--json"])).entries).toEqual([]);
@@ -3116,9 +3195,7 @@ describe("workbench skill-first CLI", () => {
         },
       ],
     });
-    expect(body.next).toBe(
-      "workbench publish --as ORG/SKILL && codex login --device-auth && workbench login codex --method oauth && workbench improve --cloud --agents 'improver'",
-    );
+    expect(body.next).toBe("workbench publish --as ORG/SKILL");
   });
 
   test("cloud dry-run reports ready for an explicitly linked organization skill", async () => {
@@ -4144,12 +4221,31 @@ describe("workbench skill-first CLI", () => {
     vi.stubGlobal("fetch", fetchMock);
     try {
       const dryRun = await invoke(["improve", "--dry-run", "--cloud", "--dir", root, "--json"]);
-      expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(2);
+      expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
       expect(stdoutJson(dryRun)).toMatchObject({
-        ok: false,
-        code: "usage",
-        message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter."),
-        remediation: "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --cloud --agents improver",
+        ok: true,
+        schema: "workbench.cli.improve-plan.v1",
+        readiness: {
+          ready: false,
+          issues: [
+            {
+              code: "improve_adapter_required",
+              message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter."),
+              remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
+              subject: {
+                agent: "default",
+                setupCommands: [
+                  "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
+                  "codex login --device-auth",
+                  "workbench login codex --method oauth",
+                  "workbench eval --agents improver --rerun",
+                  "workbench improve --agents improver",
+                ],
+              },
+            },
+          ],
+        },
+        next: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
       });
       const improved = await invoke(["improve", "--cloud", "--dir", root, "--json"]);
       expect(improved.code, improved.stdout || improved.stderr).toBe(2);
@@ -4157,7 +4253,7 @@ describe("workbench skill-first CLI", () => {
         ok: false,
         code: "usage",
         message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter."),
-        remediation: "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --cloud --agents improver",
+        remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
       });
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
@@ -4185,12 +4281,24 @@ describe("workbench skill-first CLI", () => {
 
     const dryRun = await invoke(["improve", "--dry-run", "--cloud", "--dir", root, "--json"]);
 
-    expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(2);
+    expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
     expect(stdoutJson(dryRun)).toMatchObject({
-      ok: false,
-      code: "usage",
-      message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter."),
-      remediation: "workbench login && codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --cloud --agents improver",
+      ok: true,
+      schema: "workbench.cli.improve-plan.v1",
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: "auth_required",
+            remediation: "workbench login",
+          },
+          {
+            code: "improve_adapter_required",
+            remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
+          },
+        ],
+      },
+      next: "workbench login",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -8263,11 +8371,20 @@ describe("workbench skill-first CLI", () => {
         "# Unmanaged",
         "",
       ].join("\n"));
+      await fs.mkdir(path.join(root, ".agents", "skills", "unmanaged-skill", ".workbench"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, ".agents", "skills", "unmanaged-skill", ".workbench", "eval.yaml"),
+        "schema: workbench.eval.v1\n",
+      );
+      await fs.writeFile(
+        path.join(root, ".agents", "skills", "unmanaged-skill", ".workbench", "agents.yaml"),
+        "schema: workbench.agents.v1\ndefault: default\nagents:\n  default:\n    adapter: local\n",
+      );
       const changed = await invoke(["skills", "--target", "codex", "--scope", "global", "--json"]);
-      expect(stdoutJson<{ skills: Array<{ name: string; status: string }> }>(changed).skills)
+      expect(stdoutJson<{ skills: Array<{ name: string; status: string; workbenchProject?: boolean }> }>(changed).skills)
         .toEqual(expect.arrayContaining([
           expect.objectContaining({ name: "private-skill", status: "modified" }),
-          expect.objectContaining({ name: "unmanaged-skill", status: "unmanaged" }),
+          expect.objectContaining({ name: "unmanaged-skill", status: "project", workbenchProject: true }),
         ]));
       vi.stubGlobal("fetch", fetchMock);
       const dryRunModified = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run", "--json"]);
@@ -8403,6 +8520,32 @@ describe("workbench skill-first CLI", () => {
     const failedStderr = await invoke(["show", `${failedRun.runId}:stderr.log`, "--dir", root]);
     expect(failedStderr.stdout).toContain("cli workflow failure");
 
+    const defaultImproveDryRun = await invoke(["improve", "--dry-run", "--dir", root, "--json"]);
+    expect(defaultImproveDryRun.code, defaultImproveDryRun.stdout || defaultImproveDryRun.stderr).toBe(0);
+    expect(stdoutJson(defaultImproveDryRun)).toMatchObject({
+      ok: true,
+      schema: "workbench.cli.improve-plan.v1",
+      readiness: {
+        ready: false,
+        issues: [{
+          code: "improve_adapter_required",
+          message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter"),
+          remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
+          subject: {
+            agent: "default",
+            setupCommands: [
+              "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
+              "codex login --device-auth",
+              "workbench login codex --method oauth",
+              "workbench eval --agents improver --rerun",
+              "workbench improve --agents improver",
+            ],
+          },
+        }],
+      },
+      next: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
+    });
+
     const defaultImprove = await invoke(["improve", "--dir", root, "--json"]);
     expect(defaultImprove.code).toBe(2);
     expect(defaultImprove.stderr).toBe("");
@@ -8410,7 +8553,7 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "usage",
       message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter"),
-        remediation: "codex login --device-auth && workbench login codex --method oauth && workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default && workbench eval --agents improver --rerun && workbench improve --agents improver",
+      remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
     });
 
     const agentAdd = await invoke([
@@ -8698,6 +8841,11 @@ async function addCommandImproveAgent(root: string): Promise<void> {
 async function seedFailedImproveEvidence(
   root: string,
   agent = "default",
+  options: {
+    status?: "failed" | "succeeded";
+    score?: number;
+    error?: string;
+  } = {},
 ): Promise<{
   prepared: WorkbenchPreparedCloudEvalRequest & {
     evalHash: string;
@@ -8734,6 +8882,9 @@ async function seedFailedImproveEvidence(
   const runId = `run_seed_${agent}`;
   const jobId = `job_seed_${agent}`;
   const traceId = `trace_seed_${agent}`;
+  const status = options.status ?? "failed";
+  const score = options.score ?? 0;
+  const error = options.error ?? (status === "failed" ? "seeded hosted improve evidence" : undefined);
   await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
   await fs.mkdir(path.join(root, ".workbench", "objects", "job"), { recursive: true });
   await fs.mkdir(path.join(root, ".workbench", "objects", "trace"), { recursive: true });
@@ -8746,13 +8897,13 @@ async function seedFailedImproveEvidence(
     evalHash: prepared.evalHash,
     agentName: prepared.agent,
     agentHash: prepared.agentHash,
-    status: "failed",
-    score: 0,
+    status,
+    score,
     jobIds: [jobId],
     traceIds: [traceId],
     createdAt,
     finishedAt,
-    error: "seeded hosted improve evidence",
+    ...(error ? { error } : {}),
   }));
   await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${jobId}.json`), JSON.stringify({
     id: jobId,
@@ -8766,14 +8917,14 @@ async function seedFailedImproveEvidence(
     agentHash: prepared.agentHash,
     caseId: "case-001",
     sample: 0,
-    status: "failed",
-    score: 0,
+    status,
+    score,
     artifactIds: [],
     traceIds: [traceId],
     createdAt,
     startedAt: createdAt,
     finishedAt,
-    error: "seeded hosted improve evidence",
+    ...(error ? { error } : {}),
   }));
   await fs.writeFile(path.join(root, ".workbench", "objects", "trace", `${traceId}.json`), JSON.stringify({
     id: traceId,
@@ -8787,8 +8938,8 @@ async function seedFailedImproveEvidence(
     agentHash: prepared.agentHash,
     createdAt,
     request: { caseId: "case-001" },
-    result: { status: "failed", score: 0, error: "seeded hosted improve evidence" },
-    files: [{ path: "stderr.log", kind: "text", encoding: "utf8", executable: false, content: "seeded hosted improve evidence\n" }],
+    result: { status, score, ...(error ? { error } : {}) },
+    files: [{ path: "stderr.log", kind: "text", encoding: "utf8", executable: false, content: `${error ?? "seeded hosted improve evidence"}\n` }],
   }));
   return { prepared, traceId };
 }

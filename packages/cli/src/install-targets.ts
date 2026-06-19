@@ -10,7 +10,7 @@ const INSTALLS_FILE = ".workbench-installs.json";
 
 export type SkillAccessTargetId = "codex" | "claude";
 export type SkillAccessScope = "folder" | "global";
-export type WorkbenchSkillAccessStatus = "current" | "modified" | "missing" | "unmanaged" | "duplicate-name";
+export type WorkbenchSkillAccessStatus = "current" | "modified" | "missing" | "project" | "unmanaged" | "duplicate-name";
 
 export interface WorkbenchInstallSnapshot {
   name: string;
@@ -67,6 +67,7 @@ export interface WorkbenchInstalledSkill {
   installedAt?: string;
   contentHash?: string;
   status: WorkbenchSkillAccessStatus;
+  workbenchProject?: boolean;
   deprecatedRoot?: boolean;
 }
 
@@ -323,6 +324,7 @@ export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventor
       ...(skill.description ? { description: skill.description } : {}),
       ...(skill.path ? { path: skill.path } : {}),
       status: skill.status,
+      ...(skill.workbenchProject ? { workbenchProject: true } : {}),
       ...(skill.contentHash ? { contentHash: skill.contentHash } : {}),
       ...(skill.versionId ? { versionId: skill.versionId } : {}),
       ...(skill.handle ? { handle: skill.handle } : {}),
@@ -632,9 +634,10 @@ async function readRootInventory(root: SkillAccessTargetRoot): Promise<Workbench
     const metadata = parseSkillMetadata(skillMarkdown);
     const contentHash = await readExistingTreeHash(skillPath);
     const record = validLedgerRecord(ledger.skills[entry.name], root.target);
+    const workbenchProject = !record && await isWorkbenchProjectSkillPath(skillPath);
     const status: WorkbenchSkillAccessStatus = record
       ? contentHash === record.contentHash ? "current" : "modified"
-      : "unmanaged";
+      : workbenchProject ? "project" : "unmanaged";
     rows.push({
       target: root.target,
       targetDisplayName: root.displayName,
@@ -645,6 +648,7 @@ async function readRootInventory(root: SkillAccessTargetRoot): Promise<Workbench
       ...(metadata.description ? { description: metadata.description } : {}),
       path: skillPath,
       status,
+      ...(workbenchProject ? { workbenchProject: true } : {}),
       contentHash,
       ...(record?.versionId ? { versionId: record.versionId } : {}),
       ...(record?.handle ? { handle: record.handle } : {}),
@@ -655,6 +659,15 @@ async function readRootInventory(root: SkillAccessTargetRoot): Promise<Workbench
   }
   rows.push(...missingRowsForLedger(root, ledger, seenDirectories));
   return rows;
+}
+
+async function isWorkbenchProjectSkillPath(skillPath: string): Promise<boolean> {
+  const workbenchRoot = path.join(skillPath, ".workbench");
+  const [evalYaml, agentsYaml] = await Promise.all([
+    fs.access(path.join(workbenchRoot, "eval.yaml")).then(() => true, () => false),
+    fs.access(path.join(workbenchRoot, "agents.yaml")).then(() => true, () => false),
+  ]);
+  return evalYaml && agentsYaml;
 }
 
 function missingRowsForLedger(

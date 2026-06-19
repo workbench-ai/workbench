@@ -1,7 +1,7 @@
 {
   "name": "@workbench-ai/workbench-ui",
   "private": true,
-  "version": "0.0.164",
+  "version": "0.0.166",
   "type": "module",
   "exports": {
     ".": {

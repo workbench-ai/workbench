@@ -1012,7 +1012,7 @@ async function handleEvalDryRun(parsed: ParsedArgs, io: CliIo): Promise<number> 
   const plan = withPreviewReadiness(preview, readiness);
   const next = readiness.ready
     ? operationNextCommand("eval", parsed, parsed.flags.cloud === true)
-    : readinessNextCommand("eval", parsed, readiness, parsed.flags.cloud === true);
+    : readinessNextCommand("eval", readiness);
   return emitResult("workbench.cli.eval-plan.v1", {
     dryRun: true,
     plan: plan as unknown as Json,
@@ -1324,7 +1324,7 @@ async function handleImproveDryRun(parsed: ParsedArgs, io: CliIo): Promise<numbe
   const plan = withPreviewReadiness(preview, readiness);
   const next = readiness.ready
     ? operationNextCommand("improve", parsed, parsed.flags.cloud === true)
-    : readinessNextCommand("improve", parsed, readiness, parsed.flags.cloud === true);
+    : readinessNextCommand("improve", readiness);
   return emitResult("workbench.cli.improve-plan.v1", {
     dryRun: true,
     plan: plan as unknown as Json,
@@ -1354,27 +1354,35 @@ function withPreviewReadiness<T extends WorkbenchEvalPreview | WorkbenchImproveP
 
 function readinessNextCommand(
   command: "eval" | "improve",
-  parsed: ParsedArgs,
   readiness: WorkbenchLaunchReadiness,
-  cloud: boolean,
 ): string | null {
-  const setup: string[] = [];
   for (const issue of readiness.issues) {
+    const setupCommand = readinessIssueSetupCommands(issue)[0];
+    if (setupCommand) {
+      return setupCommand;
+    }
     for (const chunk of commandChainParts(issue.remediation)) {
       if (isWorkbenchOperationCommand(chunk, command)) {
         continue;
       }
-      if (!setup.includes(chunk)) {
-        setup.push(chunk);
+      if (chunk) {
+        return chunk;
       }
     }
   }
-  const next = operationNextCommand(command, parsed, cloud);
-  return setup.length > 0 ? [...setup, next].join(" && ") : readiness.issues.find((issue) => issue.remediation)?.remediation ?? null;
+  return readiness.issues.find((issue) => issue.remediation)?.remediation ?? null;
 }
 
 function commandChainParts(command: string | undefined): string[] {
   return command?.split(/\s+&&\s+/u).map((part) => part.trim()).filter(Boolean) ?? [];
+}
+
+function readinessIssueSetupCommands(issue: WorkbenchLaunchReadinessIssue): string[] {
+  const subject = issue.subject && typeof issue.subject === "object" && !Array.isArray(issue.subject)
+    ? issue.subject as Record<string, Json>
+    : {};
+  const commands = subject.setupCommands;
+  return Array.isArray(commands) ? commands.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0) : [];
 }
 
 function isWorkbenchOperationCommand(value: string, command: "eval" | "improve"): boolean {
@@ -3486,19 +3494,19 @@ async function cloudDryRunReadiness(
   const baseUrl = optionalWorkbenchBaseUrl({ configBaseUrl: config.baseUrl });
   const token = await workbenchCloudToken({ baseUrl });
   if (!token) {
-    return {
-      ready: false,
-      issues: [{
+    return mergeLaunchReadiness(readinessFromLaunchIssues([{
         code: "auth_required",
         message: `workbench ${command} --dry-run --cloud requires Workbench Cloud auth.`,
         remediation: workbenchLoginRemediation(baseUrl),
-      }],
-    };
+      }]), preview.readiness);
+  }
+  if (preview.readiness.issues.some((issue) => issue.code === "improve_adapter_required")) {
+    return preview.readiness;
   }
   const targets = cloudAdapterAuthTargetsFromPreview(preview);
   const targetReadiness = await cloudHostedOperationTargetReadiness({ command, parsed, config });
   const adapterReadiness = await cloudAdapterAuthReadiness({ baseUrl, targets });
-  return mergeLaunchReadiness(targetReadiness, adapterReadiness);
+  return mergeLaunchReadiness(targetReadiness, adapterReadiness, preview.readiness);
 }
 
 async function cloudHostedOperationTargetReadiness(input: {
@@ -6715,7 +6723,12 @@ async function statusWithCausalNext(
     return { ...status, next: "workbench eval" };
   }
   if (!hasCurrentScoredEvalRun) {
-    return { ...status, next: postImproveProofEvalNextCommand(snapshot, currentVersionId) ?? "workbench eval" };
+    return {
+      ...status,
+      next: postImproveProofEvalNextCommand(snapshot, currentVersionId) ??
+        pendingImproverEvalNextCommand(snapshot, currentVersionId) ??
+        "workbench eval",
+    };
   }
   if (belowPerfectCurrentEvalRuns.length > 0) {
     return { ...status, next: belowPerfectEvalNextCommand(snapshot, belowPerfectCurrentEvalRuns) };
@@ -6799,7 +6812,40 @@ function belowPerfectEvalNextCommand(
   if (!agent) {
     return "workbench compare";
   }
-  return improveNextCommandForAgent(skill, agent);
+  return improveNextCommandForAgent(skill, agent, snapshot);
+}
+
+function pendingImproverEvalNextCommand(
+  snapshot: WorkbenchInspectionSnapshot | null,
+  currentVersionId: string | undefined,
+): string | undefined {
+  if (!snapshot || !currentVersionId) {
+    return undefined;
+  }
+  const improvementAgent = snapshot.agents
+    .map((entry) => entry.agent)
+    .filter(workbenchSkillImproveCanUseQueuedAdapter)
+    .sort((left, right) => left.name.localeCompare(right.name))[0];
+  if (!improvementAgent) {
+    return undefined;
+  }
+  const hasBelowPerfectEvidence = snapshot.runs.some((run) =>
+    run.kind === "eval" &&
+    run.skillName === "primary" &&
+    scoredRunIsBelowPerfect(run)
+  );
+  if (!hasBelowPerfectEvidence) {
+    return undefined;
+  }
+  const hasCurrentImproverEvidence = snapshot.runs.some((run) =>
+    run.kind === "eval" &&
+    run.versionId === currentVersionId &&
+    run.agentName === improvementAgent.name &&
+    scoredRunValue(run) !== undefined
+  );
+  return hasCurrentImproverEvidence
+    ? undefined
+    : `workbench eval --agents ${shellQuote(improvementAgent.name)} --rerun`;
 }
 
 function postImproveProofEvalNextCommand(
@@ -7747,8 +7793,19 @@ async function evalSuccessNextCommand(
   return await publishReadyNextCommand(core);
 }
 
-function improveNextCommandForAgent(skill: string, agent: WorkbenchAgent): string {
+function improveNextCommandForAgent(
+  skill: string,
+  agent: WorkbenchAgent,
+  snapshot: WorkbenchInspectionSnapshot | null,
+): string {
   if (!workbenchSkillImproveCanUseQueuedAdapter(agent)) {
+    const improvementAgent = snapshot?.agents
+      .map((entry) => entry.agent)
+      .filter((candidate) => candidate.name !== "default" && workbenchSkillImproveCanUseQueuedAdapter(candidate))
+      .sort((left, right) => left.name.localeCompare(right.name))[0];
+    if (improvementAgent) {
+      return `workbench eval --agents ${shellQuote(improvementAgent.name)} --rerun`;
+    }
     return workbenchSkillImproveAdapterRemediation(agent);
   }
   return `workbench improve --skills ${shellQuote(skill)} --agents ${shellQuote(agent.name)}`;
