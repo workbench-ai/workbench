@@ -4,9 +4,9 @@ This product-local catalog checks whether the Workbench skill drives the hard-cu
 
 It checks:
 
-- using `SKILL.md`, `.workbench/eval.yaml`, `.workbench/cases`, `.workbench/agents.yaml`, and optional `.workbench/skills.yaml`
-- running `workbench`, `workbench status`, `workbench log`, `workbench show`, `workbench eval`, `workbench improve`, and `workbench compare`
-- treating versions as automatic source snapshots
+- using `SKILL.md`, `.workbench/eval.yaml`, `.workbench/cases`, `.workbench/agents.yaml`, and optional `.workbench/versions.yaml`
+- running `workbench`, `workbench status`, `workbench log`, `workbench show`, `workbench eval`, `workbench improve`, and `workbench results`
+- treating versions as evaluated skill versions
 - using agents for local command and provider-backed eval configurations
 - treating the web UI as a snapshot-backed, capability-driven inspection and operation-start surface
 - using Workbench object remotes with `workbench sync` and explicit source publication with `workbench publish`

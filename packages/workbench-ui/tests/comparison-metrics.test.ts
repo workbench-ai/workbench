@@ -1,14 +1,12 @@
 import { describe, expect, test } from "vitest";
 
 import type {
-  WorkbenchAgentSnapshot,
-  WorkbenchComparison,
-  WorkbenchComparisonCell,
   WorkbenchEvalSnapshot,
   WorkbenchInspectionSnapshot,
-  WorkbenchJob,
+  WorkbenchResultCell,
+  WorkbenchResults,
   WorkbenchRun,
-  WorkbenchSkillBundleSnapshot,
+  WorkbenchSkillVersion,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 
@@ -17,14 +15,14 @@ import {
   buildComparisonGroups,
   buildComparisonMetricData,
   buildComparisonTableMetricDescriptors,
-  comparisonForActiveSkillVersions,
   comparisonForScorecard,
   defaultEvaluationIdForScorecard,
   evaluationOptionsForScorecard,
+  formatComparisonTableMetricValue,
   formatEvaluationDisplayDetail,
   formatEvaluationDisplayName,
-  formatComparisonTableMetricValue,
   formatSkillDisplayName,
+  missingCostLabelForStatus,
   type ComparisonMetricDescriptor,
 } from "../src/lib/comparison-metrics";
 
@@ -37,758 +35,244 @@ const SCORE: ComparisonMetricDescriptor = {
   primary: true,
 };
 
-const LATENCY: ComparisonMetricDescriptor = {
-  id: "latencyMs",
-  label: "Latency",
+const COST: ComparisonMetricDescriptor = {
+  id: "costUsd",
+  label: "Cost",
   direction: "lower",
-  kind: "duration_ms",
-  semanticRole: "speed",
+  kind: "currency_usd",
+  semanticRole: "cost",
   primary: true,
 };
 
 describe("comparison metric helpers", () => {
-  test("groups scorecard cells by skill setup", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001", agentName: "patcher", agentHash: "agent_a" }),
-      cell({ versionId: "v001", agentName: "explorer", agentHash: "agent_b" }),
-      cell({ versionId: "v002", agentName: "patcher", agentHash: "agent_a" }),
-    ]);
+  test("uses WorkbenchResults as the scorecard source", () => {
+    const snapshot = inspectionSnapshotFixture({
+      results: resultsFixture([
+        resultCell({ skillVersionId: "v001", agentVersionId: "agent_codex", quality: 0.7 }),
+        resultCell({ skillVersionId: "v002", agentVersionId: "agent_codex", quality: 0.9 }),
+      ]),
+    });
 
-    const groups = buildComparisonGroups(comparison);
-
-    expect(groups.map((group) => group.id)).toEqual([
-      "setup/active",
-    ]);
-    expect(groups[0]?.cells).toHaveLength(3);
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-    ]);
-  });
-
-  test("keeps several eval scorecards as separate rows within one setup", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001", evalHash: "eval_hash_one_long", score: 0.4 }),
-      cell({ versionId: "v001", evalHash: "eval_hash_two_long", score: 0.5 }),
-    ]);
-
-    const groups = buildComparisonGroups(comparison);
+    const scorecard = comparisonForScorecard(snapshot);
+    const groups = buildComparisonGroups(scorecard);
     const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
+      agents: scorecard.agents,
       groups,
-      runs: [],
+      runs: snapshot.runs,
     });
 
-    expect(groups).toHaveLength(1);
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-    ]);
-    expect(rows).toHaveLength(2);
-    expect(new Set(rows.map((row) => row.rowId)).size).toBe(2);
-  });
-
-  test("orders setup groups by active skill, no-skill baseline, then other skills", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v002", score: 0.3, skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash" }),
-      cell({ versionId: "v002", score: 0.1, skillName: "no-skill", skillBundleHash: "no_skill_bundle_hash" }),
-      cell({ versionId: "v002", score: 0.9 }),
-    ], {
-      skills: [
-        skillBundle(),
-        skillBundle({ hash: "dummy_bundle_hash", skillName: "dummy-skill", entryName: "dummy-skill" }),
-        skillBundle({ hash: "no_skill_bundle_hash", skillName: "no-skill", entryName: "no-skill" }),
-      ],
-    });
-
-    const groups = buildComparisonGroups(comparison);
-
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-      "No skill baseline",
-      "Dummy skill",
-    ]);
-  });
-
-  test("omits comparison cells without a matching skill bundle", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001" }),
-    ], {
-      skills: [],
-    });
-
-    expect(buildComparisonGroups(comparison)).toEqual([]);
-  });
-
-  test("labels current scorecard setups without version noise", () => {
-    const comparison = comparisonFixture([
-      cell({
-        versionId: "v002",
-        score: 0.9,
-      }),
-      cell({
-        versionId: "v002",
-        score: 0.3,
-        skillName: "dummy-skill",
-        skillBundleHash: "dummy_bundle_hash",
-      }),
-      cell({
-        versionId: "v002",
-        score: 0.1,
-        skillName: "no-skill",
-        skillBundleHash: "no_skill_bundle_hash",
-      }),
-    ], {
-      skills: [
-        skillBundle(),
-        skillBundle({
-          hash: "dummy_bundle_hash",
-          skillName: "dummy-skill",
-          entryName: "dummy-skill",
-        }),
-        skillBundle({
-          hash: "no_skill_bundle_hash",
-          skillName: "no-skill",
-          entryName: "no-skill",
-        }),
-      ],
-    });
-
-    const groups = buildComparisonGroups(comparison, {
-      currentVersionId: "v002",
-      defaultSkill: "primary",
-    });
-
-    expect(groups.map((group) => group.id)).toEqual([
-      "setup/active",
-      "setup/no-skill",
-      "setup/dummy-skill",
-    ]);
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-      "No skill baseline",
-      "Dummy skill",
-    ]);
-  });
-
-  test("does not add a skill label for the active skill when another bundle is unmeasured", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001" }),
-    ], {
-      skills: [
-        skillBundle(),
-        skillBundle({
-          hash: "dummy_bundle_hash",
-          skillName: "dummy-skill",
-          entryName: "dummy-skill",
-        }),
-      ],
-    });
-
-    const groups = buildComparisonGroups(comparison, {
-      currentVersionId: "v001",
-      defaultSkill: "primary",
-    });
-
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-    ]);
-  });
-
-  test("keeps version identity and state on rows when setup labels are shared", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001", score: 0.8 }),
-      cell({ versionId: "v002", score: 0.9 }),
-      cell({
-        versionId: "v001",
-        score: 0.2,
-        skillName: "dummy-skill",
-        skillBundleHash: "dummy_bundle_hash",
-      }),
-      cell({
-        versionId: "v002",
-        score: 0.3,
-        skillName: "dummy-skill",
-        skillBundleHash: "dummy_bundle_hash",
-      }),
-    ], {
-      skills: [
-        skillBundle(),
-        skillBundle({
-          hash: "dummy_bundle_hash",
-          skillName: "dummy-skill",
-          entryName: "dummy-skill",
-        }),
-      ],
-    });
-
-    const groups = buildComparisonGroups(comparison, {
-      currentVersionId: "v002",
-      defaultSkill: "primary",
-      publishedVersionId: "v001",
-      allVersions: [version("v001"), version("v002")],
-    });
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      context: {
-        currentVersionId: "v002",
-        defaultSkill: "primary",
-        publishedVersionId: "v001",
-        allVersions: [version("v001"), version("v002")],
-      },
-      groups,
-      runs: [],
-    });
-
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-      "Dummy skill",
-    ]);
+    expect(scorecard.cells).toHaveLength(2);
+    expect(groups.map((group) => group.label)).toEqual(["Your skill v2", "Your skill v1"]);
     expect(rows.map((row) => ({
-      setup: row.setupLabel,
       version: row.versionLabel,
-      badges: row.versionBadges,
+      agent: row.agentDetail,
+      score: row.score,
+      detail: row.versionDetail,
     }))).toEqual([
-      { setup: "Active skill", version: "Version 2", badges: ["Current"] },
-      { setup: "Active skill", version: "Version 1", badges: ["Published"] },
-      { setup: "Dummy skill", version: "Version 2", badges: ["Current"] },
-      { setup: "Dummy skill", version: "Version 1", badges: ["Published"] },
+      { version: "Your skill v2", agent: "codex / gpt-5.5", score: 0.9, detail: "local:." },
+      { version: "Your skill v1", agent: "codex / gpt-5.5", score: 0.7, detail: "local:." },
     ]);
   });
 
-  test("uses the configured default skill as the active skill label", () => {
-    const comparison = comparisonFixture([
-      cell({
-        versionId: "v002",
-        score: 0.4,
-      }),
-      cell({
-        versionId: "v002",
-        score: 0.9,
-        skillName: "variant",
-        skillBundleHash: "variant_bundle_hash",
-      }),
+  test("renders no-skill and external refs as first-class result versions", () => {
+    const results = resultsFixture([
+      resultCell({ skillVersionId: "none", quality: 0.4 }),
+      resultCell({ skillVersionId: "workbench:alice/summarizer@v1", quality: 0.8 }),
     ], {
-      skills: [
-        skillBundle(),
-        skillBundle({
-          hash: "variant_bundle_hash",
-          skillName: "variant",
-          entryName: "variant",
+      versions: [
+        skillVersion({ id: "none", label: "No skill", source: "none", sourceKind: "none" }),
+        skillVersion({
+          id: "workbench:alice/summarizer@v1",
+          label: "alice/summarizer@v1",
+          source: "workbench:alice/summarizer@v1",
+          sourceKind: "remote",
         }),
       ],
     });
 
-    const groups = buildComparisonGroups(comparison, {
-      currentVersionId: "v002",
-      defaultSkill: "variant",
-    });
+    const groups = buildComparisonGroups(results);
+    const rows = buildComparisonEvidenceRows({ agents: results.agents, groups, runs: [] });
 
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-      "Primary skill",
-    ]);
-  });
-
-  test("formats skill display names outside comparison rows", () => {
-    expect(formatSkillDisplayName("primary", { defaultSkill: "primary" })).toBe("Active skill");
-    expect(formatSkillDisplayName("primary", { defaultSkill: "all" })).toBe("Active skill");
-    expect(formatSkillDisplayName("no-skill")).toBe("No skill baseline");
-    expect(formatSkillDisplayName("dummy-skill")).toBe("Dummy skill");
-  });
-
-  test("labels row versions against the full version history", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v002" }),
-    ]);
-
-    const groups = buildComparisonGroups(comparison, {
-      allVersions: [version("v001"), version("v002")],
-    });
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      context: { allVersions: [version("v001"), version("v002")] },
-      groups,
-      runs: [],
-    });
-
-    expect(groups.map((group) => group.label)).toEqual([
-      "Active skill",
-    ]);
-    expect(rows[0]?.versionLabel).toBe("Version 2");
-  });
-
-  test("builds active skill version history from recorded eval scorecards", () => {
-    const snapshot = inspectionSnapshotFixture({
-      versions: [version("v001"), version("v002")],
-      skillBundles: [skillBundle({ hash: "bundle_v001" }), skillBundle({ hash: "bundle_v002" })],
-      runs: [
-        run({ id: "run_old", versionId: "v001", skillBundleHash: "bundle_v001", score: 0.4, createdAt: "2026-06-06T00:10:00.000Z" }),
-        run({ id: "run_newer", versionId: "v001", skillBundleHash: "bundle_v001", score: 0.5, createdAt: "2026-06-06T00:11:00.000Z" }),
-        run({ id: "run_current", versionId: "v002", skillBundleHash: "bundle_v002", score: 0.9, createdAt: "2026-06-06T00:12:00.000Z" }),
-        run({ id: "run_dummy", versionId: "v002", skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash", score: 0.1, createdAt: "2026-06-06T00:13:00.000Z" }),
-      ],
-    });
-
-    const comparison = comparisonForActiveSkillVersions(snapshot);
-
-    expect(comparison.versions.map((entry) => entry.id)).toEqual(["v001", "v002"]);
-    expect(comparison.skills.map((entry) => entry.hash)).toEqual(["bundle_v001", "bundle_v002"]);
-    expect(comparison.cells.map((entry) => ({
-      versionId: entry.versionId,
-      runId: entry.runId,
-      score: entry.score,
+    expect(rows.map((row) => ({
+      version: row.versionLabel,
+      detail: row.versionDetail,
+      score: row.score,
     }))).toEqual([
-      { versionId: "v001", runId: "run_newer", score: 0.5 },
-      { versionId: "v002", runId: "run_current", score: 0.9 },
+      { version: "No skill", detail: "none", score: 0.4 },
+      { version: "alice/summarizer@v1", detail: "workbench:alice/summarizer@v1", score: 0.8 },
     ]);
   });
 
-  test("prefers stronger terminal evidence over newer weaker runs", () => {
+  test("builds evaluation selector options from result evaluations", () => {
     const snapshot = inspectionSnapshotFixture({
-      versions: [version("v001")],
-      skillBundles: [skillBundle()],
-      runs: [
-        run({
-          id: "run_stronger",
-          versionId: "v001",
-          score: 0.8,
-          latencyMs: 3_000,
-          jobIds: ["job_first", "job_second"],
-          createdAt: "2026-06-06T00:10:00.000Z",
-          finishedAt: "2026-06-06T00:11:00.000Z",
-        }),
-        run({
-          id: "run_later_weaker",
-          versionId: "v001",
-          score: 0.1,
-          latencyMs: 100,
-          jobIds: ["job_later"],
-          createdAt: "2026-06-06T00:20:00.000Z",
-          finishedAt: "2026-06-06T00:20:10.000Z",
-        }),
+      evals: [
+        evalSnapshot("eval_one", 2, "tests", "2026-06-06T00:00:00.000Z"),
+        evalSnapshot("eval_two", 3, "rubric", "2026-06-06T00:05:00.000Z"),
       ],
-      jobs: [
-        job({ id: "job_first", runId: "run_stronger", sample: 0 }),
-        job({ id: "job_second", runId: "run_stronger", sample: 1 }),
-        job({ id: "job_later", runId: "run_later_weaker", sample: 0 }),
-      ],
-    });
-
-    const comparison = comparisonForActiveSkillVersions(snapshot);
-
-    expect(comparison.cells).toEqual([
-      expect.objectContaining({
-        runId: "run_stronger",
-        score: 0.8,
-        latencyMs: 1_500,
-        samples: 2,
-      }),
-    ]);
-  });
-
-  test("builds one scorecard from current setups plus active skill history", () => {
-    const snapshot = inspectionSnapshotFixture({
-      versions: [version("v001"), version("v002")],
-      skillBundles: [
-        skillBundle({ hash: "bundle_v001" }),
-        skillBundle({ hash: "bundle_v002" }),
-        skillBundle({ hash: "dummy_bundle_hash", skillName: "dummy-skill", entryName: "dummy-skill" }),
-      ],
-      runs: [
-        run({ id: "run_old", versionId: "v001", skillBundleHash: "bundle_v001", score: 0.4, createdAt: "2026-06-06T00:10:00.000Z" }),
-        run({ id: "run_current", versionId: "v002", skillBundleHash: "bundle_v002", score: 0.9, createdAt: "2026-06-06T00:12:00.000Z" }),
-        run({ id: "run_dummy", versionId: "v002", skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash", score: 0.1, createdAt: "2026-06-06T00:13:00.000Z" }),
-      ],
-    });
-
-    const comparison = comparisonForScorecard(snapshot);
-
-    expect(comparison.cells.map((entry) => ({
-      versionId: entry.versionId,
-      skillName: entry.skillName,
-      runId: entry.runId,
-    }))).toEqual([
-      { versionId: "v002", skillName: "dummy-skill", runId: "run_dummy" },
-      { versionId: "v002", skillName: "primary", runId: "run_current" },
-      { versionId: "v001", skillName: "primary", runId: "run_old" },
-    ]);
-  });
-
-  test("scorecard renders the canonical inspection comparison when present", () => {
-    const snapshot = inspectionSnapshotFixture({
-      versions: [version("v001")],
-      runs: [
-        run({
-          id: "run_later_weaker",
-          versionId: "v001",
-          score: 0.1,
-          jobIds: ["job_later"],
-          createdAt: "2026-06-06T00:20:00.000Z",
-        }),
-      ],
-      jobs: [
-        job({ id: "job_later", runId: "run_later_weaker", sample: 0 }),
-      ],
-      comparison: {
-        versions: [version("v001")],
-        skills: [skillBundle()],
-        agents: [agentSnapshot("agent_a", "patcher")],
-        cells: [
-          cell({
-            versionId: "v001",
-            runId: "run_stronger",
-            score: 0.8,
-            latencyMs: 1_500,
-            samples: 5,
-          }),
+      results: resultsFixture([
+        resultCell({ evaluationId: "eval_one", quality: 0.7 }),
+        resultCell({ evaluationId: "eval_two", quality: 0.9 }),
+      ], {
+        evaluations: [
+          { id: "eval_one", caseCount: 2, scoreAdapter: "tests", createdAt: "2026-06-06T00:00:00.000Z", updatedAt: "2026-06-06T00:00:00.000Z" },
+          { id: "eval_two", caseCount: 3, scoreAdapter: "rubric", createdAt: "2026-06-06T00:05:00.000Z", updatedAt: "2026-06-06T00:05:00.000Z" },
         ],
-      },
-    });
-
-    const comparison = comparisonForScorecard(snapshot);
-
-    expect(comparison.cells).toEqual([
-      expect.objectContaining({
-        runId: "run_stronger",
-        score: 0.8,
-        latencyMs: 1_500,
-        samples: 5,
       }),
-    ]);
-  });
-
-  test("scorecard includes all current-version skill and agent runs", () => {
-    const snapshot = inspectionSnapshotFixture({
-      versions: [version("v001"), version("v002")],
-      skillBundles: [
-        skillBundle({ hash: "old_bundle" }),
-        skillBundle({ hash: "active_bundle" }),
-        skillBundle({ hash: "dummy_bundle_hash", skillName: "dummy-skill", entryName: "dummy-skill" }),
-        skillBundle({ hash: "no_skill_bundle_hash", skillName: "no-skill", entryName: "no-skill" }),
-      ],
-      agents: [
-        agentSnapshot("agent_a", "patcher"),
-        agentSnapshot("agent_b", "gpt-5.4-mini"),
-      ],
-      runs: [
-        run({ id: "run_old", versionId: "v001", skillBundleHash: "old_bundle", score: 0.4, createdAt: "2026-06-06T00:10:00.000Z" }),
-        run({ id: "run_active", versionId: "v002", skillBundleHash: "active_bundle", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:20:00.000Z" }),
-        run({ id: "run_no_skill", versionId: "v002", skillName: "no-skill", skillBundleHash: "no_skill_bundle_hash", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:21:00.000Z" }),
-        run({ id: "run_dummy", versionId: "v002", skillName: "dummy-skill", skillBundleHash: "dummy_bundle_hash", agentName: "gpt-5.4-mini", agentHash: "agent_b", score: 0, createdAt: "2026-06-06T00:22:00.000Z" }),
-      ],
     });
 
-    const comparison = comparisonForScorecard(snapshot);
-
-    expect(comparison.cells.map((entry) => ({
-      skillName: entry.skillName,
-      agentName: entry.agentName,
-      runId: entry.runId,
-    }))).toEqual([
-      { skillName: "dummy-skill", agentName: "gpt-5.4-mini", runId: "run_dummy" },
-      { skillName: "no-skill", agentName: "gpt-5.4-mini", runId: "run_no_skill" },
-      { skillName: "primary", agentName: "gpt-5.4-mini", runId: "run_active" },
-      { skillName: "primary", agentName: "patcher", runId: "run_old" },
-    ]);
-  });
-
-  test("labels evaluation versions and lets the scorecard pick the latest eval scope", () => {
-    const firstEval = evalSnapshot("eval_hash_one", 1, "tests");
-    const secondEval = evalSnapshot("eval_hash_two", 3, "rubric");
-    const snapshot = inspectionSnapshotFixture({
-      evals: [firstEval, secondEval],
-      versions: [version("v001"), version("v002")],
-      skillBundles: [skillBundle({ hash: "bundle_v002" })],
-      runs: [
-        run({
-          id: "run_old_eval",
-          versionId: "v002",
-          skillBundleHash: "bundle_v002",
-          evalHash: "eval_hash_one",
-          score: 0.6,
-          createdAt: "2026-06-06T00:10:00.000Z",
-        }),
-        run({
-          id: "run_new_eval",
-          versionId: "v002",
-          skillBundleHash: "bundle_v002",
-          evalHash: "eval_hash_two",
-          score: 0.9,
-          createdAt: "2026-06-06T00:20:00.000Z",
-        }),
-      ],
-    });
-
-    const comparison = comparisonForScorecard(snapshot);
-    const options = evaluationOptionsForScorecard(snapshot, comparison);
+    const options = evaluationOptionsForScorecard(snapshot, comparisonForScorecard(snapshot));
 
     expect(options.map((option) => ({
       id: option.id,
       label: option.label,
       detail: option.detail,
-      isLatest: option.isLatest,
+      latest: option.isLatest,
     }))).toEqual([
-      { id: "eval_hash_one", label: "Evaluation 1", detail: "1 case / test grader", isLatest: false },
-      { id: "eval_hash_two", label: "Evaluation 2", detail: "3 cases / rubric grader", isLatest: true },
+      { id: "eval_one", label: "Evaluation 1", detail: "2 cases / test grader", latest: false },
+      { id: "eval_two", label: "Evaluation 2", detail: "3 cases / rubric grader", latest: true },
     ]);
-    expect(options[0]?.subtitle).toContain("Created ");
-    expect(options[0]?.subtitle).toContain(" / 1 case / test grader");
-    expect(options[1]?.subtitle).toBe("Latest / 3 cases / rubric grader");
-    expect(defaultEvaluationIdForScorecard(options)).toBe("eval_hash_two");
-    expect(formatEvaluationDisplayName("eval_hash_two", snapshot.evals)).toBe("Evaluation 2");
-    expect(formatEvaluationDisplayDetail("eval_hash_two", snapshot.evals)).toBe("3 cases / rubric grader");
+    expect(defaultEvaluationIdForScorecard(options)).toBe("eval_two");
   });
 
-  test("orders evaluation labels and latest by created-at chronology", () => {
-    const firstEval = {
-      ...evalSnapshot("eval_hash_one", 1, "tests"),
-      createdAt: "2026-06-06T00:10:00.000Z",
-      updatedAt: "2026-06-06T00:30:00.000Z",
-    };
-    const secondEval = {
-      ...evalSnapshot("eval_hash_two", 3, "rubric"),
-      createdAt: "2026-06-06T00:20:00.000Z",
-      updatedAt: "2026-06-06T00:20:00.000Z",
-    };
-    const snapshot = inspectionSnapshotFixture({
-      evals: [firstEval, secondEval],
-      versions: [version("v001"), version("v002")],
-      skillBundles: [skillBundle({ hash: "bundle_v002" })],
+  test("uses run evidence as fallback for visible row metrics", () => {
+    const results = resultsFixture([
+      resultCell({ skillVersionId: "v002", runId: "run_eval", quality: undefined, latencyMs: undefined }),
+    ]);
+    const groups = buildComparisonGroups(results);
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups,
       runs: [
         run({
-          id: "run_first_eval",
+          id: "run_eval",
           versionId: "v002",
-          skillBundleHash: "bundle_v002",
-          evalHash: "eval_hash_one",
-          score: 0.6,
-          createdAt: "2026-06-06T00:10:00.000Z",
-        }),
-        run({
-          id: "run_second_eval",
-          versionId: "v002",
-          skillBundleHash: "bundle_v002",
-          evalHash: "eval_hash_two",
-          score: 0.9,
-          createdAt: "2026-06-06T00:20:00.000Z",
+          score: 0.88,
+          latencyMs: 1200,
+          costUsd: 0.034,
         }),
       ],
     });
 
-    const comparison = comparisonForScorecard(snapshot);
-    const options = evaluationOptionsForScorecard(snapshot, comparison);
-
-    expect(options.map((option) => ({
-      id: option.id,
-      label: option.label,
-      isLatest: option.isLatest,
-      subtitle: option.subtitle,
-    }))).toEqual([
-      {
-        id: "eval_hash_one",
-        label: "Evaluation 1",
-        isLatest: false,
-        subtitle: expect.stringContaining("Created "),
-      },
-      {
-        id: "eval_hash_two",
-        label: "Evaluation 2",
-        isLatest: true,
-        subtitle: "Latest / 3 cases / rubric grader",
-      },
-    ]);
-    expect(defaultEvaluationIdForScorecard(options)).toBe("eval_hash_two");
+    expect(rows[0]?.score).toBe(0.88);
+    expect(rows[0]?.latencyMs).toBe(1200);
+    expect(rows[0]?.costUsd).toBe(0.034);
+    expect(rows[0]?.statusLabel).toBe("Succeeded");
   });
 
-  test("evidence rows fall back from cell metrics to the linked run", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001", runId: "run_001", score: 0.5 }),
-      cell({ versionId: "v002", runId: "run_002" }),
-      cell({ versionId: "v002", agentName: "explorer", agentHash: "agent_b" }),
+  test("builds metric chart rows grouped by result version", () => {
+    const results = resultsFixture([
+      resultCell({ skillVersionId: "v001", agentVersionId: "agent_codex", quality: 0.7 }),
+      resultCell({ skillVersionId: "v002", agentVersionId: "agent_claude", quality: 0.9 }),
     ]);
-    const runs: WorkbenchRun[] = [
-      run({ id: "run_001", versionId: "v001", score: 0.9, latencyMs: 2_000 }),
-      run({ id: "run_002", versionId: "v002", score: 0.8, latencyMs: 1_000 }),
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups: buildComparisonGroups(results),
+      runs: [],
+    });
+
+    expect(buildComparisonMetricData(rows, SCORE).map((datum) => ({
+      group: datum.groupLabel,
+      row: datum.rowLabel,
+      value: datum.value,
+    }))).toEqual([
+      { group: "Your skill v2", row: "Your skill v2 / claude / opus-4.8", value: 0.9 },
+      { group: "Your skill v1", row: "Your skill v1 / codex / gpt-5.5", value: 0.7 },
+    ]);
+  });
+
+  test("only shows the cost metric column when cost data exists", () => {
+    const noCost = rowsFor(resultsFixture([
+      resultCell({ skillVersionId: "v001", costUsd: undefined }),
+    ]));
+    const withCost = rowsFor(resultsFixture([
+      resultCell({ skillVersionId: "v001", costUsd: undefined }),
+      resultCell({ skillVersionId: "v002", costUsd: 0.12 }),
+    ]));
+
+    expect(buildComparisonTableMetricDescriptors(noCost).map((entry) => entry.id)).toEqual([
+      "score",
+      "latencyMs",
+    ]);
+    expect(buildComparisonTableMetricDescriptors(withCost).map((entry) => entry.id)).toEqual([
+      "score",
+      "latencyMs",
+      "costUsd",
+    ]);
+    const missingCostRow = withCost.find((row) => row.costUsd === undefined);
+    expect(missingCostRow ? formatComparisonTableMetricValue(missingCostRow, COST) : null).toBe("Not reported");
+  });
+
+  test("formats missing cost labels by run status", () => {
+    expect(missingCostLabelForStatus("Failed", true)).toBe("Failed before usage");
+    expect(missingCostLabelForStatus("Canceled", true)).toBe("Failed before usage");
+    expect(missingCostLabelForStatus("Succeeded", true)).toBe("Not reported");
+    expect(missingCostLabelForStatus("Not tested", false)).toBe("Not tested");
+  });
+
+  test("keeps legacy run display helpers for non-results views", () => {
+    const evals = [
+      evalSnapshot("eval_one", 1, "tests", "2026-06-06T00:00:00.000Z"),
+      evalSnapshot("eval_two", 3, "rubric", "2026-06-06T00:05:00.000Z"),
     ];
 
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups: buildComparisonGroups(comparison),
-      runs,
-    });
-
-    expect(rows).toHaveLength(2);
-    // Cell metric wins over the run metric, run fills cell gaps.
-    const v001Row = rows.find((row) => row.versionId === "v001");
-    const v002Row = rows.find((row) => row.versionId === "v002");
-    expect(v001Row?.score).toBe(0.5);
-    expect(v001Row?.latencyMs).toBe(2_000);
-    expect(v001Row?.evidenceLabel).toBe("View details");
-    expect(v002Row?.score).toBe(0.8);
-    expect(rows.some((row) => row.agentName === "explorer")).toBe(false);
-  });
-
-  test("surfaces failed run status and error text in evidence rows", () => {
-    const comparison = comparisonFixture([
-      cell({
-        versionId: "v001",
-        runId: "run_failed",
-        status: "failed",
-        error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth.",
-      }),
-    ]);
-
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups: buildComparisonGroups(comparison),
-      runs: [],
-    });
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      status: "failed",
-      statusLabel: "Failed",
-      evidenceLabel: expect.stringContaining("ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth"),
-      error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth.",
-      runId: "run_failed",
-    });
-    expect(rows[0]?.score).toBeUndefined();
-  });
-
-  test("summarizes adapter stack traces to the provider-facing message in evidence rows", () => {
-    const comparison = comparisonFixture([
-      cell({
-        versionId: "v001",
-        runId: "run_failed",
-        status: "failed",
-        error: "Adapter step skill (skill.run via codex model gpt-5.4-nano) exited with status 1: Error: {\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"The 'gpt-5.4-nano' model is not supported when using Codex with a ChatGPT account.\"}} at CodexHarnessAdapter.handleLine",
-      }),
-    ]);
-
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups: buildComparisonGroups(comparison),
-      runs: [],
-    });
-
-    expect(rows[0]?.evidenceLabel)
-      .toBe("The 'gpt-5.4-nano' model is not supported when using Codex with a ChatGPT account.");
-    expect(rows[0]?.error).toContain("Adapter step skill");
-  });
-
-  test("collapses untested configurations to one no-scorecard row per version", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001" }),
-      cell({ versionId: "v001", agentName: "explorer", agentHash: "agent_b" }),
-    ]);
-
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups: buildComparisonGroups(comparison),
-      runs: [],
-    });
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      agentName: "No scorecard yet",
-      statusLabel: "Not tested",
-      evidenceLabel: "No run yet",
-      runId: null,
-    });
-  });
-
-  test("sorts metric data by descriptor direction", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001", score: 0.4, latencyMs: 500 }),
-      cell({ versionId: "v002", score: 0.9, latencyMs: 2_000 }),
-    ]);
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups: buildComparisonGroups(comparison),
-      runs: [],
-    });
-
-    // higher-is-better metrics sort descending.
-    expect(buildComparisonMetricData(rows, SCORE).map((datum) => datum.value)).toEqual([0.9, 0.4]);
-    // lower-is-better metrics sort ascending.
-    expect(buildComparisonMetricData(rows, LATENCY).map((datum) => datum.value)).toEqual([500, 2_000]);
-  });
-
-  test("hides all-empty cost columns and explains mixed missing cost", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001", runId: "run_failed", score: 0, latencyMs: 500 }),
-      cell({ versionId: "v002", runId: "run_cost", score: 0.9, latencyMs: 600, costUsd: 0.0123 }),
-    ]);
-    const groups = buildComparisonGroups(comparison);
-    const rowsWithoutCost = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups,
-      runs: [
-        run({ id: "run_failed", versionId: "v001", status: "failed", score: 0, latencyMs: 500 }),
-      ],
-    }).filter((row) => row.versionId === "v001");
-    const rowsWithMixedCost = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups,
-      runs: [
-        run({ id: "run_failed", versionId: "v001", status: "failed", score: 0, latencyMs: 500 }),
-        run({ id: "run_cost", versionId: "v002", score: 0.9, latencyMs: 600, costUsd: 0.0123 }),
-      ],
-    });
-    const costDescriptor = buildComparisonTableMetricDescriptors(rowsWithMixedCost)
-      .find((descriptor) => descriptor.id === "costUsd");
-
-    expect(buildComparisonTableMetricDescriptors(rowsWithoutCost).map((descriptor) => descriptor.id))
-      .toEqual(["score", "latencyMs"]);
-    expect(buildComparisonTableMetricDescriptors(rowsWithMixedCost).map((descriptor) => descriptor.id))
-      .toEqual(["score", "latencyMs", "costUsd"]);
-    expect(costDescriptor).toBeDefined();
-    expect(formatComparisonTableMetricValue(rowsWithMixedCost.find((row) => row.versionId === "v001")!, costDescriptor!))
-      .toBe("Failed before usage");
-    expect(formatComparisonTableMetricValue(rowsWithMixedCost.find((row) => row.versionId === "v002")!, costDescriptor!))
-      .toBe("$0.0123");
-  });
-
-  test("omits rows without a value for the metric", () => {
-    const comparison = comparisonFixture([
-      cell({ versionId: "v001", score: 0.4 }),
-      cell({ versionId: "v002" }),
-    ]);
-    const rows = buildComparisonEvidenceRows({
-      agents: comparison.agents,
-      groups: buildComparisonGroups(comparison),
-      runs: [],
-    });
-
-    expect(buildComparisonMetricData(rows, SCORE)).toHaveLength(1);
+    expect(formatSkillDisplayName("current", { defaultSkill: "current" })).toBe("Active skill");
+    expect(formatSkillDisplayName("no-skill")).toBe("No skill baseline");
+    expect(formatEvaluationDisplayName("eval_two", evals)).toBe("Evaluation 2");
+    expect(formatEvaluationDisplayDetail("eval_two", evals)).toBe("3 cases / rubric grader");
   });
 });
 
-function comparisonFixture(
-  cells: WorkbenchComparisonCell[],
-  options: {
-    skills?: WorkbenchSkillBundleSnapshot[];
-    agents?: WorkbenchAgentSnapshot[];
-  } = {},
-): WorkbenchComparison {
-  const versionIds = [...new Set(cells.map((entry) => entry.versionId))];
+function rowsFor(results: WorkbenchResults) {
+  return buildComparisonEvidenceRows({
+    agents: results.agents,
+    groups: buildComparisonGroups(results),
+    runs: [],
+  });
+}
+
+function resultsFixture(
+  cells: WorkbenchResultCell[],
+  options: Partial<Pick<WorkbenchResults, "versions" | "evaluations" | "agents">> = {},
+): WorkbenchResults {
   return {
-    evalHash: "eval_hash",
-    versions: versionIds.map((id) => version(id)),
-    skills: options.skills ?? [skillBundle()],
+    versions: options.versions ?? [
+      skillVersion({ id: "v001", label: "Your skill v1", projectVersionId: "v001" }),
+      skillVersion({ id: "v002", label: "Your skill v2", projectVersionId: "v002", current: true }),
+    ],
+    evaluations: options.evaluations ?? [
+      { id: "eval_hash", caseCount: 2, scoreAdapter: "tests", createdAt: "2026-06-06T00:00:00.000Z", updatedAt: "2026-06-06T00:00:00.000Z" },
+    ],
     agents: options.agents ?? [
-      agentSnapshot("agent_a", "patcher"),
-      agentSnapshot("agent_b", "explorer"),
+      { id: "agent_codex", name: "codex", label: "codex / gpt-5.5", adapter: "codex", model: "gpt-5.5" },
+      { id: "agent_claude", name: "claude", label: "claude / opus-4.8", adapter: "claude", model: "opus-4.8" },
     ],
     cells,
   };
 }
 
-function cell(overrides: Partial<WorkbenchComparisonCell> & { versionId: string }): WorkbenchComparisonCell {
+function resultCell(overrides: Partial<WorkbenchResultCell> = {}): WorkbenchResultCell {
   return {
-    skillName: "primary",
-    skillBundleHash: "skill_bundle_hash",
-    evalHash: "eval_hash",
-    agentName: "patcher",
-    agentHash: "agent_a",
+    skillVersionId: "v001",
+    evaluationId: "eval_hash",
+    agentVersionId: "agent_codex",
+    runId: "run_eval",
+    status: "succeeded",
+    quality: 0.7,
+    latencyMs: 900,
+    samples: 2,
+    ...overrides,
+  };
+}
+
+function skillVersion(overrides: Partial<WorkbenchSkillVersion>): WorkbenchSkillVersion {
+  return {
+    id: "v001",
+    label: "Your skill v1",
+    source: "local:.",
+    sourceKind: "local",
+    projectVersionId: "v001",
+    contentHash: "bundle_hash",
+    files: [],
     ...overrides,
   };
 }
@@ -796,30 +280,12 @@ function cell(overrides: Partial<WorkbenchComparisonCell> & { versionId: string 
 function run(overrides: Partial<WorkbenchRun> & { id: string; versionId: string }): WorkbenchRun {
   return {
     kind: "eval",
-    skillName: "primary",
+    skillName: "current",
     skillBundleHash: "skill_bundle_hash",
     evalHash: "eval_hash",
-    agentName: "patcher",
-    agentHash: "agent_a",
+    agentName: "codex",
+    agentHash: "agent_codex",
     status: "succeeded",
-    traceIds: [],
-    createdAt: "2026-06-06T00:10:00.000Z",
-    ...overrides,
-  };
-}
-
-function job(overrides: Partial<WorkbenchJob> & { id: string; runId: string; sample: number }): WorkbenchJob {
-  return {
-    kind: "eval",
-    versionId: "v001",
-    skillName: "primary",
-    skillBundleHash: "skill_bundle_hash",
-    evalHash: "eval_hash",
-    agentName: "patcher",
-    agentHash: "agent_a",
-    caseId: "case_001",
-    status: "succeeded",
-    artifactIds: [],
     traceIds: [],
     createdAt: "2026-06-06T00:10:00.000Z",
     ...overrides,
@@ -837,26 +303,12 @@ function version(id: string): WorkbenchVersion {
   };
 }
 
-function skillBundle(overrides: Partial<WorkbenchSkillBundleSnapshot> = {}): WorkbenchSkillBundleSnapshot {
-  const skillName = overrides.skillName ?? "primary";
-  return {
-    hash: overrides.hash ?? "skill_bundle_hash",
-    skillName,
-    entryName: overrides.entryName ?? skillName,
-    source: overrides.source ?? (skillName === "no-skill"
-      ? { name: skillName, kind: "none" }
-      : { name: skillName, kind: "local", path: skillName === "primary" ? "." : skillName }),
-    files: [],
-    includedSkills: [],
-    createdAt: "2026-06-06T00:00:00.000Z",
-    ...overrides,
-  };
-}
-
-function evalSnapshot(hash = "eval_hash", caseCount = 1, scoreAdapter = "tests"): WorkbenchEvalSnapshot {
-  const createdAt = hash === "eval_hash_two"
-    ? "2026-06-06T00:20:00.000Z"
-    : "2026-06-06T00:00:00.000Z";
+function evalSnapshot(
+  hash = "eval_hash",
+  caseCount = 1,
+  scoreAdapter = "tests",
+  createdAt = "2026-06-06T00:00:00.000Z",
+): WorkbenchEvalSnapshot {
   return {
     hash,
     caseCount,
@@ -873,42 +325,29 @@ function evalSnapshot(hash = "eval_hash", caseCount = 1, scoreAdapter = "tests")
   };
 }
 
-function agentSnapshot(hash: string, name: string): WorkbenchAgentSnapshot {
+function inspectionSnapshotFixture(
+  overrides: Partial<WorkbenchInspectionSnapshot> = {},
+): WorkbenchInspectionSnapshot {
   return {
-    hash,
-    agent: {
-      name,
-      adapter: "command",
-      model: "deterministic",
-      config: {},
-    },
-  };
-}
-
-function inspectionSnapshotFixture(overrides: Partial<WorkbenchInspectionSnapshot> = {}): WorkbenchInspectionSnapshot {
-  const versions = overrides.versions ?? [version("v001")];
-  const skillBundles = overrides.skillBundles ?? [skillBundle()];
-  const agents = overrides.agents ?? [agentSnapshot("agent_a", "patcher")];
-  const evals = overrides.evals ?? [evalSnapshot()];
-  return {
-    root: "/tmp/workbench-test",
+    root: "/tmp/skill",
     status: {
-      root: "/tmp/workbench-test",
+      root: "/tmp/skill",
       initialized: true,
-      currentVersionId: versions.at(-1)?.id,
-      defaultSkill: "primary",
-      defaultAgent: "patcher",
-      versionCount: versions.length,
+      currentVersionId: "v002",
+      defaultSkill: "current",
+      defaultAgent: "codex",
+      versionCount: 2,
       skillCount: 1,
-      agentCount: agents.length,
-      runCount: overrides.runs?.length ?? 0,
+      agentCount: 2,
+      runCount: 0,
       remoteCount: 0,
     },
-    versions,
-    skillSources: [{ name: "primary", kind: "local", path: "." }],
-    skillBundles,
-    evals,
-    agents,
+    versions: [version("v001"), version("v002")],
+    skillSources: [{ name: "current", kind: "local", source: "local:.", path: "." }],
+    skillBundles: [],
+    evals: [evalSnapshot("eval_hash", 2)],
+    agents: [],
+    results: { versions: [], evaluations: [], agents: [], cells: [] },
     runs: [],
     jobs: [],
     traces: [],
@@ -916,7 +355,7 @@ function inspectionSnapshotFixture(overrides: Partial<WorkbenchInspectionSnapsho
     artifacts: [],
     lineage: [],
     remotes: [],
-    refs: { current: versions.at(-1)?.id },
+    refs: { current: "v002" },
     ...overrides,
   };
 }

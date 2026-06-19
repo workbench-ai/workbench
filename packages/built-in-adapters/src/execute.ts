@@ -328,7 +328,7 @@ async function executeTestsEngineRequest(
     throw new Error(`Tests engine requires ${path.join(testsRoot, "test.sh")}.`);
   }
   const shellFailure = await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.workspace, {
-    SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "primary"),
+    SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "current"),
     SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
     CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
     OUTPUT_DIR: request.paths.output,
@@ -394,7 +394,7 @@ function commandAdapterWorkingDirectory(request: WorkbenchAdapterOperationReques
 
 function commandAdapterEnvironment(request: WorkbenchAdapterOperationRequest): Record<string, string> {
   return {
-    SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "primary"),
+    SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "current"),
     SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
     CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
     TRACE_DIR: request.paths.traces ?? path.join(request.paths.workspace, "input", "traces"),
@@ -1091,7 +1091,7 @@ function buildAgentSkillPrompt(
   return [
     ...(adapter.instructions ? ["Instructions:", adapter.instructions, ""] : []),
     "Context:",
-    "- The entry skill is mounted at /workspace/input/skills/primary unless another skill is selected.",
+    "- The entry skill is mounted at /workspace/input/skills/current unless another version is selected.",
     "- All skills installed for this run are mounted under /workspace/input/skills.",
     "- The mutable working directory is /workspace.",
     "- If the skill declares prepare.command, it has already run and may have copied files into /workspace.",

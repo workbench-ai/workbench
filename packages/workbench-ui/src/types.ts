@@ -1,6 +1,6 @@
 export type {
   SurfaceSnapshotFile,
-  WorkbenchComparison,
+  WorkbenchResults,
   WorkbenchInspectionSnapshot,
   WorkbenchArtifact,
   WorkbenchJob,

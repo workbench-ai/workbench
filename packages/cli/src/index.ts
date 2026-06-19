@@ -8,7 +8,7 @@ import { gzipSync } from "node:zlib";
 import {
   addWorkbenchRemote,
   addWorkbenchAgent,
-  compareWorkbench,
+  resultsWorkbench,
   createWorkbenchRunId,
   createWorkbenchRunSnapshotForRun,
   createWorkbenchAdapterAuthBundle,
@@ -63,7 +63,7 @@ import {
   type WorkbenchAdapterAuthStatusRecord,
   type WorkbenchAdapterAuthTarget,
   type WorkbenchArtifact,
-  type WorkbenchComparison,
+  type WorkbenchResults,
   type WorkbenchInspectionSnapshotEnvelope,
   type WorkbenchInspectionSnapshot,
   type WorkbenchJob,
@@ -132,6 +132,7 @@ interface WorkbenchSkillHandle {
 
 const require = createRequire(import.meta.url);
 const EDITOR_COMMAND = "${EDITOR:-vi}";
+const CURRENT_SKILL_VERSION_NAME = "current";
 
 const HELP = [
   "Usage:",
@@ -143,9 +144,9 @@ const HELP = [
   "Taught lifecycle commands:",
   "  workbench new DIR [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
   "  workbench init [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
-  "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
-  "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
-  "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
+  "  workbench eval [--versions all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
+  "  workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
+  "  workbench results [--versions all|LIST] [--agents all|LIST] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
   "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
   "  workbench install OWNER/SKILL[@VERSION]|URL [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
@@ -165,9 +166,9 @@ const HELP_ALL = [
   "  workbench new DIR [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
   "  workbench init [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]",
   "  workbench clone OWNER/SKILL[@VERSION]|URL DIR [--json]",
-  "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
-  "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
-  "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
+  "  workbench eval [--versions all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
+  "  workbench results [--versions all|LIST] [--agents all|LIST] [--json]",
+  "  workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
   "  workbench unpublish VERSION [--dir DIR] [--json]",
   "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
@@ -229,30 +230,30 @@ const COMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   eval: [
     "Usage:",
-    "  workbench eval [--skills all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
+    "  workbench eval [--versions all|LIST] [--agents all|LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]",
     "",
-    "Runs eval jobs for the selected version, measured skills, and agents. Omitted selectors use manifest defaults.",
+    "Runs eval jobs for the selected skill versions and agents. Omitted selectors use manifest defaults.",
     "",
     "Example:",
     "  workbench eval -n 5",
   ].join("\n"),
   improve: [
     "Usage:",
-    "  workbench improve [--skills LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
+    "  workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
     "",
-    "Creates one improved child version from evidence. The selected skills and agents must resolve to exactly one entry each.",
+    "Creates one improved child skill version from evidence. The selected version and agent must resolve to exactly one entry each.",
     "",
     "Example:",
     "  workbench improve --budget 1 -n 1",
   ].join("\n"),
-  compare: [
+  results: [
     "Usage:",
-    "  workbench compare [--skills all|LIST] [--agents all|LIST] [--versions all|A..B|LIST] [--json]",
+    "  workbench results [--versions all|LIST] [--agents all|LIST] [--json]",
     "",
-    "Compares recorded eval evidence across selected skills, agents, and versions.",
+    "Shows recorded eval results across selected skill versions and agents.",
     "",
     "Example:",
-    "  workbench compare --agents all",
+    "  workbench results --agents all",
   ].join("\n"),
   install: [
     "Usage:",
@@ -443,7 +444,6 @@ const VERSION_FLAG = {
 } as const satisfies FlagSpec;
 
 const COMMAND_FLAGS: Record<string, FlagSpec> = {
-  compare: { ...PROJECT_FLAGS, ...HELP_FLAG, agents: "string", skills: "string", versions: "string" },
   diff: { ...PROJECT_FLAGS, ...HELP_FLAG },
   eval: {
     ...PROJECT_FLAGS,
@@ -453,7 +453,7 @@ const COMMAND_FLAGS: Record<string, FlagSpec> = {
     "dry-run": "boolean",
     rerun: "boolean",
     samples: "positive-integer",
-    skills: "string",
+    versions: "string",
   },
   help: { ...COMMON_FLAGS, ...HELP_FLAG, all: "boolean" },
   improve: {
@@ -464,8 +464,9 @@ const COMMAND_FLAGS: Record<string, FlagSpec> = {
     cloud: "boolean",
     "dry-run": "boolean",
     samples: "positive-integer",
-    skills: "string",
+    versions: "string",
   },
+  results: { ...PROJECT_FLAGS, ...HELP_FLAG, agents: "string", versions: "string" },
   case: { ...PROJECT_FLAGS, ...HELP_FLAG },
   clone: { ...COMMON_FLAGS, ...HELP_FLAG },
   install: { ...PROJECT_FLAGS, ...HELP_FLAG, "dry-run": "boolean", scope: "string", target: "string", yes: "boolean" },
@@ -710,15 +711,14 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         : `workbench show ${completed.run.id}`;
       return emitImproveOutcome(parsed, io, completed.snapshot, improveResult, next);
     }
-    if (command === "compare") {
-      const comparison = await compareWorkbench({
+    if (command === "results") {
+      const results = await resultsWorkbench({
         ...core,
+        projectVersions: "all",
         versions: stringFlag(parsed, "versions"),
-        skills: stringFlag(parsed, "skills"),
         agents: stringFlag(parsed, "agents"),
       });
-      const fallbackNext = stringFlag(parsed, "versions") ? undefined : compareAllVersionsCommand(parsed);
-      return output(manifestOnly(comparison), parsed, io, () => formatComparison(comparison, fallbackNext));
+      return output(manifestOnly(results), parsed, io, () => formatResults(results));
     }
     if (command === "switch") {
       const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.");
@@ -1016,7 +1016,7 @@ interface CloneProjectResult {
 async function handleEvalDryRun(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const preview = await previewWorkbenchEval({
     ...(await coreOptions(parsed)),
-    skill: stringFlag(parsed, "skills"),
+    skill: stringFlag(parsed, "versions"),
     agent: stringFlag(parsed, "agents"),
     samples: intFlag(parsed, "samples"),
     rerun: parsed.flags.rerun === true,
@@ -1036,7 +1036,7 @@ async function handleEvalDryRun(parsed: ParsedArgs, io: CliIo): Promise<number> 
     next: next as Json,
   }, parsed, io, () => [
     `Would run eval ${plan.location}: version=${displayRef(plan.versionId)} eval=${plan.evalHash}`,
-    `skills=${plan.skills.map((skill) => skill.name).join(",")} agents=${plan.agents.map((agent) => agent.name).join(",")}`,
+    `versions=${plan.skills.map((skill) => skill.name).join(",")} agents=${plan.agents.map((agent) => agent.name).join(",")}`,
     `cases=${plan.cases} samples=${plan.samples} cached=${plan.cachedRunIds.length}`,
     ...formatLaunchReadinessLines(readiness),
     "No files or Workbench state were written.",
@@ -1048,7 +1048,7 @@ function evalOperationRequest(parsed: ParsedArgs, variant: "local" | "cloud" = "
   return {
     kind: "eval",
     variant,
-    ...(stringFlag(parsed, "skills") ? { skill: stringFlag(parsed, "skills") } : {}),
+    ...(stringFlag(parsed, "versions") ? { skill: stringFlag(parsed, "versions") } : {}),
     ...(stringFlag(parsed, "agents") ? { agent: stringFlag(parsed, "agents") } : {}),
     ...(intFlag(parsed, "samples") ? { samples: intFlag(parsed, "samples") } : {}),
     ...(parsed.flags.rerun === true ? { rerun: true } : {}),
@@ -1087,7 +1087,7 @@ function improveOperationRequest(parsed: ParsedArgs, variant: "local" | "cloud" 
   return {
     kind: "improve",
     variant,
-    ...(stringFlag(parsed, "skills") ? { skill: stringFlag(parsed, "skills") } : {}),
+    ...(stringFlag(parsed, "versions") ? { skill: stringFlag(parsed, "versions") } : {}),
     ...(stringFlag(parsed, "agents") ? { agent: stringFlag(parsed, "agents") } : {}),
     ...(intFlag(parsed, "samples") ? { samples: intFlag(parsed, "samples") } : {}),
     ...(intFlag(parsed, "budget") ? { budget: intFlag(parsed, "budget") } : {}),
@@ -1353,7 +1353,7 @@ async function handleImproveDryRun(parsed: ParsedArgs, io: CliIo): Promise<numbe
   try {
     preview = await previewWorkbenchImprove({
       ...(await coreOptions(parsed)),
-      skill: stringFlag(parsed, "skills"),
+      skill: stringFlag(parsed, "versions"),
       agent: stringFlag(parsed, "agents"),
       samples: intFlag(parsed, "samples"),
       budget: intFlag(parsed, "budget"),
@@ -1466,24 +1466,10 @@ function operationNextCommand(command: "eval" | "improve", parsed: ParsedArgs, c
   return parts.join(" ");
 }
 
-function compareAllVersionsCommand(parsed: ParsedArgs): string {
-  const parts = ["workbench", "compare"];
-  const skills = stringFlag(parsed, "skills");
-  if (skills) {
-    parts.push("--skills", shellQuoteIfNeeded(skills));
-  }
-  const agents = stringFlag(parsed, "agents");
-  if (agents) {
-    parts.push("--agents", shellQuoteIfNeeded(agents));
-  }
-  parts.push("--versions", "all");
-  return parts.join(" ");
-}
-
 function appendOperationSelectorFlags(parts: string[], parsed: ParsedArgs, command: "eval" | "improve"): void {
-  const skills = stringFlag(parsed, "skills");
-  if (skills) {
-    parts.push("--skills", shellQuote(skills));
+  const versions = stringFlag(parsed, "versions");
+  if (versions) {
+    parts.push("--versions", shellQuote(versions));
   }
   const agents = stringFlag(parsed, "agents");
   if (agents) {
@@ -2196,7 +2182,7 @@ function runWatchNextCommand(run: WorkbenchRun): string {
   if (run.status === "failed" || run.status === "canceled") {
     return `workbench show ${run.id}`;
   }
-  return run.kind === "improve" ? "workbench eval --rerun -n 5" : compareNextCommandForRun(run);
+  return run.kind === "improve" ? "workbench eval --rerun -n 5" : resultsNextCommandForRun(run);
 }
 
 function showRunNextCommand(run: WorkbenchRun): string | null {
@@ -2212,10 +2198,10 @@ function runProgressNextCommand(run: WorkbenchRun): string | null {
   return showRunNextCommand(run);
 }
 
-function compareNextCommandForRun(run: WorkbenchRun): string {
-  const parts = ["workbench compare"];
-  if (run.skillName && run.skillName !== "primary") {
-    parts.push("--skills", shellQuote(run.skillName));
+function resultsNextCommandForRun(run: WorkbenchRun): string {
+  const parts = ["workbench results"];
+  if (run.skillName && run.skillName !== CURRENT_SKILL_VERSION_NAME) {
+    parts.push("--versions", shellQuote(run.skillName));
   }
   if (run.agentName && run.agentName !== "default") {
     parts.push("--agents", shellQuote(run.agentName));
@@ -2895,7 +2881,7 @@ function isEditableWorkbenchSourcePath(filePath: string): boolean {
   }
   return normalized === ".workbench/eval.yaml" ||
     normalized === ".workbench/agents.yaml" ||
-    normalized === ".workbench/skills.yaml" ||
+    normalized === ".workbench/versions.yaml" ||
     normalized.startsWith(".workbench/cases/") ||
     normalized.startsWith(".workbench/environment/");
 }
@@ -3124,7 +3110,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     const preparedImproveRequest = command === "improve"
       ? await cloudPreScheduleStep(command, interrupt, prepareWorkbenchCloudImproveRequest({
           ...core,
-          skill: stringFlag(parsed, "skills"),
+          skill: stringFlag(parsed, "versions"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           budget: intFlag(parsed, "budget"),
@@ -3133,7 +3119,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     const preview = command === "eval"
       ? await cloudPreScheduleStepWithProgress(command, interrupt, previewWorkbenchEval({
           ...core,
-          skill: stringFlag(parsed, "skills"),
+          skill: stringFlag(parsed, "versions"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           rerun: parsed.flags.rerun === true,
@@ -3141,7 +3127,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
         }), () => renderCloudProgress("preflight"))
       : await cloudPreScheduleStepWithProgress(command, interrupt, previewWorkbenchImprove({
           ...core,
-          skill: stringFlag(parsed, "skills"),
+          skill: stringFlag(parsed, "versions"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           budget: intFlag(parsed, "budget"),
@@ -3178,7 +3164,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     const requestWithoutRunId = command === "eval"
       ? await cloudPreScheduleStepWithProgress(command, interrupt, prepareWorkbenchCloudEvalRequest({
           ...core,
-          skill: stringFlag(parsed, "skills"),
+          skill: stringFlag(parsed, "versions"),
           agent: stringFlag(parsed, "agents"),
           samples: intFlag(parsed, "samples"),
           rerun: parsed.flags.rerun === true,
@@ -4270,8 +4256,8 @@ function createPrescheduledCloudRun(input: {
   if (input.command === "eval") {
     const preview = input.preview as WorkbenchEvalPreview;
     if (preview.skills.length !== 1 || preview.agents.length !== 1) {
-      throw new WorkbenchCodedError("cloud_selection_unsupported", "Hosted eval requires exactly one skill and one agent. Pass explicit skill and agent selectors.", {
-        remediation: "workbench eval --cloud --skills SKILL --agents AGENT",
+      throw new WorkbenchCodedError("cloud_selection_unsupported", "Hosted eval requires exactly one version and one agent. Pass explicit version and agent selectors.", {
+        remediation: "workbench eval --cloud --versions VERSION --agents AGENT",
         exitCode: 2,
       });
     }
@@ -6898,7 +6884,7 @@ async function statusWithCausalNext(
     return { ...status, next: belowPerfectEvalNextCommand(snapshot, belowPerfectCurrentEvalRuns) };
   }
   if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
-    return { ...status, next: "workbench compare" };
+    return { ...status, next: "workbench results" };
   }
   if (cloudAuthMissing && (canPublish || cloudRemoteNeedsAuth)) {
     return { ...status, next: "workbench login" };
@@ -6936,7 +6922,7 @@ async function statusWithCausalNext(
   }
   return {
     ...status,
-    next: canPublish ? "workbench compare" : null,
+    next: canPublish ? "workbench results" : null,
   };
 }
 
@@ -6965,16 +6951,16 @@ function belowPerfectEvalNextCommand(
   const skillNames = new Set(runs.map((run) => run.skillName));
   const agentNames = new Set(runs.map((run) => run.agentName));
   if (skillNames.size !== 1 || agentNames.size !== 1) {
-    return "workbench compare";
+    return "workbench results";
   }
   const skill = [...skillNames][0]!;
   const agentName = [...agentNames][0]!;
-  if (skill !== "primary") {
-    return "workbench compare";
+  if (skill !== CURRENT_SKILL_VERSION_NAME) {
+    return "workbench results";
   }
   const agent = snapshot?.agents.find((entry) => entry.agent.name === agentName)?.agent;
   if (!agent) {
-    return "workbench compare";
+    return "workbench results";
   }
   return improveNextCommandForAgent(skill, agent, snapshot);
 }
@@ -6995,7 +6981,7 @@ function pendingImproverEvalNextCommand(
   }
   const hasBelowPerfectEvidence = snapshot.runs.some((run) =>
     run.kind === "eval" &&
-    run.skillName === "primary" &&
+    run.skillName === CURRENT_SKILL_VERSION_NAME &&
     scoredRunIsBelowPerfect(run)
   );
   if (!hasBelowPerfectEvidence) {
@@ -7952,7 +7938,7 @@ async function evalSuccessNextCommand(
     return belowPerfectEvalNextCommand(snapshot, runs);
   }
   if (!snapshotHasWorkflowCase(snapshot)) {
-    return "workbench compare";
+    return "workbench results";
   }
   return await publishReadyNextCommand(core);
 }
@@ -7972,7 +7958,7 @@ function improveNextCommandForAgent(
     }
     return workbenchSkillImproveAdapterRemediation(agent);
   }
-  return `workbench improve --skills ${shellQuote(skill)} --agents ${shellQuote(agent.name)}`;
+  return `workbench improve --versions ${shellQuote(skill)} --agents ${shellQuote(agent.name)}`;
 }
 
 async function publishReadyNextCommand(core: { dir?: string; authToken?: string }): Promise<string> {
@@ -7981,7 +7967,7 @@ async function publishReadyNextCommand(core: { dir?: string; authToken?: string 
     return "workbench login";
   }
   const status = await workbenchStatusSnapshot(core);
-  return statusHasPublishedCurrentCloudSource(status) ? "workbench compare" : "workbench publish";
+  return statusHasPublishedCurrentCloudSource(status) ? "workbench results" : "workbench publish";
 }
 
 function postImproveValidationBeatsIncumbent(
@@ -8259,16 +8245,15 @@ function humanSampleNumber(sample: number): number {
   return sample + 1;
 }
 
-function formatComparison(comparison: WorkbenchComparison, fallbackNext?: string): string {
-  const lines = ["version\tskill\tagent\tstatus\tscore\tsamples\tcost\tavg latency\trun"];
-  const evidenceCells = comparison.cells.filter((cell) => cell.runId || cell.status);
+function formatResults(results: WorkbenchResults): string {
+  const lines = ["version\tagent\tstatus\tquality\tsamples\tcost\tlatency\trun"];
+  const evidenceCells = results.cells.filter((cell) => cell.runId || cell.status);
   for (const cell of evidenceCells) {
     lines.push([
-      displayRef(cell.versionId),
-      cell.skillName,
-      `${cell.agentName}@${shortObjectId(cell.agentHash)}`,
+      formatResultVersion(results, cell),
+      formatResultAgent(results, cell),
       cell.status ?? "not-run",
-      cell.score === undefined ? "n/a" : cell.score.toFixed(3),
+      cell.quality === undefined ? "n/a" : cell.quality.toFixed(3),
       cell.samples === undefined ? "n/a" : String(cell.samples),
       cell.costUsd === undefined ? "n/a" : `$${cell.costUsd.toFixed(4)}`,
       cell.latencyMs === undefined ? "n/a" : `${cell.latencyMs}ms`,
@@ -8276,11 +8261,25 @@ function formatComparison(comparison: WorkbenchComparison, fallbackNext?: string
     ].join("\t"));
   }
   if (lines.length === 1) {
-    return fallbackNext && comparison.cells.length > 0
-      ? `No comparable runs for the selected version.\nnext: ${fallbackNext}`
-      : "No comparable runs.";
+    return "No results.";
   }
   return lines.join("\n");
+}
+
+function formatResultVersion(
+  results: WorkbenchResults,
+  cell: WorkbenchResults["cells"][number],
+): string {
+  const version = results.versions.find((entry) => entry.id === cell.skillVersionId);
+  if (!version) {
+    return displayRef(cell.skillVersionId);
+  }
+  return `${version.label}${version.current ? " · Current" : ""}`;
+}
+
+function formatResultAgent(results: WorkbenchResults, cell: WorkbenchResults["cells"][number]): string {
+  const agent = results.agents.find((entry) => entry.id === cell.agentVersionId);
+  return agent?.label ?? displayRef(cell.agentVersionId);
 }
 
 function formatDiff(entries: readonly { path: string; status: string; before?: string; after?: string }[]): string {

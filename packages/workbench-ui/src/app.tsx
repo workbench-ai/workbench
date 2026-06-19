@@ -127,11 +127,11 @@ import {
 } from "./lib/format";
 import {
   buildWorkbenchLocationHref,
-  createActivityRoute,
   createCaseRoute,
   createEvaluationRoute,
   createFilesRoute,
   createRunRoute,
+  createRunsRoute,
   emptyFileRouteState,
   parseWorkbenchLocation,
   routePrimaryTab,
@@ -155,7 +155,6 @@ import {
   evaluationOptionsForScorecard,
   formatEvaluationDisplayDetail,
   formatEvaluationDisplayName,
-  formatSkillDisplayName,
   formatVersionDisplayName,
   missingCostLabelForStatus,
   type ComparisonEvaluationOption,
@@ -208,7 +207,7 @@ const PRIMARY_TABS: Array<{
 }> = [
   { value: "files", label: "Files", icon: FolderOpenIcon },
   { value: "evaluation", label: "Evaluation", icon: WorkflowIcon },
-  { value: "activity", label: "Activity", icon: ActivityIcon },
+  { value: "runs", label: "Runs", icon: PlayCircleIcon },
 ];
 
 const EVALUATION_VIEW_ITEMS: Array<{
@@ -627,7 +626,7 @@ function WorkbenchShellHeader({
         <div className={cn("mx-auto flex min-w-0 justify-end", WORKBENCH_CONTENT_RAIL_CLASS)}>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
             {snapshot ? (
-              <WorkbenchActivitySummary
+              <WorkbenchRunsSummary
                 snapshot={snapshot}
                 loading={loading}
                 refreshing={refreshing}
@@ -825,8 +824,8 @@ function PrimaryTabs({
     if (tab === "evaluation") {
       return createEvaluationRoute({ view: "results", evaluationId: route.kind === "evaluation" || route.kind === "case" || route.kind === "run" ? route.evaluationId : null });
     }
-    if (tab === "activity") {
-      return createActivityRoute();
+    if (tab === "runs") {
+      return createRunsRoute();
     }
     return createFilesRoute();
   };
@@ -905,8 +904,8 @@ function RouteBody({
           onRouteClick={onRouteClick}
         />
       );
-    case "activity":
-      return <ActivitySurface route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />;
+    case "runs":
+      return <RunsSurface route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />;
     case "run":
       return (
         <RunDetailPage
@@ -1211,18 +1210,18 @@ function EvaluationSurface({
   route: Extract<WorkbenchRoute, { kind: "evaluation" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const comparison = comparisonForScorecard(snapshot);
-  const evaluationOptions = evaluationOptionsForScorecard(snapshot, comparison);
+  const results = comparisonForScorecard(snapshot);
+  const evaluationOptions = evaluationOptionsForScorecard(snapshot, results);
   const defaultEvaluationId = defaultEvaluationIdForScorecard(evaluationOptions);
   const activeEvaluationId = route.evaluationId && evaluationOptions.some((option) => option.id === route.evaluationId)
     ? route.evaluationId
     : defaultEvaluationId;
   const labelContext = comparisonLabelContext(snapshot);
-  const groups = buildComparisonGroups(comparison, labelContext);
+  const groups = buildComparisonGroups(results, labelContext);
   const rows = buildComparisonEvidenceRows({
     groups,
     context: labelContext,
-    agents: comparison.agents,
+    agents: results.agents,
     runs: snapshot.runs,
   });
   const visibleRows = activeEvaluationId
@@ -1258,7 +1257,7 @@ function EvaluationSurface({
       ) : (
         <EvaluationResults
           evaluationId={activeEvaluationId}
-          hasComparison={comparison.cells.length > 0}
+          hasResults={results.cells.length > 0}
           hrefFor={hrefFor}
           onRouteClick={onRouteClick}
           rows={visibleRows}
@@ -1271,36 +1270,35 @@ function EvaluationSurface({
 }
 
 /**
- * Build the sorted scorecard comparison rows for a snapshot, mirroring what the
- * Evaluation → Results view renders. Exposed so the comparison summary can be
- * rendered standalone (for example embedded in a marketing page) without the
- * full workspace shell. By default it returns rows for the snapshot's default
- * evaluation; pass `evaluationId` to select a specific one, or `null` for all.
+ * Build the sorted scorecard result rows for a snapshot, mirroring what the
+ * Evaluation → Results view renders. By default it returns rows for the
+ * snapshot's default evaluation; pass `evaluationId` to select a specific one,
+ * or `null` for all.
  */
 export function buildEvaluationResultRows(
   snapshot: WorkbenchInspectionSnapshot,
   options: { evaluationId?: string | null } = {},
 ): ComparisonEvidenceRow[] {
-  const comparison = comparisonForScorecard(snapshot);
+  const results = comparisonForScorecard(snapshot);
   const context = comparisonLabelContext(snapshot);
-  const groups = buildComparisonGroups(comparison, context);
+  const groups = buildComparisonGroups(results, context);
   const rows = sortLeaderboardRows(
     buildComparisonEvidenceRows({
       groups,
       context,
-      agents: comparison.agents,
+      agents: results.agents,
       runs: snapshot.runs,
     }),
   );
   const evaluationId = "evaluationId" in options
     ? options.evaluationId
-    : defaultEvaluationIdForScorecard(evaluationOptionsForScorecard(snapshot, comparison));
+    : defaultEvaluationIdForScorecard(evaluationOptionsForScorecard(snapshot, results));
   return evaluationId ? rows.filter((row) => row.evalHash === evaluationId) : rows;
 }
 
 function EvaluationResults({
   evaluationId,
-  hasComparison,
+  hasResults,
   hrefFor,
   onRouteClick,
   rows,
@@ -1308,7 +1306,7 @@ function EvaluationResults({
   snapshot,
 }: {
   evaluationId: string | null;
-  hasComparison: boolean;
+  hasResults: boolean;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   rows: ComparisonEvidenceRow[];
@@ -1323,10 +1321,10 @@ function EvaluationResults({
       <EmptyState
         icon={ActivityIcon}
         eyebrow={selectedEvaluation?.label ?? "Evaluation"}
-        title={hasComparison ? "No results for this evaluation" : "No runs yet"}
-        message={hasComparison
+        title={hasResults ? "No results for this evaluation" : "No runs yet"}
+        message={hasResults
           ? "This evaluation has no recorded scorecard rows."
-          : "Run evals to record scorecards for comparison."}
+          : "Run evals to record results."}
         variant="hero"
         size="sm"
       />
@@ -1336,24 +1334,25 @@ function EvaluationResults({
     <section className="grid min-w-0 gap-4" aria-label="Results">
       <EvaluationResultsVisualSummary rows={sortedRows} />
       <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
-        <Table data-testid="evaluation-results-leaderboard" className="min-w-[58rem]">
+        <Table data-testid="evaluation-results-leaderboard" className="min-w-[52rem]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[3rem]">#</TableHead>
-              <TableHead className="w-[10rem]">Mode</TableHead>
-              <TableHead className="w-[8.5rem]">Version</TableHead>
+              <TableHead className="w-[16rem]">Version</TableHead>
+              <TableHead className="w-[12rem]">Agent</TableHead>
+              <TableHead className="w-[7.5rem]">Status</TableHead>
               <TableHead className="w-[5.5rem]">Cases</TableHead>
-              <TableHead className="w-[5.5rem]">Score</TableHead>
+              <TableHead className="w-[5.5rem]">Quality</TableHead>
               <TableHead className="w-[6.5rem]">Latency</TableHead>
               <TableHead className="w-[8rem]">Cost</TableHead>
               <TableHead className="w-[8.5rem]">When</TableHead>
-              <TableHead>Agent</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {sortedRows.map((row, index) => {
               const run = row.runId ? runsById.get(row.runId) ?? null : null;
               const jobs = run ? jobsByRunId.get(run.id) ?? [] : [];
+              const versionDetail = visibleLeaderboardVersionDetail(row);
               const runRoute = row.runId
                 ? createRunRoute({ runId: row.runId, source: "evaluation", evaluationId })
                 : null;
@@ -1372,46 +1371,44 @@ function EvaluationResults({
                           href={hrefFor(runRoute)}
                           onClick={onRouteClick(runRoute)}
                         >
-                          {row.agentName}
+                          {row.versionLabel}
                         </a>
                       ) : (
                         <span className="break-words font-medium text-foreground [overflow-wrap:anywhere]">
-                          {row.agentName}
+                          {row.versionLabel}
                         </span>
                       )}
+                      {versionDetail ? (
+                        <span className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                          {versionDetail}
+                        </span>
+                      ) : null}
                       <div className="flex min-w-0 flex-wrap gap-1">
-                        {row.status ? (
-                          <StatusBadge status={row.status} />
-                        ) : (
-                          <Badge variant="outline">{row.statusLabel}</Badge>
-                        )}
+                        {row.versionBadges.map((badge) => (
+                          <Badge key={badge} variant="outline" className="w-fit">
+                            {badge}
+                          </Badge>
+                        ))}
                       </div>
                     </div>
                   </TableCell>
                   <TableCell className="align-top">
-                    <div className="grid min-w-0 gap-1">
-                      <span className="break-words text-foreground [overflow-wrap:anywhere]">{row.versionLabel}</span>
-                      {row.versionBadges.length > 0 ? (
-                        <div className="flex min-w-0 flex-wrap gap-1">
-                          {row.versionBadges.map((badge) => (
-                            <Badge key={badge} variant="outline" className="w-fit">
-                              {badge}
-                            </Badge>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
+                    <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">
+                      {row.agentDetail}
+                    </span>
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {row.status ? (
+                      <StatusBadge status={row.status} />
+                    ) : (
+                      <Badge variant="outline">{row.statusLabel}</Badge>
+                    )}
                   </TableCell>
                   <TableCell className="align-top text-muted-foreground">{formatLeaderboardCases(row, jobs)}</TableCell>
                   <TableCell className="align-top font-medium">{formatScore(row.score)}</TableCell>
                   <TableCell className="align-top text-muted-foreground">{formatDurationMs(row.latencyMs)}</TableCell>
                   <TableCell className="align-top text-muted-foreground">{formatLeaderboardCost(row)}</TableCell>
                   <TableCell className="align-top text-muted-foreground">{formatTimestamp(run?.finishedAt ?? run?.createdAt)}</TableCell>
-                  <TableCell className="align-top">
-                    <span className="break-words text-muted-foreground [overflow-wrap:anywhere]">
-                      {row.agentDetail}
-                    </span>
-                  </TableCell>
                 </TableRow>
               );
             })}
@@ -1496,6 +1493,14 @@ function formatLeaderboardCost(row: ComparisonEvidenceRow): string {
   return typeof row.costUsd === "number" && Number.isFinite(row.costUsd)
     ? formatCost(row.costUsd)
     : missingCostLabelForStatus(row.statusLabel, Boolean(row.runId));
+}
+
+function visibleLeaderboardVersionDetail(row: ComparisonEvidenceRow): string | null {
+  const detail = row.versionDetail.trim();
+  if (!detail || detail === "none" || detail.startsWith("local:")) {
+    return null;
+  }
+  return detail;
 }
 
 function compareOptionalNumber(
@@ -1721,7 +1726,7 @@ function sectionNavItemClass(active: boolean, className?: string): string {
   );
 }
 
-function ActivitySurface({
+function RunsSurface({
   hrefFor,
   onRouteClick,
   route: _route,
@@ -1729,7 +1734,7 @@ function ActivitySurface({
 }: {
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  route: Extract<WorkbenchRoute, { kind: "activity" }>;
+  route: Extract<WorkbenchRoute, { kind: "runs" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
   const activeRuns = snapshot.runs.filter((run) => isRunActive(run, snapshot.jobs));
@@ -1739,36 +1744,36 @@ function ActivitySurface({
     ...inactiveRuns.sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
   ];
   if (runs.length === 0) {
-    return <EmptyState icon={ActivityIcon} title="No activity" message="Runs appear here after Workbench evaluates or improves a skill." variant="hero" size="sm" />;
+    return <EmptyState icon={PlayCircleIcon} title="No runs" message="Runs appear here after Workbench evaluates or improves a skill." variant="hero" size="sm" />;
   }
   return (
-    <section className="min-w-0" aria-label="Activity">
+    <section className="min-w-0" aria-label="Runs">
       <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Run</TableHead>
+              <TableHead>Operation</TableHead>
               <TableHead>Status</TableHead>
-              <TableHead>Kind</TableHead>
+              <TableHead>Version</TableHead>
               <TableHead>Agent</TableHead>
               <TableHead>Evaluation</TableHead>
-              <TableHead>Score</TableHead>
+              <TableHead>Quality</TableHead>
               <TableHead>Updated</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {runs.map((run) => {
-              const runRoute = createRunRoute({ runId: run.id, source: "activity" });
+              const runRoute = createRunRoute({ runId: run.id, source: "runs" });
               return (
                 <TableRow key={run.id} className="cursor-pointer" onClick={onRouteClick(runRoute)}>
                   <TableCell>
                     <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(runRoute)} onClick={onRouteClick(runRoute)}>
-                      {shortId(run.id)}
+                      {runOperationLabel(run)}
                     </a>
                   </TableCell>
                   <TableCell><StatusBadge status={run.status} /></TableCell>
-                  <TableCell>{run.kind}</TableCell>
-                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{run.agentName}</TableCell>
+                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</TableCell>
+                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)}</TableCell>
                   <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{formatEvaluationDisplayName(run.evalHash, snapshot.evals)}</TableCell>
                   <TableCell>{formatScore(run.score)}</TableCell>
                   <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
@@ -1846,9 +1851,9 @@ function RunDetailPage({
       </nav>
       <div className="grid min-w-0 gap-5">
         <DetailPageHeader
-          eyebrow={formatEvaluationDisplayName(run.evalHash, snapshot.evals)}
+          eyebrow={runOperationLabel(run)}
           title={runDisplayTitle(run, snapshot)}
-          description={`${run.kind} run from ${formatTimestamp(run.createdAt)} with ${formatCount(jobs.length, "case result")}.`}
+          description={`${runOperationLabel(run)} from ${formatTimestamp(run.createdAt)} with ${formatCount(jobs.length, "case result")}.`}
         />
         {route.section.kind === "summary" ? (
           <>
@@ -1908,7 +1913,7 @@ function RunSummaryCaseTable({
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
-  source: "evaluation" | "activity";
+  source: "evaluation" | "runs";
 }) {
   const evalSnapshot = selectedEvalSnapshot(snapshot, run.evalHash);
   const casesById = new Map((evalSnapshot?.cases ?? []).map((evalCase) => [evalCase.id, evalCase]));
@@ -2032,7 +2037,7 @@ function JobResult({
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
-  source: "evaluation" | "activity";
+  source: "evaluation" | "runs";
   view: WorkbenchJobEvidenceView;
 }) {
   const traces = snapshot.traces.filter((trace) => job.traceIds.includes(trace.id) || trace.jobId === job.id);
@@ -2091,7 +2096,7 @@ function JobEvidenceViewNav({
   job: WorkbenchJob;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   run: WorkbenchRun;
-  source: "evaluation" | "activity";
+  source: "evaluation" | "runs";
   view: WorkbenchJobEvidenceView;
 }) {
   const views: Array<{ value: WorkbenchJobEvidenceView; label: string; icon: typeof ActivityIcon }> = [
@@ -2145,7 +2150,7 @@ function LinkedRunTable({
   jobs: WorkbenchJob[];
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   snapshot: WorkbenchInspectionSnapshot;
-  source: "evaluation" | "activity";
+  source: "evaluation" | "runs";
   title: string;
 }) {
   const runs = uniqueRunsForJobs(snapshot, jobs);
@@ -2156,10 +2161,11 @@ function LinkedRunTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Run</TableHead>
+                <TableHead>Operation</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Version</TableHead>
                 <TableHead>Agent</TableHead>
-                <TableHead>Score</TableHead>
+                <TableHead>Quality</TableHead>
                 <TableHead>Updated</TableHead>
               </TableRow>
             </TableHeader>
@@ -2170,11 +2176,12 @@ function LinkedRunTable({
                   <TableRow key={run.id} className="cursor-pointer" onClick={onRouteClick(runRoute)}>
                     <TableCell>
                       <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(runRoute)} onClick={onRouteClick(runRoute)}>
-                        {shortId(run.id)}
+                        {runOperationLabel(run)}
                       </a>
                     </TableCell>
                     <TableCell><StatusBadge status={run.status} /></TableCell>
-                    <TableCell>{run.agentName}</TableCell>
+                    <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</TableCell>
+                    <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)}</TableCell>
                     <TableCell>{formatScore(run.score)}</TableCell>
                     <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
                   </TableRow>
@@ -2265,14 +2272,14 @@ function RunContextSidebar({
   return (
     <aside className="grid min-w-0 gap-4 rounded-lg border border-border/70 bg-background p-4 text-sm xl:sticky xl:top-6">
       <div className="grid gap-1">
-        <h2 className="text-sm font-semibold">Run</h2>
+        <h2 className="text-sm font-semibold">{runOperationLabel(run)}</h2>
         <div className="break-words font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">{run.id}</div>
       </div>
       <FactGrid>
         <FactItem title="Status" value={<StatusBadge status={run.status} />} />
-        <FactItem title="Kind" value={run.kind} />
-        <FactItem title="Version" value={formatVersionDisplayName(run.versionId, snapshot.versions, comparisonLabelContext(snapshot))} />
-        <FactItem title="Agent" value={run.agentName} />
+        <FactItem title="Operation" value={runOperationLabel(run)} />
+        <FactItem title="Version" value={runVersionDisplayName(snapshot, run)} />
+        <FactItem title="Agent" value={runAgentDisplayName(snapshot, run)} />
         <FactItem title="Evaluation" value={formatEvaluationDisplayName(run.evalHash, snapshot.evals)} />
       </FactGrid>
     </aside>
@@ -2516,16 +2523,16 @@ function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSna
       { label: route.caseId },
     ];
   }
-  if (route.kind === "activity") {
-    return [{ label: "Activity" }];
+  if (route.kind === "runs") {
+    return [{ label: "Runs" }];
   }
   if (route.kind === "run") {
     const run = snapshot?.runs.find((entry) => entry.id === route.runId) ?? null;
     return [
       {
-        label: route.source === "activity" ? "Activity" : "Results",
-        route: route.source === "activity"
-          ? createActivityRoute()
+        label: route.source === "runs" ? "Runs" : "Results",
+        route: route.source === "runs"
+          ? createRunsRoute()
           : createEvaluationRoute({ view: "results", evaluationId: route.evaluationId }),
       },
       { label: run && snapshot ? runDisplayTitle(run, snapshot) : shortId(route.runId) },
@@ -2534,7 +2541,7 @@ function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSna
   return [{ label: "Not found" }];
 }
 
-function WorkbenchActivitySummary({
+function WorkbenchRunsSummary({
   snapshot,
   loading,
   refreshing,
@@ -2550,14 +2557,14 @@ function WorkbenchActivitySummary({
   const activeWork = activeWorkbenchWork(snapshot);
   const lastUpdatedAt = latestSnapshotTimestamp(snapshot);
   const label = loading && !lastUpdatedAt ? "Loading state" : activeWorkbenchWorkLabel(activeWork);
-  const secondary = activitySecondaryLabel(snapshot, lastUpdatedAt, refreshing, error);
+  const secondary = runsSecondaryLabel(snapshot, lastUpdatedAt, refreshing, error);
   const tone = badgeToneProps(error
     ? "destructive"
     : activeWork.hasActiveWork
       ? "warning"
       : "outline");
   return (
-    <div data-testid="workbench-activity-summary" className="flex min-w-0 items-center justify-start gap-2 text-xs md:justify-end">
+    <div data-testid="workbench-runs-summary" className="flex min-w-0 items-center justify-start gap-2 text-xs md:justify-end">
       <Badge variant={tone.variant} className={cn("max-w-[11rem] truncate", tone.className)} title={label}>
         {label}
       </Badge>
@@ -2619,7 +2626,7 @@ function isJobTerminal(job: WorkbenchJob): boolean {
   return job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
 }
 
-function activitySecondaryLabel(
+function runsSecondaryLabel(
   snapshot: WorkbenchInspectionSnapshot,
   lastUpdatedAt: string | null,
   refreshing: boolean,
@@ -2880,13 +2887,124 @@ function uniqueRunsForJobs(snapshot: WorkbenchInspectionSnapshot, jobs: readonly
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
 }
 
+type InspectionResults = NonNullable<WorkbenchInspectionSnapshot["results"]>;
+type InspectionResultVersion = InspectionResults["versions"][number];
+type InspectionResultAgent = InspectionResults["agents"][number];
+
 function runDisplayTitle(run: WorkbenchRun, snapshot: WorkbenchInspectionSnapshot): string {
-  const context = comparisonLabelContext(snapshot);
-  return [
-    formatSkillDisplayName(run.skillName, context),
-    formatVersionDisplayName(run.versionId, snapshot.versions, context),
-    "run",
-  ].join(" ");
+  return `${runOperationLabel(run)}: ${runVersionDisplayName(snapshot, run)} on ${formatEvaluationDisplayName(run.evalHash, snapshot.evals)}`;
+}
+
+function runOperationLabel(run: WorkbenchRun): string {
+  const base = run.kind === "improve" ? "Improve" : "Eval";
+  return run.retryOfRunId ? `Retry ${base.toLowerCase()}` : base;
+}
+
+function runVersionDisplayName(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): string {
+  const resultVersions = runResultVersions(snapshot, run);
+  if (resultVersions.length === 1) {
+    return resultVersions[0]!.label;
+  }
+  if (resultVersions.length > 1) {
+    return formatCount(resultVersions.length, "version");
+  }
+  const outputVersion = run.outputVersionId
+    ? resultVersionForProjectVersionId(snapshot, run.outputVersionId)
+    : null;
+  if (outputVersion) {
+    return outputVersion.label;
+  }
+  const sourceLabel = runSourceVersionDisplayName(snapshot, run);
+  if (sourceLabel) {
+    return sourceLabel;
+  }
+  const baseVersion = resultVersionForProjectVersionId(snapshot, run.versionId);
+  if (baseVersion) {
+    return baseVersion.label;
+  }
+  return formatVersionDisplayName(run.outputVersionId ?? run.versionId, snapshot.versions, comparisonLabelContext(snapshot));
+}
+
+function runAgentDisplayName(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): string {
+  const resultAgents = runResultAgents(snapshot, run);
+  if (resultAgents.length === 1) {
+    return resultAgents[0]!.label;
+  }
+  if (resultAgents.length > 1) {
+    return formatCount(resultAgents.length, "agent");
+  }
+  return snapshot.results?.agents.find((agent) => agent.id === run.agentHash)?.label ?? run.agentName;
+}
+
+function runResultVersions(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): InspectionResults["versions"] {
+  const results = snapshot.results;
+  if (!results) {
+    return [];
+  }
+  const versionById = new Map(results.versions.map((version) => [version.id, version]));
+  const versions = new Map<string, InspectionResultVersion>();
+  for (const cell of results.cells) {
+    if (cell.runId !== run.id) {
+      continue;
+    }
+    const version = versionById.get(cell.skillVersionId);
+    if (version) {
+      versions.set(version.id, version);
+    }
+  }
+  return [...versions.values()];
+}
+
+function runResultAgents(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): InspectionResults["agents"] {
+  const results = snapshot.results;
+  if (!results) {
+    return [];
+  }
+  const agentById = new Map(results.agents.map((agent) => [agent.id, agent]));
+  const agents = new Map<string, InspectionResultAgent>();
+  for (const cell of results.cells) {
+    if (cell.runId !== run.id) {
+      continue;
+    }
+    const agent = agentById.get(cell.agentVersionId);
+    if (agent) {
+      agents.set(agent.id, agent);
+    }
+  }
+  return [...agents.values()];
+}
+
+function resultVersionForProjectVersionId(
+  snapshot: WorkbenchInspectionSnapshot,
+  projectVersionId: string,
+): InspectionResultVersion | null {
+  return snapshot.results?.versions.find((version) =>
+    version.projectVersionId === projectVersionId || version.id === projectVersionId
+  ) ?? null;
+}
+
+function runSourceVersionDisplayName(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): string | null {
+  const source = runSkillSource(snapshot, run);
+  if (run.skillName === "no-skill" || source?.kind === "none" || source?.source === "none") {
+    return source?.label?.trim() || "No skill";
+  }
+  if (!source) {
+    return null;
+  }
+  if (source.kind === "remote") {
+    return source.label?.trim() || source.source?.trim() || source.from?.trim() || null;
+  }
+  if (source.kind === "local" && source.name !== "current") {
+    return source.label?.trim() || null;
+  }
+  return null;
+}
+
+function runSkillSource(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): WorkbenchSkillSource | null {
+  const bundle = snapshot.skillBundles.find((entry) =>
+    entry.hash === run.skillBundleHash && entry.skillName === run.skillName
+  ) ?? snapshot.skillBundles.find((entry) => entry.hash === run.skillBundleHash);
+  return bundle?.source ?? snapshot.skillSources.find((source) => source.name === run.skillName) ?? null;
 }
 
 function versionNameFor(snapshot: WorkbenchInspectionSnapshot, versionId: string | null | undefined): string {

@@ -4,9 +4,9 @@ import {
 } from "@workbench-ai/cli-web-ui/lib/file-preview";
 import type { WorkbenchInspectionFileOwnerKind } from "@workbench-ai/workbench-contract";
 
-export type WorkbenchPrimaryTab = "files" | "evaluation" | "activity";
+export type WorkbenchPrimaryTab = "files" | "evaluation" | "runs";
 export type WorkbenchEvaluationView = "results" | "cases";
-export type WorkbenchRunRouteSource = "evaluation" | "activity";
+export type WorkbenchRunRouteSource = "evaluation" | "runs";
 export type WorkbenchCaseSection = "definition" | "runs";
 export type WorkbenchJobEvidenceView = "trace" | "output";
 export type WorkbenchRunSection =
@@ -26,7 +26,7 @@ export type WorkbenchRoute =
   | { kind: "evaluation"; view: WorkbenchEvaluationView; evaluationId: string | null }
   | { kind: "case"; caseId: string; evaluationId: string | null; section: WorkbenchCaseSection; file: WorkbenchFileRouteState }
   | { kind: "run"; runId: string; source: WorkbenchRunRouteSource; evaluationId: string | null; section: WorkbenchRunSection }
-  | { kind: "activity" }
+  | { kind: "runs" }
   | { kind: "not-found"; path: string };
 
 export function parseWorkbenchRoute(
@@ -62,12 +62,12 @@ export function parseWorkbenchRoute(
     }
     return createNotFoundRoute(segments);
   }
-  if (section === "activity") {
+  if (section === "runs") {
     if (!subsection) {
-      return createActivityRoute();
+      return createRunsRoute();
     }
-    if (subsection === "runs" && id && rest.length === 0) {
-      return createRunRoute({ runId: id, source: "activity", evaluationId: null, section: parseRunSection(sectionParam) });
+    if (subsection && !id && rest.length === 0) {
+      return createRunRoute({ runId: subsection, source: "runs", evaluationId: null, section: parseRunSection(sectionParam) });
     }
     return createNotFoundRoute(segments);
   }
@@ -133,7 +133,7 @@ export function createRunRoute(args: {
   evaluationId?: string | null;
   section?: WorkbenchRunSection;
 }): WorkbenchRoute {
-  const source = args.source ?? "activity";
+  const source = args.source ?? "runs";
   return {
     kind: "run",
     runId: args.runId,
@@ -143,8 +143,8 @@ export function createRunRoute(args: {
   };
 }
 
-export function createActivityRoute(): WorkbenchRoute {
-  return { kind: "activity" };
+export function createRunsRoute(): WorkbenchRoute {
+  return { kind: "runs" };
 }
 
 export function createNotFoundRoute(path: string[] | string): WorkbenchRoute {
@@ -155,14 +155,14 @@ export function createNotFoundRoute(path: string[] | string): WorkbenchRoute {
 }
 
 export function routePrimaryTab(route: WorkbenchRoute): WorkbenchPrimaryTab {
-  if (route.kind === "activity") {
-    return "activity";
+  if (route.kind === "runs") {
+    return "runs";
   }
   if (route.kind === "evaluation" || route.kind === "case" || (route.kind === "run" && route.source === "evaluation")) {
     return "evaluation";
   }
-  if (route.kind === "run" && route.source === "activity") {
-    return "activity";
+  if (route.kind === "run" && route.source === "runs") {
+    return "runs";
   }
   return "files";
 }
@@ -215,9 +215,9 @@ function routeParts(route: WorkbenchRoute): string[] {
     case "run":
       return route.source === "evaluation"
         ? ["evaluation", "runs", route.runId]
-        : ["activity", "runs", route.runId];
-    case "activity":
-      return ["activity"];
+        : ["runs", route.runId];
+    case "runs":
+      return ["runs"];
     case "not-found":
       return route.path.split("/").filter(Boolean);
   }

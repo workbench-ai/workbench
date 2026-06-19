@@ -55,7 +55,7 @@ EOF
 chmod +x "$tmpdir/earnings-prep/.workbench/cases/case-001/tests/test.sh"
 workbench eval --dir "$tmpdir/earnings-prep" --agents default -n 1 --json
 workbench log --dir "$tmpdir/earnings-prep" --versions
-workbench compare --dir "$tmpdir/earnings-prep" --versions all --skills all --agents all
+workbench results --dir "$tmpdir/earnings-prep" --versions all --agents all
 workbench open --dir "$tmpdir/earnings-prep"
 workbench show --dir "$tmpdir/earnings-prep" current:SKILL.md
 ```

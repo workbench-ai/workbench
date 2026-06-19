@@ -1,6 +1,6 @@
 # Eval Authoring
 
-Workbench evals measure whether a skill performs its intended workflow. Keep the skill self-contained, then let Workbench persist automatic source versions, skill bundles, eval cases, agent comparisons, traces, readiness recommendations, and lineage. The job-level command sequences this authoring loop serves are defined in [`../jtbd.md`](../jtbd.md).
+Workbench evals measure whether a skill performs its intended workflow. Keep the skill self-contained, then let Workbench persist automatic source versions, skill bundles, eval cases, agent results, traces, readiness recommendations, and lineage. The job-level command sequences this authoring loop serves are defined in [`../jtbd.md`](../jtbd.md).
 
 ## Layout
 
@@ -85,7 +85,7 @@ cd ./earnings-prep
 workbench case draft case-001
 # edit .workbench/cases/case-001/case.yaml and tests/test.sh
 workbench eval --agents default -n 1
-workbench compare
+workbench results
 workbench log --versions
 workbench show current:SKILL.md
 ```

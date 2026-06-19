@@ -1,22 +1,18 @@
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
 
 import type {
-  WorkbenchAgent,
-  WorkbenchAgentSnapshot,
-  WorkbenchComparison,
-  WorkbenchComparisonCell,
+  WorkbenchAgentVersion,
   WorkbenchEvalSnapshot,
   WorkbenchInspectionSnapshot,
-  WorkbenchJob,
+  WorkbenchResultCell,
+  WorkbenchResultEvaluation,
+  WorkbenchResults,
   WorkbenchRun,
-  WorkbenchSkillBundleSnapshot,
+  WorkbenchSkillVersion,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 
 import {
-  agentConfigString,
-  agentNetworkLabel,
-  agentTimeoutLabel,
   formatCost,
   formatDurationMs,
   formatScore,
@@ -45,6 +41,7 @@ export interface ComparisonEvidenceRow {
   setupRank: number;
   versionId: string;
   versionLabel: string;
+  versionDetail: string;
   versionOrdinal: number;
   versionBadges: string[];
   skillName: string;
@@ -91,9 +88,10 @@ export interface ComparisonGroup {
 }
 
 export interface ComparisonResolvedCell {
-  cell: WorkbenchComparisonCell;
-  version: WorkbenchVersion;
-  skill: WorkbenchSkillBundleSnapshot;
+  cell: WorkbenchResultCell;
+  version: WorkbenchSkillVersion;
+  agent?: WorkbenchAgentVersion;
+  evaluation?: WorkbenchResultEvaluation;
 }
 
 export interface ComparisonMetricDatum {
@@ -160,89 +158,77 @@ const METRIC_DESCRIPTORS: ComparisonMetricDescriptor[] = [
   },
 ];
 
-export function comparisonForSnapshot(snapshot: WorkbenchInspectionSnapshot): WorkbenchComparison {
-  return snapshot.comparison ?? {
-    versions: snapshot.versions,
-    skills: snapshot.skillBundles,
-    agents: snapshot.agents,
-    cells: [],
-  };
+export function comparisonForSnapshot(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
+  return snapshot.results ?? { versions: [], evaluations: [], agents: [], cells: [] };
 }
 
-export function comparisonForActiveSkillVersions(snapshot: WorkbenchInspectionSnapshot): WorkbenchComparison {
-  const skillName = activeSkillName(snapshot);
-  return comparisonForRuns(
-    snapshot,
-    snapshot.runs.filter((run) => run.kind === "eval" && run.skillName === skillName),
-  );
-}
-
-export function comparisonForScorecard(snapshot: WorkbenchInspectionSnapshot): WorkbenchComparison {
-  const canonical = comparisonForSnapshot(snapshot);
-  const current = comparisonForCurrentVersionRuns(snapshot);
-  const history = comparisonForActiveSkillVersions(snapshot);
-  const cells = [...canonical.cells];
-  const seenCells = new Set(cells.map(comparisonCellKey));
-
-  for (const source of [current, history]) {
-    for (const cell of source.cells) {
-      const key = comparisonCellKey(cell);
-      if (seenCells.has(key)) {
-        continue;
-      }
-      seenCells.add(key);
-      cells.push(cell);
-    }
-  }
-
-  const versionIds = new Set(cells.map((cell) => cell.versionId));
-  const skillBundleHashes = new Set(cells.map((cell) => cell.skillBundleHash));
-  const agentHashes = new Set(cells.map((cell) => cell.agentHash));
-  const evalHashes = new Set(cells.map((cell) => cell.evalHash));
-  const [onlyEvalHash] = [...evalHashes];
-
-  return {
-    ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
-    versions: unionById(
-      [...canonical.versions, ...current.versions, ...history.versions, ...snapshot.versions],
-      (version) => version.id,
-    ).filter((version) => versionIds.has(version.id)),
-    skills: unionById(
-      [...canonical.skills, ...current.skills, ...history.skills, ...snapshot.skillBundles],
-      (skill) => skill.hash,
-    ).filter((skill) => skillBundleHashes.has(skill.hash)),
-    agents: unionById(
-      [...canonical.agents, ...current.agents, ...history.agents, ...snapshot.agents],
-      (agent) => agent.hash,
-    ).filter((agent) => agentHashes.has(agent.hash)),
-    cells,
-  };
+export function comparisonForScorecard(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
+  return comparisonForSnapshot(snapshot);
 }
 
 export function evaluationOptionsForScorecard(
   snapshot: WorkbenchInspectionSnapshot,
-  comparison: WorkbenchComparison,
+  results: WorkbenchResults,
 ): ComparisonEvaluationOption[] {
-  const comparisonEvalHashes = new Set(comparison.cells.map((cell) => cell.evalHash));
-  const orderedEvals = orderEvaluationSnapshots(snapshot.evals);
-  const ordinalByHash = new Map(orderedEvals.map((evalSnapshot, index) => [evalSnapshot.hash, index + 1]));
-  const optionEvals = orderedEvals.filter((evalSnapshot) => comparisonEvalHashes.has(evalSnapshot.hash));
-  const latestEvalHash = optionEvals.at(-1)?.hash ?? null;
-  return optionEvals.map((evalSnapshot) => {
-    const scoreAdapter = evalScoreAdapter(evalSnapshot);
-    const detail = evaluationDetail(evalSnapshot, scoreAdapter);
-    const isLatest = evalSnapshot.hash === latestEvalHash;
-    const ordinal = ordinalByHash.get(evalSnapshot.hash) ?? 0;
+  const resultEvaluationIds = new Set(results.cells.map((cell) => cell.evaluationId));
+  const resultEvaluationById = new Map(results.evaluations.map((evaluation) => [evaluation.id, evaluation]));
+  const orderedSnapshotEvals = orderEvaluationSnapshots(snapshot.evals).filter((evaluation) =>
+    resultEvaluationIds.has(evaluation.hash)
+  );
+  const optionRecords: Array<{
+    id: string;
+    label?: string;
+    caseCount?: number;
+    scoreAdapter?: string;
+    createdAt?: string;
+    updatedAt?: string;
+    snapshot?: WorkbenchEvalSnapshot;
+  }> = orderedSnapshotEvals.map((snapshotEval) => {
+    const resultEvaluation = resultEvaluationById.get(snapshotEval.hash);
     return {
-      id: evalSnapshot.hash,
-      label: `Evaluation ${ordinal}`,
+      id: snapshotEval.hash,
+      label: resultEvaluation?.label,
+      caseCount: resultEvaluation?.caseCount ?? snapshotEval.caseCount,
+      scoreAdapter: resultEvaluation?.scoreAdapter ?? snapshotEval.scoreAdapter,
+      createdAt: resultEvaluation?.createdAt ?? snapshotEval.createdAt,
+      updatedAt: resultEvaluation?.updatedAt ?? snapshotEval.updatedAt,
+      snapshot: snapshotEval,
+    };
+  });
+
+  const seen = new Set(optionRecords.map((record) => record.id));
+  for (const evaluation of results.evaluations) {
+    if (!resultEvaluationIds.has(evaluation.id) || seen.has(evaluation.id)) {
+      continue;
+    }
+    seen.add(evaluation.id);
+    optionRecords.push(evaluation);
+  }
+
+  optionRecords.sort((left, right) =>
+    (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.id.localeCompare(right.id)
+  );
+
+  const latestEvaluationId = optionRecords.at(-1)?.id ?? null;
+  return optionRecords.map((evaluation, index) => {
+    const scoreAdapter = normalizeScoreAdapter(evaluation.scoreAdapter) ?? "tests";
+    const detail = evaluationDetail({
+      caseCount: evaluation.caseCount,
+      scoreAdapter,
+    });
+    const isLatest = evaluation.id === latestEvaluationId;
+    const label = evaluation.label?.trim() || `Evaluation ${index + 1}`;
+    const createdAt = evaluation.createdAt ?? "";
+    return {
+      id: evaluation.id,
+      label,
       detail,
-      subtitle: evaluationOptionSubtitle(evalSnapshot.createdAt, detail, isLatest),
-      ordinal,
+      subtitle: evaluationOptionSubtitle(createdAt, detail, isLatest),
+      ordinal: index + 1,
       isLatest,
-      createdAt: evalSnapshot.createdAt,
-      updatedAt: evalSnapshot.updatedAt,
-      caseCount: evalSnapshot.caseCount,
+      createdAt,
+      updatedAt: evaluation.updatedAt ?? createdAt,
+      caseCount: evaluation.caseCount ?? 0,
       scoreAdapter,
     };
   });
@@ -254,97 +240,28 @@ export function defaultEvaluationIdForScorecard(
   return options.find((option) => option.isLatest)?.id ?? null;
 }
 
-function comparisonForCurrentVersionRuns(snapshot: WorkbenchInspectionSnapshot): WorkbenchComparison {
-  const currentVersionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
-  if (!currentVersionId) {
-    return comparisonForSnapshot(snapshot);
-  }
-  const currentRuns = snapshot.runs.filter((run) => run.kind === "eval" && run.versionId === currentVersionId);
-  if (currentRuns.length === 0) {
-    return comparisonForSnapshot(snapshot);
-  }
-  const latestEvalHash = latestEvalHashForRuns(currentRuns);
-  return comparisonForRuns(
-    snapshot,
-    latestEvalHash ? currentRuns.filter((run) => run.evalHash === latestEvalHash) : currentRuns,
-  );
-}
-
-function comparisonForRuns(
-  snapshot: WorkbenchInspectionSnapshot,
-  sourceRuns: readonly WorkbenchRun[],
-): WorkbenchComparison {
-  const bestRunByKey = new Map<string, WorkbenchRun>();
-  for (const run of sourceRuns) {
-    const key = comparisonRunKey(run);
-    const previous = bestRunByKey.get(key);
-    if (!previous || compareRunsByEvidenceStrength(previous, run, snapshot.jobs) < 0) {
-      bestRunByKey.set(key, run);
-    }
-  }
-
-  const runs = [...bestRunByKey.values()].sort(compareRunsForComparison);
-  const versionIds = new Set(runs.map((run) => run.versionId));
-  const skillBundleHashes = new Set(runs.map((run) => run.skillBundleHash));
-  const agentHashes = new Set(runs.map((run) => run.agentHash));
-  const evalHashes = new Set(runs.map((run) => run.evalHash));
-  const [onlyEvalHash] = [...evalHashes];
-
-  return {
-    ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
-    versions: snapshot.versions.filter((version) => versionIds.has(version.id)),
-    skills: snapshot.skillBundles.filter((bundle) => skillBundleHashes.has(bundle.hash)),
-    agents: snapshot.agents.filter((agent) => agentHashes.has(agent.hash)),
-    cells: runs.map((run) => comparisonCellForRun(run, snapshot.jobs)),
-  };
-}
-
-function latestEvalHashForRuns(runs: readonly WorkbenchRun[]): string | null {
-  const latest = runs.slice().sort((left, right) => compareRunRecency(right, left))[0];
-  return latest?.evalHash ?? null;
-}
-
-function comparisonCellForRun(
-  run: WorkbenchRun,
-  jobs: readonly WorkbenchJob[],
-): WorkbenchComparisonCell {
-  const samples = comparisonRunSamples(run, jobs);
-  const latencyMs = run.latencyMs !== undefined && samples > 1
-    ? Math.round(run.latencyMs / samples)
-    : run.latencyMs;
-  return {
-    versionId: run.versionId,
-    skillName: run.skillName,
-    skillBundleHash: run.skillBundleHash,
-    evalHash: run.evalHash,
-    agentName: run.agentName,
-    agentHash: run.agentHash,
-    runId: run.id,
-    status: run.status,
-    ...(run.status === "succeeded" && run.score !== undefined ? { score: run.score } : {}),
-    ...(samples > 0 ? { samples } : {}),
-    ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
-    ...(latencyMs !== undefined ? { latencyMs } : {}),
-    ...(run.error ? { error: run.error } : {}),
-  };
-}
-
 export function buildComparisonGroups(
-  comparison: WorkbenchComparison,
-  context: ComparisonLabelContext = {},
+  results: WorkbenchResults,
+  _context: ComparisonLabelContext = {},
 ): ComparisonGroup[] {
-  const versionsById = new Map(comparison.versions.map((version) => [version.id, version]));
-  const skillsByHash = new Map(comparison.skills.map((skill) => [skill.hash, skill]));
+  const versionsById = new Map(results.versions.map((version) => [version.id, version]));
+  const agentsById = new Map(results.agents.map((agent) => [agent.id, agent]));
+  const evaluationsById = new Map(results.evaluations.map((evaluation) => [evaluation.id, evaluation]));
   const cellsByGroup = new Map<string, ComparisonResolvedCell[]>();
-  for (const cell of comparison.cells) {
-    const version = versionsById.get(cell.versionId);
-    const skill = skillsByHash.get(cell.skillBundleHash);
-    if (!version || !skill) {
+
+  for (const cell of results.cells) {
+    const version = versionsById.get(cell.skillVersionId);
+    if (!version) {
       continue;
     }
-    const key = comparisonGroupKey(cell, context);
+    const key = resultGroupId(version);
+    const resolvedCell: ComparisonResolvedCell = {
+      cell,
+      version,
+      ...(agentsById.get(cell.agentVersionId) ? { agent: agentsById.get(cell.agentVersionId) } : {}),
+      ...(evaluationsById.get(cell.evaluationId) ? { evaluation: evaluationsById.get(cell.evaluationId) } : {}),
+    };
     const cells = cellsByGroup.get(key);
-    const resolvedCell = { cell, version, skill };
     if (cells) {
       cells.push(resolvedCell);
     } else {
@@ -352,22 +269,84 @@ export function buildComparisonGroups(
     }
   }
 
+  const versionOrdinalById = resultVersionOrdinals(results.versions);
   return [...cellsByGroup.entries()].flatMap(([key, cells]): ComparisonGroup[] => {
     const first = cells[0];
     if (!first) {
       return [];
     }
-    const label = formatSkillDisplayName(first.skill.skillName, context);
     return [{
       id: key,
-      label,
-      skillName: first.skill.skillName,
-      setupRank: comparisonSetupRank(first.skill.skillName, context),
-      cells: cells.sort((left, right) => compareResolvedCells(left, right, context)),
+      label: first.version.label,
+      skillName: first.version.id,
+      setupRank: resultVersionSetupRank(first.version),
+      cells: cells.sort((left, right) => compareResolvedCells(left, right, versionOrdinalById)),
     }];
   }).sort((left, right) =>
-    compareComparisonGroups(left, right, context)
+    left.setupRank - right.setupRank ||
+    left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: "base" }) ||
+    left.id.localeCompare(right.id)
   );
+}
+
+export function buildComparisonEvidenceRows({
+  agents,
+  groups,
+  runs,
+}: {
+  agents: WorkbenchAgentVersion[];
+  context?: ComparisonLabelContext;
+  groups: ComparisonGroup[];
+  runs: WorkbenchRun[];
+}): ComparisonEvidenceRow[] {
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  const versionOrdinalById = resultVersionOrdinals(groups.flatMap((group) => group.cells.map((entry) => entry.version)));
+  const rows = groups.flatMap((group) =>
+    group.cells.map(({ agent: resolvedAgent, cell, version }) => {
+      const run = cell.runId ? runsById.get(cell.runId) ?? null : null;
+      const agent = resolvedAgent ?? agentsById.get(cell.agentVersionId);
+      const score = finiteNumber(cell.quality ?? run?.score);
+      const latencyMs = finiteNumber(cell.latencyMs ?? run?.latencyMs);
+      const costUsd = finiteNumber(cell.costUsd ?? run?.costUsd);
+      const samples = finiteNumber(cell.samples);
+      const status = cell.status ?? run?.status;
+      const error = cell.error ?? run?.error;
+      const ordinal = versionOrdinalById.get(version.id) ?? 1;
+      return {
+        rowId: [
+          group.id,
+          cell.skillVersionId,
+          cell.evaluationId,
+          cell.agentVersionId,
+        ].map(encodeComparisonGroupPart).join("/"),
+        groupId: group.id,
+        groupLabel: group.label,
+        setupLabel: group.label,
+        setupRank: group.setupRank,
+        versionId: version.id,
+        versionLabel: version.label,
+        versionDetail: resultVersionDetail(version),
+        versionOrdinal: ordinal,
+        versionBadges: resultVersionBadges(version),
+        skillName: version.id,
+        evalHash: cell.evaluationId,
+        agentName: agent?.name ?? cell.agentVersionId,
+        agentHash: cell.agentVersionId,
+        agentDetail: formatAgentVersion(agent),
+        ...(status ? { status } : {}),
+        statusLabel: status ? formatRunStatusLabel(status) : "Not tested",
+        evidenceLabel: formatEvidenceLabel(Boolean(run?.id ?? cell.runId), error),
+        runId: run?.id ?? cell.runId ?? null,
+        ...(error ? { error } : {}),
+        ...(samples !== undefined ? { samples } : {}),
+        ...(score !== undefined ? { score } : {}),
+        ...(latencyMs !== undefined ? { latencyMs } : {}),
+        ...(costUsd !== undefined ? { costUsd } : {}),
+      };
+    })
+  );
+  return collapseUnmeasuredComparisonRows(rows);
 }
 
 export function formatVersionDisplayName(
@@ -409,164 +388,9 @@ export function formatEvaluationDisplayDetail(
   evals: readonly WorkbenchEvalSnapshot[],
 ): string {
   const evalSnapshot = evals.find((entry) => entry.hash === evalHash);
-  return evaluationDetail(evalSnapshot, evalSnapshot ? evalScoreAdapter(evalSnapshot) : undefined);
-}
-
-function isActiveSkillName(skillName: string, defaultSkill: string | undefined): boolean {
-  if (!defaultSkill || defaultSkill === "all") {
-    return skillName === "primary";
-  }
-  return skillName === defaultSkill;
-}
-
-function versionLabel(version: WorkbenchVersion, versions: readonly WorkbenchVersion[]): string {
-  return `Version ${versionOrdinal(version, versions)}`;
-}
-
-function versionBadges(version: WorkbenchVersion, context: ComparisonLabelContext): string[] {
-  const badges: string[] = [];
-  if (version.id === context.currentVersionId) {
-    badges.push("Current");
-  }
-  if (version.id === context.publishedVersionId) {
-    badges.push("Published");
-  }
-  return badges;
-}
-
-function readableSkillName(value: string): string {
-  if (value === "primary") {
-    return "Primary skill";
-  }
-  if (value === "no-skill") {
-    return "No skill baseline";
-  }
-  return sentenceCaseReadable(value, "Skill");
-}
-
-function sentenceCaseReadable(value: string, fallback: string): string {
-  const words = value
-    .replace(/^v_/u, "")
-    .replaceAll(/[_/-]+/gu, " ")
-    .trim()
-    .split(/\s+/u)
-    .filter(Boolean);
-  if (words.length === 0) {
-    return fallback;
-  }
-  return words
-    .map((word, index) => readableWord(word, index))
-    .join(" ");
-}
-
-function readableWord(word: string, index: number): string {
-  if (/^[A-Z0-9]+$/u.test(word)) {
-    return word;
-  }
-  const lower = word.toLowerCase();
-  return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
-}
-
-function versionOrdinal(version: WorkbenchVersion, versions: readonly WorkbenchVersion[]): number {
-  const sorted = versions.slice().sort(compareVersionsByCreatedAt);
-  const index = sorted.findIndex((entry) => entry.id === version.id);
-  return index >= 0 ? index + 1 : 1;
-}
-
-function compareComparisonGroups(
-  left: ComparisonGroup,
-  right: ComparisonGroup,
-  _context: ComparisonLabelContext,
-): number {
-  return left.setupRank - right.setupRank ||
-    left.label.localeCompare(right.label, undefined, {
-      numeric: true,
-      sensitivity: "base",
-    }) ||
-    left.id.localeCompare(right.id);
-}
-
-function compareResolvedCells(
-  left: ComparisonResolvedCell,
-  right: ComparisonResolvedCell,
-  context: ComparisonLabelContext,
-): number {
-  return versionRoleRank(left.version, context) - versionRoleRank(right.version, context) ||
-    compareVersionsByCreatedAt(right.version, left.version) ||
-    left.cell.agentName.localeCompare(right.cell.agentName, undefined, {
-      numeric: true,
-      sensitivity: "base",
-    }) ||
-    left.cell.agentHash.localeCompare(right.cell.agentHash);
-}
-
-function versionRoleRank(version: WorkbenchVersion, context: ComparisonLabelContext): number {
-  return version.id === context.currentVersionId ? 0 : 1;
-}
-
-function compareVersionsByCreatedAt(left: WorkbenchVersion, right: WorkbenchVersion): number {
-  const created = left.createdAt.localeCompare(right.createdAt);
-  return created || compareVersionLabels(left.id, right.id);
-}
-
-export function buildComparisonEvidenceRows({
-  agents,
-  context = {},
-  groups,
-  runs,
-}: {
-  agents: WorkbenchAgentSnapshot[];
-  context?: ComparisonLabelContext;
-  groups: ComparisonGroup[];
-  runs: WorkbenchRun[];
-}): ComparisonEvidenceRow[] {
-  const agentsByHash = new Map(agents.map((entry) => [entry.hash, entry]));
-  const runsById = new Map(runs.map((run) => [run.id, run]));
-  const labelVersions = context.allVersions ?? versionsFromGroups(groups);
-  const rows = groups.flatMap((group) =>
-    group.cells.map(({ cell, version, skill }) => {
-      const run = cell.runId ? runsById.get(cell.runId) ?? null : null;
-      const agent = agentsByHash.get(cell.agentHash)?.agent;
-      const score = finiteNumber(cell.score ?? run?.score);
-      const latencyMs = finiteNumber(cell.latencyMs ?? run?.latencyMs);
-      const costUsd = finiteNumber(cell.costUsd ?? run?.costUsd);
-      const samples = finiteNumber(cell.samples);
-      const status = run?.status ?? cell.status;
-      const error = run?.error ?? cell.error;
-      return {
-        rowId: [
-          group.id,
-          cell.versionId,
-          cell.skillBundleHash,
-          cell.evalHash,
-          cell.agentHash,
-        ].map(encodeComparisonGroupPart).join("/"),
-        groupId: group.id,
-        groupLabel: group.label,
-        setupLabel: group.label,
-        setupRank: group.setupRank,
-        versionId: version.id,
-        versionLabel: versionLabel(version, labelVersions),
-        versionOrdinal: versionOrdinal(version, labelVersions),
-        versionBadges: versionBadges(version, context),
-        skillName: skill.skillName,
-        evalHash: cell.evalHash,
-        agentName: cell.agentName,
-        agentHash: cell.agentHash,
-        agentDetail: formatAgentConfiguration(agent),
-        ...(status ? { status } : {}),
-        statusLabel: status ? formatRunStatusLabel(status) : "Not tested",
-        evidenceLabel: formatEvidenceLabel(Boolean(run?.id ?? cell.runId), error),
-        runId: run?.id ?? cell.runId ?? null,
-        ...(error ? { error } : {}),
-        ...(samples !== undefined ? { samples } : {}),
-        ...(score !== undefined ? { score } : {}),
-        ...(latencyMs !== undefined ? { latencyMs } : {}),
-        ...(costUsd !== undefined ? { costUsd } : {}),
-      };
-    })
-  );
-  return collapseUnmeasuredComparisonRows(rows);
+  return evaluationDetail(evalSnapshot
+    ? { caseCount: evalSnapshot.caseCount, scoreAdapter: evalScoreAdapter(evalSnapshot) }
+    : undefined);
 }
 
 export function buildComparisonMetricDescriptors(
@@ -611,13 +435,14 @@ export function buildComparisonMetricData(
     if (value === undefined) {
       return [];
     }
+    const groupId = resultVersionGroupId(row);
     return [{
       rowId: row.rowId,
-      rowLabel: `${row.setupLabel} / ${row.versionLabel} / ${row.agentName}`,
-      groupId: row.groupId,
-      groupLabel: row.groupLabel,
-      configurationLabel: `${row.versionLabel} / ${row.agentName}`,
-      color: resolveComparisonGroupChartColor(row, groupColorById, index),
+      rowLabel: `${row.versionLabel} / ${row.agentDetail}`,
+      groupId,
+      groupLabel: row.versionLabel,
+      configurationLabel: row.agentDetail,
+      color: resolveComparisonGroupChartColor(groupId, groupColorById, index),
       value,
       displayValue: formatComparisonMetricValue(descriptor, value),
     }];
@@ -654,12 +479,13 @@ export function buildComparisonTradeoffData(
     if (x === undefined || y === undefined) {
       return [];
     }
+    const groupId = resultVersionGroupId(row);
     return [{
       rowId: row.rowId,
-      rowLabel: `${row.setupLabel} / ${row.versionLabel} / ${row.agentName}`,
-      groupId: row.groupId,
-      groupLabel: row.groupLabel,
-      color: resolveComparisonGroupChartColor(row, groupColorById, index),
+      rowLabel: `${row.versionLabel} / ${row.agentDetail}`,
+      groupId,
+      groupLabel: row.versionLabel,
+      color: resolveComparisonGroupChartColor(groupId, groupColorById, index),
       x,
       y,
       xDisplay: formatComparisonMetricValue(pair.xMetric, x),
@@ -723,77 +549,143 @@ export function getComparisonMetricValue(
 }
 
 export function resolveComparisonGroupChartColor(
-  row: ComparisonEvidenceRow,
+  groupId: string,
   groupColorById: ReadonlyMap<string, string> | undefined,
   fallbackIndex: number,
 ): string {
-  return groupColorById?.get(row.groupId) ?? getCategoricalChartColor(fallbackIndex);
+  return groupColorById?.get(groupId) ?? getCategoricalChartColor(fallbackIndex);
 }
 
-function comparisonGroupKey(
-  cell: WorkbenchComparisonCell,
-  context: ComparisonLabelContext,
-): string {
-  const setupKey = isActiveSkillName(cell.skillName.trim(), context.defaultSkill?.trim())
-    ? "active"
-    : cell.skillName.trim() || "skill";
-  return ["setup", setupKey].map(encodeComparisonGroupPart).join("/");
+export function resultVersionGroupId(row: ComparisonEvidenceRow): string {
+  if (row.versionDetail === "local:." && /^Your skill v\d+/u.test(row.versionLabel)) {
+    return row.versionId;
+  }
+  return `${row.versionLabel}\0${row.versionDetail}`;
 }
 
-function comparisonCellKey(cell: WorkbenchComparisonCell): string {
-  return [
-    cell.versionId,
-    cell.skillName,
-    cell.skillBundleHash,
-    cell.evalHash,
-    cell.agentHash,
-  ].map(encodeComparisonGroupPart).join("/");
+function resultGroupId(version: WorkbenchSkillVersion): string {
+  return ["version", version.id].map(encodeComparisonGroupPart).join("/");
 }
 
-function comparisonRunKey(run: WorkbenchRun): string {
-  return [
-    run.versionId,
-    run.skillName,
-    run.skillBundleHash,
-    run.evalHash,
-    run.agentHash,
-  ].map(encodeComparisonGroupPart).join("/");
+function resultVersionOrdinals(versions: readonly WorkbenchSkillVersion[]): Map<string, number> {
+  const unique = new Map<string, WorkbenchSkillVersion>();
+  for (const version of versions) {
+    unique.set(version.id, version);
+  }
+  const sorted = [...unique.values()].sort(compareResultVersions);
+  return new Map(sorted.map((version, index) => [version.id, index + 1]));
 }
 
-function encodeComparisonGroupPart(value: string): string {
-  return encodeURIComponent(value);
+function compareResultVersions(left: WorkbenchSkillVersion, right: WorkbenchSkillVersion): number {
+  return resultVersionSortKey(left).localeCompare(resultVersionSortKey(right), undefined, {
+    numeric: true,
+    sensitivity: "base",
+  }) || left.label.localeCompare(right.label, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  }) || left.id.localeCompare(right.id);
 }
 
-function comparisonSetupRank(skillName: string, context: ComparisonLabelContext): number {
-  const normalized = skillName.trim();
-  if (isActiveSkillName(normalized, context.defaultSkill?.trim())) {
+function resultVersionSortKey(version: WorkbenchSkillVersion): string {
+  return version.projectVersionId ?? version.id;
+}
+
+function resultVersionSetupRank(version: WorkbenchSkillVersion): number {
+  if (version.current) {
     return 0;
   }
-  if (normalized === "no-skill") {
+  if (version.source === "none" || version.sourceKind === "none") {
     return 1;
   }
   return 2;
 }
 
-function versionsFromGroups(groups: readonly ComparisonGroup[]): WorkbenchVersion[] {
-  return unionById(
-    groups.flatMap((group) => group.cells.map((entry) => entry.version)),
-    (version) => version.id,
-  );
+function compareResolvedCells(
+  left: ComparisonResolvedCell,
+  right: ComparisonResolvedCell,
+  versionOrdinalById: ReadonlyMap<string, number>,
+): number {
+  return (versionOrdinalById.get(right.version.id) ?? 0) - (versionOrdinalById.get(left.version.id) ?? 0) ||
+    agentLabel(left.agent).localeCompare(agentLabel(right.agent), undefined, {
+      numeric: true,
+      sensitivity: "base",
+    }) ||
+    left.cell.evaluationId.localeCompare(right.cell.evaluationId) ||
+    left.cell.agentVersionId.localeCompare(right.cell.agentVersionId);
 }
 
-function unionById<T>(entries: readonly T[], keyFor: (entry: T) => string): T[] {
-  const seen = new Set<string>();
-  const unique: T[] = [];
-  for (const entry of entries) {
-    const key = keyFor(entry);
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    unique.push(entry);
+function resultVersionDetail(version: WorkbenchSkillVersion): string {
+  return version.source ?? (version.contentHash ? shortId(version.contentHash) : shortId(version.id));
+}
+
+function resultVersionBadges(version: WorkbenchSkillVersion): string[] {
+  const badges: string[] = [];
+  if (version.current) {
+    badges.push("Current");
   }
-  return unique;
+  if (version.published) {
+    badges.push("Published");
+  }
+  return badges;
+}
+
+function versionLabel(version: WorkbenchVersion, versions: readonly WorkbenchVersion[]): string {
+  return `Version ${versionOrdinal(version, versions)}`;
+}
+
+function versionOrdinal(version: WorkbenchVersion, versions: readonly WorkbenchVersion[]): number {
+  const sorted = versions.slice().sort(compareVersionsByCreatedAt);
+  const index = sorted.findIndex((entry) => entry.id === version.id);
+  return index >= 0 ? index + 1 : 1;
+}
+
+function compareVersionsByCreatedAt(left: WorkbenchVersion, right: WorkbenchVersion): number {
+  const created = left.createdAt.localeCompare(right.createdAt);
+  return created || compareVersionLabels(left.id, right.id);
+}
+
+function isActiveSkillName(skillName: string, defaultSkill: string | undefined): boolean {
+  if (!defaultSkill || defaultSkill === "all") {
+    return skillName === "current";
+  }
+  return skillName === defaultSkill;
+}
+
+function readableSkillName(value: string): string {
+  if (value === "current") {
+    return "Current skill";
+  }
+  if (value === "no-skill") {
+    return "No skill baseline";
+  }
+  return sentenceCaseReadable(value, "Skill");
+}
+
+function sentenceCaseReadable(value: string, fallback: string): string {
+  const words = value
+    .replace(/^v_/u, "")
+    .replaceAll(/[_/-]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
+  if (words.length === 0) {
+    return fallback;
+  }
+  return words
+    .map((word, index) => readableWord(word, index))
+    .join(" ");
+}
+
+function readableWord(word: string, index: number): string {
+  if (/^[A-Z0-9]+$/u.test(word)) {
+    return word;
+  }
+  const lower = word.toLowerCase();
+  return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+}
+
+function encodeComparisonGroupPart(value: string): string {
+  return encodeURIComponent(value);
 }
 
 function orderEvaluationSnapshots(evals: readonly WorkbenchEvalSnapshot[]): WorkbenchEvalSnapshot[] {
@@ -803,10 +695,12 @@ function orderEvaluationSnapshots(evals: readonly WorkbenchEvalSnapshot[]): Work
   );
 }
 
-function evaluationDetail(evalSnapshot: WorkbenchEvalSnapshot | undefined, scoreAdapter: string | undefined): string {
+function evaluationDetail(
+  evaluation: Pick<WorkbenchResultEvaluation, "caseCount" | "scoreAdapter"> | undefined,
+): string {
   const parts = [
-    evalSnapshot ? formatEvalCaseCount(evalSnapshot.caseCount) : null,
-    scoreAdapter ? formatScoreAdapter(scoreAdapter) : null,
+    evaluation?.caseCount !== undefined ? formatEvalCaseCount(evaluation.caseCount) : null,
+    evaluation?.scoreAdapter ? formatScoreAdapter(evaluation.scoreAdapter) : null,
   ].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(" / ") : "Recorded evaluation";
 }
@@ -818,7 +712,9 @@ function evaluationOptionSubtitle(
 ): string {
   const context = isLatest
     ? "Latest"
-    : `Created ${formatTimestamp(createdAt)}`;
+    : createdAt
+      ? `Created ${formatTimestamp(createdAt)}`
+      : "Recorded";
   return [context, detail].join(" / ");
 }
 
@@ -845,82 +741,30 @@ function formatScoreAdapter(adapter: string): string {
   return `${sentenceCaseReadable(adapter, "Custom")} grader`;
 }
 
-function activeSkillName(snapshot: WorkbenchInspectionSnapshot): string {
-  const defaultSkill = snapshot.status.defaultSkill?.trim();
-  return !defaultSkill || defaultSkill === "all" ? "primary" : defaultSkill;
-}
-
-function compareRunsForComparison(left: WorkbenchRun, right: WorkbenchRun): number {
-  return compareVersionLabels(left.versionId, right.versionId) ||
-    left.skillName.localeCompare(right.skillName) ||
-    left.agentName.localeCompare(right.agentName) ||
-    left.agentHash.localeCompare(right.agentHash) ||
-    left.evalHash.localeCompare(right.evalHash);
-}
-
-function compareRunsByEvidenceStrength(
-  left: WorkbenchRun,
-  right: WorkbenchRun,
-  jobs: readonly WorkbenchJob[],
-): number {
-  const leftTerminal = isTerminalRun(left);
-  const rightTerminal = isTerminalRun(right);
-  if (leftTerminal !== rightTerminal) {
-    return leftTerminal ? 1 : -1;
-  }
-  if (leftTerminal && rightTerminal) {
-    const samples = comparisonRunSamples(left, jobs) - comparisonRunSamples(right, jobs);
-    if (samples !== 0) {
-      return samples;
-    }
-  }
-  return compareRunRecency(left, right);
-}
-
-function comparisonRunSamples(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): number {
-  const runJobs = jobs.filter((job) => job.runId === run.id && job.caseId !== "current");
-  if (runJobs.length > 0) {
-    return new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
-  }
-  return run.jobIds?.length ?? 0;
-}
-
-function isTerminalRun(run: WorkbenchRun): boolean {
-  return run.status !== "queued" && run.status !== "running";
-}
-
-function compareRunRecency(left: WorkbenchRun, right: WorkbenchRun): number {
-  return (left.finishedAt ?? left.createdAt).localeCompare(right.finishedAt ?? right.createdAt) ||
-    left.createdAt.localeCompare(right.createdAt) ||
-    left.id.localeCompare(right.id);
-}
-
-function formatAgentConfiguration(agent: WorkbenchAgent | undefined): string {
+function formatAgentVersion(agent: WorkbenchAgentVersion | undefined): string {
   if (!agent) {
     return "Recorded configuration";
   }
-  const parts = [
-    agent.adapter,
-    agent.model,
-    agentNetworkLabel(agent) !== "default" ? `network ${agentNetworkLabel(agent)}` : null,
-    agentTimeoutLabel(agent) !== "default" ? agentTimeoutLabel(agent) : null,
-  ].filter((part): part is string => Boolean(part));
-  return parts.length > 0 ? parts.join(" / ") : "Default configuration";
+  return agent.label || [agent.adapter, agent.model].filter(Boolean).join(" / ") || agent.name;
+}
+
+function agentLabel(agent: WorkbenchAgentVersion | undefined): string {
+  return formatAgentVersion(agent);
 }
 
 function collapseUnmeasuredComparisonRows(rows: readonly ComparisonEvidenceRow[]): ComparisonEvidenceRow[] {
-  const rowsByGroup = new Map<string, ComparisonEvidenceRow[]>();
+  const rowsByVersion = new Map<string, ComparisonEvidenceRow[]>();
   for (const row of rows) {
-    const groupRows = rowsByGroup.get(row.groupId);
+    const groupRows = rowsByVersion.get(row.versionId);
     if (groupRows) {
       groupRows.push(row);
     } else {
-      rowsByGroup.set(row.groupId, [row]);
+      rowsByVersion.set(row.versionId, [row]);
     }
   }
 
   const visibleRows: ComparisonEvidenceRow[] = [];
-  for (const groupRows of rowsByGroup.values()) {
+  for (const groupRows of rowsByVersion.values()) {
     const measuredRows = groupRows.filter((row) =>
       row.runId ||
       row.score !== undefined ||
@@ -937,7 +781,7 @@ function collapseUnmeasuredComparisonRows(rows: readonly ComparisonEvidenceRow[]
     }
     visibleRows.push({
       ...first,
-      rowId: `${first.groupId}/no-scorecard`,
+      rowId: `${first.versionId}/no-scorecard`,
       agentName: "No scorecard yet",
       agentHash: "no-scorecard",
       agentDetail: "Run an eval to compare this version.",
@@ -995,7 +839,7 @@ function singleLine(value: string): string {
 
 function truncateText(value: string, maxLength: number): string {
   return value.length > maxLength
-    ? `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`
+    ? `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`
     : value;
 }
 

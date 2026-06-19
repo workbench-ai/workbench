@@ -153,7 +153,7 @@ describe("workbench execution DAG scheduler", () => {
       kind: "improve",
       versionId: "v_candidate",
       baseVersionId: "v_base",
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "patcher",
@@ -167,7 +167,7 @@ describe("workbench execution DAG scheduler", () => {
         variant: "local",
         versionId: "v_base",
         evalHash: "eval_hash",
-        skills: ["primary"],
+        skills: ["current"],
         agents: ["patcher"],
         samples: 2,
         budget: 3,
@@ -187,7 +187,7 @@ describe("workbench execution DAG scheduler", () => {
       kind: "improve",
       location: "local",
       baseVersionId: "v_base",
-      skillName: "primary",
+      skillName: "current",
       agentName: "patcher",
       samples: 2,
       budget: 3,
@@ -200,7 +200,7 @@ describe("workbench execution DAG scheduler", () => {
       id: "run_eval",
       kind: "eval",
       versionId: "v_base",
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -221,7 +221,7 @@ describe("workbench execution DAG scheduler", () => {
       id: "run_eval",
       kind: "eval",
       versionId: "v_base",
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -235,7 +235,7 @@ describe("workbench execution DAG scheduler", () => {
         variant: "local",
         versionId: "v_base",
         evalHash: "eval_hash",
-        skills: ["primary"],
+        skills: ["current"],
         agents: ["default"],
         samples: 1.5,
       },
@@ -250,7 +250,7 @@ describe("workbench execution DAG scheduler", () => {
       id: "run_matrix",
       kind: "eval",
       versionId: "v_matrix",
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -266,7 +266,7 @@ describe("workbench execution DAG scheduler", () => {
         variant: "local",
         versionId: "v_matrix",
         evalHash: "eval_hash",
-        skills: ["primary"],
+        skills: ["current"],
         agents: ["default", "patcher"],
         samples: 1,
       },
@@ -295,7 +295,7 @@ describe("workbench execution DAG scheduler", () => {
       variant: "local",
       versionId: "v_matrix",
       evalHash: "eval_hash",
-      skill: "primary",
+      skill: "current",
       agent: "default,patcher",
       samples: 1,
     }, [run], { jobs });
@@ -321,7 +321,7 @@ describe("workbench execution DAG scheduler", () => {
       id: "run_terminal",
       kind: "eval",
       versionId: "v001",
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -338,7 +338,7 @@ describe("workbench execution DAG scheduler", () => {
       variant: "local",
       versionId: "v001",
       evalHash: "eval_hash",
-      skill: "primary",
+      skill: "current",
       agent: "default",
     }, [base]);
     const canceled = createWorkbenchRunSnapshot({
@@ -346,7 +346,7 @@ describe("workbench execution DAG scheduler", () => {
       variant: "local",
       versionId: "v001",
       evalHash: "eval_hash",
-      skill: "primary",
+      skill: "current",
       agent: "default",
     }, [{ ...base, status: "canceled" }]);
 
@@ -359,7 +359,7 @@ describe("workbench execution DAG scheduler", () => {
       id: "run_strict",
       kind: "eval",
       versionId: "v001",
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "strict",
@@ -377,11 +377,11 @@ describe("workbench execution DAG scheduler", () => {
       variant: "local",
       versionId: "v001",
       evalHash: "eval_hash",
-      skill: "primary",
+      skill: "current",
       agent: "strict",
     }, [run]);
 
-    expect(snapshot.next).toBe("workbench compare --agents 'strict'");
+    expect(snapshot.next).toBe("workbench results --agents 'strict'");
   });
 
   test("local web operation defaults keep CLI current-source semantics", () => {
@@ -408,7 +408,7 @@ describe("workbench execution DAG scheduler", () => {
         id: "run_failed",
         kind: "eval",
         versionId: "v_current",
-        skillName: "primary",
+        skillName: "current",
         skillBundleHash: "bundle_hash",
         evalHash: "eval_hash",
         agentName: "default",
@@ -636,7 +636,7 @@ function genericSpec(): GenericRunSpec {
       engine: { use: "tests" },
     },
     skill: {
-      name: "primary",
+      name: "current",
       files: { path: "skill" },
       agents: {
         default: { name: "Default", use: "command" },
@@ -760,7 +760,7 @@ function actionCapabilitySnapshot(): WorkbenchInspectionSnapshot {
     status: {
       root: "/tmp/workbench-action-capability-test",
       initialized: true,
-      defaultSkill: "primary",
+      defaultSkill: "current",
       defaultAgent: "default",
       currentVersionId: "v_current",
       versionCount: 1,

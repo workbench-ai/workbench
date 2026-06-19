@@ -371,16 +371,12 @@ function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): Work
         files: inspectionFileManifests(evalCase.files),
       })),
     })),
-    ...(snapshot.comparison ? {
-      comparison: {
-        ...snapshot.comparison,
-        versions: snapshot.comparison.versions.map((version) => ({
+    ...(snapshot.results ? {
+      results: {
+        ...snapshot.results,
+        versions: snapshot.results.versions.map((version) => ({
           ...version,
-          files: inspectionFileManifests(version.files),
-        })),
-        skills: snapshot.comparison.skills.map((bundle) => ({
-          ...bundle,
-          files: inspectionFileManifests(bundle.files),
+          ...(version.files ? { files: inspectionFileManifests(version.files) } : {}),
         })),
       },
     } : {}),

@@ -33,6 +33,7 @@ import {
   buildComparisonTradeoffData,
   buildComparisonTradeoffPairs,
   formatComparisonMetricValue,
+  resultVersionGroupId,
   selectPrimaryComparisonMetrics,
   type ComparisonEvidenceRow,
   type ComparisonGroupPresentation,
@@ -48,8 +49,14 @@ const TRADEOFF_CHART_HEIGHT = 320;
 
 export function EvaluationResultsVisualSummary({
   rows,
+  dense = false,
 }: {
   rows: ComparisonEvidenceRow[];
+  /**
+   * Compact layout for constrained surfaces: smaller metric charts and the
+   * tradeoff scatter omitted so the summary fits without scrolling.
+   */
+  dense?: boolean;
 }) {
   const groups = React.useMemo(() => buildVisualSummaryGroups(rows), [rows]);
   const groupColorById = React.useMemo(
@@ -89,6 +96,7 @@ export function EvaluationResultsVisualSummary({
             {chartDescriptors.map((descriptor) => (
               <EvaluationMetricBarChart
                 key={descriptor.id}
+                dense={dense}
                 descriptor={descriptor}
                 groups={groups}
                 groupColorById={groupColorById}
@@ -97,7 +105,7 @@ export function EvaluationResultsVisualSummary({
             ))}
           </div>
         ) : null}
-        {tradeoffPairs.length > 0 ? (
+        {!dense && tradeoffPairs.length > 0 ? (
           <EvaluationTradeoffChart
             groupColorById={groupColorById}
             groups={groups}
@@ -111,11 +119,13 @@ export function EvaluationResultsVisualSummary({
 }
 
 function EvaluationMetricBarChart({
+  dense,
   descriptor,
   groups,
   groupColorById,
   rows,
 }: {
+  dense: boolean;
   descriptor: ComparisonMetricDescriptor;
   groups: readonly ComparisonGroupPresentation[];
   groupColorById: ReadonlyMap<string, string>;
@@ -145,11 +155,13 @@ function EvaluationMetricBarChart({
     }) satisfies ChartConfig,
     [descriptor],
   );
-  const chartHeight = clamp(
-    chartRows.length * categoryAxisLayout.rowHeight + 64,
-    BAR_CHART_MIN_HEIGHT,
-    BAR_CHART_MAX_HEIGHT,
-  );
+  const chartHeight = dense
+    ? clamp(chartRows.length * categoryAxisLayout.rowHeight + 24, 128, 172)
+    : clamp(
+        chartRows.length * categoryAxisLayout.rowHeight + 64,
+        BAR_CHART_MIN_HEIGHT,
+        BAR_CHART_MAX_HEIGHT,
+      );
   const axisDomain = comparisonMetricAxisDomain(data, descriptor);
   const displayLabel = displayMetricLabel(descriptor);
 
@@ -510,19 +522,20 @@ function ComparisonGroupedAxisTick({
 }
 
 function buildVisualSummaryGroups(rows: readonly ComparisonEvidenceRow[]): ComparisonGroupPresentation[] {
-  const groupsById = new Map<string, Omit<ComparisonGroupPresentation, "color"> & { setupRank: number }>();
+  const groupsById = new Map<string, Omit<ComparisonGroupPresentation, "color"> & { versionOrdinal: number }>();
   for (const row of rows) {
-    if (!groupsById.has(row.groupId)) {
-      groupsById.set(row.groupId, {
-        id: row.groupId,
-        label: row.groupLabel,
-        setupRank: row.setupRank,
+    const groupId = resultVersionGroupId(row);
+    if (!groupsById.has(groupId)) {
+      groupsById.set(groupId, {
+        id: groupId,
+        label: row.versionLabel,
+        versionOrdinal: row.versionOrdinal,
       });
     }
   }
   return [...groupsById.values()]
     .sort((left, right) =>
-      left.setupRank - right.setupRank ||
+      left.versionOrdinal - right.versionOrdinal ||
       left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: "base" }) ||
       left.id.localeCompare(right.id)
     )

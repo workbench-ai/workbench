@@ -55,7 +55,7 @@
       "title": "Compare eval runtime configurations",
       "category": "agent_comparison",
       "prompt": "Evaluate a skill across two runtime configurations and explain how to compare performance, cost, and latency.",
-      "expected_output": "The response uses workbench agent add for named agents, workbench eval --agents all --samples 1, and workbench compare --versions all --agents all. It explains that local/command agents run Docker-style tests and Codex/Claude agents require adapter auth for provider-backed execution.",
+      "expected_output": "The response uses workbench agent add for named agents, workbench eval --agents all --samples 1, and workbench results --versions all --agents all. It explains that local/command agents run Docker-style tests and Codex/Claude agents require adapter auth for provider-backed execution.",
       "files": [],
       "required_skills": [
         "workbench"

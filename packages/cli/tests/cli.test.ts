@@ -154,7 +154,7 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
     route: {
       kind: "run",
       runId: run.id,
-      source: run.kind === "eval" ? "evaluation" : "activity",
+      source: run.kind === "eval" ? "evaluation" : "runs",
       evaluationId: run.evalHash,
     },
     cliEquivalent: run.kind === "improve" ? "workbench improve --cloud" : "workbench eval --cloud",
@@ -162,7 +162,7 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
       ? `workbench run watch ${run.id}`
       : run.status === "failed" || run.status === "canceled"
         ? `workbench show ${run.id}`
-        : run.kind === "improve" ? "workbench eval --rerun -n 5" : "workbench compare",
+        : run.kind === "improve" ? "workbench eval --rerun -n 5" : "workbench results",
   };
 }
 
@@ -276,7 +276,7 @@ describe("workbench skill-first CLI", () => {
     expect(help.stdout).toContain("workbench new");
     expect(help.stdout).toContain("workbench eval");
     expect(help.stdout).toContain("workbench improve");
-    expect(help.stdout).toContain("workbench compare");
+    expect(help.stdout).toContain("workbench results");
     expect(help.stdout).toContain("workbench publish");
     expect(help.stdout).toContain("workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]");
     expect(help.stdout).toContain("workbench install");
@@ -290,7 +290,7 @@ describe("workbench skill-first CLI", () => {
     expect(help.stdout).not.toContain("workbench show");
     expect(help.stdout).not.toContain("workbench open");
 
-    for (const command of ["compare", "diff", "open", "agent"]) {
+    for (const command of ["results", "diff", "open", "agent"]) {
       const commandHelp = await invoke(["help", command]);
       expect(commandHelp.code).toBe(0);
       expect(commandHelp.stdout).toContain(`workbench ${command}`);
@@ -532,7 +532,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_active",
       kind: "eval",
       versionId: currentVersionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -550,7 +550,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_active",
       kind: "eval",
       versionId: currentVersionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -569,7 +569,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_active",
       kind: "eval",
       versionId: currentVersionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -586,7 +586,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_done",
       kind: "eval",
       versionId: currentVersionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -698,7 +698,7 @@ describe("workbench skill-first CLI", () => {
           }),
         ],
       },
-      next: "workbench compare",
+      next: "workbench results",
     });
     expect(watchJson).not.toHaveProperty("result");
     expect(watchJson).not.toHaveProperty("progress");
@@ -737,7 +737,7 @@ describe("workbench skill-first CLI", () => {
           }),
         ],
       },
-      next: "workbench compare",
+      next: "workbench results",
     });
     const retryRun = retryJson.run as Record<string, unknown>;
     expect(retryRun.id).not.toBe(retryOfRunId);
@@ -746,7 +746,7 @@ describe("workbench skill-first CLI", () => {
     expect(retryJson).not.toHaveProperty("jobs");
   });
 
-  test("run watch and retry preserve non-default agent context in compare next", async () => {
+  test("run watch and retry preserve non-default agent context in results next", async () => {
     const root = await makeTempRoot("workbench-cli-run-context-next-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await writePassingCaseTest(root);
@@ -758,7 +758,7 @@ describe("workbench skill-first CLI", () => {
 
     const watched = await invoke(["run", "watch", evaluatedRunId, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
-    expect(stdoutJson<{ next: string }>(watched).next).toBe("workbench compare --agents 'strict'");
+    expect(stdoutJson<{ next: string }>(watched).next).toBe("workbench results --agents 'strict'");
 
     const shown = await invoke(["show", evaluatedRunId, "--dir", root]);
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
@@ -766,17 +766,18 @@ describe("workbench skill-first CLI", () => {
     expect(shown.stdout).toContain("sample=2");
     expect(shown.stdout).not.toContain("sample=0");
 
-    const bareCompare = await invoke(["compare", "--dir", root]);
-    expect(bareCompare.code, bareCompare.stdout || bareCompare.stderr).toBe(0);
-    expect(bareCompare.stdout).toContain("No comparable runs");
+    const bareResults = await invoke(["results", "--dir", root]);
+    expect(bareResults.code, bareResults.stdout || bareResults.stderr).toBe(0);
+    expect(bareResults.stdout).toContain("No results.");
 
-    const contextualCompare = await invoke(["compare", "--agents", "strict", "--dir", root]);
-    expect(contextualCompare.code, contextualCompare.stdout || contextualCompare.stderr).toBe(0);
-    expect(contextualCompare.stdout).toContain("strict@");
+    const contextualResults = await invoke(["results", "--agents", "strict", "--dir", root]);
+    expect(contextualResults.code, contextualResults.stdout || contextualResults.stderr).toBe(0);
+    expect(contextualResults.stdout).toContain("Your skill v1");
+    expect(contextualResults.stdout).toContain("\tstrict\t");
 
     const retried = await invoke(["run", "retry", evaluatedRunId, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
-    expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench compare --agents 'strict'");
+    expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench results --agents 'strict'");
   });
 
   test("rejects unsupported and context-invalid flags before handlers run", async () => {
@@ -905,9 +906,9 @@ describe("workbench skill-first CLI", () => {
 
     const root = await makeTempRoot("workbench-cli-flag-kinds-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
-    const compare = await invoke(["compare", "--versions", "all", "--dir", root, "--json"]);
-    expect(compare.code, compare.stdout || compare.stderr).toBe(0);
-    expect(stdoutJson(compare)).toMatchObject({ schema: "workbench.cli.compare.v1", ok: true });
+    const results = await invoke(["results", "--versions", "all", "--dir", root, "--json"]);
+    expect(results.code, results.stdout || results.stderr).toBe(0);
+    expect(stdoutJson(results)).toMatchObject({ schema: "workbench.cli.results.v1", ok: true });
   });
 
   test("new is a strict create command", async () => {
@@ -1134,11 +1135,11 @@ describe("workbench skill-first CLI", () => {
           content: "schema: workbench.agents.v1\ndefault: default\nagents:\n  default:\n    adapter: local\n",
         },
         {
-          path: ".workbench/skills.yaml",
+          path: ".workbench/versions.yaml",
           kind: "text",
           encoding: "utf8",
           executable: false,
-          content: "schema: workbench.skills.v1\n",
+          content: "schema: workbench.versions.v1\n",
         },
         {
           path: ".workbench/cases/case-001/case.yaml",
@@ -1195,7 +1196,7 @@ describe("workbench skill-first CLI", () => {
         "scripts/run.sh",
         ".workbench/eval.yaml",
         ".workbench/agents.yaml",
-        ".workbench/skills.yaml",
+        ".workbench/versions.yaml",
         ".workbench/cases/case-001/case.yaml",
         ".workbench/environment/Dockerfile",
       ]),
@@ -2169,7 +2170,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_sync_queued",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2226,12 +2227,14 @@ describe("workbench skill-first CLI", () => {
     const root = await makeTempRoot("workbench-cli-invalid-version-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
 
-    const compare = await invoke(["compare", "--versions", "deadbeef..badc0de", "--dir", root, "--json"]);
-    expect(compare.code, compare.stdout || compare.stderr).toBe(1);
-    expect(stdoutJson(compare)).toMatchObject({
+    const results = await invoke(["results", "--versions", "deadbeef..badc0de", "--dir", root, "--json"]);
+    expect(results.code, results.stdout || results.stderr).toBe(2);
+    expect(stdoutJson(results)).toMatchObject({
       ok: false,
-      code: "version_not_found",
-      remediation: "workbench log --versions",
+      code: "usage",
+      message: expect.stringContaining("Version not found: deadbeef..badc0de."),
+      remediation: "workbench results --versions current",
+      subject: { configuredVersions: ["current"] },
     });
   });
 
@@ -2358,11 +2361,11 @@ describe("workbench skill-first CLI", () => {
 
     const rerun = await invoke(["eval", "--rerun", "--dir", root, "--json"]);
     expect(rerun.code, rerun.stdout || rerun.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(rerun).next).toBe("workbench compare");
+    expect(stdoutJson<{ next: string | null }>(rerun).next).toBe("workbench results");
 
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench compare");
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench results");
   });
 
   test("logged-out Cloud status reports auth_required instead of actionable local_changes", async () => {
@@ -2437,7 +2440,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_historical",
       kind: "eval",
       versionId: firstVersionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2478,7 +2481,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_partial",
       kind: "eval",
       versionId: currentVersionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2587,11 +2590,11 @@ describe("workbench skill-first CLI", () => {
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
     const next = stdoutJson<{ next: string | null }>(status).next;
-    expect(next).toBe("workbench improve --skills 'primary' --agents 'patcher'");
+    expect(next).toBe("workbench improve --versions 'current' --agents 'patcher'");
     expect(next).not.toMatch(/^workbench switch\b/u);
   }, 60_000);
 
-  test("status suggests compare after a successful smoke eval", async () => {
+  test("status suggests results after a successful smoke eval", async () => {
     const root = await makeTempRoot("workbench-cli-status-smoke-case-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await fs.mkdir(path.join(root, ".workbench", "cases", "case-001"), { recursive: true });
@@ -2610,10 +2613,10 @@ describe("workbench skill-first CLI", () => {
 
     const evalResult = await invoke(["eval", "--dir", root, "--json"]);
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(evalResult).next).toBe("workbench compare");
+    expect(stdoutJson<{ next: string | null }>(evalResult).next).toBe("workbench results");
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench compare");
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench results");
   });
 
   test("eval JSON terminal progress uses the final publish-ready next command", async () => {
@@ -2651,7 +2654,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_live",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2679,7 +2682,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_queued",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2711,7 +2714,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_surface",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2730,7 +2733,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_surface",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2765,7 +2768,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_surface",
       jobId: "job_surface",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2798,7 +2801,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_surface",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2827,7 +2830,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_surface",
       jobId: "job_orphan",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2924,7 +2927,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_distinct",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -2945,7 +2948,7 @@ describe("workbench skill-first CLI", () => {
         runId: "run_distinct",
         kind: "eval",
         versionId,
-        skillName: "primary",
+        skillName: "current",
         skillBundleHash: "bundle_hash",
         evalHash: "eval_hash",
         agentName: "default",
@@ -2998,7 +3001,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_same_prefix",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -3017,7 +3020,7 @@ describe("workbench skill-first CLI", () => {
         runId: "run_same_prefix",
         kind: "eval",
         versionId,
-        skillName: "primary",
+        skillName: "current",
         skillBundleHash: "bundle_hash",
         evalHash: "eval_hash",
         agentName: "default",
@@ -3075,7 +3078,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_failed",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -3091,7 +3094,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_failed",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -3132,7 +3135,7 @@ describe("workbench skill-first CLI", () => {
         runId: "run_prefix",
         jobId: id.replace(/^trace_/u, ""),
         versionId,
-        skillName: "primary",
+        skillName: "current",
         skillBundleHash: "bundle_hash",
         evalHash: "eval_hash",
         agentName: "default",
@@ -3503,7 +3506,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_cloud",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -3519,7 +3522,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_cloud",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -3537,7 +3540,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_cloud",
       jobId: "job_cloud",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -3715,7 +3718,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_preaccept_cancel",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_preaccept",
       evalHash: "eval_preaccept",
       agentName: "default",
@@ -3732,7 +3735,7 @@ describe("workbench skill-first CLI", () => {
         variant: "cloud",
         versionId,
         evalHash: "eval_preaccept",
-        skills: ["primary"],
+        skills: ["current"],
         agents: ["default"],
         samples: 1,
       },
@@ -3792,7 +3795,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_preaccept_retry",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_preaccept",
       evalHash: "eval_preaccept",
       agentName: "default",
@@ -3810,7 +3813,7 @@ describe("workbench skill-first CLI", () => {
         variant: "cloud",
         versionId,
         evalHash: "eval_preaccept",
-        skills: ["primary"],
+        skills: ["current"],
         agents: ["default"],
         samples: 1,
       },
@@ -3849,7 +3852,7 @@ describe("workbench skill-first CLI", () => {
           kind: "eval",
           variant: "cloud",
           versionId,
-          skill: "primary",
+          skill: "current",
           agent: "default",
           samples: 1,
           rerun: true,
@@ -3873,7 +3876,7 @@ describe("workbench skill-first CLI", () => {
           runId: retryRunId,
           kind: "eval",
           versionId,
-          skillName: "primary",
+          skillName: "current",
           skillBundleHash: "bundle_preaccept",
           evalHash: "eval_preaccept",
           agentName: "default",
@@ -3912,7 +3915,7 @@ describe("workbench skill-first CLI", () => {
         retryOfRunId: canceledRun.id,
         run: { status: "succeeded" },
         cloud: { skillId: "skill_cloud" },
-        next: "workbench compare",
+        next: "workbench results",
       });
       expect(stdoutJson(retried).run.id).toBe(retryRunId);
       const progress = stderrJsonLines<{ schema: string; id: string; status: string; phase: string; variant: string }>(retried);
@@ -3954,7 +3957,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_preaccept_retry_error",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_preaccept",
       evalHash: "eval_preaccept",
       agentName: "default",
@@ -3972,7 +3975,7 @@ describe("workbench skill-first CLI", () => {
         variant: "cloud",
         versionId,
         evalHash: "eval_preaccept",
-        skills: ["primary"],
+        skills: ["current"],
         agents: ["default"],
         samples: 1,
       },
@@ -4053,7 +4056,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_retry_cancel_source",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_preaccept",
       evalHash: "eval_preaccept",
       agentName: "default",
@@ -4071,7 +4074,7 @@ describe("workbench skill-first CLI", () => {
         variant: "cloud",
         versionId,
         evalHash: "eval_preaccept",
-        skills: ["primary"],
+        skills: ["current"],
         agents: ["default"],
         samples: 1,
       },
@@ -4126,7 +4129,7 @@ describe("workbench skill-first CLI", () => {
           runId: retryRunId,
           kind: "eval",
           versionId,
-          skillName: "primary",
+          skillName: "current",
           skillBundleHash: "bundle_preaccept",
           evalHash: "eval_preaccept",
           agentName: "default",
@@ -4158,7 +4161,7 @@ describe("workbench skill-first CLI", () => {
           runId: retryRunId,
           kind: "eval",
           versionId,
-          skillName: "primary",
+          skillName: "current",
           skillBundleHash: "bundle_preaccept",
           evalHash: "eval_preaccept",
           agentName: "default",
@@ -4866,7 +4869,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_cloud",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -4885,7 +4888,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_cloud",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -4919,7 +4922,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_cloud",
       jobId: "job_cloud",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -5094,7 +5097,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_pending",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -5109,7 +5112,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_pending",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -5223,7 +5226,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_detach",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -5245,7 +5248,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_detach",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_cloud",
       evalHash: "eval_cloud",
       agentName: "default",
@@ -5415,7 +5418,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_autolink",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_autolink",
       evalHash: "eval_autolink",
       agentName: "default",
@@ -5436,7 +5439,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_autolink",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_autolink",
       evalHash: "eval_autolink",
       agentName: "default",
@@ -5455,7 +5458,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_autolink",
       jobId: "job_autolink",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "bundle_autolink",
       evalHash: "eval_autolink",
       agentName: "default",
@@ -7263,13 +7266,13 @@ describe("workbench skill-first CLI", () => {
     await invoke(["new", root, "--agent", "local"]);
     await fs.mkdir(path.join(root, "skills", "variant"), { recursive: true });
     await fs.writeFile(path.join(root, "skills", "variant", "SKILL.md"), "# Variant\n");
-    await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
+    await fs.writeFile(path.join(root, ".workbench", "versions.yaml"), [
       "default: all",
-      "skills:",
-      "  primary:",
-      "    path: .",
+      "versions:",
+      "  current:",
+      "    source: local:.",
       "  variant:",
-      "    path: skills/variant",
+      "    source: local:skills/variant",
       "",
     ].join("\n"));
     await fs.writeFile(path.join(root, ".workbench", "agents.yaml"), [
@@ -7288,21 +7291,21 @@ describe("workbench skill-first CLI", () => {
 
     const result = await invoke(["improve", "--dir", root, "--json"]);
     expect(result.code).toBe(2);
-    const error = stdoutJson<{ message: string; remediation?: string; subject?: { configuredSkills?: string[]; configuredAgents?: string[]; improvementCapableAgents?: string[] } }>(result);
+    const error = stdoutJson<{ message: string; remediation?: string; subject?: { configuredVersions?: string[]; configuredAgents?: string[]; improvementCapableAgents?: string[] } }>(result);
     expect(error).toMatchObject({
       ok: false,
       code: "usage",
-      message: expect.stringContaining("requires exactly one skill and one eval agent"),
+      message: expect.stringContaining("requires exactly one version and one eval agent"),
       subject: {
-        configuredSkills: expect.arrayContaining(["primary", "variant"]),
+        configuredVersions: expect.arrayContaining(["current", "variant"]),
         configuredAgents: expect.arrayContaining(["default", "strict"]),
         improvementCapableAgents: ["strict"],
       },
     });
-    expect(error.message).toContain("Configured skills: primary, variant.");
+    expect(error.message).toContain("Configured versions: current, variant.");
     expect(error.message).toContain("Configured agents: default, strict.");
     expect(error.message).toContain("Improvement-capable agents: strict.");
-    expect(error.remediation).toBe("workbench improve --skills primary --agents strict");
+    expect(error.remediation).toBe("workbench improve --versions current --agents strict");
     expect(error.message).not.toContain("AGENT");
     expect(error.remediation).not.toContain("AGENT");
   });
@@ -7323,18 +7326,18 @@ describe("workbench skill-first CLI", () => {
     });
   });
 
-  test("compare selector errors include command-shaped remediation", async () => {
-    const root = await makeTempRoot("workbench-cli-compare-selector-");
+  test("results selector errors include command-shaped remediation", async () => {
+    const root = await makeTempRoot("workbench-cli-results-selector-");
     await invoke(["new", root, "--agent", "local"]);
 
-    const result = await invoke(["compare", "--dir", root, "--agents", "missing", "--json"]);
+    const result = await invoke(["results", "--dir", root, "--agents", "missing", "--json"]);
 
     expect(result.code).toBe(2);
     expect(stdoutJson(result)).toMatchObject({
       ok: false,
       code: "usage",
       message: "Agent not found: missing. Configured agents: default.",
-      remediation: "workbench compare --agents default",
+      remediation: "workbench results --agents default",
       subject: { configuredAgents: ["default"] },
     });
   });
@@ -7369,13 +7372,13 @@ describe("workbench skill-first CLI", () => {
   test("lists the built-in no-skill baseline without an undefined location", async () => {
     const root = await makeTempRoot("workbench-cli-skills-none-");
     await invoke(["new", root, "--agent", "local"]);
-    await fs.writeFile(path.join(root, ".workbench", "skills.yaml"), [
+    await fs.writeFile(path.join(root, ".workbench", "versions.yaml"), [
       "default: all",
-      "skills:",
-      "  primary:",
-      "    path: .",
+      "versions:",
+      "  current:",
+      "    source: local:.",
       "  no-skill:",
-      "    baseline: none",
+      "    source: none",
       "",
     ].join("\n"));
 
@@ -7612,8 +7615,8 @@ describe("workbench skill-first CLI", () => {
     expect(result.stdout).toContain("coverage cases=1 samples=5 jobs=5 failed=5");
     expect(result.stdout).toContain("coverage cases=1 samples=5 jobs=5 run=");
     expect(result.stdout).toContain("measurement\trun=");
-    expect(result.stdout).toContain("skill=primary\tagent=failer\tfailed");
-    expect(result.stdout).toContain("skill=primary\tagent=passer\tsucceeded");
+    expect(result.stdout).toContain("skill=current\tagent=failer\tfailed");
+    expect(result.stdout).toContain("skill=current\tagent=passer\tsucceeded");
 
     const json = await invoke(["eval", "--dir", root, "--agents", "all", "-n", "5", "--rerun", "--json"]);
     const parsed = stdoutJson<{
@@ -7885,7 +7888,7 @@ describe("workbench skill-first CLI", () => {
       id: "run_evidence",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "skill_bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -7904,7 +7907,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_evidence",
       kind: "eval",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "skill_bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -7926,7 +7929,7 @@ describe("workbench skill-first CLI", () => {
       runId: "run_evidence",
       jobId: "job_evidence",
       versionId,
-      skillName: "primary",
+      skillName: "current",
       skillBundleHash: "skill_bundle_hash",
       evalHash: "eval_hash",
       agentName: "default",
@@ -7945,7 +7948,7 @@ describe("workbench skill-first CLI", () => {
     try {
       expect(server.url.startsWith("http://127.0.0.1:")).toBe(true);
       expect(server.url.endsWith("/")).toBe(true);
-      const response = await fetch(new URL("/compare/runs/run_example", server.url));
+      const response = await fetch(new URL("/evaluation/runs/run_example", server.url));
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/html");
       await expect(response.text()).resolves.toContain("<div id=\"root\"></div>");
@@ -8899,18 +8902,28 @@ describe("workbench skill-first CLI", () => {
       message: expect.any(String),
     });
 
-    const compare = await invoke(["compare", "--dir", root, "--agents", "patcher"]);
-    expect(compare.stdout).toContain("version\tskill\tagent\tstatus\tscore\tsamples\tcost");
-    expect(compare.stdout).toContain(shortTestRef(patcherBaseVersionId));
-    expect(compare.stdout).toContain("\tfailed\t");
-    expect(compare.stdout).toContain("\t0.000\t");
+    const results = await invoke(["results", "--dir", root, "--agents", "patcher"]);
+    expect(results.stdout).toContain("version\tagent\tstatus\tquality\tsamples\tcost\tlatency\trun");
+    expect(results.stdout).toContain("\tpatcher\tfailed\t");
+    expect(results.stdout).toContain("Your skill v1");
+    expect(results.stdout).toContain("Your skill v2");
+    expect(results.stdout).toContain("\tfailed\t");
+    expect(results.stdout).toContain("\t0.000\t");
+    const resultsJson = await invoke(["results", "--dir", root, "--agents", "patcher", "--json"]);
+    const resultsPayload = stdoutJson<{ result: { cells: Array<Record<string, unknown>> } }>(resultsJson);
+    expect(resultsPayload.result.cells[0]).toHaveProperty("skillVersionId");
+    expect(resultsPayload.result.cells[0]).toHaveProperty("evaluationId");
+    expect(resultsPayload.result.cells[0]).toHaveProperty("agentVersionId");
+    expect(resultsPayload.result.cells[0]).not.toHaveProperty("skillName");
+    expect(resultsPayload.result.cells[0]).not.toHaveProperty("skillBundleHash");
     const observerAdd = await invoke(["agent", "add", "observer", "--dir", root, "--adapter", "command"]);
     expect(observerAdd.code, observerAdd.stdout || observerAdd.stderr).toBe(0);
-    const allAgentsCompare = await invoke(["compare", "--dir", root, "--agents", "all"]);
-    expect(allAgentsCompare.code, allAgentsCompare.stdout || allAgentsCompare.stderr).toBe(0);
-    expect(allAgentsCompare.stdout).not.toContain("\tnot-run\t");
-    expect(allAgentsCompare.stdout).not.toContain("observer@");
-    expect(allAgentsCompare.stdout).toContain("next: workbench compare --agents all --versions all");
+    const allAgentsResults = await invoke(["results", "--dir", root, "--agents", "all"]);
+    expect(allAgentsResults.code, allAgentsResults.stdout || allAgentsResults.stderr).toBe(0);
+    expect(allAgentsResults.stdout).not.toContain("\tnot-run\t");
+    expect(allAgentsResults.stdout).not.toContain("observer@");
+    expect(allAgentsResults.stdout).toContain("Your skill v1");
+    expect(allAgentsResults.stdout).toContain("Your skill v4");
     const improveSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
     const improveRun = [...improveSnapshot.runs].reverse()
       .find((run) => run.kind === "improve" && run.agentName === "patcher");

@@ -26,8 +26,7 @@ import type {
   WorkbenchAdapterInvocation,
   WorkbenchAgentSnapshot,
   WorkbenchSkillPatch,
-  WorkbenchComparison,
-  WorkbenchComparisonCell,
+  WorkbenchResults,
   WorkbenchDefaultAgentSelection,
   WorkbenchEvalCaseSnapshot,
   WorkbenchEvalSnapshot,
@@ -182,8 +181,7 @@ export type {
   RemoteWorkbenchJob,
   SurfaceSnapshotFile,
   WorkbenchArtifact,
-  WorkbenchComparison,
-  WorkbenchComparisonCell,
+  WorkbenchResults,
   WorkbenchDefaultAgentSelection,
   WorkbenchEvalCaseSnapshot,
   WorkbenchEvalSnapshot,
@@ -428,7 +426,7 @@ export interface WorkbenchInitOptions extends WorkbenchCommandOptions {
   auth?: string;
 }
 
-type WorkbenchSelectorCommand = "eval" | "compare" | "improve";
+type WorkbenchSelectorCommand = "eval" | "results" | "improve";
 
 export interface WorkbenchEvalOptions extends WorkbenchCommandOptions {
   version?: string;
@@ -2446,7 +2444,7 @@ function runtimeControlSkillsDir(root: string): string {
   return path.join(root, "input", "skills");
 }
 
-function runtimeControlEntrySkillDir(root: string, skillName = PRIMARY_SKILL_NAME): string {
+function runtimeControlEntrySkillDir(root: string, skillName = CURRENT_SKILL_VERSION_NAME): string {
   return path.join(runtimeControlSkillsDir(root), skillName);
 }
 
@@ -2456,7 +2454,7 @@ function runtimeControlSkillDir(root: string, execution?: WorkbenchExecutionSpec
   }
   const skillName = typeof jobInput?.skillName === "string" && jobInput.skillName.trim()
     ? jobInput.skillName.trim()
-    : PRIMARY_SKILL_NAME;
+    : CURRENT_SKILL_VERSION_NAME;
   return runtimeControlEntrySkillDir(root, skillName);
 }
 
@@ -2670,7 +2668,7 @@ async function executeSkillEvalExecutionInCurrentRuntime(
   const metadata = asRuntimeRecord(execution.metadata);
   const entrySkill = typeof metadata.skillName === "string" && metadata.skillName.trim()
     ? metadata.skillName.trim()
-    : PRIMARY_SKILL_NAME;
+    : CURRENT_SKILL_VERSION_NAME;
   const skillDir = path.join(skillsDir, entrySkill);
   const caseDir = path.join(workspace, "input", "case");
   const outputDir = path.join(workspace, "output");
@@ -3008,7 +3006,37 @@ export interface WorkbenchRunCancellationResult {
   requestPath: string;
 }
 
-export interface WorkbenchCompareOptions extends WorkbenchCommandOptions {
+export interface WorkbenchResultsOptions extends WorkbenchCommandOptions {
+  projectVersions?: string;
+  versions?: string;
+  agents?: string;
+}
+
+interface InternalComparisonCell {
+  versionId: string;
+  skillName: string;
+  skillBundleHash: string;
+  evalHash: string;
+  agentName: string;
+  agentHash: string;
+  runId?: string;
+  status?: WorkbenchRun["status"];
+  score?: number;
+  samples?: number;
+  costUsd?: number;
+  latencyMs?: number;
+  error?: string;
+}
+
+interface InternalComparison {
+  evalHash?: string;
+  versions: WorkbenchVersion[];
+  skills: WorkbenchSkillBundleSnapshot[];
+  agents: WorkbenchAgentSnapshot[];
+  cells: InternalComparisonCell[];
+}
+
+interface InternalComparisonSelection {
   versions?: string;
   skills?: string;
   agents?: string;
@@ -3177,9 +3205,10 @@ const EVAL_FILE = "eval.yaml";
 const CASES_DIR = "cases";
 const ENVIRONMENT_DIR = "environment";
 const AGENTS_FILE = "agents.yaml";
-const SKILLS_FILE = "skills.yaml";
+const VERSIONS_FILE = "versions.yaml";
+const LEGACY_SKILLS_FILE = "skills.yaml";
 const SKILL_FILE = "SKILL.md";
-const PRIMARY_SKILL_NAME = "primary";
+const CURRENT_SKILL_VERSION_NAME = "current";
 const ALL_SELECTOR = "all";
 const STATE_SCHEMA = "workbench.skill.state.v1";
 const PACK_SCHEMA = "workbench.object-pack.v1";
@@ -3224,6 +3253,7 @@ const STARTER_CREATED_PATHS = [
 
 type WorkbenchProviderAgentAdapter = "codex" | "claude";
 type WorkbenchNewAgentAdapter = WorkbenchProviderAgentAdapter | "command" | "local";
+type WorkbenchManifestEntryNoun = "skill" | "version" | "agent";
 
 const WORKBENCH_PROVIDER_AGENT_DEFAULTS: Record<WorkbenchProviderAgentAdapter, {
   model: string;
@@ -4408,7 +4438,7 @@ export async function listWorkbenchProjectStateEvalRuntimeCases(
 export function createWorkbenchSkillEvalRuntimeInput(
   args: WorkbenchSkillEvalRuntimeInputArgs,
 ): WorkbenchExecutionRuntimeInput {
-  const skillName = args.skillName ?? PRIMARY_SKILL_NAME;
+  const skillName = args.skillName ?? CURRENT_SKILL_VERSION_NAME;
   const skillBundleHash = args.skillBundleHash ?? args.versionId;
   assertSkillEvalAgentSupported(args.agent);
   const createdAt = args.createdAt ?? now();
@@ -4532,7 +4562,7 @@ export function createWorkbenchSkillEvalRuntimeInput(
 export function createWorkbenchSkillImproveRuntimeInput(
   args: WorkbenchSkillImproveRuntimeInputArgs,
 ): WorkbenchExecutionRuntimeInput {
-  const skillName = args.skillName ?? PRIMARY_SKILL_NAME;
+  const skillName = args.skillName ?? CURRENT_SKILL_VERSION_NAME;
   const skillBundleHash = args.skillBundleHash ?? args.baseVersionId;
   assertSkillEvalAgentSupported(args.agent);
   const createdAt = args.createdAt ?? now();
@@ -5386,14 +5416,14 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     state = applied.state;
     const version = applied.version;
     const outputRuntime = await createWorkbenchVersionRuntimeSnapshot(version, {
-      skill: PRIMARY_SKILL_NAME,
+      skill: CURRENT_SKILL_VERSION_NAME,
       agent: evalAgent.name,
       authToken: options.authToken,
       selectionRemediationCommand: "improve",
     });
     const [outputSkillBundle] = outputRuntime.skillBundles;
     if (!outputSkillBundle) {
-      throw new WorkbenchUserError("No primary skill bundle available for improve proof eval.");
+      throw new WorkbenchUserError("No current skill version available for improve proof eval.");
     }
     for (const bundle of outputRuntime.skillBundles) {
       upsertByHash(state.skillBundles, bundle);
@@ -5855,7 +5885,7 @@ export function createWorkbenchRunSnapshot(
     route: {
       kind: "run",
       runId: firstRun.id,
-      source: plan.kind === "eval" ? "evaluation" : "activity",
+      source: plan.kind === "eval" ? "evaluation" : "runs",
       evaluationId: firstRun.evalHash,
     },
     ...(options.cursor ? { cursor: options.cursor } : {}),
@@ -5950,7 +5980,7 @@ export function workbenchOperationCliEquivalent(request: WorkbenchOperationReque
     parts.push("--cloud");
   }
   if (normalized.skill) {
-    parts.push("--skills", shellQuote(normalized.skill));
+    parts.push("--versions", shellQuote(normalized.skill));
   }
   if (normalized.agent) {
     parts.push("--agents", shellQuote(normalized.agent));
@@ -6181,13 +6211,13 @@ function runSnapshotNext(run: WorkbenchRun): string | undefined {
   if (run.status === "failed" || run.status === "canceled") {
     return undefined;
   }
-  return run.kind === "improve" ? "workbench eval --rerun -n 5" : compareNextCommandForRun(run);
+  return run.kind === "improve" ? "workbench eval --rerun -n 5" : resultsNextCommandForRun(run);
 }
 
-function compareNextCommandForRun(run: WorkbenchRun): string {
-  const parts = ["workbench compare"];
-  if (run.skillName && run.skillName !== "primary") {
-    parts.push("--skills", shellQuote(run.skillName));
+function resultsNextCommandForRun(run: WorkbenchRun): string {
+  const parts = ["workbench results"];
+  if (run.skillName && run.skillName !== CURRENT_SKILL_VERSION_NAME) {
+    parts.push("--versions", shellQuote(run.skillName));
   }
   if (run.agentName && run.agentName !== "default") {
     parts.push("--agents", shellQuote(run.agentName));
@@ -6655,31 +6685,31 @@ function requireWorkbenchImproveTarget(
   evalAgent: WorkbenchAgent;
 } {
   if (runtime.skillBundles.length !== 1 || runtime.selectedAgents.length !== 1) {
-    const configuredSkills = [...new Set(runtime.skillBundles.map((bundle) => bundle.skillName))].sort();
+    const configuredVersions = [...new Set(runtime.skillBundles.map((bundle) => bundle.skillName))].sort();
     const configuredAgents = [...new Set(runtime.selectedAgents.map((agent) => agent.name))].sort();
     const improvementCapableAgents = runtime.selectedAgents
       .filter(workbenchSkillImproveCanUseQueuedAdapter)
       .map((agent) => agent.name)
       .sort();
     throw new WorkbenchCodedError("usage", [
-      "workbench improve requires exactly one skill and one eval agent.",
-      `Configured skills: ${configuredSkills.length > 0 ? configuredSkills.join(", ") : "none"}.`,
+      "workbench improve requires exactly one version and one eval agent.",
+      `Configured versions: ${configuredVersions.length > 0 ? configuredVersions.join(", ") : "none"}.`,
       `Configured agents: ${configuredAgents.length > 0 ? configuredAgents.join(", ") : "none"}.`,
       ...(improvementCapableAgents.length > 0
         ? [`Improvement-capable agents: ${improvementCapableAgents.join(", ")}.`]
         : []),
     ].join(" "), {
-      remediation: improveSelectorRemediation(configuredSkills, improvementCapableAgents),
-      subject: { configuredSkills, configuredAgents, improvementCapableAgents },
+      remediation: improveSelectorRemediation(configuredVersions, improvementCapableAgents),
+      subject: { configuredVersions, configuredAgents, improvementCapableAgents },
       exitCode: 2,
     });
   }
   const [skillBundle] = runtime.skillBundles;
   if (!skillBundle) {
-    throw new WorkbenchUserError("No primary skill selected for improve.");
+    throw new WorkbenchUserError("No current skill version selected for improve.");
   }
-  if (skillBundle.skillName !== PRIMARY_SKILL_NAME) {
-    throw new WorkbenchUserError("workbench improve can edit only the primary project skill. Vendor or clone another skill before improving it.");
+  if (skillBundle.skillName !== CURRENT_SKILL_VERSION_NAME) {
+    throw new WorkbenchUserError("workbench improve can edit only the current local project skill. Vendor or clone another skill before improving it.");
   }
   const [evalAgent] = runtime.selectedAgents;
   if (!evalAgent) {
@@ -6774,13 +6804,13 @@ function nextWorkbenchEvalCaseCommand(cases: readonly WorkbenchEvalCaseRuntime[]
 }
 
 function improveSelectorRemediation(
-  configuredSkills: readonly string[],
+  configuredVersions: readonly string[],
   improvementCapableAgents: readonly string[],
 ): string {
-  const skill = configuredSkills[0] ?? PRIMARY_SKILL_NAME;
+  const version = configuredVersions[0] ?? CURRENT_SKILL_VERSION_NAME;
   const agent = improvementCapableAgents[0];
   if (agent) {
-    return `workbench improve --skills ${skill} --agents ${agent}`;
+    return `workbench improve --versions ${version} --agents ${agent}`;
   }
   return providerAgentSetupCommand("codex", "default");
 }
@@ -6795,43 +6825,48 @@ function improveProofEvalFailureMessage(
   ].join("");
 }
 
-function shouldSkipVersionForCompareSelection(
+function shouldSkipVersionForResultsSelection(
   error: unknown,
-  options: Pick<WorkbenchCompareOptions, "skills" | "agents">,
+  options: Pick<WorkbenchResultsOptions, "versions" | "agents">,
   versionCount: number,
 ): boolean {
   if (versionCount <= 1 || !(error instanceof WorkbenchUserError)) {
     return false;
   }
   const message = error.message.trim();
-  if (isNamedCompareSelection(options.agents) && message.startsWith("Agent not found: ")) {
+  if (isNamedResultsSelection(options.agents) && message.startsWith("Agent not found: ")) {
     return true;
   }
-  return isNamedCompareSelection(options.skills) && message.startsWith("Skill not found: ");
+  return isNamedResultsSelection(options.versions) && message.startsWith("Skill not found: ");
 }
 
-function isNamedCompareSelection(selection: string | undefined): boolean {
+function isNamedResultsSelection(selection: string | undefined): boolean {
   const normalized = selection?.trim();
   return Boolean(normalized && normalized !== ALL_SELECTOR);
 }
 
-export async function compareWorkbench(options: WorkbenchCompareOptions = {}): Promise<WorkbenchComparison> {
+export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): Promise<WorkbenchResults> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
   await requireInitialized(root);
   const state = await loadState(root);
   await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
-  const recordedComparison = buildWorkbenchComparisonFromState(state, options);
+  const internalSelection = {
+    versions: options.projectVersions,
+    skills: options.versions,
+    agents: options.agents,
+  };
+  const recordedComparison = buildInternalComparisonFromState(state, internalSelection);
   if (recordedComparison.cells.some((cell) => cell.runId || cell.status)) {
-    const completedComparison = await completeRecordedComparisonSelectionMatrix(state, recordedComparison, options);
+    const completedComparison = await completeRecordedResultsSelectionMatrix(state, recordedComparison, options);
     await saveState(root, state);
-    return completedComparison;
+    return resultsFromInternalComparison(completedComparison, state);
   }
-  let versions = resolveVersionSelection(state, options.versions ?? "current");
+  let versions = resolveVersionSelection(state, options.projectVersions ?? "current");
   if (versions.length === 0) {
     versions = [await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE)];
   }
-  const cells: WorkbenchComparisonCell[] = [];
+  const cells: InternalComparisonCell[] = [];
   const comparedSkills: WorkbenchSkillBundleSnapshot[] = [];
   const comparedAgents: WorkbenchAgent[] = [];
   const comparedVersions: WorkbenchVersion[] = [];
@@ -6841,13 +6876,13 @@ export async function compareWorkbench(options: WorkbenchCompareOptions = {}): P
     let runtime: WorkbenchVersionRuntimeSnapshot;
     try {
       runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
-        skill: options.skills,
+        skill: options.versions,
         agent: options.agents,
         authToken: options.authToken,
-        selectionRemediationCommand: "compare",
+        selectionRemediationCommand: "results",
       });
     } catch (error) {
-      if (shouldSkipVersionForCompareSelection(error, options, versions.length)) {
+      if (shouldSkipVersionForResultsSelection(error, options, versions.length)) {
         skippedVersions.push(version.id);
         continue;
       }
@@ -6894,25 +6929,25 @@ export async function compareWorkbench(options: WorkbenchCompareOptions = {}): P
     }
   }
   if (comparedVersions.length === 0 && skippedVersions.length > 0) {
-    throw new WorkbenchUserError("No selected versions define the requested compare skills or agents.");
+    throw new WorkbenchUserError("No selected versions define the requested result versions or agents.");
   }
   await saveState(root, state);
   const [onlyEvalHash] = [...evalHashes];
-  return {
+  return resultsFromInternalComparison({
     ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
     versions: comparedVersions,
     skills: comparedSkills,
     agents: uniqueAgentSnapshots(comparedAgents),
     cells,
-  };
+  }, state);
   });
 }
 
-async function completeRecordedComparisonSelectionMatrix(
+async function completeRecordedResultsSelectionMatrix(
   state: WorkbenchProjectState,
-  comparison: WorkbenchComparison,
-  options: Pick<WorkbenchCompareOptions, "versions" | "skills" | "agents" | "authToken">,
-): Promise<WorkbenchComparison> {
+  comparison: InternalComparison,
+  options: Pick<WorkbenchResultsOptions, "versions" | "agents" | "authToken">,
+): Promise<InternalComparison> {
   const versions = comparison.versions;
   const cells = [...comparison.cells];
   const skills = [...comparison.skills];
@@ -6928,14 +6963,14 @@ async function completeRecordedComparisonSelectionMatrix(
     let runtime: WorkbenchVersionRuntimeSnapshot;
     try {
       runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
-        skill: options.skills,
+        skill: options.versions,
         agent: options.agents,
         authToken: options.authToken,
-        selectionRemediationCommand: "compare",
+        selectionRemediationCommand: "results",
       });
     } catch (error) {
       const alreadyHasEvidence = cells.some((cell) => cell.versionId === version.id && (cell.runId || cell.status));
-      if (alreadyHasEvidence || shouldSkipVersionForCompareSelection(error, options, versions.length)) {
+      if (alreadyHasEvidence || shouldSkipVersionForResultsSelection(error, options, versions.length)) {
         continue;
       }
       throw error;
@@ -6959,7 +6994,7 @@ async function completeRecordedComparisonSelectionMatrix(
     for (const skill of runtime.skillBundles) {
       for (const agent of runtime.selectedAgents) {
         const agentHash = hashJson(agent);
-        const cell: WorkbenchComparisonCell = {
+        const cell: InternalComparisonCell = {
           versionId: version.id,
           skillName: skill.skillName,
           skillBundleHash: skill.hash,
@@ -7008,7 +7043,7 @@ async function completeRecordedComparisonSelectionMatrix(
   };
 }
 
-function comparisonCellAxisKey(cell: Pick<WorkbenchComparisonCell, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentName" | "agentHash">): string {
+function comparisonCellAxisKey(cell: Pick<InternalComparisonCell, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentName" | "agentHash">): string {
   return [
     cell.versionId,
     cell.skillName,
@@ -7019,10 +7054,220 @@ function comparisonCellAxisKey(cell: Pick<WorkbenchComparisonCell, "versionId" |
   ].join("\0");
 }
 
-export function buildWorkbenchComparisonFromState(
+function resultsFromInternalComparison(
+  comparison: InternalComparison,
   state: WorkbenchProjectState,
-  options: Pick<WorkbenchCompareOptions, "versions" | "skills" | "agents"> = {},
-): WorkbenchComparison {
+): WorkbenchResults {
+  const skillByHash = new Map(comparison.skills.map((skill) => [skill.hash, skill]));
+  const agentByHash = new Map(comparison.agents.map((agent) => [agent.hash, agent]));
+  const evalByHash = new Map(state.evals.map((evalSnapshot) => [evalSnapshot.hash, evalSnapshot]));
+  const projectVersionById = new Map(comparison.versions.map((version) => [version.id, version]));
+  const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(comparison);
+  const resultVersions = new Map<string, WorkbenchResults["versions"][number]>();
+  const resultAgents = new Map<string, WorkbenchResults["agents"][number]>();
+  const resultEvaluations = new Map<string, WorkbenchResults["evaluations"][number]>();
+  const resultCells = new Map<string, WorkbenchResults["cells"][number]>();
+  const createdAtByRunId = new Map(state.runs.map((run) => [run.id, run.createdAt]));
+
+  for (const cell of comparison.cells) {
+    const skill = skillByHash.get(cell.skillBundleHash);
+    const agent = agentByHash.get(cell.agentHash);
+    if (!skill || !agent) {
+      continue;
+    }
+    const projectVersion = projectVersionById.get(cell.versionId);
+    const skillVersion = resultVersionFromInternalCell(
+      cell,
+      skill,
+      projectVersion,
+      localOrdinalByProjectVersionId,
+      state,
+    );
+    const evaluation = evalByHash.get(cell.evalHash);
+    const resultCell: WorkbenchResults["cells"][number] = {
+      skillVersionId: skillVersion.id,
+      evaluationId: cell.evalHash,
+      agentVersionId: cell.agentHash,
+      ...(cell.runId ? { runId: cell.runId } : {}),
+      ...(cell.status ? { status: cell.status } : {}),
+      ...(cell.score !== undefined ? { quality: cell.score } : {}),
+      ...(cell.samples !== undefined ? { samples: cell.samples } : {}),
+      ...(cell.costUsd !== undefined ? { costUsd: cell.costUsd } : {}),
+      ...(cell.latencyMs !== undefined ? { latencyMs: cell.latencyMs } : {}),
+      ...(cell.error ? { error: cell.error } : {}),
+    };
+    const resultCellKey = [
+      resultCell.skillVersionId,
+      resultCell.evaluationId,
+      resultCell.agentVersionId,
+    ].join("\0");
+    const existingCell = resultCells.get(resultCellKey);
+    if (!existingCell || compareResultCellEvidence(resultCell, existingCell, createdAtByRunId) > 0) {
+      resultCells.set(resultCellKey, resultCell);
+    }
+    resultVersions.set(skillVersion.id, skillVersion);
+    resultAgents.set(cell.agentHash, {
+      id: cell.agentHash,
+      name: agent.agent.name,
+      label: agent.agent.name,
+      adapter: agent.agent.adapter,
+      ...(agent.agent.model ? { model: agent.agent.model } : {}),
+    });
+    resultEvaluations.set(cell.evalHash, {
+      id: cell.evalHash,
+      ...(evaluation ? {
+        caseCount: evaluation.caseCount,
+        scoreAdapter: evaluation.scoreAdapter,
+        createdAt: evaluation.createdAt,
+        updatedAt: evaluation.updatedAt,
+      } : {}),
+    });
+  }
+
+  return {
+    versions: [...resultVersions.values()].sort((left, right) =>
+      resultVersionSortKey(left).localeCompare(resultVersionSortKey(right))
+    ),
+    evaluations: [...resultEvaluations.values()].sort((left, right) =>
+      (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.id.localeCompare(right.id)
+    ),
+    agents: [...resultAgents.values()].sort((left, right) =>
+      left.label.localeCompare(right.label) || left.id.localeCompare(right.id)
+    ),
+    cells: [...resultCells.values()].sort((left, right) =>
+      resultVersionSortKey(resultVersions.get(left.skillVersionId)).localeCompare(resultVersionSortKey(resultVersions.get(right.skillVersionId))) ||
+      left.evaluationId.localeCompare(right.evaluationId) ||
+      left.agentVersionId.localeCompare(right.agentVersionId)
+    ),
+  };
+}
+
+function resultVersionFromInternalCell(
+  cell: InternalComparisonCell,
+  skill: WorkbenchSkillBundleSnapshot,
+  projectVersion: WorkbenchVersion | undefined,
+  localOrdinalByProjectVersionId: ReadonlyMap<string, number>,
+  state: WorkbenchProjectState,
+): WorkbenchResults["versions"][number] {
+  const id = resultSkillVersionId(skill, cell);
+  const localOrdinal = localOrdinalByProjectVersionId.get(cell.versionId) ?? 1;
+  const source = resultSkillVersionSource(skill);
+  return {
+    id,
+    label: resultSkillVersionLabel(skill, localOrdinal),
+    source,
+    sourceKind: skill.source.kind,
+    projectVersionId: cell.versionId,
+    contentHash: skill.hash,
+    current: skill.source.kind === "local" &&
+      (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".") &&
+      cell.versionId === state.refs.current,
+    files: skill.files.map(copyFile),
+    ...(projectVersion && remoteCurrentRefPromotesVersionInState(state, projectVersion.id) ? { published: true } : {}),
+  };
+}
+
+function resultSkillVersionId(
+  skill: WorkbenchSkillBundleSnapshot,
+  cell: InternalComparisonCell,
+): string {
+  if (skill.source.kind === "local" && (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".")) {
+    return cell.versionId;
+  }
+  return resultSkillVersionSource(skill) || skill.hash;
+}
+
+function resultSkillVersionSource(skill: WorkbenchSkillBundleSnapshot): string | undefined {
+  if (skill.source.source) {
+    return skill.source.source;
+  }
+  if (skill.source.kind === "none") {
+    return "none";
+  }
+  if (skill.source.kind === "local" && skill.source.path) {
+    return `local:${skill.source.path}`;
+  }
+  if (skill.source.kind === "remote" && skill.source.from && skill.source.ref) {
+    return `${skill.source.from}@${skill.source.ref}`;
+  }
+  return undefined;
+}
+
+function resultSkillVersionLabel(skill: WorkbenchSkillBundleSnapshot, localOrdinal: number): string {
+  const sourceLabel = skill.source.label?.trim();
+  if (skill.source.kind === "none" || skill.skillName === "no-skill") {
+    return sourceLabel || "No skill";
+  }
+  if (skill.source.kind === "local" && (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".")) {
+    return `${sourceLabel || "Your skill"} v${localOrdinal}`;
+  }
+  if (sourceLabel) {
+    return sourceLabel;
+  }
+  if (skill.source.source?.startsWith("workbench:")) {
+    return skill.source.source.slice("workbench:".length);
+  }
+  return readableResultLabel(skill.skillName);
+}
+
+function resultLocalVersionOrdinals(comparison: InternalComparison): Map<string, number> {
+  const localVersionIds = new Set<string>();
+  const skillByHash = new Map(comparison.skills.map((skill) => [skill.hash, skill]));
+  for (const cell of comparison.cells) {
+    const skill = skillByHash.get(cell.skillBundleHash);
+    if (
+      skill?.source.kind === "local" &&
+      (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".") &&
+      (cell.runId || cell.status || cell.score !== undefined || cell.latencyMs !== undefined || cell.costUsd !== undefined)
+    ) {
+      localVersionIds.add(cell.versionId);
+    }
+  }
+  const ids = localVersionIds.size > 0
+    ? localVersionIds
+    : new Set(comparison.versions.map((version) => version.id));
+  const sorted = comparison.versions
+    .filter((version) => ids.has(version.id))
+    .sort(compareVersionIds);
+  return new Map(sorted.map((version, index) => [version.id, index + 1]));
+}
+
+function compareResultCellEvidence(
+  left: WorkbenchResults["cells"][number],
+  right: WorkbenchResults["cells"][number],
+  createdAtByRunId: ReadonlyMap<string, string>,
+): number {
+  const leftTerminal = left.status ? isTerminalRunStatus(left.status) : false;
+  const rightTerminal = right.status ? isTerminalRunStatus(right.status) : false;
+  if (leftTerminal !== rightTerminal) {
+    return leftTerminal ? 1 : -1;
+  }
+  const sampleDelta = (left.samples ?? 0) - (right.samples ?? 0);
+  if (sampleDelta !== 0) {
+    return sampleDelta;
+  }
+  const leftCreated = left.runId ? createdAtByRunId.get(left.runId) ?? "" : "";
+  const rightCreated = right.runId ? createdAtByRunId.get(right.runId) ?? "" : "";
+  return leftCreated.localeCompare(rightCreated);
+}
+
+function resultVersionSortKey(version: WorkbenchResults["versions"][number] | undefined): string {
+  return version?.projectVersionId ?? version?.id ?? "";
+}
+
+function remoteCurrentRefPromotesVersionInState(state: WorkbenchProjectState, versionId: string): boolean {
+  return publishedVersionIdFromRefs(state.refs) === versionId || publishedVersionIdsFromRefs(state.refs).includes(versionId);
+}
+
+function readableResultLabel(value: string): string {
+  const normalized = value.trim().replace(/[-_]+/gu, " ");
+  return normalized ? normalized.replace(/\b\w/gu, (match) => match.toUpperCase()) : "Version";
+}
+
+export function buildInternalComparisonFromState(
+  state: WorkbenchProjectState,
+  options: InternalComparisonSelection = {},
+): InternalComparison {
   const versions = resolveVersionSelection(state, options.versions ?? "current");
   const versionIds = new Set(versions.map((version) => version.id));
   const skillBundlesByHash = new Map(state.skillBundles.map((bundle) => [bundle.hash, bundle]));
@@ -7091,7 +7336,7 @@ export function buildWorkbenchComparisonFromState(
   );
   const comparedSkills = uniqueSkillBundles(entries.map((entry) => entry.bundle));
   const evalHashes = new Set(entries.map((entry) => entry.evalHash));
-  const cells: WorkbenchComparisonCell[] = [];
+  const cells: InternalComparisonCell[] = [];
 
   for (const entry of entries) {
     const agents = agentsByVersionId.get(entry.version.id) ?? [];
@@ -7126,6 +7371,13 @@ export function buildWorkbenchComparisonFromState(
     agents: comparedAgents,
     cells,
   };
+}
+
+export function buildWorkbenchResultsFromState(
+  state: WorkbenchProjectState,
+  options: InternalComparisonSelection = {},
+): WorkbenchResults {
+  return resultsFromInternalComparison(buildInternalComparisonFromState(state, options), state);
 }
 
 export async function switchWorkbenchVersion(versionRef: string, options: WorkbenchCommandOptions = {}): Promise<WorkbenchVersion> {
@@ -7763,11 +8015,11 @@ export function createWorkbenchInspectionSnapshotFromState(
     evals: state.evals.map(copyEval),
     agents,
     ...(currentVersion ? {
-      comparison: buildWorkbenchComparisonFromState(state, {
-        versions: currentVersion.id,
-        skills: status.defaultSkill,
-        agents: status.defaultAgent,
-      }),
+      results: resultsFromInternalComparison(buildInternalComparisonFromState(state, {
+        versions: "all",
+        skills: "all",
+        agents: "all",
+      }), state),
     } : {}),
     runs: state.runs.map(copyRun),
     jobs: state.jobs.map(copyJob),
@@ -7796,22 +8048,22 @@ export function defaultWorkbenchAgentSelectionFromState(state: WorkbenchProjectS
 }
 
 export function defaultWorkbenchSkillSelectionFromState(state: WorkbenchProjectState): string | undefined {
-  const configured = authoredWorkbenchDefaultFromState(state, SKILLS_FILE);
+  const configured = authoredWorkbenchDefaultFromState(state, VERSIONS_FILE);
   if (configured === ALL_SELECTOR) {
     return configured;
   }
   if (configured && state.skillSources.some((source) => source.name === configured)) {
     return configured;
   }
-  if (state.skillSources.some((source) => source.name === PRIMARY_SKILL_NAME)) {
-    return PRIMARY_SKILL_NAME;
+  if (state.skillSources.some((source) => source.name === CURRENT_SKILL_VERSION_NAME)) {
+    return CURRENT_SKILL_VERSION_NAME;
   }
   return state.skillSources[0]?.name ?? state.skillBundles[0]?.skillName;
 }
 
 function authoredWorkbenchDefaultFromState(
   state: WorkbenchProjectState,
-  fileName: typeof AGENTS_FILE | typeof SKILLS_FILE,
+  fileName: typeof AGENTS_FILE | typeof VERSIONS_FILE,
 ): string | undefined {
   const current = currentWorkbenchVersionIdFromState(state);
   const version = current
@@ -10526,7 +10778,7 @@ function resolveNamedSelection<T extends { name: string }>(
   entries: readonly T[],
   selection: string | undefined,
   defaultSelection: string,
-  noun: "skill" | "agent",
+  noun: WorkbenchManifestEntryNoun,
   remediationCommand?: WorkbenchSelectorCommand,
 ): T[] {
   const selected = (selection ?? defaultSelection).trim();
@@ -10551,7 +10803,9 @@ function resolveNamedSelection<T extends { name: string }>(
         remediation: namedSelectionRemediation(noun, entries, remediationCommand),
         subject: noun === "agent"
           ? { configuredAgents: configured }
-          : { configuredSkills: configured },
+          : noun === "version"
+            ? { configuredVersions: configured }
+            : { configuredSkills: configured },
         exitCode: 2,
       });
     }
@@ -10569,11 +10823,11 @@ function configuredSelectionNames(entries: readonly { name: string }[]): string 
 }
 
 function namedSelectionRemediation<T extends { name: string }>(
-  noun: "skill" | "agent",
+  noun: WorkbenchManifestEntryNoun,
   entries: readonly T[],
   command: WorkbenchSelectorCommand = "eval",
 ): string {
-  const flag = noun === "agent" ? "--agents" : "--skills";
+  const flag = noun === "agent" ? "--agents" : "--versions";
   const configured = entries.map((entry) => entry.name).sort();
   if (configured.length === 0) {
     return noun === "agent"
@@ -10613,7 +10867,7 @@ function readManifestDefaultSelection<T extends { name: string }>(
   record: Record<string, unknown>,
   fileLabel: string,
   entries: readonly T[],
-  noun: "skill" | "agent",
+  noun: WorkbenchManifestEntryNoun,
 ): string {
   const configured = typeof record.default === "string" ? record.default.trim() : "";
   if (!configured) {
@@ -10631,7 +10885,7 @@ function readManifestDefaultSelection<T extends { name: string }>(
   return configured;
 }
 
-function normalizeManifestEntryName(name: string, fileLabel: string, noun: "skill" | "agent"): string {
+function normalizeManifestEntryName(name: string, fileLabel: string, noun: WorkbenchManifestEntryNoun): string {
   const normalizedName = name.trim();
   if (!normalizedName) {
     throw new WorkbenchUserError(`${fileLabel} contains an empty ${noun} name.`);
@@ -10645,7 +10899,7 @@ function normalizeManifestEntryName(name: string, fileLabel: string, noun: "skil
 function assertUniqueManifestEntryNames<T extends { name: string }>(
   entries: readonly T[],
   fileLabel: string,
-  noun: "skill" | "agent",
+  noun: WorkbenchManifestEntryNoun,
 ): void {
   const seen = new Set<string>();
   for (const entry of entries) {
@@ -10862,7 +11116,7 @@ async function readSkillFiles(root: string): Promise<SurfaceSnapshotFile[]> {
     ...await readOptionalFile(path.join(workbenchDir(root), EVAL_FILE), `${WORKBENCH_DIR}/${EVAL_FILE}`),
     ...await readFilesUnder(path.join(workbenchDir(root), CASES_DIR), `${WORKBENCH_DIR}/${CASES_DIR}`),
     ...await readOptionalFile(path.join(workbenchDir(root), AGENTS_FILE), `${WORKBENCH_DIR}/${AGENTS_FILE}`),
-    ...await readOptionalFile(path.join(workbenchDir(root), SKILLS_FILE), `${WORKBENCH_DIR}/${SKILLS_FILE}`),
+    ...await readOptionalFile(path.join(workbenchDir(root), VERSIONS_FILE), `${WORKBENCH_DIR}/${VERSIONS_FILE}`),
     ...await readFilesUnder(path.join(workbenchDir(root), ENVIRONMENT_DIR), `${WORKBENCH_DIR}/${ENVIRONMENT_DIR}`),
   ];
   return [...installableFiles, ...authoredWorkbenchFiles]
@@ -10870,13 +11124,14 @@ async function readSkillFiles(root: string): Promise<SurfaceSnapshotFile[]> {
 }
 
 async function readSkillSources(root: string): Promise<WorkbenchSkillSource[]> {
-  const filePath = path.join(workbenchDir(root), SKILLS_FILE);
+  await assertNoLegacySkillManifest(root);
+  const filePath = path.join(workbenchDir(root), VERSIONS_FILE);
   if (!await exists(filePath)) {
-    const rootSkill = await primaryRootSkillSource(root);
+    const rootSkill = await currentRootSkillSource(root);
     if (rootSkill) {
       return [rootSkill];
     }
-    throw new WorkbenchUserError(`Missing ${path.join(".workbench", SKILLS_FILE)}. Projects without a root ${SKILL_FILE} must declare measured skills.`);
+    throw new WorkbenchUserError(`Missing ${path.join(".workbench", VERSIONS_FILE)}. Projects without a root ${SKILL_FILE} must declare versions.`);
   }
   const source = await fs.readFile(filePath, "utf8");
   let record: Record<string, unknown>;
@@ -10884,103 +11139,185 @@ async function readSkillSources(root: string): Promise<WorkbenchSkillSource[]> {
     record = parseYamlRecord(source);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} is not valid YAML: ${message}`);
+    throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} is not valid YAML: ${message}`);
   }
-  const skillsRecord = asRecord(record.skills);
-  if (!skillsRecord || Object.keys(skillsRecord).length === 0) {
-    const rootSkill = await primaryRootSkillSource(root);
+  const versionsRecord = asRecord(record.versions);
+  if (!versionsRecord || Object.keys(versionsRecord).length === 0) {
+    const rootSkill = await currentRootSkillSource(root);
     if (rootSkill) {
       return [rootSkill];
     }
-    throw new WorkbenchUserError(`No skills configured in ${path.join(".workbench", SKILLS_FILE)}.`);
+    throw new WorkbenchUserError(`No versions configured in ${path.join(".workbench", VERSIONS_FILE)}.`);
   }
-  const sources = Object.entries(skillsRecord)
-    .map(([name, raw]) => parseSkillSource(name, raw, `skills.${name}`))
+  const sources = Object.entries(versionsRecord)
+    .map(([name, raw]) => parseSkillSource(name, raw, `versions.${name}`))
     .sort((left, right) => left.name.localeCompare(right.name));
-  assertUniqueManifestEntryNames(sources, path.join(".workbench", SKILLS_FILE), "skill");
-  readManifestDefaultSelection(record, path.join(".workbench", SKILLS_FILE), sources, "skill");
+  assertUniqueManifestEntryNames(sources, path.join(".workbench", VERSIONS_FILE), "version");
+  readManifestDefaultSelection(record, path.join(".workbench", VERSIONS_FILE), sources, "version");
   return sources;
 }
 
 async function readDefaultSkillSelection(root: string, sources: readonly WorkbenchSkillSource[]): Promise<string> {
-  const filePath = path.join(workbenchDir(root), SKILLS_FILE);
+  await assertNoLegacySkillManifest(root);
+  const filePath = path.join(workbenchDir(root), VERSIONS_FILE);
   if (!await exists(filePath)) {
-    if (sources.some((source) => source.name === PRIMARY_SKILL_NAME)) {
-      return PRIMARY_SKILL_NAME;
+    if (sources.some((source) => source.name === CURRENT_SKILL_VERSION_NAME)) {
+      return CURRENT_SKILL_VERSION_NAME;
     }
-    throw new WorkbenchUserError(`Missing ${path.join(".workbench", SKILLS_FILE)}. Projects without a root ${SKILL_FILE} must declare measured skills.`);
+    throw new WorkbenchUserError(`Missing ${path.join(".workbench", VERSIONS_FILE)}. Projects without a root ${SKILL_FILE} must declare versions.`);
   }
   const record = parseYamlRecord(await fs.readFile(filePath, "utf8"));
-  const skillsRecord = asRecord(record.skills);
-  if ((!skillsRecord || Object.keys(skillsRecord).length === 0) && sources.some((source) => source.name === PRIMARY_SKILL_NAME)) {
-    return PRIMARY_SKILL_NAME;
+  const versionsRecord = asRecord(record.versions);
+  if ((!versionsRecord || Object.keys(versionsRecord).length === 0) && sources.some((source) => source.name === CURRENT_SKILL_VERSION_NAME)) {
+    return CURRENT_SKILL_VERSION_NAME;
   }
-  return readManifestDefaultSelection(record, path.join(".workbench", SKILLS_FILE), sources, "skill");
+  return readManifestDefaultSelection(record, path.join(".workbench", VERSIONS_FILE), sources, "version");
 }
 
-async function primaryRootSkillSource(root: string): Promise<WorkbenchSkillSource | null> {
+async function assertNoLegacySkillManifest(root: string): Promise<void> {
+  const legacyPath = path.join(workbenchDir(root), LEGACY_SKILLS_FILE);
+  if (await exists(legacyPath)) {
+    throw new WorkbenchUserError(`${path.join(".workbench", LEGACY_SKILLS_FILE)} is no longer supported. Use ${path.join(".workbench", VERSIONS_FILE)} with versions.*.source entries.`);
+  }
+}
+
+async function currentRootSkillSource(root: string): Promise<WorkbenchSkillSource | null> {
   return await exists(path.join(root, SKILL_FILE))
-    ? { name: PRIMARY_SKILL_NAME, kind: "local", path: "." }
+    ? { name: CURRENT_SKILL_VERSION_NAME, kind: "local", source: "local:.", label: "Your skill", path: "." }
     : null;
 }
 
 function parseSkillSource(name: string, raw: unknown, label: string): WorkbenchSkillSource {
-  const value = typeof raw === "string" ? { path: raw } : asRecord(raw) ?? {};
-  const normalizedName = normalizeManifestEntryName(name, path.join(".workbench", SKILLS_FILE), "skill");
-  const pathRef = typeof value.path === "string" && value.path.trim() ? value.path.trim() : undefined;
-  const fromRef = typeof value.from === "string" && value.from.trim() ? value.from.trim() : undefined;
-  const baselineRef = typeof value.baseline === "string" && value.baseline.trim() ? value.baseline.trim() : undefined;
-  if ((pathRef ? 1 : 0) + (fromRef ? 1 : 0) + (baselineRef ? 1 : 0) !== 1) {
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} ${label} must define exactly one of path, from, or baseline.`);
+  const value = asRecord(raw) ?? {};
+  const normalizedName = normalizeManifestEntryName(name, path.join(".workbench", VERSIONS_FILE), "version");
+  for (const oldKey of ["path", "from", "ref", "baseline"]) {
+    if (oldKey in value) {
+      throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label}.${oldKey} is no longer supported. Use ${label}.source.`);
+    }
   }
-  if (baselineRef && baselineRef !== "none") {
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} ${label} baseline must be none.`);
-  }
-  const explicitRef = typeof value.ref === "string" && value.ref.trim() ? value.ref.trim() : undefined;
-  if (fromRef && !explicitRef) {
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} ${label} remote skills must define an explicit ref.`);
-  }
-  if (baselineRef && explicitRef) {
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} ${label} baseline skills cannot define ref.`);
+  const sourceText = typeof value.source === "string" && value.source.trim() ? value.source.trim() : undefined;
+  if (!sourceText) {
+    throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label} must define source.`);
   }
   const includes = Array.isArray(value.includes)
     ? value.includes.map((entry, index) => parseSkillInclude(entry, `${label}.includes[${index}]`))
     : undefined;
-  if (baselineRef && includes && includes.length > 0) {
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} ${label} baseline skills cannot define includes.`);
+  const descriptor = parseVersionSourceString(sourceText, label);
+  if (descriptor.kind === "none" && includes && includes.length > 0) {
+    throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label} source none cannot define includes.`);
   }
+  const explicitLabel = typeof value.label === "string" && value.label.trim() ? value.label.trim() : undefined;
   return {
     name: normalizedName,
-    kind: pathRef ? "local" : fromRef ? "remote" : "none",
-    ...(pathRef ? { path: pathRef } : {}),
-    ...(fromRef ? { from: fromRef } : {}),
-    ...(explicitRef ? { ref: explicitRef } : {}),
+    source: sourceText,
+    ...(explicitLabel ? { label: explicitLabel } : {}),
+    ...descriptor,
     ...(includes && includes.length > 0 ? { includes } : {}),
   };
 }
 
 function parseSkillInclude(raw: unknown, label: string): WorkbenchSkillInclude {
-  const value = typeof raw === "string" ? { path: raw } : asRecord(raw) ?? {};
-  const pathRef = typeof value.path === "string" && value.path.trim() ? value.path.trim() : undefined;
-  const fromRef = typeof value.from === "string" && value.from.trim() ? value.from.trim() : undefined;
-  if ((pathRef ? 1 : 0) + (fromRef ? 1 : 0) !== 1) {
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} ${label} must define exactly one of path or from.`);
+  const value = asRecord(raw) ?? {};
+  const sourceText = typeof value.source === "string" && value.source.trim() ? value.source.trim() : undefined;
+  if (!sourceText) {
+    throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label} must define source.`);
   }
-  const explicitRef = typeof value.ref === "string" && value.ref.trim() ? value.ref.trim() : undefined;
-  if (fromRef && !explicitRef) {
-    throw new WorkbenchUserError(`${path.join(".workbench", SKILLS_FILE)} ${label} remote skills must define an explicit ref.`);
+  for (const oldKey of ["path", "from", "ref", "baseline"]) {
+    if (oldKey in value) {
+      throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label}.${oldKey} is no longer supported. Use ${label}.source.`);
+    }
+  }
+  const descriptor = parseVersionSourceString(sourceText, label);
+  if (descriptor.kind === "none") {
+    throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label} includes cannot use source none.`);
   }
   const explicitName = typeof value.name === "string" && value.name.trim() ? value.name.trim() : undefined;
-  const fallbackName = pathRef
-    ? safeName(path.basename(pathRef))
-    : safeName(remoteSkillPathName(fromRef!));
+  const explicitLabel = typeof value.label === "string" && value.label.trim() ? value.label.trim() : undefined;
+  const fallbackName = descriptor.kind === "local"
+    ? safeName(path.basename(descriptor.path || "include"))
+    : safeName(remoteSkillPathName(descriptor.from!));
   return {
     name: explicitName ?? fallbackName,
-    kind: pathRef ? "local" : "remote",
-    ...(pathRef ? { path: pathRef } : {}),
-    ...(fromRef ? { from: fromRef } : {}),
-    ...(explicitRef ? { ref: explicitRef } : {}),
+    source: sourceText,
+    ...(explicitLabel ? { label: explicitLabel } : {}),
+    kind: descriptor.kind,
+    ...(descriptor.path ? { path: descriptor.path } : {}),
+    ...(descriptor.from ? { from: descriptor.from } : {}),
+    ...(descriptor.ref ? { ref: descriptor.ref } : {}),
   };
+}
+
+function parseVersionSourceString(
+  source: string,
+  label: string,
+): Pick<WorkbenchSkillSource, "kind" | "path" | "from" | "ref"> {
+  if (source === "none") {
+    return { kind: "none" };
+  }
+  if (source.startsWith("local:")) {
+    const localPath = source.slice("local:".length).trim();
+    if (!localPath) {
+      throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label}.source local: requires a path.`);
+    }
+    return { kind: "local", path: localPath };
+  }
+  if (source.startsWith("workbench:")) {
+    const pinned = splitPinnedSource(source.slice("workbench:".length), label);
+    const parts = pinned.from.split("/");
+    const [owner, skill] = parts;
+    if (parts.length !== 2 || !isPinnedSourceSegment(owner) || !isPinnedSourceSegment(skill) || !isPinnedSourceRef(pinned.ref)) {
+      throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label}.source must be workbench:OWNER/SKILL@VERSION.`);
+    }
+    return {
+      kind: "remote",
+      from: `https://v2.workbench.ai/skills/${encodeURIComponent(owner)}/${encodeURIComponent(skill)}`,
+      ref: pinned.ref,
+    };
+  }
+  if (source.startsWith("github:")) {
+    const pinned = splitPinnedSource(source, label);
+    if (!isGithubPinnedSource(pinned.from, pinned.ref)) {
+      throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label}.source must be github:OWNER/REPO//PATH@COMMIT, where COMMIT is a 40-character commit SHA.`);
+    }
+    return { kind: "remote", from: pinned.from, ref: pinned.ref };
+  }
+  throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label}.source must use local:, none, workbench:, or github:.`);
+}
+
+function splitPinnedSource(value: string, label: string): { from: string; ref: string } {
+  const trimmed = value.trim();
+  const at = trimmed.lastIndexOf("@");
+  if (at <= 0 || at === trimmed.length - 1) {
+    throw new WorkbenchUserError(`${path.join(".workbench", VERSIONS_FILE)} ${label}.source must include an immutable @ ref.`);
+  }
+  return {
+    from: trimmed.slice(0, at).trim(),
+    ref: trimmed.slice(at + 1).trim(),
+  };
+}
+
+function isPinnedSourceSegment(value: string | undefined): value is string {
+  return typeof value === "string" && /^[^\s/@]+$/u.test(value);
+}
+
+function isPinnedSourceRef(value: string): boolean {
+  return /^[^\s/@]+$/u.test(value);
+}
+
+function isGithubPinnedSource(from: string, ref: string): boolean {
+  if (!/^[0-9a-f]{40}$/iu.test(ref)) {
+    return false;
+  }
+  const match = /^github:([^\s/@]+)\/([^\s/@]+)\/\/(.+)$/u.exec(from);
+  if (!match) {
+    return false;
+  }
+  try {
+    normalizeRelativePath(match[3]!);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function resolveRequestedSkillBundles(args: {
@@ -10994,7 +11331,7 @@ async function resolveRequestedSkillBundles(args: {
   const sources = await readSkillSources(args.root);
   args.state.skillSources = sources.map(copySkillSource);
   const defaultSelection = await readDefaultSkillSelection(args.root, sources);
-  const requested = resolveNamedSelection(sources, args.selection, defaultSelection, "skill", args.remediationCommand);
+  const requested = resolveNamedSelection(sources, args.selection, defaultSelection, "version", args.remediationCommand);
   const bundles: WorkbenchSkillBundleSnapshot[] = [];
   for (const source of requested) {
     const bundle = await resolveSkillBundle(args.root, source, args.version, {
@@ -11015,8 +11352,8 @@ async function resolveSkillBundle(
 ): Promise<WorkbenchSkillBundleSnapshot> {
   const entryFiles = source.kind === "none"
     ? []
-    : source.kind === "local" && source.path === "." && source.name === PRIMARY_SKILL_NAME
-    ? installablePrimarySkillFiles(primaryVersion.files, source, options.sources ?? [source])
+    : source.kind === "local" && source.path === "."
+    ? installableCurrentSkillFiles(primaryVersion.files, source, options.sources ?? [source])
         .map((file) => ({ ...copyFile(file), path: `${source.name}/${normalizeRelativePath(file.path)}` }))
     : await resolveSkillSourceFiles(root, source, source.name, options);
   const includedSkills: WorkbenchSkillInclude[] = [];
@@ -11036,6 +11373,7 @@ async function resolveSkillBundle(
     source: {
       name: source.name,
       kind: source.kind,
+      source: source.source,
       path: source.path,
       from: source.from,
       ref: source.ref,
@@ -11044,6 +11382,7 @@ async function resolveSkillBundle(
     includes: includedSkills.map((include) => ({
       name: include.name,
       kind: include.kind,
+      source: include.source,
       path: include.path,
       from: include.from,
       ref: include.ref,
@@ -11484,7 +11823,7 @@ async function removeAuthoredWorkbenchFiles(root: string): Promise<void> {
     fs.rm(path.join(workbenchRoot, EVAL_FILE), { force: true }),
     fs.rm(path.join(workbenchRoot, CASES_DIR), { recursive: true, force: true }),
     fs.rm(path.join(workbenchRoot, AGENTS_FILE), { force: true }),
-    fs.rm(path.join(workbenchRoot, SKILLS_FILE), { force: true }),
+    fs.rm(path.join(workbenchRoot, VERSIONS_FILE), { force: true }),
     fs.rm(path.join(workbenchRoot, ENVIRONMENT_DIR), { recursive: true, force: true }),
   ]);
 }
@@ -12872,7 +13211,7 @@ function bestScoredComparableRun(args: {
   } : undefined;
 }
 
-type WorkbenchComparisonEvidence = {
+type InternalComparisonEvidence = {
   runId: string;
   status: WorkbenchRun["status"];
   createdAt: string;
@@ -12892,7 +13231,7 @@ function bestComparableEvidence(args: {
   evalHash: string;
   agentName: string;
   agentHash: string;
-}): WorkbenchComparisonEvidence | undefined {
+}): InternalComparisonEvidence | undefined {
   const measurements = matchingComparisonMeasurements(args);
   const terminalMeasurements = measurements.filter((measurement) => isTerminalRunStatus(measurement.status));
   if (terminalMeasurements.length > 0) {
@@ -12913,9 +13252,9 @@ function bestScoredComparableEvidence(args: {
   evalHash: string;
   agentName: string;
   agentHash: string;
-}): (WorkbenchComparisonEvidence & { score: number }) | undefined {
+}): (InternalComparisonEvidence & { score: number }) | undefined {
   return matchingComparisonMeasurements(args)
-    .filter((measurement): measurement is WorkbenchComparisonEvidence & { score: number } =>
+    .filter((measurement): measurement is InternalComparisonEvidence & { score: number } =>
       measurement.status === "succeeded" &&
       typeof measurement.score === "number"
     )
@@ -12934,7 +13273,7 @@ function matchingComparisonMeasurements(args: {
   evalHash: string;
   agentName: string;
   agentHash: string;
-}): WorkbenchComparisonEvidence[] {
+}): InternalComparisonEvidence[] {
   const runsById = new Map(args.runs.map((run) => [run.id, run]));
   const runJobsByRunId = new Map<string, WorkbenchJob[]>();
   const matchingJobsByRunId = new Map<string, WorkbenchJob[]>();
@@ -12956,7 +13295,7 @@ function matchingComparisonMeasurements(args: {
       matchingJobsByRunId.set(job.runId, matching);
     }
   }
-  const measurements: WorkbenchComparisonEvidence[] = [];
+  const measurements: InternalComparisonEvidence[] = [];
   for (const [runId, jobs] of matchingJobsByRunId) {
     const run = runsById.get(runId);
     if (!run) {
@@ -13026,7 +13365,7 @@ function comparisonEntryKey(
   return `${versionId}\0${skillName}\0${skillBundleHash}\0${evalHash}`;
 }
 
-function comparisonEvidenceFromRun(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): WorkbenchComparisonEvidence {
+function comparisonEvidenceFromRun(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): InternalComparisonEvidence {
   const samples = comparisonRunSamples(run, jobs);
   const latencyMs = run.latencyMs !== undefined && samples > 1
     ? Math.round(run.latencyMs / samples)
@@ -13047,7 +13386,7 @@ function comparisonEvidenceFromJobs(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
   allRunJobs: readonly WorkbenchJob[],
-): WorkbenchComparisonEvidence {
+): InternalComparisonEvidence {
   const scoredJobs = jobs.filter((job) => typeof job.score === "number");
   const samples = new Set(jobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
   const latencyMs = jobs.some((job) => job.durationMs !== undefined)
@@ -13089,8 +13428,8 @@ function comparisonJobStatus(jobs: readonly WorkbenchJob[], fallback: WorkbenchR
 }
 
 function comparisonCellEvidenceFields(
-  evidence: WorkbenchComparisonEvidence,
-): Pick<WorkbenchComparisonCell, "runId" | "status" | "score" | "samples" | "costUsd" | "latencyMs" | "error"> {
+  evidence: InternalComparisonEvidence,
+): Pick<InternalComparisonCell, "runId" | "status" | "score" | "samples" | "costUsd" | "latencyMs" | "error"> {
   const { createdAt: _createdAt, ...fields } = evidence;
   return fields;
 }
@@ -13451,14 +13790,14 @@ function installableSkillFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSn
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function installablePrimarySkillFiles(
+function installableCurrentSkillFiles(
   files: readonly SurfaceSnapshotFile[],
-  primarySource: WorkbenchSkillSource,
+  currentSource: WorkbenchSkillSource,
   sources: readonly WorkbenchSkillSource[],
 ): SurfaceSnapshotFile[] {
   const excludedLocalSourcePaths = sources
     .filter((source) =>
-      source.name !== primarySource.name &&
+      source.name !== currentSource.name &&
       source.kind === "local" &&
       source.path &&
       source.path !== "."

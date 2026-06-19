@@ -181,6 +181,8 @@ export type WorkbenchSkillIncludeKind = Exclude<WorkbenchSkillSourceKind, "none"
 export interface WorkbenchSkillInclude {
   name: string;
   kind: WorkbenchSkillIncludeKind;
+  source?: string;
+  label?: string;
   path?: string;
   from?: string;
   ref?: string;
@@ -192,6 +194,8 @@ export interface WorkbenchSkillInclude {
 export interface WorkbenchSkillSource {
   name: string;
   kind: WorkbenchSkillSourceKind;
+  source?: string;
+  label?: string;
   path?: string;
   from?: string;
   ref?: string;
@@ -238,7 +242,7 @@ export interface WorkbenchEvalCaseSnapshot {
   files: SurfaceSnapshotFile[];
 }
 
-export type WorkbenchRunKind = "eval" | "improve" | "compare";
+export type WorkbenchRunKind = "eval" | "improve";
 export type WorkbenchRunLocation = "local" | "cloud";
 export type WorkbenchRunStatus = "queued" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -287,7 +291,7 @@ export interface WorkbenchOperationPreview {
 export interface WorkbenchOperationRouteTarget {
   kind: "run";
   runId: string;
-  source: "activity" | "evaluation";
+  source: "runs" | "evaluation";
   evaluationId?: string;
 }
 
@@ -644,28 +648,53 @@ export interface WorkbenchStatusSnapshot {
   next: string | null;
 }
 
-export interface WorkbenchComparisonCell {
-  versionId: string;
-  skillName: string;
-  skillBundleHash: string;
-  evalHash: string;
-  agentName: string;
-  agentHash: string;
+export interface WorkbenchSkillVersion {
+  id: string;
+  label: string;
+  source?: string;
+  sourceKind?: WorkbenchSkillSourceKind;
+  projectVersionId?: string;
+  contentHash?: string;
+  current?: boolean;
+  published?: boolean;
+  files?: SurfaceSnapshotFile[];
+}
+
+export interface WorkbenchAgentVersion {
+  id: string;
+  name: string;
+  label: string;
+  adapter: string;
+  model?: string;
+}
+
+export interface WorkbenchResultEvaluation {
+  id: string;
+  label?: string;
+  caseCount?: number;
+  scoreAdapter?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface WorkbenchResultCell {
+  skillVersionId: string;
+  evaluationId: string;
+  agentVersionId: string;
   runId?: string;
   status?: WorkbenchRunStatus;
-  score?: number;
+  quality?: number;
   samples?: number;
   costUsd?: number;
   latencyMs?: number;
   error?: string;
 }
 
-export interface WorkbenchComparison {
-  evalHash?: string;
-  versions: WorkbenchVersion[];
-  skills: WorkbenchSkillBundleSnapshot[];
-  agents: WorkbenchAgentSnapshot[];
-  cells: WorkbenchComparisonCell[];
+export interface WorkbenchResults {
+  versions: WorkbenchSkillVersion[];
+  evaluations: WorkbenchResultEvaluation[];
+  agents: WorkbenchAgentVersion[];
+  cells: WorkbenchResultCell[];
 }
 
 export interface WorkbenchInspectionSnapshot {
@@ -676,7 +705,7 @@ export interface WorkbenchInspectionSnapshot {
   skillBundles: WorkbenchSkillBundleSnapshot[];
   evals: WorkbenchEvalSnapshot[];
   agents: WorkbenchAgentSnapshot[];
-  comparison?: WorkbenchComparison;
+  results?: WorkbenchResults;
   runs: WorkbenchRun[];
   jobs: WorkbenchJob[];
   traces: WorkbenchTrace[];

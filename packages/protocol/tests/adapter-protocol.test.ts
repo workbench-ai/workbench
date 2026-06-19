@@ -159,14 +159,14 @@ describe("Workbench adapter protocol", () => {
       },
       context: {
         skill: {
-          prepare: { command: "cp -R input/skills/primary/. ." },
+          prepare: { command: "cp -R input/skills/current/. ." },
         },
       },
       paths: {
         workspace: "/workspace",
         output: "/workspace/output",
         result: "/workspace/output/workbench-result.json",
-        skill: "/workspace/input/skills/primary",
+        skill: "/workspace/input/skills/current",
         traces: "/workspace/input/traces",
         enginePrivate: "/workspace/private/engine",
       },
@@ -179,14 +179,14 @@ describe("Workbench adapter protocol", () => {
       },
       context: {
         skill: {
-          prepare: { command: "cp -R input/skills/primary/. ." },
+          prepare: { command: "cp -R input/skills/current/. ." },
         },
       },
       paths: {
         workspace: "/workspace",
         output: "/workspace/output",
         result: "/workspace/output/workbench-result.json",
-        skill: "/workspace/input/skills/primary",
+        skill: "/workspace/input/skills/current",
         traces: "/workspace/input/traces",
         enginePrivate: "/workspace/private/engine",
       },
@@ -205,7 +205,7 @@ describe("Workbench adapter protocol", () => {
         workspace: "/workspace",
         output: "/workspace/output",
         result: "/workspace/output/workbench-result.json",
-        skill: "/workspace/input/skills/primary",
+        skill: "/workspace/input/skills/current",
         traces: "/workspace/input/traces",
         input: "/workspace/input",
         artifacts: "/workspace/output/artifacts",
