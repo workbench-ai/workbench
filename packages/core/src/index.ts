@@ -3926,12 +3926,19 @@ export async function checkWorkbenchSkill(options: WorkbenchCommandOptions = {})
 
 export async function listWorkbenchVersions(options: WorkbenchCommandOptions = {}): Promise<WorkbenchVersion[]> {
   const root = resolveRoot(options.dir);
+  await requireInitialized(root);
+  const state = await loadStateReadOnlyWithRetry(root);
+  return [...state.versions].sort(compareVersionIds);
+}
+
+export async function reconcileCurrentWorkbenchVersion(options: WorkbenchCommandOptions = {}): Promise<WorkbenchVersion> {
+  const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
     await requireInitialized(root);
     const state = await loadState(root);
-    await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
+    const version = await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
     await saveState(root, state);
-    return [...state.versions].sort(compareVersionIds);
+    return copyVersion(version);
   });
 }
 
@@ -3941,7 +3948,6 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
     await requireInitialized(root);
     const state = await loadState(root);
     const version = await resolveOrCreateRunVersion(root, state, options.version);
-    await saveState(root, state);
     const runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
       skill: options.skill,
       agent: options.agent,
@@ -3953,12 +3959,15 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
       assertSkillEvalAgentSupported(agent);
     }
     const skillBundles = runtime.skillBundles;
-    for (const bundle of skillBundles) {
-      upsertByHash(state.skillBundles, bundle);
-    }
     const evalSnapshot = runtime.evalSnapshot;
     if (runtime.cases.length === 0) {
       throw noEvalCasesError();
+    }
+    if ((options.location ?? "local") === "local") {
+      await assertLocalWorkbenchAdapterAuthReady(agents, options.adapterAuthStoreRoot);
+    }
+    for (const bundle of skillBundles) {
+      upsertByHash(state.skillBundles, bundle);
     }
     upsertEvalSnapshotObject(state.evals, evalSnapshot);
     upsertAgentSnapshots(state.agents, runtime.agents);
@@ -3975,6 +3984,7 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
     if (!primaryTarget) {
       throw new WorkbenchUserError("No eval targets resolved for this run.");
     }
+    await saveState(root, state);
     const reusable = options.rerun === true || selected || (options.kind ?? "eval") !== "eval"
       ? undefined
       : latestReusableEvalMatrixRun({
@@ -3986,7 +3996,6 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
           caseCount: reusableCaseCount ?? 0,
         });
     if (reusable) {
-      await saveState(root, state);
       return [copyRun(reusable)];
     }
     const run = await executeWorkbenchEvaluationRun({

@@ -210,6 +210,7 @@ export async function installSnapshotToSkillTargets(options: {
   overwrite: boolean;
   dryRun: boolean;
   provenance: WorkbenchInstallProvenanceInput;
+  sourceForRemediation?: string;
   target?: string;
   scope?: string;
   dir?: string;
@@ -222,7 +223,7 @@ export async function installSnapshotToSkillTargets(options: {
     dir: options.dir,
     write: true,
     env: options.env,
-    sourceForRemediation: options.provenance.handle,
+    sourceForRemediation: options.sourceForRemediation ?? options.provenance.handle,
   });
   const packageFiles = installPackageFiles(options.snapshot.files);
   if (!packageFiles.some((file) => file.path === "SKILL.md")) {
@@ -235,7 +236,7 @@ export async function installSnapshotToSkillTargets(options: {
   const contentHash = contentHashForFiles(packageFiles);
   const target = request.targets[0]!.id;
   const overwriteRemediation = installOverwriteRemediation({
-    handle: options.provenance.handle,
+    handle: options.sourceForRemediation ?? options.provenance.handle,
     target,
     scope: request.scopes[0] ?? "folder",
     dir: request.scopes.includes("folder") && options.dir ? request.dir : undefined,

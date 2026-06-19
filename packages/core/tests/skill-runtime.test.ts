@@ -877,11 +877,17 @@ describe("skill-first Workbench runtime", () => {
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty edit before explicit-version eval.\n");
     const dirtySelectedRuns = await evalWorkbenchSkill({ dir: root, version: initial.id, rerun: true });
-    const dirtyCurrentVersion = (await listWorkbenchVersions({ dir: root }))
+    const uncommittedDirtyVersion = (await listWorkbenchVersions({ dir: root }))
       .find((version) => version.files.some((file) =>
         file.path === "SKILL.md" && file.content.includes("Dirty edit before explicit-version eval.")
       ));
     expect(dirtySelectedRuns[0]).toMatchObject({ versionId: initial.id, status: "succeeded" });
+    expect(uncommittedDirtyVersion).toBeUndefined();
+    await workbenchStatus({ dir: root });
+    const dirtyCurrentVersion = (await listWorkbenchVersions({ dir: root }))
+      .find((version) => version.files.some((file) =>
+        file.path === "SKILL.md" && file.content.includes("Dirty edit before explicit-version eval.")
+      ));
     expect(dirtyCurrentVersion?.files.find((file) => file.path === "SKILL.md")?.content).toContain("Dirty edit before explicit-version eval.");
   }, 60_000);
 
@@ -1064,8 +1070,8 @@ describe("skill-first Workbench runtime", () => {
       })
     ));
 
-    const [status, versions, snapshot, shown] = await Promise.all([
-      workbenchStatus({ dir: root }),
+    const status = await workbenchStatus({ dir: root });
+    const [versions, snapshot, shown] = await Promise.all([
       listWorkbenchVersions({ dir: root }),
       createWorkbenchInspectionSnapshot({ dir: root }),
       showWorkbenchRef("current:SKILL.md", { dir: root }) as Promise<{ content?: string }>,
@@ -1119,6 +1125,12 @@ describe("skill-first Workbench runtime", () => {
     await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty edit before explicit-version improve.\n");
     await expect(improveWorkbenchSkill({ dir: root, version: initial.id })).rejects.toThrow(/No eval cases found/u);
 
+    const uncommittedDirtyVersion = (await listWorkbenchVersions({ dir: root }))
+      .find((version) => version.files.some((file) =>
+        file.path === "SKILL.md" && file.content.includes("Dirty edit before explicit-version improve.")
+      ));
+    expect(uncommittedDirtyVersion).toBeUndefined();
+    await workbenchStatus({ dir: root });
     const dirtyCurrentVersion = (await listWorkbenchVersions({ dir: root }))
       .find((version) => version.files.some((file) =>
         file.path === "SKILL.md" && file.content.includes("Dirty edit before explicit-version improve.")
@@ -4730,7 +4742,7 @@ describe("skill-first Workbench runtime", () => {
     expect(input.engineCases[0]?.files.private?.map((file) => file.path)).toEqual([]);
   });
 
-  dockerTest("fails provider-backed skill evals through adapter auth when disconnected", async () => {
+  test("blocks provider-backed skill evals before source or evidence writes when auth is disconnected", async () => {
     const root = await makeTempRoot("workbench-skill-adapter-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
@@ -4742,20 +4754,22 @@ describe("skill-first Workbench runtime", () => {
       config: { auth: `missing-${Date.now()}` },
     });
     await setDefaultWorkbenchAgent("codex", { dir: root });
-    const runs = await evalWorkbenchSkill({ dir: root });
-    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const trace = snapshot.traces.find((entry) => entry.runId === runs[0]?.id);
+    const before = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty edit before disconnected provider eval.\n");
 
-    expect(runs[0]).toMatchObject({ agentName: "codex", status: "failed" });
-    expect(trace?.request).toMatchObject({
-      agent: expect.objectContaining({ adapter: "codex" }),
-      skillName: "primary",
+    await expect(evalWorkbenchSkill({ dir: root })).rejects.toMatchObject({
+      code: "adapter_auth_required",
     });
-    expect(trace?.result).toMatchObject({
-      status: "failed",
-      error: expect.stringContaining("ADAPTER_AUTH_REQUIRED: codex disconnected"),
-    });
-  }, 30_000);
+
+    const after = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    expect(after.versions.map((version) => version.id)).toEqual(before.versions.map((version) => version.id));
+    expect(after.versions.some((version) =>
+      version.files.some((file) => file.path === "SKILL.md" && file.content.includes("Dirty edit before disconnected provider eval."))
+    )).toBe(false);
+    expect(after.runs).toEqual([]);
+    expect(after.jobs).toEqual([]);
+    expect(after.traces).toEqual([]);
+  });
 });
 
 function runtimeControlSpec() {

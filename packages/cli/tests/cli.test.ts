@@ -1707,7 +1707,7 @@ describe("workbench skill-first CLI", () => {
     expect(humanStatus.stdout).toContain("Connected providers: claude/default");
   });
 
-  test("provider eval auth failures preserve OAuth token-generation guidance in evidence", async () => {
+  test("provider eval auth preflight preserves OAuth token-generation guidance without evidence", async () => {
     const authRoot = await makeTempRoot("workbench-cli-eval-provider-auth-");
     vi.stubEnv("WORKBENCH_CONFIG", path.join(authRoot, "config.json"));
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
@@ -1751,62 +1751,33 @@ describe("workbench skill-first CLI", () => {
 
     const codexResult = await invoke(["eval", "--dir", codexRoot, "--json"]);
     expect(codexResult.code, codexResult.stdout || codexResult.stderr).toBe(1);
-    expect(stderrJsonLines(codexResult)).toContainEqual(expect.objectContaining({
-      schema: "workbench.run.v1",
-      kind: "eval",
-      phase: "complete",
-      variant: "local",
-      progress: expect.objectContaining({
-        completed: 1,
-        planned: 1,
-        failed: 1,
-      }),
-    }));
+    expect(stderrJsonLines(codexResult)).toEqual([]);
     expect(stdoutJson(codexResult)).toMatchObject({
       ok: false,
-      code: "eval_runs_failed",
-      evidenceSaved: true,
-      next: "codex login --device-auth && workbench login codex --method oauth",
-      failedMeasurements: [{
-        status: "failed",
-        error: "ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth && workbench login codex --method oauth.",
-      }],
+      code: "adapter_auth_required",
+      remediation: "codex login --device-auth && workbench login codex --method oauth",
     });
+    expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", codexRoot, "--json"])).entries).toEqual([]);
     const codexRetry = await invoke(["eval", "--dir", codexRoot, "--json"]);
     expect(codexRetry.code, codexRetry.stdout || codexRetry.stderr).toBe(1);
-    expect(stdoutJson<{ failedMeasurements: Array<{ runId: string }> }>(codexRetry).failedMeasurements[0]?.runId)
-      .not.toBe(stdoutJson<{ failedMeasurements: Array<{ runId: string }> }>(codexResult).failedMeasurements[0]?.runId);
-    const improveAfterUnscoredAuthFailure = await invoke(["improve", "--dir", codexRoot, "--json"]);
-    expect(improveAfterUnscoredAuthFailure.code, improveAfterUnscoredAuthFailure.stdout || improveAfterUnscoredAuthFailure.stderr).toBe(2);
-    expect(stdoutJson<{ message: string }>(improveAfterUnscoredAuthFailure).message)
-      .toContain("Unscored runtime or auth failures do not qualify.");
+    expect(stdoutJson(codexRetry)).toMatchObject({
+      ok: false,
+      code: "adapter_auth_required",
+      remediation: "codex login --device-auth && workbench login codex --method oauth",
+    });
 
     const claudeRoot = await makeTempRoot("workbench-cli-eval-claude-auth-");
     expect((await invoke(["new", claudeRoot, "--agent", "claude", "--json"])).code).toBe(0);
     await writePassingCaseTest(claudeRoot);
     const claudeResult = await invoke(["eval", "--dir", claudeRoot, "--json"]);
     expect(claudeResult.code, claudeResult.stdout || claudeResult.stderr).toBe(1);
-    expect(stderrJsonLines(claudeResult)).toContainEqual(expect.objectContaining({
-      schema: "workbench.run.v1",
-      kind: "eval",
-      phase: "complete",
-      variant: "local",
-      progress: expect.objectContaining({
-        completed: 1,
-        planned: 1,
-        failed: 1,
-      }),
-    }));
+    expect(stderrJsonLines(claudeResult)).toEqual([]);
     expect(stdoutJson(claudeResult)).toMatchObject({
       ok: false,
-      code: "eval_runs_failed",
-      evidenceSaved: true,
-      next: "claude setup-token",
-      failedMeasurements: [{
-        status: "failed",
-        error: "ADAPTER_AUTH_REQUIRED: claude disconnected. Next: claude setup-token.",
-      }],
+      code: "adapter_auth_required",
+      remediation: "claude setup-token",
     });
+    expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", claudeRoot, "--json"])).entries).toEqual([]);
   });
 
   test("provider improve auth failures surface login remediation directly", async () => {
@@ -3653,8 +3624,11 @@ describe("workbench skill-first CLI", () => {
       schema: "workbench.cli.run-watch.v1",
       ok: true,
       run: { id: run.id, status: "canceled" },
-      next: `workbench show ${run.id}`,
+      next: null,
     });
+    const watchedHuman = await invoke(["run", "watch", run.id, "--dir", root]);
+    expect(watchedHuman.code, watchedHuman.stdout || watchedHuman.stderr).toBe(0);
+    expect(watchedHuman.stdout).not.toContain(`next: workbench show ${run.id}`);
   });
 
   test("hosted pre-accept run retry creates a local watch handle before network work", async () => {
@@ -4106,7 +4080,7 @@ describe("workbench skill-first CLI", () => {
         schema: "workbench.cli.run-watch.v1",
         ok: true,
         run: { id: retryRunId, status: "canceled" },
-        next: `workbench show ${retryRunId}`,
+        next: null,
       });
     } finally {
       releaseOperation();
@@ -8258,6 +8232,11 @@ describe("workbench skill-first CLI", () => {
     const marker = "VERSIONS_JSON_CONTENT_MARKER";
     await fs.appendFile(path.join(root, "SKILL.md"), `\n${marker}\n`);
 
+    const inspection = await invoke(["versions", "--dir", root, "--json"]);
+    expect(inspection.code, inspection.stdout || inspection.stderr).toBe(0);
+    expect(stdoutJson<{ versions: Array<Record<string, unknown>> }>(inspection).versions).toHaveLength(1);
+    expect(inspection.stdout).not.toContain(marker);
+
     const versions = await invoke(["log", "--versions", "--dir", root, "--json"]);
     expect(versions.code).toBe(0);
     const result = stdoutJson<{ entries: Array<Record<string, unknown>> }>(versions).entries;
@@ -8297,6 +8276,13 @@ describe("workbench skill-first CLI", () => {
       code: "install_failed",
       message: `Skill destination has unmanaged content: ${destination}`,
       subject: { destination, status: "unmanaged", target: "codex" },
+    });
+    const pinned = await invoke(["install", "alice/private-skill@v007", "--target", "codex", "--scope", "global", "--json"]);
+    expect(pinned.code).toBe(1);
+    expect(stdoutJson(pinned)).toMatchObject({
+      ok: false,
+      code: "install_failed",
+      remediation: "workbench install alice/private-skill@v007 --target codex --scope global --yes",
     });
     await expect(fs.readFile(path.join(destination, "SKILL.md"), "utf8")).resolves.toBe("# Different existing content\n");
     await expect(fs.stat(path.join(root, ".agents", "skills", ".workbench-installs.json"))).rejects.toMatchObject({ code: "ENOENT" });
