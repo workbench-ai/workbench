@@ -6842,6 +6842,26 @@ function shouldSkipVersionForResultsSelection(
   return isNamedResultsSelection(options.versions) && message.startsWith("Skill not found: ");
 }
 
+async function resultsSelectionErrorWithLiveControls(
+  root: string,
+  error: unknown,
+  options: Pick<WorkbenchResultsOptions, "agents">,
+): Promise<unknown> {
+  if (
+    !isNamedResultsSelection(options.agents) ||
+    !(error instanceof WorkbenchUserError) ||
+    !error.message.trim().startsWith("Agent not found: ")
+  ) {
+    return error;
+  }
+  try {
+    await resolveRequestedAgents(root, options.agents, "results");
+    return error;
+  } catch (liveError) {
+    return liveError instanceof WorkbenchUserError ? liveError : error;
+  }
+}
+
 function isNamedResultsSelection(selection: string | undefined): boolean {
   const normalized = selection?.trim();
   return Boolean(normalized && normalized !== ALL_SELECTOR);
@@ -6885,12 +6905,13 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
         selectionRemediationCommand: "results",
       });
     } catch (error) {
+      const selectionError = await resultsSelectionErrorWithLiveControls(root, error, options);
       if (shouldSkipVersionForResultsSelection(error, options, versions.length)) {
-        skippedSelectionError ??= error;
+        skippedSelectionError ??= selectionError;
         skippedVersions.push(version.id);
         continue;
       }
-      throw error;
+      throw selectionError;
     }
     comparedVersions.push(version);
     evalHashes.add(runtime.evalSnapshot.hash);

@@ -334,6 +334,15 @@ describe("workbench skill-first CLI", () => {
       message: "Unsupported flag --bogus for workbench help.",
     });
 
+    const evalWithSingularAgentFlag = await invoke(["eval", "--agent", "harness", "--json"]);
+    expect(evalWithSingularAgentFlag.code).toBe(2);
+    expect(stdoutJson(evalWithSingularAgentFlag)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Unsupported flag --agent for workbench eval.",
+      remediation: "workbench eval --agents 'harness'",
+    });
+
     const allHelp = await invoke(["help", "--all"]);
     expect(allHelp.stdout).toContain("workbench run watch RUN_ID");
     expect(allHelp.stdout).toContain("workbench run cancel RUN_ID");
@@ -499,7 +508,7 @@ describe("workbench skill-first CLI", () => {
     });
     const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
     expect(stdoutJson<{ next: string | null }>(statusAfterAdd).next)
-      .toBe("workbench eval --agents 'improver' --rerun");
+      .toBe("codex login --device-auth");
   });
 
   test("explicit below-perfect local eval does not pivot to generated default provider agent", async () => {
@@ -1542,8 +1551,8 @@ describe("workbench skill-first CLI", () => {
     expect(createdJson.result.defaultAgentSelection.reason).toMatch(/codex|product_default/u);
     expect(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND).toBe("workbench case draft 'case-001'");
     expect(createdJson.result.defaultAgentSelection.readiness.setupCommands.length).toBeGreaterThan(0);
-    expect(createdJson.next).toContain(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
-    expect(createdJson.next).not.toContain("codex login --device-auth");
+    expect(createdJson.next).toBe(createdJson.result.defaultAgentSelection.readiness.setupCommands[0]);
+    expect(createdJson.next).not.toContain(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
     expect(createdJson.setupCommands.every((command) => typeof command === "string")).toBe(true);
     const newStatus = await invoke(["status", "--dir", root, "--json"]);
     expect(newStatus.code, newStatus.stdout || newStatus.stderr).toBe(0);
@@ -1602,6 +1611,7 @@ describe("workbench skill-first CLI", () => {
           },
         },
       },
+      next: "workbench login codex --method oauth",
     });
 
     const connectedCodexProfileRoot = await makeTempRoot("workbench-cli-connected-codex-profile-");
@@ -1637,6 +1647,7 @@ describe("workbench skill-first CLI", () => {
       .not.toContain("codex login --device-auth");
     expect(connectedCodexJson.result.defaultAgentSelection.readiness.setupCommands)
       .not.toContain("workbench login codex --method oauth");
+    expect(stdoutJson<{ next: string }>(connectedCodex).next).toContain(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
 
     const connectedClaudeProfileRoot = await makeTempRoot("workbench-cli-connected-claude-profile-");
     await fs.writeFile(path.join(connectedClaudeProfileRoot, ".claude.json"), "{}", "utf8");
@@ -1668,6 +1679,7 @@ describe("workbench skill-first CLI", () => {
       .not.toContain("claude setup-token");
     expect(connectedClaudeJson.result.defaultAgentSelection.readiness.setupCommands.join("\n"))
       .not.toContain("workbench login claude --method oauth");
+    expect(stdoutJson<{ next: string }>(connectedClaude).next).toContain(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
 
     const claudeRoot = await makeTempRoot("workbench-cli-new-provider-claude-");
     const claude = await invoke(["new", claudeRoot, "--agent", "claude", "--model", "opus", "--auth", "team", "--json"]);
@@ -7752,15 +7764,27 @@ describe("workbench skill-first CLI", () => {
       subject: { configuredAgents: ["default"] },
     });
 
+    expect((await invoke(["agent", "add", "improver", "--dir", root, "--adapter", "codex", "--model", "gpt-5.4-mini"])).code)
+      .toBe(0);
+    const liveAgentResult = await invoke(["results", "--dir", root, "--agents", "nope", "--json"]);
+    expect(liveAgentResult.code).toBe(2);
+    expect(stdoutJson(liveAgentResult)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Agent not found: nope. Configured agents: default, improver.",
+      remediation: "workbench results --agents all",
+      subject: { configuredAgents: ["default", "improver"] },
+    });
+
     await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond version.\n");
     const multiVersionResult = await invoke(["results", "--dir", root, "--versions", "all", "--agents", "missing", "--json"]);
     expect(multiVersionResult.code).toBe(2);
     expect(stdoutJson(multiVersionResult)).toMatchObject({
       ok: false,
       code: "usage",
-      message: "Agent not found: missing. Configured agents: default.",
-      remediation: "workbench results --agents default",
-      subject: { configuredAgents: ["default"] },
+      message: "Agent not found: missing. Configured agents: default, improver.",
+      remediation: "workbench results --agents all",
+      subject: { configuredAgents: ["default", "improver"] },
     });
   });
 
@@ -7956,13 +7980,19 @@ describe("workbench skill-first CLI", () => {
 
     expect(detached.code, detached.stdout || detached.stderr).toBe(130);
     expect(detached.stderr).toContain("detaching from local run");
-    const detachedJson = stdoutJson<{ code: string; detached: boolean; run: { id: string; status: string }; next: string }>(detached);
+    const detachedJson = stdoutJson<{ code: string; detached: boolean; run: { id: string; status: string; progress: { elapsedMs: number } }; next: string }>(detached);
     expect(detachedJson).toMatchObject({
       ok: false,
       code: "local_detached",
       detached: true,
       next: `workbench run watch ${detachedJson.run.id}`,
     });
+    const progressLines = detached.stderr.trim().split("\n")
+      .filter((line) => line.trim().startsWith("{"))
+      .map((line) => JSON.parse(line) as { id: string; progress: { elapsedMs: number } })
+      .filter((line) => line.id === detachedJson.run.id);
+    expect(progressLines.length).toBeGreaterThan(0);
+    expect(detachedJson.run.progress.elapsedMs).toBe(progressLines.at(-1)!.progress.elapsedMs);
 
     const watched = await invoke(["run", "watch", detachedJson.run.id, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);

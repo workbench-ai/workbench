@@ -16,6 +16,7 @@ export type WorkbenchProgressPhase =
   | "sync"
   | "queued"
   | "running"
+  | "canceling"
   | "improving"
   | "applying_patch"
   | "proof_eval"

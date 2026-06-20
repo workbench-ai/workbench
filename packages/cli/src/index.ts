@@ -989,6 +989,10 @@ function formatInitResult(status: WorkbenchStatus, next: string | null): string 
 }
 
 function newProjectNextCommand(projectRoot: string, status: WorkbenchStatus): string | null {
+  const setupCommand = status.defaultAgentSelection?.readiness.setupCommands[0];
+  if (setupCommand) {
+    return setupCommand;
+  }
   return projectScopedNextCommand(projectRoot, WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
 }
 
@@ -1168,12 +1172,12 @@ async function waitForLocalRunTerminal(input: {
         });
       }
       const jobs = jobsForRuns(inspection, [run.id]);
-      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+      const baseRunSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
       const terminal = isTerminalRun(run);
       const progressNext = terminal && input.command === "eval" && run.status === "succeeded"
         ? await evalSuccessNextCommand(input.core, [run])
         : runProgressNextCommand(run);
-      renderer.render(runProgressSnapshotForInspection({
+      const progressSnapshot = runProgressSnapshotForInspection({
         command: input.command,
         location: "local",
         phase: localProgressPhaseForRun(run, jobs, terminal),
@@ -1181,7 +1185,9 @@ async function waitForLocalRunTerminal(input: {
         snapshot: inspection,
         startedAtMs,
         next: progressNext ?? undefined,
-      }), { force: terminal || detached, command: input.command });
+      });
+      renderer.render(progressSnapshot, { force: terminal || detached, command: input.command });
+      const runSnapshot = progressSnapshot ?? baseRunSnapshot;
       if (detached) {
         return { snapshot: runSnapshot, run, jobs, detached: true };
       }
@@ -1233,6 +1239,9 @@ function localProgressPhaseForRun(
 ): WorkbenchProgressPhase {
   if (terminal) {
     return "complete";
+  }
+  if (run.status === "canceling") {
+    return "canceling";
   }
   if (run.kind !== "improve") {
     return "running";
@@ -2179,7 +2188,7 @@ function runWatchExitCode(run: WorkbenchRun): number {
 }
 
 function runWatchNextCommand(run: WorkbenchRun): string {
-  if (run.status === "queued" || run.status === "running") {
+  if (run.status === "queued" || run.status === "running" || run.status === "canceling") {
     return `workbench run watch ${run.id}`;
   }
   if (run.status === "failed" || run.status === "canceled") {
@@ -2463,10 +2472,49 @@ function validateCommandFlags(parsed: ParsedArgs, command: string | undefined): 
   const allowedSet = new Set(Object.keys(allowed));
   for (const [name, value] of Object.entries(parsed.flags)) {
     if (!allowedSet.has(name)) {
-      throw new WorkbenchUserError(`Unsupported flag --${name} for workbench ${effectiveCommand}.`);
+      throw unsupportedFlagError(effectiveCommand, name, value, allowedSet);
     }
     validateFlagValue(name, value, allowed[name]);
   }
+}
+
+function unsupportedFlagError(
+  command: string,
+  name: string,
+  value: string | boolean | string[],
+  allowedSet: ReadonlySet<string>,
+): WorkbenchCodedError {
+  const replacement = singularSelectorFlagReplacement(name);
+  const remediation = replacement && allowedSet.has(replacement)
+    ? unsupportedFlagRemediation(command, replacement, value)
+    : undefined;
+  return new WorkbenchCodedError("usage", `Unsupported flag --${name} for workbench ${command}.`, {
+    ...(remediation ? { remediation } : {}),
+    exitCode: 2,
+  });
+}
+
+function singularSelectorFlagReplacement(name: string): string | undefined {
+  if (name === "agent") {
+    return "agents";
+  }
+  if (name === "version" || name === "skill") {
+    return "versions";
+  }
+  return undefined;
+}
+
+function unsupportedFlagRemediation(
+  command: string,
+  replacement: string,
+  value: string | boolean | string[],
+): string {
+  const selected = Array.isArray(value)
+    ? value.join(",")
+    : typeof value === "string" && value.length > 0
+      ? value
+      : replacement === "agents" ? "AGENT" : "VERSION";
+  return `workbench ${command} --${replacement} ${shellQuote(selected)}`;
 }
 
 function allowedFlagsForCommand(parsed: ParsedArgs, command: string): FlagSpec | undefined {
@@ -6988,7 +7036,7 @@ async function firstExistingPath(paths: readonly string[]): Promise<string | nul
 async function statusWithCausalNext(
   status: Awaited<ReturnType<typeof workbenchStatusSnapshot>>,
   auth: WorkbenchCliAuthStatus,
-  core: { dir?: string; authToken?: string },
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
   machine: WorkbenchMachineStatus,
   inspection?: WorkbenchInspectionSnapshot | null,
 ): Promise<Awaited<ReturnType<typeof workbenchStatusSnapshot>>> {
@@ -7046,7 +7094,7 @@ async function statusWithCausalNext(
     return {
       ...status,
       next: postImproveProofEvalNextCommand(snapshot, currentVersionId) ??
-        pendingImproverEvalNextCommand(snapshot, currentVersionId) ??
+        await pendingImproverEvalNextCommand(core, snapshot, currentVersionId) ??
         "workbench eval",
     };
   }
@@ -7115,7 +7163,7 @@ function latestScoredEvalRunsForVersion(
 }
 
 async function belowPerfectEvalNextCommand(
-  core: { dir?: string; authToken?: string },
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
   snapshot: WorkbenchInspectionSnapshot | null,
   runs: readonly WorkbenchRun[],
 ): Promise<string> {
@@ -7136,10 +7184,11 @@ async function belowPerfectEvalNextCommand(
   return await improveNextCommandForAgent(core, skill, agent, snapshot);
 }
 
-function pendingImproverEvalNextCommand(
+async function pendingImproverEvalNextCommand(
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
   snapshot: WorkbenchInspectionSnapshot | null,
   currentVersionId: string | undefined,
-): string | undefined {
+): Promise<string | undefined> {
   if (!snapshot || !currentVersionId) {
     return undefined;
   }
@@ -7166,7 +7215,23 @@ function pendingImproverEvalNextCommand(
   );
   return hasCurrentImproverEvidence
     ? undefined
-    : `workbench eval --agents ${shellQuote(improvementAgent.name)} --rerun`;
+    : await evalRerunNextCommandForAgent(core, improvementAgent.name);
+}
+
+async function evalRerunNextCommandForAgent(
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  agentName: string,
+): Promise<string> {
+  const command = `workbench eval --agents ${shellQuote(agentName)} --rerun`;
+  const preview = await previewWorkbenchEval({
+    ...core,
+    agent: agentName,
+    rerun: true,
+  }).catch(() => null);
+  if (preview && !preview.readiness.ready) {
+    return readinessNextCommand("eval", preview.readiness) ?? command;
+  }
+  return command;
 }
 
 function postImproveProofEvalNextCommand(
@@ -8234,7 +8299,7 @@ async function evalSuccessNextCommand(
 }
 
 async function improveNextCommandForAgent(
-  core: { dir?: string; authToken?: string },
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
   skill: string,
   agent: WorkbenchAgent,
   snapshot: WorkbenchInspectionSnapshot | null,
@@ -8253,7 +8318,7 @@ async function improveNextCommandForAgent(
       .filter((candidate) => candidate.name !== "default" && workbenchSkillImproveCanUseQueuedAdapter(candidate))
       .sort((left, right) => left.name.localeCompare(right.name))[0];
     if (improvementAgent) {
-      return `workbench eval --agents ${shellQuote(improvementAgent.name)} --rerun`;
+      return await evalRerunNextCommandForAgent(core, improvementAgent.name);
     }
     return readinessNextCommand("improve", preview?.readiness ?? { ready: false, issues: [] }) ??
       workbenchSkillImproveAdapterRemediation(agent);
