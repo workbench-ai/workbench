@@ -2994,7 +2994,8 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
     },
   });
   const dryRun = parsed.flags["dry-run"] === true;
-  const next = result.remediation ?? (dryRun ? null : "workbench skills");
+  const next = result.remediation ??
+    (dryRun ? installDryRunNextCommand(parsed, sourceInput, result) : "workbench skills");
   const blockedDryRun = dryRun && result.result === "blocked";
   return emitResult("workbench.cli.install.v3", {
     source: sourceSummary,
@@ -3005,6 +3006,33 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
     ok: !blockedDryRun,
     exitCode: blockedDryRun ? 1 : 0,
   });
+}
+
+function installDryRunNextCommand(
+  parsed: ParsedArgs,
+  sourceInput: string,
+  result: WorkbenchInstallTargetsResult,
+): string | null {
+  if (result.result !== "planned") {
+    return null;
+  }
+  const parts = ["workbench install", shellQuote(sourceInput)];
+  const target = stringFlag(parsed, "target");
+  const scope = stringFlag(parsed, "scope");
+  const dir = dirFlag(parsed);
+  if (target) {
+    parts.push("--target", shellQuote(target));
+  }
+  if (scope) {
+    parts.push("--scope", shellQuote(scope));
+  }
+  if (dir) {
+    parts.push("--dir", shellQuote(dir));
+  }
+  if (parsed.flags.yes === true) {
+    parts.push("--yes");
+  }
+  return parts.join(" ");
 }
 
 async function handleDelete(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -3448,18 +3476,18 @@ function formatInstallOutcome(
     const nextLine = next ? `\nnext: ${next}` : "";
     if (target.previous === "unchanged") {
       return target.metadataChanged
-        ? `Would update install metadata for ${result.skill} on ${targetSummary} (package files unchanged; dry run made no changes).`
+        ? `Would update install metadata for ${result.skill} on ${targetSummary} (package files unchanged; dry run made no changes).${nextLine}`
         : `Already installed ${result.skill} for ${targetSummary} (unchanged; dry run made no changes).`;
     }
     if (target.previous === "updated") {
-      return `Would update ${result.skill} for ${targetSummary} (dry run made no changes).`;
+      return `Would update ${result.skill} for ${targetSummary} (dry run made no changes).${nextLine}`;
     }
     if (target.previous === "modified" || target.previous === "unmanaged") {
       return target.requiresOverwrite
         ? `Would require --yes to overwrite ${result.skill} for ${targetSummary} (dry run made no changes).${nextLine}`
-        : `Would overwrite ${result.skill} for ${targetSummary} (dry run made no changes).`;
+        : `Would overwrite ${result.skill} for ${targetSummary} (dry run made no changes).${nextLine}`;
     }
-    return `Would install ${result.skill} for ${targetSummary} (dry run made no changes).`;
+    return `Would install ${result.skill} for ${targetSummary} (dry run made no changes).${nextLine}`;
   }
   if (result.result === "unchanged") {
     const nextLine = next ? `\nnext: ${next}` : "";
@@ -6048,15 +6076,26 @@ async function collectClaudeOAuthFiles(root: string): Promise<WorkbenchAdapterAu
 }
 
 function codexOAuthRemediation(profileRoot: string): string {
-  return codexOAuthSetupCommands(profileRoot)[0]!;
+  const rootFlag = profileRootFlag(profileRoot);
+  if (!rootFlag) {
+    return "codex login --device-auth";
+  }
+  const codexHome = path.join(profileRoot, ".codex");
+  return `mkdir -p ${shellQuote(codexHome)} && CODEX_HOME=${shellQuote(codexHome)} codex login --device-auth`;
 }
 
 function codexOAuthSetupCommands(profileRoot: string): string[] {
   const rootFlag = profileRootFlag(profileRoot);
+  if (!rootFlag) {
+    return [
+      "codex login --device-auth",
+      "workbench login codex --method oauth",
+    ];
+  }
   const codexHome = path.join(profileRoot, ".codex");
-  const loginPrefix = rootFlag ? `mkdir -p ${shellQuote(codexHome)} && CODEX_HOME=${shellQuote(codexHome)} ` : "";
   return [
-    `${loginPrefix}codex login --device-auth`,
+    `mkdir -p ${shellQuote(codexHome)}`,
+    `CODEX_HOME=${shellQuote(codexHome)} codex login --device-auth`,
     `workbench login codex --method oauth${rootFlag}`,
   ];
 }

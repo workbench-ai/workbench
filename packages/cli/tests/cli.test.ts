@@ -2447,11 +2447,19 @@ describe("workbench skill-first CLI", () => {
       subject: {
         relativePath: ".codex/auth.json",
         setupCommands: [
-          `mkdir -p ${path.join(codexProfileRoot, ".codex")} && CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
+          `mkdir -p ${path.join(codexProfileRoot, ".codex")}`,
+          `CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
           `workbench login codex --method oauth --profile-root ${codexProfileRoot}`,
         ],
       },
     });
+    const codexHuman = await invoke(["login", "codex", "--profile-root", codexProfileRoot]);
+    expect(codexHuman.code).toBe(2);
+    expect(codexHuman.stderr).toContain("setup:\n");
+    expect(codexHuman.stderr).toContain(`  mkdir -p ${path.join(codexProfileRoot, ".codex")}\n`);
+    expect(codexHuman.stderr).toContain(`  CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth\n`);
+    expect(codexHuman.stderr).toContain(`  workbench login codex --method oauth --profile-root ${codexProfileRoot}\n`);
+    expect(codexHuman.stderr).toContain(`next: mkdir -p ${path.join(codexProfileRoot, ".codex")} && CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`);
 
     await fs.mkdir(path.join(codexProfileRoot, ".codex"), { recursive: true });
     await fs.writeFile(path.join(codexProfileRoot, ".codex", "auth.json"), "{}\n", "utf8");
@@ -2464,7 +2472,8 @@ describe("workbench skill-first CLI", () => {
       subject: {
         relativePath: ".codex/auth.json",
         setupCommands: [
-          `mkdir -p ${path.join(codexProfileRoot, ".codex")} && CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
+          `mkdir -p ${path.join(codexProfileRoot, ".codex")}`,
+          `CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
           `workbench login codex --method oauth --profile-root ${codexProfileRoot}`,
         ],
       },
@@ -10198,7 +10207,7 @@ describe("workbench skill-first CLI", () => {
       schema: "workbench.cli.install.v3",
       ok: true,
       result: "planned",
-      next: null,
+      next: "workbench install https://cloud.test/skills/alice/private-skill --target codex --scope global",
       filesCopied: 0,
       dryRun: true,
       scope: "global",
@@ -10215,6 +10224,7 @@ describe("workbench skill-first CLI", () => {
     const dryRunHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run"]);
     expect(dryRunHuman.code, dryRunHuman.stdout || dryRunHuman.stderr).toBe(0);
     expect(dryRunHuman.stdout).toContain("Would install private-skill for codex global (dry run made no changes).");
+    expect(dryRunHuman.stdout).toContain("next: workbench install https://cloud.test/skills/alice/private-skill --target codex --scope global");
     expect(dryRunHuman.stdout).not.toContain("machine\t");
     expect(dryRunHuman.stdout).not.toContain("\tnone\t");
 

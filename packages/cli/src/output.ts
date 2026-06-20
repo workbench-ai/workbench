@@ -64,9 +64,23 @@ export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): nu
   } else {
     const format = humanFormatOptions(io.stderr);
     io.stderr.write(`${styleError(`error[${envelope.code}]`, format)}: ${envelope.message}\n`);
+    const setupCommands = setupCommandsFromSubject(envelope.subject);
+    if (setupCommands.length > 0) {
+      io.stderr.write(`${styleHint("setup", format)}:\n`);
+      for (const command of setupCommands) {
+        io.stderr.write(`  ${command}\n`);
+      }
+    }
     if (envelope.remediation) {
       io.stderr.write(`${styleHint("next", format)}: ${envelope.remediation}\n`);
     }
   }
   return coded.exitCode;
+}
+
+function setupCommandsFromSubject(subject: Record<string, Json> | undefined): string[] {
+  const commands = subject?.setupCommands;
+  return Array.isArray(commands)
+    ? commands.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
 }
