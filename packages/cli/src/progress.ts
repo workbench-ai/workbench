@@ -463,8 +463,10 @@ function formatScore(score: number): string {
 }
 
 function formatCostUsd(costUsd: number): string {
-  if (costUsd < 0.01) {
-    return `$${costUsd.toFixed(4)}`;
-  }
-  return `$${costUsd.toFixed(2)}`;
+  return new Intl.NumberFormat("en-US", {
+    currency: "USD",
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 0,
+    style: "currency",
+  }).format(costUsd);
 }

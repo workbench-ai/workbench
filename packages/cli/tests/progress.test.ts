@@ -108,6 +108,10 @@ describe("Workbench CLI progress projection", () => {
     expect(formatProgressSummary(snapshot)).toContain("partial score 0.500");
     expect(formatProgressSummary(snapshot)).toContain("evidence 4");
     expect(formatProgressSummary(snapshot)).toContain("usage cost=$0.12");
+    expect(formatProgressSummary({
+      ...snapshot,
+      progress: { ...snapshot.progress, costUsd: 0.004 },
+    })).toContain("usage cost=$0");
   });
 
   test("uses durable finish time for terminal elapsed duration", () => {

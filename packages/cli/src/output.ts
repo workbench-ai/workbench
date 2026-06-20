@@ -1,5 +1,6 @@
 import { codedErrorFromUnknown, type Json } from "@workbench-ai/workbench-core";
 
+import { humanFormatOptions, styleError, styleHint, type HumanFormatOptions } from "./human-format.js";
 import type { CliIo } from "./index.js";
 
 export interface ParsedCliFlags {
@@ -28,7 +29,7 @@ export function emitResult(
   body: Record<string, Json | undefined>,
   parsed: ParsedCliFlags,
   io: CliIo,
-  text: () => string,
+  text: (format: HumanFormatOptions) => string,
 ): number {
   if (parsed.flags.json === true) {
     const envelope: WorkbenchCliSuccessEnvelope = { schema, ok: true };
@@ -39,7 +40,7 @@ export function emitResult(
     }
     io.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
   } else {
-    io.stdout.write(`${text()}\n`);
+    io.stdout.write(`${text(humanFormatOptions(io.stdout))}\n`);
   }
   return 0;
 }
@@ -60,9 +61,10 @@ export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): nu
   if (parsed.flags.json === true) {
     io.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
   } else {
-    io.stderr.write(`error[${envelope.code}]: ${envelope.message}\n`);
+    const format = humanFormatOptions(io.stderr);
+    io.stderr.write(`${styleError(`error[${envelope.code}]`, format)}: ${envelope.message}\n`);
     if (envelope.remediation) {
-      io.stderr.write(`next: ${envelope.remediation}\n`);
+      io.stderr.write(`${styleHint("next", format)}: ${envelope.remediation}\n`);
     }
   }
   return coded.exitCode;

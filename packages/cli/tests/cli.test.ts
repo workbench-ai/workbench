@@ -361,6 +361,27 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("next: workbench new .");
   });
 
+  test("human list commands render aligned tables", async () => {
+    const root = await makeTempRoot("workbench-cli-human-tables-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+
+    const versions = await invoke(["versions", "--dir", root]);
+    expect(versions.code, versions.stdout || versions.stderr).toBe(0);
+    expect(versions.stdout).toMatch(/^version\s+hash\s+message/mu);
+    expect(versions.stdout).not.toContain("\t");
+
+    const agents = await invoke(["agent", "list", "--dir", root]);
+    expect(agents.code, agents.stdout || agents.stderr).toBe(0);
+    expect(agents.stdout).toMatch(/^name\s+adapter\s+model/mu);
+    expect(agents.stdout).toMatch(/\bdefault\s+local\s+docker\b/u);
+    expect(agents.stdout).not.toContain("\t");
+
+    const log = await invoke(["log", "--dir", root]);
+    expect(log.code, log.stdout || log.stderr).toBe(0);
+    expect(log.stdout).toMatch(/^created\s+kind\s+ref\s+status\s+version\s+skill\s+agent\s+score\s+detail/mu);
+    expect(log.stdout).not.toContain("\t");
+  });
+
   test("eval dry-run previews the selected plan without creating run evidence", async () => {
     const root = await makeTempRoot("workbench-cli-eval-dry-run-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -780,7 +801,36 @@ describe("workbench skill-first CLI", () => {
     const contextualResults = await invoke(["results", "--agents", "strict", "--dir", root]);
     expect(contextualResults.code, contextualResults.stdout || contextualResults.stderr).toBe(0);
     expect(contextualResults.stdout).toContain(expectedLocalSkillLabel(root, 1));
-    expect(contextualResults.stdout).toContain("\tstrict\t");
+    expect(contextualResults.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+samples\s+cost\s+latency\s+run/mu);
+    expect(contextualResults.stdout).toMatch(/\bstrict\s+succeeded\b/u);
+
+    const resultsJson = await invoke(["results", "--versions", "all", "--agents", "all", "--dir", root, "--json"]);
+    expect(resultsJson.code, resultsJson.stdout || resultsJson.stderr).toBe(0);
+    const resultsPayload = stdoutJson<{
+      result: {
+        versions: Array<{
+          id: string;
+          projectVersionId?: string;
+          files?: Array<{ path: string; ref?: string; content?: string }>;
+        }>;
+      };
+    }>(resultsJson);
+    const resultVersion = resultsPayload.result.versions.find((version) =>
+      version.files?.some((file) => file.path.endsWith("SKILL.md"))
+    );
+    const resultFile = resultVersion?.files?.find((file) => file.path.endsWith("SKILL.md"));
+    expect(resultVersion).toBeTruthy();
+    expect(resultFile).toMatchObject({
+      path: expect.stringMatching(/SKILL\.md$/u),
+      ref: expect.any(String),
+    });
+    expect(resultFile).not.toHaveProperty("content");
+    const shownByPath = await invoke(["show", `${resultVersion!.id}:${resultFile!.path}`, "--dir", root, "--json"]);
+    expect(shownByPath.code, shownByPath.stdout || shownByPath.stderr).toBe(0);
+    expect(stdoutJson<{ result: { content: string } }>(shownByPath).result.content).toContain("#");
+    const shownByRef = await invoke(["show", resultFile!.ref!, "--dir", root, "--json"]);
+    expect(shownByRef.code, shownByRef.stdout || shownByRef.stderr).toBe(0);
+    expect(stdoutJson<{ result: { content: string } }>(shownByRef).result.content).toContain("#");
 
     const retried = await invoke(["run", "retry", evaluatedRunId, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
@@ -813,7 +863,7 @@ describe("workbench skill-first CLI", () => {
 
     const logRuns = await invoke(["log", "--runs", "--dir", root]);
     expect(logRuns.code, logRuns.stdout || logRuns.stderr).toBe(0);
-    expect(logRuns.stdout).toContain("agent=default,strict");
+    expect(logRuns.stdout).toMatch(/\bcurrent\s+default,strict\s+1\.000\b/u);
 
     const retried = await invoke(["run", "retry", evaluatedJson.run.id, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
@@ -915,7 +965,7 @@ describe("workbench skill-first CLI", () => {
       ]));
     const human = await invoke(["results", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toContain("\tcanceled\t");
+    expect(human.stdout).toMatch(/\bcanceled\s+0\.000\b/u);
   });
 
   test("rejects unsupported and context-invalid flags before handlers run", async () => {
@@ -1474,9 +1524,10 @@ describe("workbench skill-first CLI", () => {
       kind: "provider",
     });
     expect(createdJson.result.defaultAgentSelection.reason).toMatch(/codex|product_default/u);
-    expect(createdJson.result.defaultAgentSelection.readiness.setupCommands.length).toBeGreaterThan(0);
-    expect(createdJson.next).toBe(createdJson.result.defaultAgentSelection.readiness.setupCommands[0]);
     expect(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND).toBe("workbench case draft 'case-001'");
+    expect(createdJson.result.defaultAgentSelection.readiness.setupCommands.length).toBeGreaterThan(0);
+    expect(createdJson.next).toContain(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
+    expect(createdJson.next).not.toContain("codex login --device-auth");
     expect(createdJson.setupCommands.every((command) => typeof command === "string")).toBe(true);
     const newStatus = await invoke(["status", "--dir", root, "--json"]);
     expect(newStatus.code, newStatus.stdout || newStatus.stderr).toBe(0);
@@ -6735,6 +6786,55 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
+  test("publish dry-run reports missing Cloud auth before previewing install", async () => {
+    const root = await makeTempRoot("workbench-cli-publish-dry-run-auth-");
+    const previousConfig = process.env.WORKBENCH_CONFIG;
+    const previousApiToken = process.env.WORKBENCH_API_TOKEN;
+    const previousSmokeToken = process.env.WORKBENCH_SMOKE_BEARER_TOKEN;
+    const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
+    process.env.WORKBENCH_CONFIG = configPath;
+    process.env.WORKBENCH_API_TOKEN = "";
+    process.env.WORKBENCH_SMOKE_BEARER_TOKEN = "";
+    await fs.writeFile(configPath, JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+      username: "alice",
+    }));
+    const fetchMock = vi.fn(async () => jsonResponse({ message: "unexpected network call" }, 500));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+
+      const publish = await invoke(["publish", "--dry-run", "--dir", root, "--json"]);
+
+      expect(publish.code, publish.stdout || publish.stderr).toBe(1);
+      expect(stdoutJson(publish)).toMatchObject({
+        ok: false,
+        code: "auth_required",
+        message: "workbench publish requires Workbench Cloud auth.",
+        remediation: "workbench login --base-url https://cloud.test",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expect(fs.access(path.join(root, ".workbench", "remotes.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previousConfig === undefined) {
+        delete process.env.WORKBENCH_CONFIG;
+      } else {
+        process.env.WORKBENCH_CONFIG = previousConfig;
+      }
+      if (previousApiToken === undefined) {
+        delete process.env.WORKBENCH_API_TOKEN;
+      } else {
+        process.env.WORKBENCH_API_TOKEN = previousApiToken;
+      }
+      if (previousSmokeToken === undefined) {
+        delete process.env.WORKBENCH_SMOKE_BEARER_TOKEN;
+      } else {
+        process.env.WORKBENCH_SMOKE_BEARER_TOKEN = previousSmokeToken;
+      }
+    }
+  });
+
   test("publish --as dry-run does not persist the linked cloud handle", async () => {
     const root = await makeTempRoot("workbench-cli-publish-as-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
@@ -7118,6 +7218,7 @@ describe("workbench skill-first CLI", () => {
         schema: "workbench.cli.install.v3",
         ok: true,
         result: "installed",
+        next: "workbench skills",
         filesCopied: 3,
         scope: "global",
         targets: [expect.objectContaining({
@@ -7148,6 +7249,7 @@ describe("workbench skill-first CLI", () => {
         schema: "workbench.cli.install.v3",
         ok: true,
         result: "installed",
+        next: "workbench skills",
         filesCopied: 3,
         targets: [expect.objectContaining({ previous: "updated", filesCopied: 3 })],
       });
@@ -7156,6 +7258,7 @@ describe("workbench skill-first CLI", () => {
         .resolves.toContain("\"v008\"");
       const repeatedHuman = await invoke(["install", "https://cloud.test/skills/alice/private-skill", "--target", "codex", "--scope", "global", "--yes"]);
       expect(repeatedHuman.code, repeatedHuman.stdout || repeatedHuman.stderr).toBe(0);
+      expect(repeatedHuman.stdout).toContain("next: workbench skills");
       await expectNoInstallFanout(root);
     } finally {
       if (previousConfig === undefined) {
@@ -7209,9 +7312,10 @@ describe("workbench skill-first CLI", () => {
       expect(installed.code).toBe(0);
       expect(stdoutJson(installed)).toMatchObject({
         schema: "workbench.cli.install.v3",
-        ok: true,
-        result: "installed",
-        skill: "private-skill",
+      ok: true,
+      result: "installed",
+      next: "workbench skills",
+      skill: "private-skill",
         targets: [expect.objectContaining({
           target: "codex",
           destination: path.join(root, ".agents", "skills", "private-skill"),
@@ -7269,6 +7373,7 @@ describe("workbench skill-first CLI", () => {
       schema: "workbench.cli.install.v3",
       ok: true,
       result: "installed",
+      next: "workbench skills",
       target: "codex",
       scope: "global",
       filesCopied: 1,
@@ -7287,6 +7392,7 @@ describe("workbench skill-first CLI", () => {
       schema: "workbench.cli.install.v3",
       ok: true,
       result: "installed",
+      next: "workbench skills",
       target: "claude",
       scope: "global",
       filesCopied: 1,
@@ -7815,9 +7921,68 @@ describe("workbench skill-first CLI", () => {
       run: { id: runId, status: "canceled" },
     });
 
+    const shown = await invoke(["show", runId!, "--dir", root]);
+    expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+    expect(shown.stdout).toContain("Canceled:");
+    expect(shown.stdout).not.toContain("Failures:\n  1 canceled:");
+    const shownJson = await invoke(["show", runId!, "--dir", root, "--json"]);
+    expect(shownJson.code, shownJson.stdout || shownJson.stderr).toBe(0);
+    expect(stdoutJson<{
+      result: {
+        failures: unknown[];
+        cancellations: Array<{ status: string; count: number }>;
+      };
+    }>(shownJson)).toMatchObject({
+      result: {
+        failures: [],
+        cancellations: [expect.objectContaining({ status: "canceled", count: 1 })],
+      },
+    });
+
     const evalResult = await runningEval;
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
-  }, 60_000);
+    const evalJson = stdoutJson<{
+      code: string;
+      message: string;
+      failedMeasurements?: unknown[];
+      canceledMeasurements?: Array<{ status: string }>;
+      coverage: Array<{ failed: number; canceled: number }>;
+      run: { status: string };
+    }>(evalResult);
+    expect(evalJson).toMatchObject({
+      code: "eval_canceled",
+      message: "Eval canceled; evidence was saved.",
+      run: { status: "canceled" },
+      canceledMeasurements: [expect.objectContaining({ status: "canceled" })],
+      coverage: [expect.objectContaining({ failed: 0, canceled: 1 })],
+    });
+    expect(evalJson.failedMeasurements).toBeUndefined();
+
+    const humanRoot = await makeTempRoot("workbench-cli-local-cancel-human-");
+    expect((await invoke(["new", humanRoot, "--agent", "local"])).code).toBe(0);
+    await writeSleepingPassingCaseTest(humanRoot, 30);
+    const runningHumanEval = invokeChild(["eval", "--dir", humanRoot]);
+    let humanRunId: string | undefined;
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: humanRoot }).catch(() => null);
+      const activeRun = snapshot?.runs.find((run) =>
+        run.status === "queued" || run.status === "running" || run.status === "canceling"
+      );
+      if (activeRun) {
+        humanRunId = activeRun.id;
+        break;
+      }
+      await delay(100);
+    }
+    expect(humanRunId).toBeTruthy();
+    expect((await invoke(["run", "cancel", humanRunId!, "--dir", humanRoot, "--json"])).code).toBe(0);
+    expect((await invoke(["run", "watch", humanRunId!, "--dir", humanRoot, "--json"])).code).toBe(0);
+    const humanEvalResult = await runningHumanEval;
+    expect(humanEvalResult.code, humanEvalResult.stdout || humanEvalResult.stderr).toBe(1);
+    expect(humanEvalResult.stdout).toContain("Eval canceled; evidence was saved.");
+    expect(humanEvalResult.stdout).toContain("coverage cases=1 samples=1 jobs=1 canceled=1");
+    expect(humanEvalResult.stdout).not.toContain("coverage cases=1 samples=1 jobs=1 failed=1");
+  }, 90_000);
 
   dockerTest("failed multi-agent eval reports labeled coverage for every measurement", async () => {
     const root = await makeTempRoot("workbench-cli-failed-multi-coverage-");
@@ -7930,7 +8095,8 @@ describe("workbench skill-first CLI", () => {
 
     const agents = await invoke(["agent", "list", "--dir", root]);
     expect(agents.code).toBe(0);
-    expect(agents.stdout).toContain("codex\tcodex\tgpt-test");
+    expect(agents.stdout).toMatch(/^name\s+adapter\s+model/mu);
+    expect(agents.stdout).toMatch(/\bcodex\s+codex\s+gpt-test\b/u);
   });
 
   test("agent command config rejects likely shell-expanded runtime paths", async () => {
@@ -8684,6 +8850,7 @@ describe("workbench skill-first CLI", () => {
       schema: "workbench.cli.install.v3",
       ok: true,
       result: "planned",
+      next: null,
       filesCopied: 0,
       dryRun: true,
       scope: "global",
@@ -8851,6 +9018,10 @@ describe("workbench skill-first CLI", () => {
       expect(folder.code).toBe(0);
       expect(stdoutJson<{ skills: Array<{ name: string; status: string; target: string }> }>(folder).skills)
         .toEqual([expect.objectContaining({ target: "codex", name: "help-skill", status: "unmanaged" })]);
+      const folderHuman = await invoke(["skills", "--target", "codex", "--dir", cwdRoot]);
+      expect(folderHuman.code, folderHuman.stdout || folderHuman.stderr).toBe(0);
+      expect(folderHuman.stdout).toMatch(/^name\s+target\s+scope\s+status\s+source/mu);
+      expect(folderHuman.stdout).toMatch(/\bhelp-skill\s+codex\s+folder\s+unmanaged\s+\(no provenance\)/u);
 
       const installed = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);
       expect(installed.code, installed.stdout || installed.stderr).toBe(0);
@@ -9134,12 +9305,11 @@ describe("workbench skill-first CLI", () => {
     });
 
     const results = await invoke(["results", "--dir", root, "--agents", "patcher"]);
-    expect(results.stdout).toContain("version\tagent\tstatus\tquality\tsamples\tcost\tlatency\trun");
-    expect(results.stdout).toContain("\tpatcher\tfailed\t");
+    expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+samples\s+cost\s+latency\s+run/mu);
+    expect(results.stdout).toMatch(/\bpatcher\s+failed\b/u);
     expect(results.stdout).toContain(expectedLocalSkillLabel(root, 1));
     expect(results.stdout).toContain(expectedLocalSkillLabel(root, 2));
-    expect(results.stdout).toContain("\tfailed\t");
-    expect(results.stdout).toContain("\t0.000\t");
+    expect(results.stdout).toMatch(/\bfailed\s+0\.000\b/u);
     const resultsJson = await invoke(["results", "--dir", root, "--agents", "patcher", "--json"]);
     const resultsPayload = stdoutJson<{ result: { cells: Array<Record<string, unknown>> } }>(resultsJson);
     expect(resultsPayload.result.cells[0]).toHaveProperty("skillVersionId");
@@ -9151,7 +9321,7 @@ describe("workbench skill-first CLI", () => {
     expect(observerAdd.code, observerAdd.stdout || observerAdd.stderr).toBe(0);
     const allAgentsResults = await invoke(["results", "--dir", root, "--agents", "all"]);
     expect(allAgentsResults.code, allAgentsResults.stdout || allAgentsResults.stderr).toBe(0);
-    expect(allAgentsResults.stdout).not.toContain("\tnot-run\t");
+    expect(allAgentsResults.stdout).not.toMatch(/\bnot-run\b/u);
     expect(allAgentsResults.stdout).not.toContain("observer@");
     expect(allAgentsResults.stdout).toContain(expectedLocalSkillLabel(root, 1));
     expect(allAgentsResults.stdout).toContain(expectedLocalSkillLabel(root, 4));

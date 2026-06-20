@@ -89,6 +89,14 @@ import {
 import { normalizeWorkbenchSkillName } from "@workbench-ai/workbench-contract";
 import { emitError, emitResult } from "./output.js";
 import {
+  formatCostUsd,
+  humanFormatOptions,
+  PLAIN_HUMAN_FORMAT,
+  renderTable,
+  styleStatus,
+  type HumanFormatOptions,
+} from "./human-format.js";
+import {
   createProgressRenderer,
   formatProgressDuration,
   formatProgressSummary,
@@ -107,7 +115,6 @@ import {
   readInstalledSkillsInventory,
   type WorkbenchInstallTargetsResult,
   type WorkbenchSkillAccessInventory,
-  type WorkbenchInstalledSkill,
 } from "./install-targets.js";
 import {
   localWorkerErrorForRun,
@@ -721,7 +728,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         versions: stringFlag(parsed, "versions"),
         agents: stringFlag(parsed, "agents"),
       });
-      return output(manifestOnly(results), parsed, io, () => formatResults(results));
+      return output(resultsManifest(results), parsed, io, (format) => formatResults(results, format));
     }
     if (command === "switch") {
       const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.");
@@ -737,7 +744,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       const versions = await listWorkbenchVersions(core);
       return emitResult("workbench.cli.versions.v1", {
         versions: versions.map(versionSummary) as Json,
-      }, parsed, io, () => versions.map(formatVersion).join("\n") || "No versions.");
+      }, parsed, io, (format) => formatVersions(versions, format));
     }
     if (command === "diff") {
       const range = optionalPositional(parsed, 1) ?? await defaultDiffRange(core);
@@ -982,13 +989,6 @@ function formatInitResult(status: WorkbenchStatus, next: string | null): string 
 }
 
 function newProjectNextCommand(projectRoot: string, status: WorkbenchStatus): string | null {
-  const selection = status.defaultAgentSelection;
-  if (selection?.kind === "provider" && selection.readiness.state !== "ready") {
-    const setupCommand = selection.readiness.setupCommands.find((command) => command.trim().length > 0);
-    if (setupCommand) {
-      return setupCommand;
-    }
-  }
   return projectScopedNextCommand(projectRoot, WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
 }
 
@@ -1526,7 +1526,7 @@ async function handleStatus(parsed: ParsedArgs, io: CliIo): Promise<number> {
     auth: auth as unknown as Json,
     machine: machine as unknown as Json,
     next: cliStatus.next as Json,
-  }, parsed, io, () => formatStatusSnapshot({ ...cliStatus, auth, machine }));
+  }, parsed, io, (format) => formatStatusSnapshot({ ...cliStatus, auth, machine }, format));
 }
 
 async function handleLog(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -1573,7 +1573,7 @@ async function handleLog(parsed: ParsedArgs, io: CliIo): Promise<number> {
   ].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return emitResult("workbench.cli.log.v1", {
     entries: entries as unknown as Json,
-  }, parsed, io, () => entries.map(formatLogEntry).join("\n") || "No history.");
+  }, parsed, io, (format) => formatLogEntries(entries, format));
 }
 
 type WorkbenchLogEntry =
@@ -2163,13 +2163,13 @@ function emitRunTerminalResult(
   body: Record<string, Json | undefined>,
   parsed: ParsedArgs,
   io: CliIo,
-  text: () => string,
+  text: (format: HumanFormatOptions) => string,
   code: number,
 ): number {
   if (parsed.flags.json === true) {
     io.stdout.write(`${JSON.stringify({ schema, ok: true, ...body }, null, 2)}\n`);
   } else {
-    io.stdout.write(`${text()}\n`);
+    io.stdout.write(`${text(humanFormatOptions(io.stdout))}\n`);
   }
   return code;
 }
@@ -2289,7 +2289,8 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
       ...(selection.run ? { run: runSummary(selection.run, []) } : {}),
       jobs: selection.jobs.map(jobEvidenceSummary),
       ...(progress ? { progress: progress as unknown as Json } : {}),
-      failures: runFailureGroups(selection.jobs) as unknown as Json,
+      failures: runFailureGroups(selection.jobs, ["failed"]) as unknown as Json,
+      cancellations: runFailureGroups(selection.jobs, ["canceled"]) as unknown as Json,
       details: details.map(evidenceDetailSummary),
       highlights: evidenceHighlights(evidenceFiles) as unknown as Json,
       files: evidenceFiles.map((file) => fileSummary(file, showFileRef(evidenceOwnerRef, file.path))),
@@ -2315,7 +2316,7 @@ async function handleAgent(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const subcommand = requiredPositional(parsed, 1, "workbench agent requires list|add|rm.");
   if (subcommand === "list") {
     const agents = await listWorkbenchAgents(await coreOptions(parsed));
-    return output(agents, parsed, io, () => agents.map(formatAgent).join("\n") || "No agents.");
+    return output(agents, parsed, io, (format) => formatAgents(agents, format));
   }
   if (subcommand === "add") {
     const name = requiredPositional(parsed, 2, "workbench agent add requires NAME.");
@@ -2332,7 +2333,7 @@ async function handleAgent(parsed: ParsedArgs, io: CliIo): Promise<number> {
       model: stringFlag(parsed, "model"),
       config,
     });
-    return output(agent, parsed, io, () => `Configured agent ${formatAgent(agent)}.`);
+    return output(agent, parsed, io, () => `Configured agent ${formatAgentInline(agent)}.`);
   }
   if (subcommand === "rm") {
     const result = await removeWorkbenchAgent(requiredPositional(parsed, 2, "workbench agent rm requires NAME."), await coreOptions(parsed));
@@ -2700,13 +2701,14 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
       baseUrl: workbenchSource.baseUrl,
     },
   });
-  const next = result.remediation ?? null;
+  const dryRun = parsed.flags["dry-run"] === true;
+  const next = result.remediation ?? (dryRun ? null : "workbench skills");
   return emitResult("workbench.cli.install.v3", {
     source: sourceSummary,
     ...installResultToJson(result),
     next: next as Json,
-    ...(parsed.flags["dry-run"] === true ? { dryRun: true } : {}),
-  }, parsed, io, () => formatInstallOutcome(result, parsed.flags["dry-run"] === true, next));
+    ...(dryRun ? { dryRun: true } : {}),
+  }, parsed, io, () => formatInstallOutcome(result, dryRun, next));
 }
 
 async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -2720,7 +2722,7 @@ async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
     scope: stringFlag(parsed, "scope"),
     dir: dirFlag(parsed),
   });
-  return emitResult("workbench.cli.skills.v2", installedInventoryToJson(inventory), parsed, io, () => formatInstalledInventory(inventory));
+  return emitResult("workbench.cli.skills.v2", installedInventoryToJson(inventory), parsed, io, (format) => formatInstalledInventory(inventory, format));
 }
 
 async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -2998,7 +3000,7 @@ function emitCloudDetached(
   body: Record<string, Json | undefined>,
   parsed: ParsedArgs,
   io: CliIo,
-  text: () => string,
+  text: (format: HumanFormatOptions) => string,
 ): number {
   const next = typeof body.next === "string" ? body.next : "workbench log --runs";
   if (parsed.flags.json === true) {
@@ -3013,7 +3015,7 @@ function emitCloudDetached(
       ...body,
     }, null, 2)}\n`);
   } else {
-    io.stdout.write(`${text()}\n`);
+    io.stdout.write(`${text(humanFormatOptions(io.stdout))}\n`);
   }
   return 130;
 }
@@ -3058,15 +3060,17 @@ function formatInstallOutcome(
     return `Would install ${result.skill} for ${targetSummary} (dry run made no changes).`;
   }
   if (result.result === "unchanged") {
-    return `Already installed ${result.skill} for ${targetSummary} (unchanged).`;
+    const nextLine = next ? `\nnext: ${next}` : "";
+    return `Already installed ${result.skill} for ${targetSummary} (unchanged).${nextLine}`;
   }
+  const nextLine = next ? `\nnext: ${next}` : "";
   if (target.previous === "updated") {
-    return `Updated ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).`;
+    return `Updated ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).${nextLine}`;
   }
   const detail = target.previous === "modified" || target.previous === "unmanaged"
     ? `overwrote ${target.previous} copy, ${formatFileCount(result.filesCopied)}`
     : formatFileCount(result.filesCopied);
-  return `Installed ${result.skill} for ${targetSummary} (${detail}).`;
+  return `Installed ${result.skill} for ${targetSummary} (${detail}).${nextLine}`;
 }
 
 function formatFileCount(count: number): string {
@@ -6116,6 +6120,7 @@ async function previewPublishWithDerivedRemote(parsed: ParsedArgs, visibility: "
   const remote = stringFlag(parsed, "as") || !link.existing
     ? await derivePublishCloudRemote(parsed, "workbench publish", link.name)
     : link.existing;
+  await assertPublishCloudAuthForRemote(remote);
   const requestedVersion = optionalPositional(parsed, 1);
   const version = requestedVersion && requestedVersion !== "current"
     ? snapshotVersionByRef(reconciledSnapshot, requestedVersion)
@@ -6176,8 +6181,20 @@ async function assertPublishCloudAuth(parsed: ParsedArgs, remoteName: string | u
   if (!source || await workbenchCloudToken({ baseUrl: source.baseUrl })) {
     return;
   }
-  throw new WorkbenchCodedError("auth_required", "workbench publish requires Workbench Cloud auth.", {
-    remediation: workbenchLoginRemediation(source.baseUrl),
+  throw publishCloudAuthRequired(source.baseUrl);
+}
+
+async function assertPublishCloudAuthForRemote(remote: WorkbenchRemote): Promise<void> {
+  const source = parseWorkbenchInstallSource(remote.url);
+  if (!source || await workbenchCloudToken({ baseUrl: source.baseUrl })) {
+    return;
+  }
+  throw publishCloudAuthRequired(source.baseUrl);
+}
+
+function publishCloudAuthRequired(baseUrl: string): WorkbenchCodedError {
+  return new WorkbenchCodedError("auth_required", "workbench publish requires Workbench Cloud auth.", {
+    remediation: workbenchLoginRemediation(baseUrl),
     exitCode: 1,
   });
 }
@@ -6478,18 +6495,26 @@ function emitEvalFailure(
   io: CliIo,
 ): number {
   const next = evalFailureNextCommand(failedRuns);
+  const failedMeasurements = snapshot.measurements
+    .filter((measurement) => measurement.status === "failed")
+    .map((measurement) => measurementFailureSummary(measurement, artifactIds.get(measurement.runId) ?? []));
+  const canceledMeasurements = snapshot.measurements
+    .filter((measurement) => measurement.status === "canceled")
+    .map((measurement) => measurementFailureSummary(measurement, artifactIds.get(measurement.runId) ?? []));
+  const canceledOnly = failedMeasurements.length === 0 && canceledMeasurements.length > 0;
+  const code = canceledOnly ? "eval_canceled" : "eval_runs_failed";
+  const message = canceledOnly ? "Eval canceled; evidence was saved." : "Eval failed; evidence was saved.";
   if (parsed.flags.json === true) {
     io.stdout.write(`${JSON.stringify({
       schema: "workbench.cli.eval.v1",
       ok: false,
-      code: "eval_runs_failed",
-      message: "Eval failed; evidence was saved.",
+      code,
+      message,
       retryable: false,
       evidenceSaved: true,
       run: runSnapshotResultJson(snapshot),
-      failedMeasurements: snapshot.measurements
-        .filter((measurement) => measurement.status === "failed" || measurement.status === "canceled")
-        .map((measurement) => measurementFailureSummary(measurement, artifactIds.get(measurement.runId) ?? [])),
+      ...(failedMeasurements.length > 0 ? { failedMeasurements } : {}),
+      ...(canceledMeasurements.length > 0 ? { canceledMeasurements } : {}),
       coverage: coverage as unknown as Json,
       deltas: deltas as unknown as Json,
       next,
@@ -6497,7 +6522,7 @@ function emitEvalFailure(
     return 1;
   }
   io.stdout.write([
-    "Eval failed; evidence was saved.",
+    message,
     formatRunSnapshot(snapshot, failedRuns[0]),
     ...formatEvalCoverageLines(coverage),
     ...formatEvalDeltaLines(deltas),
@@ -6566,7 +6591,7 @@ function adapterAuthRemediationFromErrorMessage(error: string | undefined): stri
   return adapterId ? workbenchProviderAuthSetupCommand(adapterId) : null;
 }
 
-function output(value: unknown, parsed: ParsedArgs, io: CliIo, text: () => string): number {
+function output(value: unknown, parsed: ParsedArgs, io: CliIo, text: (format: HumanFormatOptions) => string): number {
   return emitResult(commandSchema(parsed), { result: value as Json }, parsed, io, text);
 }
 
@@ -7230,6 +7255,30 @@ function snapshotVersionByRef(snapshot: InspectionSnapshot, ref: string): Workbe
   return candidates[0];
 }
 
+function snapshotResultVersionsByRef(
+  snapshot: InspectionSnapshot,
+  ref: string,
+): WorkbenchResults["versions"][number][] {
+  const requested = ref.trim();
+  const normalized = requested === "current" ? snapshot.refs.current ?? "" : requested;
+  if (!normalized || !snapshot.results) {
+    return [];
+  }
+  return snapshot.results.versions.filter((version) =>
+    resultVersionRefMatches(version, normalized)
+  );
+}
+
+function resultVersionRefMatches(version: WorkbenchResults["versions"][number], ref: string): boolean {
+  const candidates = [version.id, version.projectVersionId]
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+  return candidates.some((candidate) =>
+    candidate === ref ||
+    candidate.startsWith(ref) ||
+    (candidate.startsWith("v_") && (candidate.slice(2) === ref || candidate.slice(2).startsWith(ref)))
+  );
+}
+
 function snapshotVersionRefMatches(version: WorkbenchVersion, ref: string): boolean {
   const withoutVersionPrefix = ref.startsWith("v_") ? ref.slice(2) : ref;
   return version.id === ref ||
@@ -7436,7 +7485,8 @@ function formatRunEvidenceSummary(
   progress?: WorkbenchRunSnapshot,
   next?: string | null,
 ): string {
-  const failures = runFailureGroups(jobs);
+  const failures = runFailureGroups(jobs, ["failed"]);
+  const cancellations = runFailureGroups(jobs, ["canceled"]);
   return [
     progress ? formatRunSnapshot(progress, run) : formatRun(run),
     `location=${run.location ?? "local"}${run.retryOfRunId ? ` retry_of=${displayRef(run.retryOfRunId)}` : ""}${run.outputVersionId ? ` output=${displayRef(run.outputVersionId)}` : ""}`,
@@ -7445,15 +7495,22 @@ function formatRunEvidenceSummary(
     ...(failures.length > 0
       ? ["Failures:", ...failures.map((failure) => `  ${failure.count} ${failure.status}: ${failure.cause}`)]
       : []),
+    ...(cancellations.length > 0
+      ? ["Canceled:", ...cancellations.map((failure) => `  ${failure.count}: ${failure.cause}`)]
+      : []),
     formatRunOrJobEvidence(jobs, details, files, run.id),
     ...(next ? [`next: ${next}`] : []),
   ].filter(Boolean).join("\n");
 }
 
-function runFailureGroups(jobs: readonly WorkbenchJob[]): Array<{ status: string; cause: string; count: number; jobIds: string[] }> {
+function runFailureGroups(
+  jobs: readonly WorkbenchJob[],
+  statuses: readonly WorkbenchJob["status"][] = ["failed", "canceled"],
+): Array<{ status: string; cause: string; count: number; jobIds: string[] }> {
+  const includedStatuses = new Set(statuses);
   const groups = new Map<string, { status: string; cause: string; count: number; jobIds: string[] }>();
   for (const job of jobs) {
-    if (job.status !== "failed" && job.status !== "canceled") {
+    if (!includedStatuses.has(job.status)) {
       continue;
     }
     const cause = job.error ? singleLine(job.error).slice(0, 240) : job.status;
@@ -7649,12 +7706,52 @@ function manifestOnly(value: unknown): Json {
   return out as Json;
 }
 
-function formatLogEntry(entry: WorkbenchLogEntry): string {
-  if (entry.kind === "version") {
-    return `${entry.createdAt}\tversion\t${displayRef(entry.id)}\tfiles=${entry.fileCount}\t${entry.message}`;
+function resultsManifest(results: WorkbenchResults): Json {
+  return {
+    versions: results.versions.map((version) => ({
+      ...version,
+      ...(version.files
+        ? {
+            files: version.files.map((file) =>
+              fileSummary(file, showFileRef(version.projectVersionId ?? version.id, file.path))
+            ),
+          }
+        : {}),
+    })),
+    evaluations: results.evaluations.map((evaluation) => ({ ...evaluation })),
+    agents: results.agents.map((agent) => ({ ...agent })),
+    cells: results.cells.map((cell) => ({ ...cell })),
+  } as unknown as Json;
+}
+
+function formatLogEntries(entries: readonly WorkbenchLogEntry[], format: HumanFormatOptions): string {
+  if (entries.length === 0) {
+    return "No history.";
   }
-  const score = entry.score === undefined ? "n/a" : entry.score.toFixed(3);
-  return `${entry.createdAt}\trun\t${displayRef(entry.id)}\t${entry.status}\tversion=${displayRef(entry.versionId)}\tskill=${entry.skillName}\tagent=${entry.agentName}\tscore=${score}`;
+  return renderTable(entries, [
+    { header: "created", cell: (entry) => entry.createdAt },
+    { header: "kind", cell: (entry) => entry.kind },
+    { header: "ref", cell: (entry) => displayRef(entry.id) },
+    {
+      header: "status",
+      cell: (entry, options) => entry.kind === "run" ? styleStatus(entry.status, options) : "n/a",
+    },
+    {
+      header: "version",
+      cell: (entry) => entry.kind === "run" ? displayRef(entry.versionId) : "n/a",
+    },
+    { header: "skill", cell: (entry) => entry.kind === "run" ? entry.skillName : "n/a" },
+    { header: "agent", cell: (entry) => entry.kind === "run" ? entry.agentName : "n/a" },
+    {
+      header: "score",
+      align: "right",
+      cell: (entry) => entry.kind === "run" && entry.score !== undefined ? entry.score.toFixed(3) : "n/a",
+    },
+    {
+      header: "detail",
+      cell: (entry) => entry.kind === "version" ? `${entry.fileCount} ${entry.fileCount === 1 ? "file" : "files"}; ${entry.message}` : "n/a",
+    },
+  ], format);
 }
 
 function splitShowRef(ref: string): [string, string | null] {
@@ -7672,15 +7769,23 @@ function fileForSnapshotRef(
 ): unknown | null {
   const version = snapshotVersionByRef(snapshot, objectRef);
   if (version) {
-    const file = version.files.find((entry) => entry.path === requestedPath);
+    const file = findShowFile(version.files, requestedPath, objectRef);
     if (file) {
       return file;
+    }
+    const resultVersionFile = fileForResultVersionSnapshotRef(snapshot, objectRef, requestedPath);
+    if (resultVersionFile) {
+      return resultVersionFile;
     }
     throw new WorkbenchCodedError("ref_not_found", `File not found in ${version.id}: ${requestedPath}`, {
       remediation: `workbench show ${version.id}`,
       subject: { ref: version.id, path: requestedPath },
       exitCode: 1,
     });
+  }
+  const resultVersionFile = fileForResultVersionSnapshotRef(snapshot, objectRef, requestedPath);
+  if (resultVersionFile) {
+    return resultVersionFile;
   }
   const runOrJobFile = fileForRunOrJobSnapshotRef(snapshot, objectRef, requestedPath);
   if (runOrJobFile) {
@@ -7711,6 +7816,36 @@ function fileForSnapshotRef(
     });
   }
   return fileForRunOrJobSnapshotRef(snapshot, objectRef, requestedPath);
+}
+
+function fileForResultVersionSnapshotRef(
+  snapshot: InspectionSnapshot,
+  objectRef: string,
+  requestedPath: string,
+): SurfaceSnapshotFile | null {
+  const candidates = snapshotResultVersionsByRef(snapshot, objectRef);
+  if (candidates.length === 0) {
+    return null;
+  }
+  const matches = candidates.flatMap((version) => {
+    const file = version.files ? findShowFile(version.files, requestedPath, objectRef) : null;
+    return file ? [{ version, file }] : [];
+  });
+  if (matches.length === 1) {
+    return matches[0]!.file;
+  }
+  if (matches.length > 1) {
+    throw new WorkbenchCodedError("ref_ambiguous", `Result version file ref is ambiguous: ${objectRef}:${requestedPath}. Candidates: ${displayCandidateRefs(matches.map((match) => match.version.id)).join(", ")}.`, {
+      subject: { ref: objectRef, path: requestedPath, candidates: matches.map((match) => match.version.id) },
+      exitCode: 2,
+    });
+  }
+  const version = candidates[0]!;
+  throw new WorkbenchCodedError("ref_not_found", `File not found in ${version.id}: ${requestedPath}`, {
+    remediation: `workbench show ${version.projectVersionId ?? version.id}`,
+    subject: { ref: version.id, path: requestedPath },
+    exitCode: 1,
+  });
 }
 
 function fileForRunOrJobSnapshotRef(
@@ -7779,8 +7914,11 @@ function findShowFile(
   if (exact.length > 1) {
     throw ambiguousShowPath(objectRef, requestedPath, exact);
   }
+  const normalizedBase = path.basename(normalized);
   const suffixCandidates = files.filter((file) =>
-    file.path.endsWith(`/${normalized}`) || path.basename(file.path) === normalized
+    file.path.endsWith(`/${normalized}`) ||
+    file.path === normalizedBase ||
+    path.basename(file.path) === normalizedBase
   );
   if (suffixCandidates.length === 0) {
     return null;
@@ -7851,6 +7989,7 @@ interface EvalCoverage {
   jobs: number;
   succeeded: number;
   failed: number;
+  canceled: number;
 }
 
 async function evalCoverageSummaries(
@@ -7881,6 +8020,7 @@ async function evalCoverageSummaries(
       jobs: 0,
       succeeded: 0,
       failed: 0,
+      canceled: 0,
       sampleKeys: new Set<string>(),
       caseIds: new Set<string>(),
     };
@@ -7890,8 +8030,11 @@ async function evalCoverageSummaries(
     if (job.status === "succeeded") {
       current.succeeded += 1;
     }
-    if (job.status === "failed" || job.status === "canceled") {
+    if (job.status === "failed") {
       current.failed += 1;
+    }
+    if (job.status === "canceled") {
+      current.canceled += 1;
     }
     coverageByKey.set(key, current);
   }
@@ -7916,6 +8059,7 @@ function formatEvalCoverage(coverage: EvalCoverage, includeRunLabels = false): s
     `samples=${coverage.samples}`,
     `jobs=${coverage.jobs}`,
     coverage.failed > 0 ? `failed=${coverage.failed}` : undefined,
+    coverage.canceled > 0 ? `canceled=${coverage.canceled}` : undefined,
     includeRunLabels ? `run=${displayRef(coverage.runId)}` : undefined,
     includeRunLabels ? `skill=${coverage.skillName}` : undefined,
     includeRunLabels ? `agent=${coverage.agentName}` : undefined,
@@ -8122,7 +8266,7 @@ function statusHasPublishedCurrentCloudSource(status: Awaited<ReturnType<typeof 
 function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
   auth?: WorkbenchCliAuthStatus;
   machine?: WorkbenchMachineStatus;
-}): string {
+}, format: HumanFormatOptions = PLAIN_HUMAN_FORMAT): string {
   const lines = [
     `Root: ${status.project.root}`,
     `Initialized: ${status.project.initialized ? "yes" : "no"}`,
@@ -8137,10 +8281,10 @@ function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
     ...((status.runs.activeRuns?.length ?? 0) > 0
       ? [
         "Active runs:",
-        ...status.runs.activeRuns!.map(formatStatusActiveRun),
+        ...status.runs.activeRuns!.map((run) => formatStatusActiveRun(run, format)),
       ]
       : []),
-    `Workbench Cloud: ${status.auth?.workbenchCloud.status ?? "not_authenticated"}${status.auth?.workbenchCloud.baseUrl ? ` ${status.auth.workbenchCloud.baseUrl}` : ""}`,
+    `Workbench Cloud: ${styleStatus(status.auth?.workbenchCloud.status ?? "not_authenticated", format)}${status.auth?.workbenchCloud.baseUrl ? ` ${status.auth.workbenchCloud.baseUrl}` : ""}`,
     ...(status.remotes.length > 0 ? ["Remotes:", ...status.remotes.flatMap((remote) => {
       const publication = remote.publication.status === "published"
         ? [
@@ -8151,7 +8295,7 @@ function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
           ].filter(Boolean).join("\t")
         : "publication=unpublished";
       return [
-        `  ${remote.name}\tkind=${remote.kind}\tsync=${remote.sync.status}\turl=${remote.url}\t${publication}`,
+        `  ${remote.name} kind=${remote.kind} sync=${styleStatus(remote.sync.status, format)} url=${remote.url} ${publication}`,
         ...((remote.sync.status === "error" || remote.sync.status === "auth_required") && remote.sync.lastError
           ? [
             `    error[${remote.sync.lastError.code}]: ${remote.sync.lastError.message}`,
@@ -8165,12 +8309,12 @@ function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
   return lines.join("\n");
 }
 
-function formatStatusActiveRun(run: WorkbenchActiveRunStatusForCli): string {
+function formatStatusActiveRun(run: WorkbenchActiveRunStatusForCli, format: HumanFormatOptions = PLAIN_HUMAN_FORMAT): string {
   return [
     `  ${displayRef(run.id)}`,
     run.kind,
     run.location,
-    run.status,
+    styleStatus(run.status, format),
     `skill=${run.skillName}`,
     `agent=${run.agentName}`,
     run.workTotal !== undefined && run.workDone !== undefined ? `work=${run.workDone}/${run.workTotal}` : undefined,
@@ -8183,7 +8327,10 @@ function formatStatusActiveRun(run: WorkbenchActiveRunStatusForCli): string {
   ].filter(Boolean).join("\t");
 }
 
-function formatInstalledInventory(inventory: WorkbenchSkillAccessInventory): string {
+function formatInstalledInventory(
+  inventory: WorkbenchSkillAccessInventory,
+  format: HumanFormatOptions = PLAIN_HUMAN_FORMAT,
+): string {
   if (inventory.skills.length === 0) {
     const scopeText = inventory.scopes.length === 1
       ? inventory.scopes[0] === "global" ? " globally" : " in this folder"
@@ -8194,24 +8341,27 @@ function formatInstalledInventory(inventory: WorkbenchSkillAccessInventory): str
     ].filter(Boolean).join("\n");
   }
   const lines = [
-    "name\tavailable to\tstatus\tsource",
-    ...inventory.skills.map(formatInstalledSkill),
+    renderTable(inventory.skills, [
+      { header: "name", cell: (skill) => skill.name },
+      { header: "target", cell: (skill) => skill.target },
+      { header: "scope", cell: (skill) => skill.scope },
+      { header: "status", cell: (skill, options) => styleStatus(skill.status, options) },
+      { header: "source", cell: (skill) => skill.handle ?? "(no provenance)" },
+    ], format),
     ...(inventory.next ? [`next: ${inventory.next}`] : []),
   ];
   return lines.join("\n");
 }
 
-function formatInstalledSkill(skill: WorkbenchInstalledSkill): string {
-  return [
-    skill.name,
-    `${skill.target} ${skill.scope}`,
-    skill.status,
-    skill.handle ?? "(no provenance)",
-  ].join("\t");
-}
-
-function formatVersion(version: WorkbenchVersion): string {
-  return `${displayRef(version.id)}\t${version.hash.slice(0, 12)}\t${version.message}`;
+function formatVersions(versions: readonly WorkbenchVersion[], format: HumanFormatOptions): string {
+  if (versions.length === 0) {
+    return "No versions.";
+  }
+  return renderTable(versions, [
+    { header: "version", cell: (version) => displayRef(version.id) },
+    { header: "hash", cell: (version) => version.hash.slice(0, 12) },
+    { header: "message", cell: (version) => version.message },
+  ], format);
 }
 
 function versionSummary(version: WorkbenchVersion): Json {
@@ -8225,8 +8375,23 @@ function versionSummary(version: WorkbenchVersion): Json {
   };
 }
 
-function formatAgent(agent: WorkbenchAgent): string {
-  return `${agent.name}\t${agent.adapter}${agent.model ? `\t${agent.model}` : ""}`;
+function formatAgents(agents: readonly WorkbenchAgent[], format: HumanFormatOptions): string {
+  if (agents.length === 0) {
+    return "No agents.";
+  }
+  return renderTable(agents, [
+    { header: "name", cell: (agent) => agent.name },
+    { header: "adapter", cell: (agent) => agent.adapter },
+    { header: "model", cell: (agent) => agent.model ?? "n/a" },
+  ], format);
+}
+
+function formatAgentInline(agent: WorkbenchAgent): string {
+  return [
+    agent.name,
+    `adapter=${agent.adapter}`,
+    agent.model ? `model=${agent.model}` : undefined,
+  ].filter(Boolean).join(" ");
 }
 
 function formatRun(run: WorkbenchRun): string {
@@ -8253,7 +8418,7 @@ function formatRunSnapshot(
     : "n/a";
   const scoreValue = snapshot.result?.score ?? snapshot.progress.partialScore;
   const score = scoreValue === undefined ? "n/a" : scoreValue.toFixed(3);
-  const cost = snapshot.progress.costUsd === undefined ? "n/a" : `$${snapshot.progress.costUsd.toFixed(4)}`;
+  const cost = snapshot.progress.costUsd === undefined ? "n/a" : formatCostUsd(snapshot.progress.costUsd);
   const singleMeasurement = snapshot.measurements.length === 1 ? snapshot.measurements[0] : undefined;
   const latencyParts = snapshotLatencySummaryParts(snapshot, run ?? singleMeasurement);
   const header = [
@@ -8327,25 +8492,40 @@ function humanSampleNumber(sample: number): number {
   return sample + 1;
 }
 
-function formatResults(results: WorkbenchResults): string {
-  const lines = ["version\tagent\tstatus\tquality\tsamples\tcost\tlatency\trun"];
+function formatResults(
+  results: WorkbenchResults,
+  format: HumanFormatOptions = PLAIN_HUMAN_FORMAT,
+): string {
   const evidenceCells = results.cells.filter((cell) => cell.runId || cell.status);
-  for (const cell of evidenceCells) {
-    lines.push([
-      formatResultVersion(results, cell),
-      formatResultAgent(results, cell),
-      cell.status ?? "not-run",
-      cell.quality === undefined ? "n/a" : cell.quality.toFixed(3),
-      cell.samples === undefined ? "n/a" : String(cell.samples),
-      cell.costUsd === undefined ? "n/a" : `$${cell.costUsd.toFixed(4)}`,
-      cell.latencyMs === undefined ? "n/a" : `${cell.latencyMs}ms`,
-      cell.runId ? displayRef(cell.runId) : "n/a",
-    ].join("\t"));
-  }
-  if (lines.length === 1) {
+  if (evidenceCells.length === 0) {
     return "No results.";
   }
-  return lines.join("\n");
+  return renderTable(evidenceCells, [
+    { header: "version", cell: (cell) => formatResultVersion(results, cell) },
+    { header: "agent", cell: (cell) => formatResultAgent(results, cell) },
+    { header: "status", cell: (cell, options) => styleStatus(cell.status ?? "not-run", options) },
+    {
+      header: "quality",
+      align: "right",
+      cell: (cell) => cell.quality === undefined ? "n/a" : cell.quality.toFixed(3),
+    },
+    {
+      header: "samples",
+      align: "right",
+      cell: (cell) => cell.samples === undefined ? "n/a" : String(cell.samples),
+    },
+    {
+      header: "cost",
+      align: "right",
+      cell: (cell) => cell.costUsd === undefined ? "n/a" : formatCostUsd(cell.costUsd),
+    },
+    {
+      header: "latency",
+      align: "right",
+      cell: (cell) => cell.latencyMs === undefined ? "n/a" : `${cell.latencyMs}ms`,
+    },
+    { header: "run", cell: (cell) => cell.runId ? displayRef(cell.runId) : "n/a" },
+  ], format);
 }
 
 function formatResultVersion(
