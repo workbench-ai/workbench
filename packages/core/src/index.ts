@@ -3072,6 +3072,7 @@ export interface WorkbenchUnpublishOptions extends WorkbenchCommandOptions {
   version: string;
   remote?: string;
   authToken?: string;
+  dryRun?: boolean;
 }
 
 export interface WorkbenchUnpublishResult {
@@ -3081,6 +3082,7 @@ export interface WorkbenchUnpublishResult {
   installHandle?: string;
   currentVersionId?: string;
   publishedVersionIds: string[];
+  dryRun?: boolean;
 }
 
 export interface WorkbenchAddRemoteOptions extends WorkbenchCommandOptions {
@@ -3100,12 +3102,7 @@ export interface WorkbenchSyncResult {
   pulled: number;
   upToDate: boolean;
   dryRun?: boolean;
-  publication?: {
-    status: "published" | "unpublished";
-    visibility?: string;
-    versionId?: string;
-    installHandle?: string;
-  };
+  publication?: WorkbenchStatusSnapshot["remotes"][number]["publication"];
 }
 
 export interface WorkbenchDiffEntry {
@@ -7096,7 +7093,7 @@ function resultsFromInternalComparison(
   const agentByHash = new Map(comparison.agents.map((agent) => [agent.hash, agent]));
   const evalByHash = new Map(state.evals.map((evalSnapshot) => [evalSnapshot.hash, evalSnapshot]));
   const projectVersionById = new Map(comparison.versions.map((version) => [version.id, version]));
-  const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(comparison);
+  const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(comparison, state.refs.current);
   const resultVersions = new Map<string, WorkbenchResults["versions"][number]>();
   const resultAgents = new Map<string, WorkbenchResults["agents"][number]>();
   const resultEvaluations = new Map<string, WorkbenchResults["evaluations"][number]>();
@@ -7270,7 +7267,7 @@ function skillFrontmatterName(content: string): string | undefined {
   }
 }
 
-function resultLocalVersionOrdinals(comparison: InternalComparison): Map<string, number> {
+function resultLocalVersionOrdinals(comparison: InternalComparison, currentVersionId?: string): Map<string, number> {
   const localVersionIds = new Set<string>();
   const skillByHash = new Map(comparison.skills.map((skill) => [skill.hash, skill]));
   for (const cell of comparison.cells) {
@@ -7278,7 +7275,14 @@ function resultLocalVersionOrdinals(comparison: InternalComparison): Map<string,
     if (
       skill?.source.kind === "local" &&
       (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".") &&
-      (cell.runId || cell.status || cell.score !== undefined || cell.latencyMs !== undefined || cell.costUsd !== undefined)
+      (
+        cell.versionId === currentVersionId ||
+        cell.runId ||
+        cell.status ||
+        cell.score !== undefined ||
+        cell.latencyMs !== undefined ||
+        cell.costUsd !== undefined
+      )
     ) {
       localVersionIds.add(cell.versionId);
     }
@@ -7967,10 +7971,19 @@ export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptio
     const version = resolveVersion(state, options.version);
     const remote = resolveRemote(state, options.remote);
     assertPublishableRemote(remote);
-    await saveState(root, state);
-    const sync = await syncWorkbenchRemote({ dir: root, remote: remote.name, authToken: options.authToken });
-    const syncedState = await loadState(root);
-    const publication = publicationStatusFromRefs(syncedState.refs, sync.remote.name);
+    if (options.dryRun !== true) {
+      await saveState(root, state);
+    }
+    const sync = await syncWorkbenchRemote({
+      dir: root,
+      remote: remote.name,
+      authToken: options.authToken,
+      dryRun: options.dryRun === true,
+    });
+    const syncedState = options.dryRun === true ? state : await loadState(root);
+    const publication = options.dryRun === true && sync.publication
+      ? sync.publication
+      : publicationStatusFromRefs(syncedState.refs, sync.remote.name);
     if (publication.status !== "published" || !publication.publishedVersionIds?.includes(version.id)) {
       throw new WorkbenchCodedError("published_version_not_found", `Published version not found: ${version.id}.`, {
         remediation: "workbench publish VERSION",
@@ -7987,6 +8000,17 @@ export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptio
         },
         exitCode: 1,
       });
+    }
+    if (options.dryRun === true) {
+      return {
+        remote: sync.remote,
+        version,
+        visibility: normalizePublishVisibilityRef(publication.visibility),
+        installHandle: publication.installHandle,
+        currentVersionId: publication.currentVersionId,
+        publishedVersionIds: publication.publishedVersionIds ?? [],
+        dryRun: true,
+      };
     }
     const remotePublication = await deleteRemotePublishedVersion(sync.remote, version.id, {
       authToken: options.authToken,

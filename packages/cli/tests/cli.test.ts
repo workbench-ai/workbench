@@ -861,10 +861,16 @@ describe("workbench skill-first CLI", () => {
     expect(shown.stdout).toContain("sample=1");
     expect(shown.stdout).toContain("sample=2");
     expect(shown.stdout).not.toContain("sample=0");
+    const shownJson = await invoke(["show", evaluatedRunId, "--dir", root, "--json"]);
+    expect(shownJson.code, shownJson.stdout || shownJson.stderr).toBe(0);
+    expect(stdoutJson<{ result: { jobs: Array<{ sample: number }> } }>(shownJson).result.jobs.map((job) => job.sample))
+      .toEqual([1, 2]);
 
     const bareResults = await invoke(["results", "--dir", root]);
     expect(bareResults.code, bareResults.stdout || bareResults.stderr).toBe(0);
     expect(bareResults.stdout).toContain("No results.");
+    expect(bareResults.stdout).toContain("Current version has no recorded results:");
+    expect(bareResults.stdout).toContain("next: workbench eval");
 
     const contextualResults = await invoke(["results", "--agents", "strict", "--dir", root]);
     expect(contextualResults.code, contextualResults.stdout || contextualResults.stderr).toBe(0);
@@ -903,6 +909,35 @@ describe("workbench skill-first CLI", () => {
     const retried = await invoke(["run", "retry", evaluatedRunId, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
     expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench results --agents strict");
+  });
+
+  test("results keep historical evidence distinct when current source has not run", async () => {
+    const root = await makeTempRoot("workbench-cli-results-current-unrun-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+
+    const evaluated = await invoke(["eval", "--dir", root, "--json"]);
+    expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nUnscored current edit.\n");
+    await currentVersionIdFor(root);
+
+    const results = await invoke(["results", "--versions", "all", "--dir", root]);
+    expect(results.code, results.stdout || results.stderr).toBe(0);
+    expect(results.stdout).toContain(expectedLocalSkillLabel(root, 1));
+    expect(results.stdout).toContain(`Current version has no recorded results: ${expectedLocalSkillLabel(root, 2)}.`);
+    expect(results.stdout).toContain("next: workbench eval");
+
+    const resultsJson = await invoke(["results", "--versions", "all", "--dir", root, "--json"]);
+    expect(resultsJson.code, resultsJson.stdout || resultsJson.stderr).toBe(0);
+    const payload = stdoutJson<{
+      next: string | null;
+      result: { versions: Array<{ label: string; current?: boolean }> };
+    }>(resultsJson);
+    expect(payload.next).toBe("workbench eval");
+    expect(payload.result.versions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: expectedLocalSkillLabel(root, 1) }),
+      expect.objectContaining({ label: expectedLocalSkillLabel(root, 2), current: true }),
+    ]));
   });
 
   test("terminal run summaries preserve multi-agent measurement context", async () => {
@@ -1476,6 +1511,12 @@ describe("workbench skill-first CLI", () => {
         ".workbench/cases/case-001/case.yaml",
         ".workbench/environment/Dockerfile",
       ]),
+      result: {
+        runtimeState: {
+          initialized: "fresh",
+          copiedFromSource: false,
+        },
+      },
       next: "workbench eval",
     });
     expect(stdoutJson(created)).not.toHaveProperty("setupCommands");
@@ -1514,6 +1555,10 @@ describe("workbench skill-first CLI", () => {
     const hydratedStatus = await invoke(["status", "--dir", root, "--json"]);
     expect(hydratedStatus.code, hydratedStatus.stdout || hydratedStatus.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(hydratedStatus).next).toBe("workbench eval");
+    const humanRoot = path.join(await makeTempRoot("workbench-cli-clone-human-parent-"), "private-skill");
+    const human = await invoke(["clone", "alice/private-skill", humanRoot]);
+    expect(human.code, human.stdout || human.stderr).toBe(0);
+    expect(human.stdout).toContain("Initialized fresh local Workbench runtime state; source runtime directories were not copied.");
   });
 
   test("clone with published smoke cases points to eval", async () => {
@@ -3104,6 +3149,7 @@ describe("workbench skill-first CLI", () => {
 
   test("status suggests results after a successful smoke eval", async () => {
     const root = await makeTempRoot("workbench-cli-status-smoke-case-");
+    const remote = await makeTempRoot("workbench-cli-status-smoke-remote-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await fs.mkdir(path.join(root, ".workbench", "cases", "case-001"), { recursive: true });
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
@@ -3115,6 +3161,8 @@ describe("workbench skill-first CLI", () => {
     ].join("\n"));
 
     await currentVersionIdFor(root);
+    await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    expect((await invoke(["sync", "origin", "--dir", root, "--json"])).code).toBe(0);
     const preEvalStatus = await invoke(["status", "--dir", root, "--json"]);
     expect(preEvalStatus.code, preEvalStatus.stdout || preEvalStatus.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(preEvalStatus).next).toBe("workbench eval");
@@ -3124,7 +3172,14 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(evalResult).next).toBe("workbench results");
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench results");
+    expect(stdoutJson<{ next: string | null; syncNext: string | null }>(status)).toMatchObject({
+      next: "workbench results",
+      syncNext: "workbench sync origin --dry-run",
+    });
+    const human = await invoke(["status", "--dir", root]);
+    expect(human.code, human.stdout || human.stderr).toBe(0);
+    expect(human.stdout).toContain("sync next: workbench sync origin --dry-run");
+    expect(human.stdout).toContain("next: workbench results");
   });
 
   test("eval JSON terminal progress uses the final publish-ready next command", async () => {
@@ -7425,6 +7480,7 @@ describe("workbench skill-first CLI", () => {
     let created = false;
     let remotePack = emptyObjectPack("2026-06-11T00:00:00.000Z");
     let publishRequests = 0;
+    let deleteRequests = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const method = (init?.method ?? "GET").toUpperCase();
@@ -7463,6 +7519,10 @@ describe("workbench skill-first CLI", () => {
         }
         return jsonResponse({ skill: { id: "skill_progress", ownerSlug: "alice", name: "progress-skill" } });
       }
+      if (url.pathname.startsWith("/api/workbench/source/skills/alice/progress-skill/versions/") && method === "DELETE") {
+        deleteRequests += 1;
+        return jsonResponse({ message: "unexpected delete" }, 500);
+      }
       return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -7486,7 +7546,30 @@ describe("workbench skill-first CLI", () => {
       expect(publishHuman.stdout).not.toContain("Pinned release URL:");
       expect(publishHuman.stdout).not.toContain("https://cloud.test/skills/alice/progress-skill");
       expect(publishRequests).toBe(1);
-      const currentVersionId = stdoutJson<{ version: { id: string } }>(publish).version.id;
+      const firstVersionId = stdoutJson<{ version: { id: string } }>(publish).version.id;
+      await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond published version.\n");
+      const replacement = await invoke(["publish", "--dir", root, "--json"]);
+      expect(replacement.code, replacement.stdout || replacement.stderr).toBe(0);
+      const currentVersionId = stdoutJson<{ version: { id: string } }>(replacement).version.id;
+      expect(currentVersionId).not.toBe(firstVersionId);
+      expect(publishRequests).toBe(2);
+      const dryUnpublish = await invoke(["unpublish", firstVersionId, "--dry-run", "--dir", root, "--json"]);
+      expect(dryUnpublish.code, dryUnpublish.stdout || dryUnpublish.stderr).toBe(0);
+      expect(stdoutJson(dryUnpublish)).toMatchObject({
+        schema: "workbench.cli.unpublish.v1",
+        ok: true,
+        dryRun: true,
+        version: { id: firstVersionId },
+        installHandle: "alice/progress-skill",
+        currentVersionId,
+        publishedVersionIds: expect.arrayContaining([firstVersionId, currentVersionId]),
+      });
+      const dryUnpublishHuman = await invoke(["unpublish", firstVersionId, "--dry-run", "--dir", root]);
+      expect(dryUnpublishHuman.code, dryUnpublishHuman.stdout || dryUnpublishHuman.stderr).toBe(0);
+      expect(dryUnpublishHuman.stdout).toContain("Would unpublish ");
+      expect(dryUnpublishHuman.stdout).toContain("Dry run made no changes.");
+      expect(dryUnpublishHuman.stdout).toContain(`Current published version: ${shortTestRef(currentVersionId)}.`);
+      expect(deleteRequests).toBe(0);
       const unpublishCurrent = await invoke(["unpublish", currentVersionId, "--dir", root]);
       expect(unpublishCurrent.code, unpublishCurrent.stdout || unpublishCurrent.stderr).toBe(1);
       expect(unpublishCurrent.stderr).toContain(`workbench unpublish: checking exact source availability for ${currentVersionId}.`);

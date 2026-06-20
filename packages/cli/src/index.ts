@@ -406,12 +406,12 @@ const COMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   unpublish: [
     "Usage:",
-    "  workbench unpublish VERSION [--dir DIR] [--json]",
+    "  workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]",
     "",
     "Removes exact source availability for a non-current published version.",
     "",
     "Example:",
-    "  workbench unpublish v_abc123",
+    "  workbench unpublish v_abc123 --dry-run",
   ].join("\n"),
   login: [
     "Usage:",
@@ -511,7 +511,7 @@ const COMMAND_FLAGS: Record<string, FlagSpec> = {
   status: { ...PROJECT_FLAGS, ...HELP_FLAG },
   switch: { ...PROJECT_FLAGS, ...HELP_FLAG },
   sync: { ...PROJECT_FLAGS, ...HELP_FLAG, "dry-run": "boolean" },
-  unpublish: { ...PROJECT_FLAGS, ...HELP_FLAG },
+  unpublish: { ...PROJECT_FLAGS, ...HELP_FLAG, "dry-run": "boolean" },
   versions: { ...PROJECT_FLAGS, ...HELP_FLAG },
   version: { ...COMMON_FLAGS, ...VERSION_FLAG },
 };
@@ -727,7 +727,11 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         versions: stringFlag(parsed, "versions"),
         agents: stringFlag(parsed, "agents"),
       });
-      return output(resultsManifest(results), parsed, io, (format) => formatResults(results, format));
+      const next = resultsNextCommand(results);
+      return emitResult("workbench.cli.results.v1", {
+        result: resultsManifest(results),
+        next: next as Json,
+      }, parsed, io, (format) => formatResults(results, format));
     }
     if (command === "switch") {
       const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.", "workbench switch VERSION");
@@ -862,13 +866,15 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         message: "workbench unpublish accepts one VERSION argument.",
         remediation: "workbench unpublish VERSION",
       });
+      const dryRun = parsed.flags["dry-run"] === true;
       const remote = await ensurePublishRemote(parsed);
       await assertPublishCloudAuth(parsed, remote);
       writeCliProgress(parsed, io, `workbench unpublish: checking exact source availability for ${versionRef}.`);
-      const result = await withProgressHeartbeat(io, "workbench unpublish: remote publication update", async () => await unpublishWorkbenchVersion({
+      const result = await withProgressHeartbeat(io, dryRun ? "workbench unpublish: dry-run check" : "workbench unpublish: remote publication update", async () => await unpublishWorkbenchVersion({
         ...core,
         version: versionRef,
         remote,
+        dryRun,
       }), { json: parsed.flags.json === true });
       return emitResult("workbench.cli.unpublish.v1", {
         remote: result.remote as unknown as Json,
@@ -877,9 +883,11 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         visibility: result.visibility ? publishAudience(result.visibility) : null,
         currentVersionId: result.currentVersionId ?? null,
         publishedVersionIds: result.publishedVersionIds,
+        ...(result.dryRun ? { dryRun: true } : {}),
         next: result.currentVersionId ? `workbench install ${result.installHandle ?? "OWNER/SKILL"}@${result.currentVersionId}` : null,
       }, parsed, io, () => [
-        `Unpublished ${displayRef(result.version.id)}${result.installHandle ? ` from ${result.installHandle}` : ""}.`,
+        `${result.dryRun ? "Would unpublish" : "Unpublished"} ${displayRef(result.version.id)}${result.installHandle ? ` from ${result.installHandle}` : ""}.`,
+        ...(result.dryRun ? ["Dry run made no changes."] : []),
         ...(result.currentVersionId ? [`Current published version: ${displayRef(result.currentVersionId)}.`] : []),
       ].join("\n"));
     }
@@ -1006,6 +1014,7 @@ function formatCloneResult(
   return [
     `Cloned Workbench skill source to ${project.root} from ${snapshot.owner}/${snapshot.name}.`,
     `Hydrated ${hydratedPaths.length} source ${hydratedPaths.length === 1 ? "file" : "files"} from ${snapshot.versionId}.`,
+    "Initialized fresh local Workbench runtime state; source runtime directories were not copied.",
     version,
     agent,
     ...(next ? [`next: ${next}`] : []),
@@ -1017,6 +1026,10 @@ interface CloneProjectResult {
   initialized: true;
   currentVersionId?: string;
   defaultAgent?: string;
+  runtimeState: {
+    initialized: "fresh";
+    copiedFromSource: false;
+  };
 }
 
 async function handleEvalDryRun(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -1532,6 +1545,7 @@ async function handleStatus(parsed: ParsedArgs, io: CliIo): Promise<number> {
     await statusWithCausalNext(status, auth, core, machine, inspection),
     inspection,
   );
+  const syncNext = statusSyncNextCommand(cliStatus);
   return emitResult("workbench.status.v1", {
     project: cliStatus.project as Json,
     worktree: cliStatus.worktree as Json,
@@ -1539,8 +1553,9 @@ async function handleStatus(parsed: ParsedArgs, io: CliIo): Promise<number> {
     remotes: cliStatus.remotes as Json,
     auth: auth as unknown as Json,
     machine: machine as unknown as Json,
+    syncNext: syncNext as Json,
     next: cliStatus.next as Json,
-  }, parsed, io, (format) => formatStatusSnapshot({ ...cliStatus, auth, machine }, format));
+  }, parsed, io, (format) => formatStatusSnapshot({ ...cliStatus, auth, machine, syncNext }, format));
 }
 
 async function handleLog(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -2950,6 +2965,10 @@ async function handleClone(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const project: CloneProjectResult = {
     root: hydratedStatus.root,
     initialized: true,
+    runtimeState: {
+      initialized: "fresh",
+      copiedFromSource: false,
+    },
     ...(hydratedStatus.currentVersionId ? { currentVersionId: hydratedStatus.currentVersionId } : {}),
     ...(hydratedStatus.defaultAgent ? { defaultAgent: hydratedStatus.defaultAgent } : {}),
   };
@@ -7895,7 +7914,7 @@ function jobEvidenceSummary(job: WorkbenchJob): Json {
     id: job.id,
     runId: job.runId,
     caseId: job.caseId,
-    sample: job.sample,
+    sample: humanSampleNumber(job.sample),
     status: job.status,
     ...(job.score !== undefined ? { score: job.score } : {}),
     ...(job.error ? { error: job.error } : {}),
@@ -8526,9 +8545,15 @@ function statusHasPublishedCurrentCloudSource(status: Awaited<ReturnType<typeof 
   ));
 }
 
+function statusSyncNextCommand(status: WorkbenchStatusSnapshotWithProgress): string | null {
+  const changedRemote = status.remotes.find((remote) => remote.sync.status === "local_changes");
+  return changedRemote ? `workbench sync ${changedRemote.name} --dry-run` : null;
+}
+
 function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
   auth?: WorkbenchCliAuthStatus;
   machine?: WorkbenchMachineStatus;
+  syncNext?: string | null;
 }, format: HumanFormatOptions = PLAIN_HUMAN_FORMAT): string {
   const lines = [
     `Root: ${status.project.root}`,
@@ -8567,6 +8592,7 @@ function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
           : []),
       ];
     })] : ["Remotes: none"]),
+    ...(status.syncNext ? [`sync next: ${shortenCommandRefs(status.syncNext)}`] : []),
     ...(status.next ? [`next: ${shortenCommandRefs(status.next)}`] : []),
   ];
   return lines.join("\n");
@@ -8760,35 +8786,58 @@ function formatResults(
   format: HumanFormatOptions = PLAIN_HUMAN_FORMAT,
 ): string {
   const evidenceCells = results.cells.filter((cell) => cell.runId || cell.status);
-  if (evidenceCells.length === 0) {
-    return "No results.";
+  const missingCurrent = currentResultVersionsWithoutEvidence(results);
+  const next = resultsNextCommand(results);
+  const lines = evidenceCells.length === 0
+    ? ["No results."]
+    : [renderTable(evidenceCells, [
+        { header: "version", cell: (cell) => formatResultVersion(results, cell) },
+        { header: "agent", cell: (cell) => formatResultAgent(results, cell) },
+        { header: "status", cell: (cell, options) => styleStatus(cell.status ?? "unknown", options) },
+        {
+          header: "quality",
+          align: "right",
+          cell: (cell) => cell.quality === undefined ? "n/a" : cell.quality.toFixed(3),
+        },
+        {
+          header: "samples",
+          align: "right",
+          cell: (cell) => cell.samples === undefined ? "n/a" : String(cell.samples),
+        },
+        {
+          header: "cost",
+          align: "right",
+          cell: (cell) => cell.costUsd === undefined ? "n/a" : formatCostUsd(cell.costUsd),
+        },
+        {
+          header: "latency",
+          align: "right",
+          cell: (cell) => cell.latencyMs === undefined ? "n/a" : `${cell.latencyMs}ms`,
+        },
+        { header: "run", cell: (cell) => cell.runId ? displayRef(cell.runId) : "n/a" },
+      ], format)];
+  if (missingCurrent.length > 0) {
+    lines.push(`Current version has no recorded results: ${formatResultVersionList(missingCurrent)}.`);
   }
-  return renderTable(evidenceCells, [
-    { header: "version", cell: (cell) => formatResultVersion(results, cell) },
-    { header: "agent", cell: (cell) => formatResultAgent(results, cell) },
-    { header: "status", cell: (cell, options) => styleStatus(cell.status ?? "not-run", options) },
-    {
-      header: "quality",
-      align: "right",
-      cell: (cell) => cell.quality === undefined ? "n/a" : cell.quality.toFixed(3),
-    },
-    {
-      header: "samples",
-      align: "right",
-      cell: (cell) => cell.samples === undefined ? "n/a" : String(cell.samples),
-    },
-    {
-      header: "cost",
-      align: "right",
-      cell: (cell) => cell.costUsd === undefined ? "n/a" : formatCostUsd(cell.costUsd),
-    },
-    {
-      header: "latency",
-      align: "right",
-      cell: (cell) => cell.latencyMs === undefined ? "n/a" : `${cell.latencyMs}ms`,
-    },
-    { header: "run", cell: (cell) => cell.runId ? displayRef(cell.runId) : "n/a" },
-  ], format);
+  if (next) {
+    lines.push(`next: ${next}`);
+  }
+  return lines.join("\n");
+}
+
+function resultsNextCommand(results: WorkbenchResults): string | null {
+  return currentResultVersionsWithoutEvidence(results).length > 0 ? "workbench eval" : null;
+}
+
+function currentResultVersionsWithoutEvidence(results: WorkbenchResults): WorkbenchResults["versions"] {
+  return results.versions.filter((version) =>
+    version.current &&
+    !results.cells.some((cell) => cell.skillVersionId === version.id && (cell.runId || cell.status))
+  );
+}
+
+function formatResultVersionList(versions: WorkbenchResults["versions"]): string {
+  return versions.map((version) => version.label).join(", ");
 }
 
 function formatResultVersion(
