@@ -215,6 +215,31 @@ async function makeTempRoot(prefix: string): Promise<string> {
   return root;
 }
 
+async function snapshotWorkbenchTree(root: string): Promise<string[]> {
+  const base = path.join(root, ".workbench");
+  const rows: string[] = [];
+  async function walk(directory: string, prefix = ""): Promise<void> {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        rows.push(`dir\t${relativePath}`);
+        await walk(fullPath, relativePath);
+      } else if (entry.isFile()) {
+        rows.push(`file\t${relativePath}\t${(await fs.readFile(fullPath)).toString("base64")}`);
+      } else if (entry.isSymbolicLink()) {
+        rows.push(`link\t${relativePath}\t${await fs.readlink(fullPath)}`);
+      } else {
+        rows.push(`other\t${relativePath}`);
+      }
+    }
+  }
+  await walk(base);
+  return rows;
+}
+
 async function expectNoInstallFanout(homeRoot: string): Promise<void> {
   for (const directoryName of [".claude", ".qwen", ".trae", ".continue", ".codeium", ".tabnine"]) {
     await expect(fs.stat(path.join(homeRoot, directoryName))).rejects.toMatchObject({ code: "ENOENT" });
@@ -938,6 +963,20 @@ describe("workbench skill-first CLI", () => {
       expect.objectContaining({ label: expectedLocalSkillLabel(root, 1) }),
       expect.objectContaining({ label: expectedLocalSkillLabel(root, 2), current: true }),
     ]));
+  });
+
+  test("results does not write Workbench state for unevaluated projects", async () => {
+    const root = await makeTempRoot("workbench-cli-results-read-only-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const authorCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
+    expect(authorCase.code, authorCase.stdout || authorCase.stderr).toBe(0);
+    const before = await snapshotWorkbenchTree(root);
+
+    const results = await invoke(["results", "--dir", root, "--json"]);
+    expect(results.code, results.stdout || results.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(results).next).toBe("workbench eval");
+
+    await expect(snapshotWorkbenchTree(root)).resolves.toEqual(before);
   });
 
   test("terminal run summaries preserve multi-agent measurement context", async () => {

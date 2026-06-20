@@ -897,7 +897,7 @@ describe("skill-first Workbench runtime", () => {
     });
   }, 60_000);
 
-  dockerTest("compare fills unrun cells for valid selected versions when recorded evidence exists", async () => {
+  dockerTest("results fills unrun cells for valid selected committed versions when recorded evidence exists", async () => {
     const root = await makeTempRoot("workbench-compare-selected-matrix-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
@@ -908,22 +908,23 @@ describe("skill-first Workbench runtime", () => {
     }
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nCurrent source edit without an eval run.\n");
+    const status = await workbenchStatus({ dir: root });
+    const committedCurrentVersionId = status.currentVersionId;
     const comparison = await resultsWorkbench({ dir: root, projectVersions: `${initialVersionId}..current` });
-    const currentVersionId = comparison.versions.find((version) => version.id !== initialVersionId)?.id;
-    if (!currentVersionId) {
-      throw new Error("Expected compare to reconcile a second selected version.");
+    if (!committedCurrentVersionId || committedCurrentVersionId === initialVersionId) {
+      throw new Error("Expected status to commit a second selected version.");
     }
     const initialCell = comparison.cells.find((cell) => cell.skillVersionId === initialVersionId);
-    const currentCell = comparison.cells.find((cell) => cell.skillVersionId === currentVersionId);
+    const currentCell = comparison.cells.find((cell) => cell.skillVersionId === committedCurrentVersionId);
 
-    expect(comparison.versions.map((version) => version.id)).toEqual(expect.arrayContaining([initialVersionId, currentVersionId]));
+    expect(comparison.versions.map((version) => version.id)).toEqual(expect.arrayContaining([initialVersionId, committedCurrentVersionId]));
     expect(initialCell).toMatchObject({
       skillVersionId: initialVersionId,
       runId: initialRun.id,
       status: "succeeded",
     });
     expect(currentCell).toMatchObject({
-      skillVersionId: currentVersionId,
+      skillVersionId: committedCurrentVersionId,
     });
     expect(currentCell?.runId).toBeUndefined();
     expect(currentCell?.status).toBeUndefined();

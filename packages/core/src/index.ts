@@ -6875,7 +6875,6 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
   return withWorkbenchProjectLockIfInitialized(root, async () => {
   await requireInitialized(root);
   const state = await loadState(root);
-  await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
   const internalSelection = {
     versions: options.projectVersions,
     skills: options.versions,
@@ -6884,12 +6883,16 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
   const recordedComparison = buildInternalComparisonFromState(state, internalSelection);
   if (recordedComparison.cells.some((cell) => cell.runId || cell.status)) {
     const completedComparison = await completeRecordedResultsSelectionMatrix(state, recordedComparison, options);
-    await saveState(root, state);
     return resultsFromInternalComparison(completedComparison, state);
   }
   let versions = resolveVersionSelection(state, options.projectVersions ?? "current");
   if (versions.length === 0) {
-    versions = [await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE)];
+    return resultsFromInternalComparison({
+      versions: [],
+      skills: [],
+      agents: [],
+      cells: [],
+    }, state);
   }
   const cells: InternalComparisonCell[] = [];
   const comparedSkills: WorkbenchSkillBundleSnapshot[] = [];
@@ -6962,7 +6965,6 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
     }
     throw new WorkbenchUserError("No selected versions define the requested result versions or agents.");
   }
-  await saveState(root, state);
   const [onlyEvalHash] = [...evalHashes];
   return resultsFromInternalComparison({
     ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
