@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -7,7 +7,7 @@ import type { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { TextDecoder } from "node:util";
+import { promisify, TextDecoder } from "node:util";
 import { gzipSync } from "node:zlib";
 
 import YAML from "yaml";
@@ -102,6 +102,9 @@ import {
   createSandboxBackendPlaneForBackend,
   DOCKER_SANDBOX_BACKEND,
 } from "./sandbox-backends/index.ts";
+import {
+  assertDockerSandboxAvailable,
+} from "./sandbox-backends/docker.ts";
 import {
   abortSignalOrUndefined,
   asRuntimeRecord,
@@ -3275,6 +3278,11 @@ const stateSaveQueues = new Map<string, Promise<void>>();
 const SKILL_EVAL_COMMAND_AGENT_ADAPTERS = new Set(["local", "command"]);
 const SKILL_EVAL_PROVIDER_AGENT_ADAPTERS = new Set(["codex", "claude"]);
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const dockerAvailabilityExecFileAsync = promisify(execFile) as unknown as (
+  file: string,
+  args: string[],
+  options?: Record<string, unknown>,
+) => Promise<unknown>;
 
 const IGNORED_SKILL_DIRS = new Set([
   ".agents",
@@ -3717,6 +3725,14 @@ async function assertLocalWorkbenchAdapterAuthReady(
   }
 }
 
+async function assertLocalWorkbenchLaunchReady(
+  agents: readonly WorkbenchAgent[],
+  options?: string | Pick<WorkbenchCommandOptions, "adapterAuthStoreRoot" | "homeDir" | "env">,
+): Promise<void> {
+  await assertLocalWorkbenchAdapterAuthReady(agents, options);
+  await assertLocalWorkbenchExecutionEnvironmentReady(agents);
+}
+
 async function localWorkbenchAdapterAuthReadiness(
   agents: readonly WorkbenchAgent[],
   input?: string | Pick<WorkbenchCommandOptions, "adapterAuthStoreRoot" | "homeDir" | "env">,
@@ -3746,6 +3762,60 @@ async function localWorkbenchAdapterAuthReadiness(
     }
   }
   return readinessFromIssues(issues);
+}
+
+async function localWorkbenchLaunchReadiness(
+  agents: readonly WorkbenchAgent[],
+  options?: string | Pick<WorkbenchCommandOptions, "adapterAuthStoreRoot" | "homeDir" | "env">,
+): Promise<WorkbenchLaunchReadiness> {
+  const [authReadiness, environmentReadiness] = await Promise.all([
+    localWorkbenchAdapterAuthReadiness(agents, options),
+    localWorkbenchExecutionEnvironmentReadiness(agents),
+  ]);
+  return readinessFromIssues([...authReadiness.issues, ...environmentReadiness.issues]);
+}
+
+async function assertLocalWorkbenchExecutionEnvironmentReady(agents: readonly WorkbenchAgent[]): Promise<void> {
+  const readiness = await localWorkbenchExecutionEnvironmentReadiness(agents);
+  const issue = readiness.issues[0];
+  if (issue) {
+    throw new WorkbenchCodedError(issue.code, issue.message, {
+      remediation: issue.remediation,
+      subject: issue.subject as Record<string, Json> | undefined,
+      exitCode: 1,
+    });
+  }
+}
+
+async function localWorkbenchExecutionEnvironmentReadiness(agents: readonly WorkbenchAgent[]): Promise<WorkbenchLaunchReadiness> {
+  if (!localWorkbenchLaunchUsesDocker(agents)) {
+    return readyWorkbenchLaunchReadiness();
+  }
+  try {
+    await assertDockerSandboxAvailable(dockerAvailabilityExecFileAsync);
+    return readyWorkbenchLaunchReadiness();
+  } catch (error) {
+    return readinessFromIssues([dockerSandboxReadinessIssue(error)]);
+  }
+}
+
+function localWorkbenchLaunchUsesDocker(agents: readonly WorkbenchAgent[]): boolean {
+  return agents.some((agent) => {
+    const adapter = agent.adapter.trim().toLowerCase();
+    return SKILL_EVAL_COMMAND_AGENT_ADAPTERS.has(adapter) || SKILL_EVAL_PROVIDER_AGENT_ADAPTERS.has(adapter);
+  });
+}
+
+function dockerSandboxReadinessIssue(error: unknown): WorkbenchLaunchReadinessIssue {
+  return {
+    code: "sandbox_unavailable",
+    message: error instanceof Error ? error.message : String(error),
+    remediation: "Install and start Docker, ensure the docker CLI is on PATH, then rerun the command.",
+    subject: {
+      backend: DOCKER_SANDBOX_BACKEND,
+      executable: "docker",
+    },
+  };
 }
 
 function readyWorkbenchLaunchReadiness(): WorkbenchLaunchReadiness {
@@ -4100,7 +4170,7 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
       throw noEvalCasesError();
     }
     if ((options.location ?? "local") === "local") {
-      await assertLocalWorkbenchAdapterAuthReady(agents, options);
+      await assertLocalWorkbenchLaunchReady(agents, options);
     }
     for (const bundle of skillBundles) {
       upsertByHash(state.skillBundles, bundle);
@@ -4180,12 +4250,14 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
   for (const agent of runtime.selectedAgents) {
     assertSkillEvalAgentSupported(agent);
   }
-  const authReadiness = options.cloud === true
+  const localReadiness = options.cloud === true
     ? readyWorkbenchLaunchReadiness()
-    : await localWorkbenchAdapterAuthReadiness(runtime.selectedAgents, options);
+    : runtime.cases.length === 0
+      ? await localWorkbenchAdapterAuthReadiness(runtime.selectedAgents, options)
+      : await localWorkbenchLaunchReadiness(runtime.selectedAgents, options);
   const readiness = runtime.cases.length === 0
-    ? readinessFromIssues([noEvalCasesReadinessIssue(), ...authReadiness.issues])
-    : authReadiness;
+    ? readinessFromIssues([noEvalCasesReadinessIssue(), ...localReadiness.issues])
+    : localReadiness;
   const adapterAuthTargets = uniqueLocalAdapterAuthTargets(runtime.selectedAgents.flatMap(localAdapterAuthTargetsForAgent));
   const samples = options.samples ?? 1;
   const cachedRunIds = options.cloud === true || options.rerun === true
@@ -5364,6 +5436,9 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
         preserveAgentSelection: options.agent !== undefined,
       });
     }
+    if ((options.location ?? "local") === "local") {
+      await assertLocalWorkbenchLaunchReady([evalAgent], options);
+    }
     const evalSnapshot = runtime.evalSnapshot;
     upsertEvalSnapshotObject(state.evals, evalSnapshot);
     const incumbentRun = bestScoredComparableRun({
@@ -5634,7 +5709,7 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
   const readiness = canImproveWithSelectedAgent
     ? options.cloud === true
       ? readyWorkbenchLaunchReadiness()
-      : await localWorkbenchAdapterAuthReadiness([evalAgent], options)
+      : await localWorkbenchLaunchReadiness([evalAgent], options)
     : readinessFromIssues([workbenchSkillImproveAdapterRequirementIssue(evalAgent)]);
   const adapterAuthTargets = canImproveWithSelectedAgent
     ? uniqueLocalAdapterAuthTargets([evalAgent].flatMap(localAdapterAuthTargetsForAgent))

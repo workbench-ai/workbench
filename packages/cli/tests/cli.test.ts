@@ -178,6 +178,34 @@ function requestRunId(body: Record<string, unknown>): string {
   return body.runId as string;
 }
 
+function cloudOrganizationSkillFixture(ownerSlug = "alice", name = "cloud-skill"): Record<string, unknown> {
+  return {
+    id: "skill_cloud",
+    ownerSlug,
+    ownerKind: "organization",
+    name,
+  };
+}
+
+function cloudPersonalSkillFixture(ownerSlug = "alice", name = "cloud-skill"): Record<string, unknown> {
+  return {
+    id: "skill_cloud",
+    ownerSlug,
+    ownerKind: "user",
+    name,
+  };
+}
+
+function cloudOrganizationReadinessFixture(ownerSlug = "alice"): Record<string, unknown> {
+  return {
+    organization: {
+      namespace: {
+        slug: ownerSlug,
+      },
+    },
+  };
+}
+
 function withRunId<T extends { id: string }>(run: T, runId: string): T {
   return { ...run, id: runId };
 }
@@ -450,6 +478,25 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("next: workbench new .");
   });
 
+  test("status separates visible project skills from installed skill copies", async () => {
+    const root = await makeTempRoot("workbench-cli-project-status-count-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson(status)).toMatchObject({
+      machine: {
+        visibleSkillCount: 1,
+        installedSkillCount: 0,
+        projectSkillCount: 1,
+      },
+    });
+    const human = await invoke(["status", "--dir", root]);
+    expect(human.code, human.stdout || human.stderr).toBe(0);
+    expect(human.stdout).toContain("Visible skills: 1 (installed 0, projects 1)");
+    expect(human.stdout).not.toContain("Installed skills: 1");
+  });
+
   test("human list commands render aligned tables", async () => {
     const root = await makeTempRoot("workbench-cli-human-tables-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -561,7 +608,53 @@ describe("workbench skill-first CLI", () => {
     expect(snapshotAfterDryRun.versions.some((version) => version.id === dirtyPlan.versionId)).toBe(false);
   });
 
-  test("below-perfect evidence with a non-improvement agent teaches improver setup", async () => {
+  test("local eval readiness blocks on missing Docker before writing run evidence", async () => {
+    const root = await makeTempRoot("workbench-cli-eval-docker-readiness-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+    if (hasDocker) {
+      const ready = await invoke(["eval", "--dry-run", "--dir", root, "--json"]);
+      expect(ready.code, ready.stdout || ready.stderr).toBe(0);
+      expect(stdoutJson(ready)).toMatchObject({
+        readiness: { ready: true, issues: [] },
+      });
+    }
+    const emptyBin = path.join(await makeTempRoot("workbench-cli-no-docker-path-"), "bin");
+    await fs.mkdir(emptyBin, { recursive: true });
+    vi.stubEnv("PATH", emptyBin);
+
+    const dryRun = await invoke(["eval", "--dry-run", "--dir", root, "--json"]);
+    expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
+    expect(stdoutJson(dryRun)).toMatchObject({
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: "sandbox_unavailable",
+            message: expect.stringContaining("The docker CLI was not found on PATH."),
+            remediation: "Install and start Docker, ensure the docker CLI is on PATH, then rerun the command.",
+            subject: {
+              backend: "docker",
+              executable: "docker",
+            },
+          },
+        ],
+      },
+      next: "Install and start Docker, ensure the docker CLI is on PATH, then rerun the command.",
+    });
+
+    const evaluated = await invoke(["eval", "--dir", root, "--json"]);
+    expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(1);
+    expect(stdoutJson(evaluated)).toMatchObject({
+      ok: false,
+      code: "sandbox_unavailable",
+      message: expect.stringContaining("The docker CLI was not found on PATH."),
+    });
+    const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
+    expect(stdoutJson<{ entries: unknown[] }>(runs).entries).toEqual([]);
+  });
+
+    test("below-perfect evidence with a non-improvement agent teaches improver setup", async () => {
     const authRoot = await makeTempRoot("workbench-cli-eval-improve-next-auth-");
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
     vi.stubEnv("HOME", await makeTempRoot("workbench-cli-eval-improve-next-home-"));
@@ -582,11 +675,11 @@ describe("workbench skill-first CLI", () => {
 
     const added = await invoke(["agent", "add", "improver", "--dir", root, "--adapter", "codex", "--model", "gpt-5.4-mini", "--json"]);
     expect(added.code, added.stdout || added.stderr).toBe(0);
-    expect(stdoutJson(added)).toMatchObject({
-      result: {
-        agent: {
-          name: "improver",
-          adapter: "codex",
+      expect(stdoutJson(added)).toMatchObject({
+        result: {
+          agent: {
+            name: "improver",
+            adapter: "codex",
           model: "gpt-5.4-mini",
         },
         setupCommands: [
@@ -595,10 +688,18 @@ describe("workbench skill-first CLI", () => {
           "workbench eval --agents improver --rerun",
           "workbench improve --agents improver",
         ],
-        next: "codex login --device-auth",
-      },
-    });
-    const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
+          next: "codex login --device-auth",
+        },
+      });
+    const humanAddRoot = await makeTempRoot("workbench-cli-eval-improve-human-agent-add-");
+    expect((await invoke(["new", humanAddRoot, "--agent", "local", "--json"])).code).toBe(0);
+    await seedFailedImproveEvidence(humanAddRoot, "default", { status: "succeeded", score: 0.5 });
+    const humanAdd = await invoke(["agent", "add", "improver", "--dir", humanAddRoot, "--adapter", "codex", "--model", "gpt-5.4-mini"]);
+    expect(humanAdd.code, humanAdd.stdout || humanAdd.stderr).toBe(0);
+    expect(humanAdd.stdout).toContain("setup:\n  codex login --device-auth\n  workbench login codex --method oauth");
+    expect(humanAdd.stdout).toContain("  workbench eval --agents improver --rerun\n  workbench improve --agents improver");
+    expect(humanAdd.stdout).toContain("next: codex login --device-auth");
+      const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
     expect(stdoutJson<{ next: string | null }>(statusAfterAdd).next)
       .toBe("workbench results");
 
@@ -2553,7 +2654,7 @@ describe("workbench skill-first CLI", () => {
     expect(improved.code, improved.stdout || improved.stderr).toBe(1);
     expect(stdoutJson(improved)).toMatchObject({
       ok: false,
-      code: "improve_failed",
+      code: "adapter_auth_required",
       remediation: "codex login --device-auth",
     });
   });
@@ -4228,7 +4329,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", root, "--json"])).entries).toEqual([]);
   });
 
-  test("hosted eval setup blockers do not leave failed pre-accept runs", async () => {
+  test("hosted eval plan blockers run before pre-accept handles or object sync", async () => {
     const configRoot = await makeTempRoot("workbench-cli-cloud-preaccept-plan-config-");
     const configPath = path.join(configRoot, "config.json");
     vi.stubEnv("WORKBENCH_CONFIG", configPath);
@@ -4253,23 +4354,28 @@ describe("workbench skill-first CLI", () => {
       "",
     ].join("\n"));
     const createdAt = "2026-06-16T00:00:00.000Z";
-    let remotePack = emptyObjectPack(createdAt);
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const initialRemotePack = emptyObjectPack(createdAt);
+    let remotePack = initialRemotePack;
+    let objectPushes = 0;
+    let scheduledOperations = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudPersonalSkillFixture()] });
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         return jsonResponse({ objectPack: remotePack });
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "PUT") {
+        objectPushes += 1;
         const body = JSON.parse(String(init?.body)) as { objectPack?: ReturnType<typeof emptyObjectPack> };
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+        scheduledOperations += 1;
         return jsonResponse({
           schema: "workbench.cloud.error.v1",
           code: "plan_required",
@@ -4284,32 +4390,32 @@ describe("workbench skill-first CLI", () => {
         }, 402);
       }
       return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     const evalResult = await invoke(["eval", "--cloud", "--dir", root, "--json"]);
 
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
     expect(stderrJsonLines(evalResult)).toEqual([]);
-    const evalJson = stdoutJson<{ subject: { correlationRunId: string } }>(evalResult);
+    const evalJson = stdoutJson(evalResult);
     expect(evalJson).toMatchObject({
       ok: false,
       code: "plan_required",
       remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
       subject: {
-        correlationRunId: expect.stringMatching(/^run_/),
+        owner: "alice",
+        remote: "cloud",
+        ownerKind: "user",
       },
     });
     expect(evalJson).not.toHaveProperty("runId");
-    const shown = await invoke(["show", evalJson.subject.correlationRunId, "--dir", root, "--json"]);
-    expect(shown.code, shown.stdout || shown.stderr).toBe(1);
-    expect(stdoutJson(shown)).toMatchObject({
-      ok: false,
-      code: "ref_not_found",
-    });
+    expect((evalJson as { subject?: Record<string, unknown> }).subject).not.toHaveProperty("correlationRunId");
+    expect(objectPushes).toBe(0);
+    expect(scheduledOperations).toBe(0);
+    expect(remotePack).toEqual(initialRemotePack);
     const runsLog = await invoke(["log", "--runs", "--dir", root, "--json"]);
     expect(runsLog.code, runsLog.stdout || runsLog.stderr).toBe(0);
-    expect(stdoutJson<{ entries: Array<{ id: string }> }>(runsLog).entries.some((entry) => entry.id === evalJson.subject.correlationRunId))
-      .toBe(false);
+    expect(stdoutJson<{ entries: Array<{ id: string }> }>(runsLog).entries).toEqual([]);
   });
 
   test("hosted improve dry-run preserves setup remediation and selected agent", async () => {
@@ -4451,8 +4557,8 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ entries: unknown[] }>(await invoke(["log", "--runs", "--dir", root, "--json"])).entries).toEqual([]);
   });
 
-  test("hosted eval creates the local watch handle before Cloud auto-link work", async () => {
-    const root = await makeTempRoot("workbench-cli-cloud-autolink-early-handle-");
+  test("hosted eval personal auto-link blocks before Cloud calls or local handles", async () => {
+    const root = await makeTempRoot("workbench-cli-cloud-autolink-plan-block-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
     process.env.WORKBENCH_CONFIG = configPath;
@@ -4464,45 +4570,26 @@ describe("workbench skill-first CLI", () => {
     }));
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await writePassingCaseTest(root);
-    let localHandleVisibleDuringAutoLink = false;
-    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
-      if (url.pathname === "/api/workbench/skills") {
-        const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
-        localHandleVisibleDuringAutoLink = snapshot.runs.some((run) =>
-          run.kind === "eval" &&
-          run.location === "cloud" &&
-          run.remoteName === "cloud" &&
-          run.status === "queued"
-        );
-        return jsonResponse({ message: "forced auto-link failure" }, 500);
-      }
       return jsonResponse({ message: `Unexpected ${url.pathname}` }, 500);
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
     try {
       const result = await invoke(["eval", "--cloud", "--dir", root, "--json"]);
       expect(result.code, result.stdout || result.stderr).toBe(1);
-      expect(localHandleVisibleDuringAutoLink).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
       expect(stderrJsonLines(result)).toEqual([]);
-      const resultJson = stdoutJson<{ subject: { correlationRunId: string } }>(result);
+      const resultJson = stdoutJson(result);
       expect(resultJson).toMatchObject({
         ok: false,
-        subject: {
-          correlationRunId: expect.stringMatching(/^run_/),
-        },
+        code: "plan_required",
+        remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
       });
       expect(resultJson).not.toHaveProperty("runId");
+      expect(resultJson).not.toHaveProperty("subject.correlationRunId");
       const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
-      expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
-        .not.toEqual(expect.arrayContaining([
-          expect.objectContaining({ id: resultJson.subject.correlationRunId }),
-        ]));
-      const shown = await invoke(["show", resultJson.subject.correlationRunId, "--dir", root, "--json"]);
-      expect(shown.code, shown.stdout || shown.stderr).toBe(1);
-      expect(stdoutJson(shown)).toMatchObject({
-        ok: false,
-        code: "ref_not_found",
-      });
+      expect(stdoutJson<{ entries: unknown[] }>(runs).entries).toEqual([]);
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -4595,7 +4682,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/snapshot" && method === "GET") {
         inspectionReadsAfterStart += started ? 1 : 0;
@@ -4712,7 +4802,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         if (!signalScheduled) {
@@ -5024,7 +5117,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         return jsonResponse({ objectPack: remotePack });
@@ -5143,7 +5239,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         return jsonResponse({ objectPack: remotePack });
@@ -5320,7 +5419,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         objectReadStarted = true;
@@ -5857,20 +5959,11 @@ describe("workbench skill-first CLI", () => {
         message: "codex disconnected.",
         remediation: "codex login --device-auth",
       });
-      const improvedJson = stdoutJson<{ subject: { correlationRunId: string } }>(improved);
-      expect(improvedJson.subject.correlationRunId).toEqual(expect.stringMatching(/^run_/));
+      expect(stdoutJson(improved)).not.toHaveProperty("subject.correlationRunId");
       expect(stderrJsonLines(improved)).toEqual([]);
       const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
-      expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
-        .not.toEqual(expect.arrayContaining([
-          expect.objectContaining({ id: improvedJson.subject.correlationRunId }),
-        ]));
-      const shown = await invoke(["show", improvedJson.subject.correlationRunId, "--dir", root, "--json"]);
-      expect(shown.code, shown.stdout || shown.stderr).toBe(1);
-      expect(stdoutJson(shown)).toMatchObject({
-        ok: false,
-        code: "ref_not_found",
-      });
+      expect(stdoutJson<{ entries: Array<{ id: string }> }>(runs).entries.map((entry) => entry.id))
+        .toEqual(["run_seed_codex"]);
       expect(improved.stderr).not.toContain("workbench cloud:");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
@@ -5993,7 +6086,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/snapshot" && method === "GET") {
         inspectionReadsAfterStart += started ? 1 : 0;
@@ -6174,7 +6270,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/snapshot" && method === "GET") {
         return jsonResponse(cloudInspectionEnvelope("cloud:pending", {
@@ -6320,7 +6419,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/snapshot" && method === "GET") {
         inspectionReadsAfterStart += started ? 1 : 0;
@@ -6435,7 +6537,7 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
-  test("hosted eval auto-links an unpublished cloud skill", async () => {
+  test("hosted eval blocks personal auto-link before creating an unpublished cloud skill", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-autolink-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const previousTimeout = process.env.WORKBENCH_CLOUD_RUN_TIMEOUT_MS;
@@ -6604,32 +6706,20 @@ describe("workbench skill-first CLI", () => {
     vi.stubGlobal("fetch", fetchMock);
     try {
       const evalResult = await invoke(["eval", "--cloud", "--dir", root, "--json"]);
-      expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
+      expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
       expect(stdoutJson(evalResult)).toMatchObject({
-        ok: true,
-        run: expect.objectContaining({ id: hostedRunId, status: "succeeded" }),
-        cloud: expect.objectContaining({
-          remote: "cloud-1",
-          skillId: "skill_autolink",
-        }),
+        ok: false,
+        code: "plan_required",
+        remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
       });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(created).toBe(false);
+      expect(started).toBe(false);
       const remotesYaml = await fs.readFile(path.join(root, ".workbench", "remotes.yaml"), "utf8");
       expect(remotesYaml).toContain(fileRemoteUrl);
-      expect(remotesYaml).toContain("cloud-1:");
-      expect(remotesYaml).toContain(`https://cloud.test/skills/${ownerSlug}/${skillName}`);
-      expect(skillLookupUrls.length).toBeGreaterThan(0);
-      expect(skillLookupUrls.every((entry) =>
-        entry.startsWith("/api/workbench/skills?") &&
-        entry.includes(`owner=${encodeURIComponent(ownerSlug)}`) &&
-        entry.includes("name=")
-      )).toBe(true);
-
-      const install = await invoke(["install", `${ownerSlug}/${skillName}`, "--json"]);
-      expect(install.code).toBe(1);
-      expect(stdoutJson(install)).toMatchObject({
-        ok: false,
-        code: "source_not_available",
-      });
+      expect(remotesYaml).not.toContain("cloud-1:");
+      expect(remotesYaml).not.toContain(`https://cloud.test/skills/${ownerSlug}/${skillName}`);
+      expect(skillLookupUrls).toEqual([]);
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -6718,7 +6808,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         if (started) {
@@ -6904,7 +6997,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/snapshot" && method === "GET") {
         inspectionReadsAfterStart += started ? 1 : 0;
@@ -7186,7 +7282,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         return jsonResponse({ objectPack: remotePack });
@@ -7340,7 +7439,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/snapshot" && method === "GET") {
         inspectionReadsAfterStart += started ? 1 : 0;
@@ -7460,7 +7562,10 @@ describe("workbench skill-first CLI", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer cloud-token");
       if (url.pathname === "/api/workbench/skills" && method === "GET") {
-        return jsonResponse({ skills: [{ id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" }] });
+        return jsonResponse({ skills: [cloudOrganizationSkillFixture()] });
+      }
+      if (url.pathname === "/api/workbench/organizations/alice" && method === "GET") {
+        return jsonResponse(cloudOrganizationReadinessFixture());
       }
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "GET") {
         return jsonResponse({ objectPack: remotePack });

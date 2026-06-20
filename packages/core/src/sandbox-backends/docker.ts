@@ -62,7 +62,7 @@ const DOCKER_RUNTIME_MOUNT = "/workbench-runtime";
 const DOCKER_DEFAULT_WORKSPACE = "/workspace";
 const DEFAULT_DOCKER_AVAILABILITY_TIMEOUT_MS = 5_000;
 const mutableDockerTemplateImageBuilds = new Map<string, Promise<string>>();
-let dockerAvailabilityCheck: { timeoutMs: number; promise: Promise<void> } | undefined;
+let dockerAvailabilityCheck: { timeoutMs: number; pathEnv: string | undefined; promise: Promise<void> } | undefined;
 
 type DockerRuntimePayload = {
   mounts: readonly DockerRuntimeMount[];
@@ -253,11 +253,12 @@ async function prepareDockerSandboxWorkspace(
   };
 }
 
-async function assertDockerSandboxAvailable(
+export async function assertDockerSandboxAvailable(
   execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
 ): Promise<void> {
   const timeoutMs = dockerAvailabilityTimeoutMs();
-  if (!dockerAvailabilityCheck || dockerAvailabilityCheck.timeoutMs !== timeoutMs) {
+  const pathEnv = process.env.PATH;
+  if (!dockerAvailabilityCheck || dockerAvailabilityCheck.timeoutMs !== timeoutMs || dockerAvailabilityCheck.pathEnv !== pathEnv) {
     const promise = execFileAsync("docker", ["info", "--format", "{{json .ServerVersion}}"], {
       maxBuffer: 1024 * 1024,
       timeout: timeoutMs,
@@ -268,7 +269,7 @@ async function assertDockerSandboxAvailable(
         dockerAvailabilityCheck = undefined;
         throw new Error(`Docker sandbox unavailable: Docker must be installed and running before Workbench can execute this eval. ${dockerUnavailableDetail(error)}`);
       });
-    dockerAvailabilityCheck = { timeoutMs, promise };
+    dockerAvailabilityCheck = { timeoutMs, pathEnv, promise };
   }
   await dockerAvailabilityCheck.promise;
 }

@@ -1075,9 +1075,14 @@ function newProjectSetupLines(selection: WorkbenchStatus["defaultAgentSelection"
   }
   return [
     ...(selection.kind === "provider" ? ["Provider setup is still required before provider-backed eval."] : []),
-    "setup:",
-    ...selection.readiness.setupCommands.map((command) => `  ${command}`),
+    ...setupCommandBlock(selection.readiness.setupCommands),
   ];
+}
+
+function setupCommandBlock(commands: readonly string[]): string[] {
+  return commands.length > 0
+    ? ["setup:", ...commands.map((command) => `  ${command}`)]
+    : [];
 }
 
 function newProjectNextCommand(projectRoot: string): string {
@@ -2548,14 +2553,15 @@ async function handleAgent(parsed: ParsedArgs, io: CliIo): Promise<number> {
     });
     const setupCommands = await postAgentAddSetupCommands(agent, core);
     const next = setupCommands[0] ?? null;
-    return output({
-      agent: agent as unknown as Json,
-      setupCommands: setupCommands as unknown as Json,
-      next: next as Json,
-    }, parsed, io, () => [
-      `Configured agent ${formatAgentInline(agent)}.`,
-      ...(next ? [`next: ${next}`] : []),
-    ].join("\n"));
+      return output({
+        agent: agent as unknown as Json,
+        setupCommands: setupCommands as unknown as Json,
+        next: next as Json,
+      }, parsed, io, () => [
+        `Configured agent ${formatAgentInline(agent)}.`,
+        ...setupCommandBlock(setupCommands),
+        ...(next ? [`next: ${next}`] : []),
+      ].join("\n"));
   }
   if (subcommand === "rm") {
     const result = await removeWorkbenchAgent(requiredInput(
@@ -3433,6 +3439,23 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
           budget: intFlag(parsed, "budget"),
           cloud: true,
         }), () => renderCloudProgress("preflight"));
+    assertLaunchReadinessReady(preview.readiness);
+    const adapterAuthTargets = cloudAdapterAuthTargetsFromPreview(preview);
+    if (adapterAuthTargets.length > 0) {
+      await cloudPreScheduleStepWithProgress(command, interrupt, async (signal) => await assertCloudAdapterAuthConnected({
+        baseUrl: plannedSource.baseUrl,
+        targets: adapterAuthTargets,
+        signal,
+      }), () => renderCloudProgress("provider_auth"));
+    }
+    const config = await loadConfig();
+    const targetReadiness = await cloudPreScheduleStep(command, interrupt, cloudHostedOperationRemoteReadiness({
+      command,
+      config,
+      remote: plannedRemote,
+      linked: Boolean(link.existing),
+    }));
+    assertLaunchReadinessReady(targetReadiness);
     const runId = createWorkbenchRunId();
     const prescheduledRun = createPrescheduledCloudRun({
       command,
@@ -3479,14 +3502,6 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
         },
         exitCode: 1,
       });
-    }
-    const adapterAuthTargets = cloudAdapterAuthTargetsFromPreview(preview);
-    if (adapterAuthTargets.length > 0) {
-      await cloudPreScheduleStepWithProgress(command, interrupt, async (signal) => await assertCloudAdapterAuthConnected({
-        baseUrl: source.baseUrl,
-        targets: adapterAuthTargets,
-        signal,
-      }), () => renderCloudProgress("provider_auth", [prescheduledRun]));
     }
     const request = { ...requestWithoutRunId, runId };
     const syncBefore = await cloudPreScheduleStepWithLocalCancel(
@@ -3916,31 +3931,46 @@ async function cloudHostedOperationTargetReadiness(input: {
     throw error;
   }
 
-  const source = parseWorkbenchInstallSource(remote.url);
+  return await cloudHostedOperationRemoteReadiness({
+    command: input.command,
+    config: input.config,
+    remote,
+    linked,
+  });
+}
+
+async function cloudHostedOperationRemoteReadiness(input: {
+  command: "eval" | "improve";
+  config: WorkbenchConfig;
+  remote: WorkbenchRemote;
+  linked: boolean;
+}): Promise<WorkbenchLaunchReadiness> {
+  const source = parseWorkbenchInstallSource(input.remote.url);
   if (!source) {
     return readinessFromLaunchIssues([{
       code: "remote_invalid_url",
-      message: `Workbench remote is not a Cloud skill URL: ${remote.url}`,
+      message: `Workbench remote is not a Cloud skill URL: ${input.remote.url}`,
       remediation: "workbench publish",
-      subject: { remote: remote.name, url: remote.url },
+      subject: { remote: input.remote.name, url: input.remote.url },
     }]);
   }
 
-  const isPersonalOwner = source.owner === input.config.username?.trim();
-  if (!linked && isPersonalOwner) {
-    return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
+  const personalOwner = input.config.username ? normalizeWorkbenchSkillName(input.config.username) : "";
+  const isPersonalOwner = source.owner === personalOwner;
+  if (!input.linked && isPersonalOwner) {
+    return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, input.remote.name)]);
   }
 
   const existing = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
   if (existing) {
     if (existing.ownerKind !== "organization") {
-      return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
+      return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, input.remote.name)]);
     }
     return await cloudOrganizationHostedOperationReadiness(source.baseUrl, existing.ownerSlug ?? source.owner);
   }
 
   if (isPersonalOwner) {
-    return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, remote.name)]);
+    return readinessFromLaunchIssues([personalHostedOperationPlanIssue(input.command, source.owner, input.remote.name)]);
   }
   return await cloudOrganizationHostedOperationReadiness(source.baseUrl, source.owner);
 }
@@ -4001,6 +4031,20 @@ function readinessFromLaunchIssues(issues: readonly WorkbenchLaunchReadinessIssu
     ready: sorted.length === 0,
     issues: sorted,
   };
+}
+
+function assertLaunchReadinessReady(readiness: WorkbenchLaunchReadiness): void {
+  const issue = readiness.issues[0];
+  if (!issue) {
+    return;
+  }
+  throw new WorkbenchCodedError(issue.code, issue.message, {
+    ...(issue.remediation ? { remediation: issue.remediation } : {}),
+    ...(issue.subject && typeof issue.subject === "object" && !Array.isArray(issue.subject)
+      ? { subject: issue.subject as Record<string, Json> }
+      : {}),
+    exitCode: issue.code === "remote_invalid_url" ? 2 : 1,
+  });
 }
 
 function cloudAdapterAuthTargetsFromPreview(
@@ -4728,11 +4772,13 @@ async function syncNextCommand(
   }
   const status = await workbenchStatusSnapshot(core);
   const auth = await workbenchCliAuthStatus();
-  const cliStatus = await statusWithCausalNext(status, auth, core, {
-    installedSkillCount: 0,
-    targets: [],
-    connectedProviders: [],
-  });
+    const cliStatus = await statusWithCausalNext(status, auth, core, {
+      visibleSkillCount: 0,
+      installedSkillCount: 0,
+      projectSkillCount: 0,
+      targets: [],
+      connectedProviders: [],
+    });
   return cliStatus.next ?? null;
 }
 
@@ -7103,7 +7149,9 @@ interface WorkbenchCliAuthStatus {
 }
 
 interface WorkbenchMachineStatus {
+  visibleSkillCount: number;
   installedSkillCount: number;
+  projectSkillCount: number;
   targets: Array<{ id: string; scope: string; roots: string[] }>;
   connectedProviders: Array<{ adapter: string; slot?: string; profile: string }>;
 }
@@ -7131,8 +7179,12 @@ async function workbenchCliAuthStatus(): Promise<WorkbenchCliAuthStatus> {
 
 async function workbenchMachineStatus(auth: WorkbenchCliAuthStatus, core: { dir?: string } = {}): Promise<WorkbenchMachineStatus> {
   const inventory = await observeCurrentInstalledSkillsInventory({ dir: core.dir });
+  const projectSkillCount = inventory.skills.filter((skill) => skill.status === "project").length;
+  const visibleSkillCount = inventory.skills.length;
   return {
-    installedSkillCount: inventory.skills.length,
+    visibleSkillCount,
+    installedSkillCount: visibleSkillCount - projectSkillCount,
+    projectSkillCount,
     targets: inventory.targets.map((target) => ({
       id: target.id,
       scope: target.scope,
@@ -8787,12 +8839,12 @@ function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
   syncNext?: string | null;
 }, format: HumanFormatOptions = PLAIN_HUMAN_FORMAT): string {
   const lines = [
-    `Root: ${status.project.root}`,
-    `Initialized: ${status.project.initialized ? "yes" : "no"}`,
-    `Installed skills: ${status.machine?.installedSkillCount ?? 0}`,
-    `Connected providers: ${status.machine?.connectedProviders.length
-      ? status.machine.connectedProviders.map((entry) => `${entry.adapter}/${entry.profile}`).join(", ")
-      : "none"}`,
+      `Root: ${status.project.root}`,
+      `Initialized: ${status.project.initialized ? "yes" : "no"}`,
+      formatMachineSkillCount(status.machine),
+      `Connected providers: ${status.machine?.connectedProviders.length
+        ? status.machine.connectedProviders.map((entry) => `${entry.adapter}/${entry.profile}`).join(", ")
+        : "none"}`,
     ...(status.project.currentVersionId ? [`Current version: ${displayRef(status.project.currentVersionId)}`] : []),
     ...formatStatusWorktreeSourceLines(status),
     ...(status.project.defaultSkill ? [`Default skill: ${status.project.defaultSkill}`] : []),
@@ -8828,6 +8880,13 @@ function formatStatusSnapshot(status: WorkbenchStatusSnapshotWithProgress & {
     ...(status.next ? [`next: ${shortenCommandRefs(status.next)}`] : []),
   ];
   return lines.join("\n");
+}
+
+function formatMachineSkillCount(machine: WorkbenchMachineStatus | undefined): string {
+  if (!machine || machine.projectSkillCount === 0) {
+    return `Installed skills: ${machine?.installedSkillCount ?? 0}`;
+  }
+  return `Visible skills: ${machine.visibleSkillCount} (installed ${machine.installedSkillCount}, projects ${machine.projectSkillCount})`;
 }
 
 function formatStatusWorktreeSourceLines(status: WorkbenchStatusSnapshotWithProgress): string[] {
