@@ -57,7 +57,7 @@ describe("Workbench CLI progress projection", () => {
         active: {
           jobId: "job_a_1",
           caseId: "case-001",
-          sample: 1,
+          sample: 2,
           runningCount: 1,
         },
       },

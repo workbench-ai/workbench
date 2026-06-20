@@ -6071,7 +6071,7 @@ function runProgressSummary(
       active: {
         jobId: activeJobs[0].id,
         caseId: activeJobs[0].caseId,
-        sample: activeJobs[0].sample,
+        sample: activeJobs[0].sample + 1,
         skillName: activeJobs[0].skillName,
         agentName: activeJobs[0].agentName,
         runningCount: activeJobs.length,

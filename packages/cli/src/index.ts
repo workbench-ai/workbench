@@ -1923,6 +1923,9 @@ async function retryCloudRun(
     runs: readonly WorkbenchRun[] = [],
     jobs: readonly WorkbenchJob[] = [],
   ): void => {
+    if (parsed.flags.json === true) {
+      return;
+    }
     renderer.render(runProgressSnapshotFromRuns({
       command: "run retry",
       location: "cloud",
@@ -3208,6 +3211,9 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
     runs: readonly WorkbenchRun[] = [],
     jobs: readonly WorkbenchJob[] = [],
   ): void => {
+    if (parsed.flags.json === true) {
+      return;
+    }
     renderer.render(runProgressSnapshotFromRuns({
       command,
       location: "cloud",
@@ -8889,7 +8895,7 @@ function formatTraceDetail(
   return detail.executions.map((execution) => {
     const sessionLabels = execution.sessions.map((session) => session.label).join(",");
     return [
-      `${formatExecutionEvidenceLabel(detail, execution)}\trun=${refs.runRefs?.get(detail.runId) ?? displayRef(detail.runId)}\tjobs=${execution.jobIds.map((id) => refs.jobRefs?.get(id) ?? displayRef(id)).join(",")}\tstatus=${formatExecutionTraceStatus(execution.status)}`,
+      `${formatExecutionEvidenceLabel(detail, execution)}\trun=${refs.runRefs?.get(detail.runId) ?? displayRef(detail.runId)}\tjobs=${execution.jobIds.join(",")}\tstatus=${formatExecutionTraceStatus(execution.status)}`,
       `events=${execution.trace.events.length}`,
       `spans=${execution.trace.spans.length}`,
       `summaries=${execution.trace.summaries.length}`,

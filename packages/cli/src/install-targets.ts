@@ -694,7 +694,7 @@ async function readRootInventory(root: SkillAccessTargetRoot): Promise<Workbench
       targetDisplayName: root.displayName,
       scope: root.scope,
       root: root.root,
-      name: metadata.name ?? record?.skillName ?? entry.name,
+      name: record?.skillName ?? metadata.name ?? entry.name,
       directoryName: entry.name,
       ...(metadata.description ? { description: metadata.description } : {}),
       path: skillPath,

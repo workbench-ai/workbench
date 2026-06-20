@@ -3228,11 +3228,28 @@ describe("workbench skill-first CLI", () => {
       status: "succeeded",
       score: 1,
       artifactIds: [],
-      traceIds: [],
+      traceIds: ["trace_long_job"],
       createdAt,
       startedAt: createdAt,
       finishedAt: createdAt,
       durationMs: 0,
+    }));
+    await fs.writeFile(path.join(root, ".workbench", "objects", "trace", "trace_long_job.json"), JSON.stringify({
+      id: "trace_long_job",
+      runId: "run_surface",
+      jobId: longJobId,
+      versionId,
+      skillName: "current",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      createdAt,
+      request: {},
+      result: { status: "succeeded" },
+      files: [
+        { path: "agent-session.json", kind: "text", encoding: "utf8", content: `${JSON.stringify({ schema: "workbench.agent.session.v1", provider: "codex", sessionId: "session-long", ref: "codex:session-long" }, null, 2)}\n` },
+      ],
     }));
     const longJobHuman = await invoke(["show", "job_mqf3nijg_c", "--dir", root]);
     expect(longJobHuman.code, longJobHuman.stdout || longJobHuman.stderr).toBe(0);
@@ -3279,7 +3296,7 @@ describe("workbench skill-first CLI", () => {
         planned: 2,
         completed: 2,
         scored: 2,
-        evidenceCount: 2,
+        evidenceCount: 3,
       },
     });
     const paths = listing.result.files.map((file) => file.path);
@@ -3319,8 +3336,10 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("\ttotal_latency=4219ms\tavg_latency=844ms");
     expect(human.stdout).not.toContain("\tlatency=4219ms");
     expect(human.stdout).toContain("Progress: complete, work 2/2 complete, scored 2, failed 0");
-    expect(human.stdout).toContain("evidence 2");
+    expect(human.stdout).toContain("evidence 3");
     expect(human.stdout).toContain("evidence\trun=run_surface\tjobs=job_surface\tstatus=succeeded");
+    expect(human.stdout).toContain(`evidence\trun=run_surface\tjobs=${longJobId}\tstatus=succeeded`);
+    expect(human.stdout).not.toContain("jobs=job_mqf3nijg\t");
     expect(human.stdout).toContain("Output cases/case-001/jobs/job_surface/skill-summary.md:");
     expect(human.stdout).toContain("Provider answer line one.");
     expect(human.stdout).toContain("Session cases/case-001/jobs/job_surface/agent-session.json: codex:session-surface");
@@ -3755,24 +3774,18 @@ describe("workbench skill-first CLI", () => {
     const evalResult = await invoke(["eval", "--cloud", "--dir", root, "--json"]);
 
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
-    const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(evalResult);
-    expect(progress[0]).toMatchObject({
-      schema: "workbench.run.v1",
-      status: "running",
-      phase: "planning",
-      variant: "cloud",
-    });
-    expect(progress[0]?.next).toBeUndefined();
-    expect(stdoutJson(evalResult)).toMatchObject({
+    expect(stderrJsonLines(evalResult)).toEqual([]);
+    const evalJson = stdoutJson<{ subject: { correlationRunId: string } }>(evalResult);
+    expect(evalJson).toMatchObject({
       ok: false,
       code: "plan_required",
       remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
       subject: {
-        correlationRunId: progress[0]!.id,
+        correlationRunId: expect.stringMatching(/^run_/),
       },
     });
-    expect(stdoutJson(evalResult)).not.toHaveProperty("runId");
-    const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
+    expect(evalJson).not.toHaveProperty("runId");
+    const shown = await invoke(["show", evalJson.subject.correlationRunId, "--dir", root, "--json"]);
     expect(shown.code, shown.stdout || shown.stderr).toBe(1);
     expect(stdoutJson(shown)).toMatchObject({
       ok: false,
@@ -3780,7 +3793,7 @@ describe("workbench skill-first CLI", () => {
     });
     const runsLog = await invoke(["log", "--runs", "--dir", root, "--json"]);
     expect(runsLog.code, runsLog.stdout || runsLog.stderr).toBe(0);
-    expect(stdoutJson<{ entries: Array<{ id: string }> }>(runsLog).entries.some((entry) => entry.id === progress[0]!.id))
+    expect(stdoutJson<{ entries: Array<{ id: string }> }>(runsLog).entries.some((entry) => entry.id === evalJson.subject.correlationRunId))
       .toBe(false);
   });
 
@@ -3955,28 +3968,21 @@ describe("workbench skill-first CLI", () => {
       const result = await invoke(["eval", "--cloud", "--dir", root, "--json"]);
       expect(result.code, result.stdout || result.stderr).toBe(1);
       expect(localHandleVisibleDuringAutoLink).toBe(true);
-      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(result);
-      expect(progress).toHaveLength(1);
-      expect(stdoutJson(result)).toMatchObject({
+      expect(stderrJsonLines(result)).toEqual([]);
+      const resultJson = stdoutJson<{ subject: { correlationRunId: string } }>(result);
+      expect(resultJson).toMatchObject({
         ok: false,
         subject: {
-          correlationRunId: progress[0]!.id,
+          correlationRunId: expect.stringMatching(/^run_/),
         },
       });
-      expect(stdoutJson(result)).not.toHaveProperty("runId");
-      expect(progress[0]).toMatchObject({
-        schema: "workbench.run.v1",
-        status: "running",
-        phase: "planning",
-        variant: "cloud",
-      });
-      expect(progress[0]?.next).toBeUndefined();
+      expect(resultJson).not.toHaveProperty("runId");
       const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
       expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
         .not.toEqual(expect.arrayContaining([
-          expect.objectContaining({ id: progress[0]!.id }),
+          expect.objectContaining({ id: resultJson.subject.correlationRunId }),
         ]));
-      const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
+      const shown = await invoke(["show", resultJson.subject.correlationRunId, "--dir", root, "--json"]);
       expect(shown.code, shown.stdout || shown.stderr).toBe(1);
       expect(stdoutJson(shown)).toMatchObject({
         ok: false,
@@ -4433,13 +4439,15 @@ describe("workbench skill-first CLI", () => {
       });
       expect(stdoutJson(retried).run.id).toBe(retryRunId);
       const progress = stderrJsonLines<{ schema: string; id: string; status: string; phase: string; variant: string }>(retried);
-      expect(progress[0]).toMatchObject({
-        schema: "workbench.run.v1",
-        id: retryRunId,
-        status: "running",
-        phase: "planning",
-        variant: "cloud",
-      });
+      expect(progress).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          schema: "workbench.run.v1",
+          id: retryRunId,
+          status: "succeeded",
+          phase: "complete",
+          variant: "cloud",
+        }),
+      ]));
       expect(calls.indexOf("POST /api/workbench/skills")).toBeGreaterThan(calls.indexOf("GET /api/workbench/skills"));
       expect(calls.indexOf("POST /api/workbench/skills/skill_cloud/workbench/operations"))
         .toBeGreaterThan(calls.indexOf("POST /api/workbench/skills"));
@@ -4530,15 +4538,8 @@ describe("workbench skill-first CLI", () => {
     try {
       const retried = await invoke(["run", "retry", retryOfRun.id, "--dir", root, "--json"]);
       expect(retried.code, retried.stdout || retried.stderr).toBe(1);
-      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(retried);
-      expect(progress[0]).toMatchObject({
-        schema: "workbench.run.v1",
-        status: "running",
-        phase: "planning",
-        variant: "cloud",
-      });
-      expect(progress[0]?.next).toBeUndefined();
-      const retriedJson = stdoutJson(retried);
+      expect(stderrJsonLines(retried)).toEqual([]);
+      const retriedJson = stdoutJson<{ subject: { correlationRunId: string } }>(retried);
       expect(retriedJson).toMatchObject({
         ok: false,
         code: "plan_required",
@@ -4547,11 +4548,11 @@ describe("workbench skill-first CLI", () => {
           owner: "alice",
           ownerKind: "user",
           requirement: "Publish under an organization-owned skill with an active Team or Enterprise plan, then rerun the hosted command.",
-          correlationRunId: progress[0]!.id,
+          correlationRunId: expect.stringMatching(/^run_/),
         },
       });
       expect(retriedJson).not.toHaveProperty("runId");
-      const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
+      const shown = await invoke(["show", retriedJson.subject.correlationRunId, "--dir", root, "--json"]);
       expect(shown.code, shown.stdout || shown.stderr).toBe(1);
       expect(stdoutJson(shown)).toMatchObject({
         ok: false,
@@ -4559,7 +4560,7 @@ describe("workbench skill-first CLI", () => {
       });
       const runsLog = await invoke(["log", "--runs", "--dir", root, "--json"]);
       expect(runsLog.code, runsLog.stdout || runsLog.stderr).toBe(0);
-      expect(stdoutJson<{ entries: Array<{ id: string }> }>(runsLog).entries.some((entry) => entry.id === progress[0]!.id))
+      expect(stdoutJson<{ entries: Array<{ id: string }> }>(runsLog).entries.some((entry) => entry.id === retriedJson.subject.correlationRunId))
         .toBe(false);
     } finally {
       if (previousConfig === undefined) {
@@ -5341,21 +5342,15 @@ describe("workbench skill-first CLI", () => {
         message: "codex disconnected.",
         remediation: "codex login --device-auth",
       });
-      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(improved);
-      expect(progress).toHaveLength(1);
-      expect(progress[0]).toMatchObject({
-        schema: "workbench.run.v1",
-        status: "running",
-        phase: "planning",
-        variant: "cloud",
-      });
-      expect(progress[0]?.next).toBeUndefined();
+      const improvedJson = stdoutJson<{ subject: { correlationRunId: string } }>(improved);
+      expect(improvedJson.subject.correlationRunId).toEqual(expect.stringMatching(/^run_/));
+      expect(stderrJsonLines(improved)).toEqual([]);
       const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
       expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
         .not.toEqual(expect.arrayContaining([
-          expect.objectContaining({ id: progress[0]!.id }),
+          expect.objectContaining({ id: improvedJson.subject.correlationRunId }),
         ]));
-      const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
+      const shown = await invoke(["show", improvedJson.subject.correlationRunId, "--dir", root, "--json"]);
       expect(shown.code, shown.stdout || shown.stderr).toBe(1);
       expect(stdoutJson(shown)).toMatchObject({
         ok: false,
@@ -7594,6 +7589,17 @@ describe("workbench skill-first CLI", () => {
         skills: Record<string, { handle: string }>;
       };
       expect(provenance.skills["private-skill"]).toMatchObject({ handle: "alice/private-skill" });
+      const inventory = await invoke(["skills", "--target", "codex", "--scope", "global", "--json"]);
+      expect(inventory.code, inventory.stdout || inventory.stderr).toBe(0);
+      expect(stdoutJson<{ skills: Array<{ name: string; directoryName: string; handle?: string; description?: string }> }>(inventory).skills)
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            name: "private-skill",
+            directoryName: "private-skill",
+            handle: "alice/private-skill",
+            description: "Frontmatter identity differs from the handle.",
+          }),
+        ]));
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -8234,7 +8240,12 @@ describe("workbench skill-first CLI", () => {
     const cancel = await invoke(["run", "cancel", runId!, "--dir", root, "--json"]);
     expect(cancel.code, cancel.stdout || cancel.stderr).toBe(0);
     expect(Date.now() - cancelStartedAt).toBeLessThan(2_000);
-    expect(stdoutJson<{ run: { status: string } }>(cancel).run.status).toBe("canceling");
+    expect(stdoutJson<{ run: { status: string; progress: { active?: { sample?: number } } } }>(cancel).run).toMatchObject({
+      status: "canceling",
+      progress: {
+        active: expect.objectContaining({ sample: 1 }),
+      },
+    });
 
     const watchStartedAt = Date.now();
     const watched = await invoke(["run", "watch", runId!, "--dir", root, "--json"]);

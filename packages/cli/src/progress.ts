@@ -409,7 +409,7 @@ function activeProgressParts(snapshot: WorkbenchRunSnapshot): string[] {
   }
   const details = [
     active.caseId ? `case=${active.caseId}` : undefined,
-    active.sample !== undefined ? `sample=${active.sample + 1}` : undefined,
+    active.sample !== undefined ? `sample=${active.sample}` : undefined,
     `job=${active.jobId}`,
   ].filter((entry): entry is string => Boolean(entry));
   return [
