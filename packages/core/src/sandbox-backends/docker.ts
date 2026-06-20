@@ -60,8 +60,9 @@ const BUILT_IN_ENVIRONMENT_IMAGES: Record<string, string> = {
 
 const DOCKER_RUNTIME_MOUNT = "/workbench-runtime";
 const DOCKER_DEFAULT_WORKSPACE = "/workspace";
+const DEFAULT_DOCKER_AVAILABILITY_TIMEOUT_MS = 5_000;
 const mutableDockerTemplateImageBuilds = new Map<string, Promise<string>>();
-let dockerAvailabilityCheck: Promise<void> | undefined;
+let dockerAvailabilityCheck: { timeoutMs: number; promise: Promise<void> } | undefined;
 
 type DockerRuntimePayload = {
   mounts: readonly DockerRuntimeMount[];
@@ -255,13 +256,32 @@ async function prepareDockerSandboxWorkspace(
 async function assertDockerSandboxAvailable(
   execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
 ): Promise<void> {
-  dockerAvailabilityCheck ??= execFileAsync("docker", ["info", "--format", "{{json .ServerVersion}}"], { maxBuffer: 1024 * 1024 })
-    .then(() => undefined)
-    .catch((error: unknown) => {
-      dockerAvailabilityCheck = undefined;
-      throw new Error(`Docker sandbox unavailable: Docker must be installed and running before Workbench can execute this eval. ${dockerUnavailableDetail(error)}`);
-    });
-  await dockerAvailabilityCheck;
+  const timeoutMs = dockerAvailabilityTimeoutMs();
+  if (!dockerAvailabilityCheck || dockerAvailabilityCheck.timeoutMs !== timeoutMs) {
+    const promise = execFileAsync("docker", ["info", "--format", "{{json .ServerVersion}}"], {
+      maxBuffer: 1024 * 1024,
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+    })
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        dockerAvailabilityCheck = undefined;
+        throw new Error(`Docker sandbox unavailable: Docker must be installed and running before Workbench can execute this eval. ${dockerUnavailableDetail(error)}`);
+      });
+    dockerAvailabilityCheck = { timeoutMs, promise };
+  }
+  await dockerAvailabilityCheck.promise;
+}
+
+function dockerAvailabilityTimeoutMs(): number {
+  const raw = process.env.WORKBENCH_DOCKER_AVAILABILITY_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return DEFAULT_DOCKER_AVAILABILITY_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : DEFAULT_DOCKER_AVAILABILITY_TIMEOUT_MS;
 }
 
 function dockerUnavailableDetail(error: unknown): string {
@@ -269,6 +289,9 @@ function dockerUnavailableDetail(error: unknown): string {
   const code = typeof record.code === "string" ? record.code : "";
   if (code === "ENOENT") {
     return "The docker CLI was not found on PATH.";
+  }
+  if (code === "ETIMEDOUT" || record.killed === true || record.signal === "SIGKILL") {
+    return `The docker CLI did not respond within ${dockerAvailabilityTimeoutMs()}ms.`;
   }
   const stderr = bufferLikeToString(record.stderr).trim();
   if (stderr) {

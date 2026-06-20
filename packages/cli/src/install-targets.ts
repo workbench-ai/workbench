@@ -193,11 +193,7 @@ async function readInventoryForRequest(request: {
     markDuplicateSkillNames(targetRows);
     skills.push(...targetRows);
   }
-  skills.sort((left, right) =>
-    left.name.localeCompare(right.name) ||
-    left.target.localeCompare(right.target) ||
-    (left.path ?? "").localeCompare(right.path ?? "")
-  );
+  skills.sort((left, right) => compareInstalledSkills(left, right, request.currentAgent));
   return {
     scopes: [...request.scopes],
     ...(request.dir ? { dir: request.dir } : {}),
@@ -207,6 +203,45 @@ async function readInventoryForRequest(request: {
     skills,
     next: null,
   };
+}
+
+function compareInstalledSkills(
+  left: WorkbenchInstalledSkill,
+  right: WorkbenchInstalledSkill,
+  currentAgent?: SkillAccessTargetId,
+): number {
+  return skillScopePriority(left.scope) - skillScopePriority(right.scope) ||
+    skillStatusPriority(left.status) - skillStatusPriority(right.status) ||
+    skillTargetPriority(left.target, currentAgent) - skillTargetPriority(right.target, currentAgent) ||
+    left.name.localeCompare(right.name) ||
+    (left.path ?? "").localeCompare(right.path ?? "");
+}
+
+function skillScopePriority(scope: SkillAccessScope): number {
+  return scope === "folder" ? 0 : 1;
+}
+
+function skillStatusPriority(status: WorkbenchSkillAccessStatus): number {
+  switch (status) {
+    case "current":
+      return 0;
+    case "modified":
+    case "project":
+      return 1;
+    case "duplicate-name":
+      return 2;
+    case "unmanaged":
+      return 3;
+    case "missing":
+      return 4;
+  }
+}
+
+function skillTargetPriority(target: SkillAccessTargetId, currentAgent?: SkillAccessTargetId): number {
+  if (target === currentAgent) {
+    return 0;
+  }
+  return target === "codex" ? 1 : 2;
 }
 
 export async function installSnapshotToSkillTargets(options: {

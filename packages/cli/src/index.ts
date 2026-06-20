@@ -33,7 +33,6 @@ import {
   recordWorkbenchCloudInspectionSnapshot,
   recordWorkbenchCloudRunSnapshot,
   recordWorkbenchLocalHostedRunCancellation,
-  recordWorkbenchLocalHostedRunFailure,
   recordWorkbenchLocalHostedRunHandle,
   reconcileCurrentWorkbenchVersion,
   requestLocalWorkbenchRunCancellation,
@@ -2058,10 +2057,9 @@ async function retryCloudRun(
       !(error instanceof WorkbenchCodedError && (error.code === "cloud_canceled" || error.code === "cloud_detached"))
     ) {
       const contextualError = hostedRunErrorWithContext(error, prescheduledRunForCleanup.id);
-      await recordWorkbenchLocalHostedRunFailure({
+      await clearWorkbenchLocalHostedRunHandle({
         ...remoteContext.core,
-        run: prescheduledRunForCleanup,
-        error: hostedRunFailureMessage(contextualError),
+        runId: prescheduledRunForCleanup.id,
       }).catch(() => undefined);
       throw contextualError;
     }
@@ -2236,18 +2234,49 @@ function resultsNextCommandForRun(run: WorkbenchRun): string {
   return parts.join(" ");
 }
 
-function postAgentAddSetupCommands(agent: WorkbenchAgent): string[] {
+async function postAgentAddSetupCommands(
+  agent: WorkbenchAgent,
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+): Promise<string[]> {
   const adapter = agent.adapter.trim().toLowerCase();
-  const providerSetup = adapter === "codex" || adapter === "claude"
-    ? workbenchProviderAuthSetupCommands(adapter)
-    : [];
   const agentSelector = shellQuote(agent.name);
   const isImprover = agent.name === "improver";
-  return [
-    ...providerSetup,
-    `workbench eval --agents ${agentSelector}${isImprover ? " --rerun" : ""}`,
-    ...(isImprover ? [`workbench improve --agents ${agentSelector}`] : []),
-  ];
+  const evalCommand = `workbench eval --agents ${agentSelector}${isImprover ? " --rerun" : ""}`;
+  const commands = new Set<string>();
+  const preview = await previewWorkbenchEval({
+    ...core,
+    agent: agent.name,
+    rerun: isImprover,
+  }).catch(() => null);
+  const agentReadinessIssues = preview?.readiness.issues.filter(agentAddReadinessIssue) ?? [];
+  if (agentReadinessIssues.length > 0) {
+    for (const issue of readinessIssuesForNext(agentReadinessIssues)) {
+      for (const setupCommand of readinessIssueSetupCommands(issue)) {
+        commands.add(setupCommand);
+      }
+      for (const chunk of commandChainParts(issue.remediation)) {
+        if (isWorkbenchOperationCommand(chunk, "eval")) {
+          continue;
+        }
+        commands.add(chunk);
+      }
+    }
+  } else if (!preview && (adapter === "codex" || adapter === "claude")) {
+    for (const setupCommand of workbenchProviderAuthSetupCommands(adapter)) {
+      commands.add(setupCommand);
+    }
+  }
+  commands.add(evalCommand);
+  if (isImprover) {
+    commands.add(`workbench improve --agents ${agentSelector}`);
+  }
+  return [...commands];
+}
+
+function agentAddReadinessIssue(issue: WorkbenchLaunchReadinessIssue): boolean {
+  return issue.code === "adapter_auth_required" ||
+    issue.code === "provider_oauth_missing" ||
+    issue.code === "auth_required";
 }
 
 function formatRunWatchResult(
@@ -2362,14 +2391,15 @@ async function handleAgent(parsed: ParsedArgs, io: CliIo): Promise<number> {
     }
     const config = parseWithFlags(parsed);
     validateAgentCommandConfig(config);
+    const core = await coreOptions(parsed);
     const agent = await addWorkbenchAgent({
-      ...(await coreOptions(parsed)),
+      ...core,
       name,
       adapter,
       model: stringFlag(parsed, "model"),
       config,
     });
-    const setupCommands = postAgentAddSetupCommands(agent);
+    const setupCommands = await postAgentAddSetupCommands(agent, core);
     const next = setupCommands[0] ?? null;
     return output({
       agent: agent as unknown as Json,
@@ -3386,10 +3416,9 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       !(error instanceof WorkbenchCodedError && (error.code === "cloud_canceled" || error.code === "cloud_detached"))
     ) {
       const contextualError = hostedRunErrorWithContext(error, prescheduledRunForCleanup.id);
-      await recordWorkbenchLocalHostedRunFailure({
+      await clearWorkbenchLocalHostedRunHandle({
         dir: root,
-        run: prescheduledRunForCleanup,
-        error: hostedRunFailureMessage(contextualError),
+        runId: prescheduledRunForCleanup.id,
       }).catch(() => undefined);
       throw command === "improve" ? await cloudImproveErrorWithHostedRemediation(contextualError, parsed) : contextualError;
     }
@@ -3410,15 +3439,6 @@ function hostedRunErrorWithContext(error: unknown, runId: string): WorkbenchCode
     },
     exitCode: coded.exitCode,
   });
-}
-
-function hostedRunFailureMessage(error: unknown): string {
-  const coded = codedErrorFromUnknown(error);
-  return singleLine([
-    coded.message,
-    coded.remediation ? `Next: ${coded.remediation}.` : undefined,
-    typeof coded.subject?.requirement === "string" ? coded.subject.requirement : undefined,
-  ].filter(Boolean).join(" "));
 }
 
 async function cloudImproveErrorWithHostedRemediation(error: unknown, parsed: ParsedArgs): Promise<unknown> {
@@ -7818,7 +7838,7 @@ function evidenceDetailSummary(detail: WorkbenchExecutionTraceDetail): Json {
     runId: detail.runId,
     executions: detail.executions.map((execution) => ({
       id: execution.id,
-      status: execution.status,
+      status: formatExecutionTraceStatus(execution.status),
       jobIds: execution.jobIds,
       sessions: execution.sessions.map((session) => ({
         label: session.label,
@@ -8821,13 +8841,17 @@ function formatTraceDetail(
   return detail.executions.map((execution) => {
     const sessionLabels = execution.sessions.map((session) => session.label).join(",");
     return [
-      `${formatExecutionEvidenceLabel(detail, execution)}\trun=${refs.runRefs?.get(detail.runId) ?? displayRef(detail.runId)}\tjobs=${execution.jobIds.map((id) => refs.jobRefs?.get(id) ?? displayRef(id)).join(",")}\tstatus=${execution.status}`,
+      `${formatExecutionEvidenceLabel(detail, execution)}\trun=${refs.runRefs?.get(detail.runId) ?? displayRef(detail.runId)}\tjobs=${execution.jobIds.map((id) => refs.jobRefs?.get(id) ?? displayRef(id)).join(",")}\tstatus=${formatExecutionTraceStatus(execution.status)}`,
       `events=${execution.trace.events.length}`,
       `spans=${execution.trace.spans.length}`,
       `summaries=${execution.trace.summaries.length}`,
       sessionLabels ? `sessions=${sessionLabels}` : undefined,
     ].filter(Boolean).join("\t");
   }).join("\n");
+}
+
+function formatExecutionTraceStatus(status: string): string {
+  return status === "cancelled" ? "canceled" : status;
 }
 
 function formatExecutionEvidenceLabel(
