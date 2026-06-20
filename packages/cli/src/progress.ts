@@ -45,7 +45,7 @@ export interface RunProgressSnapshotInput {
   startedAtMs: number;
   nowMs?: number;
   evidence?: ProgressEvidenceCounts;
-  next?: string;
+  next?: string | null;
 }
 
 export function runProgressSnapshotFromRuns(input: RunProgressSnapshotInput): WorkbenchRunSnapshot | undefined {
@@ -67,11 +67,12 @@ export function runProgressSnapshotFromRuns(input: RunProgressSnapshotInput): Wo
     : base.measurements;
   const nowMs = input.nowMs ?? terminalProgressObservedAtMs(phase, input.runs, jobs) ?? Date.now();
   const elapsedMs = Math.max(0, nowMs - input.startedAtMs);
+  const { next: baseNext, ...baseWithoutNext } = base;
   const partialScore = progressPartialScore(base, jobs);
   const evidenceCount = progressEvidenceCount(input.evidence);
-  const next = progressSnapshotNext(input.next, base);
+  const next = progressSnapshotNext(input.next, baseNext, base);
   return {
-    ...base,
+    ...baseWithoutNext,
     status,
     phase,
     measurements,
@@ -100,13 +101,18 @@ function runSnapshotStatus(
 }
 
 function progressSnapshotNext(
-  next: string | undefined,
+  next: string | null | undefined,
+  defaultNext: string | undefined,
   base: WorkbenchRunSnapshot,
 ): string | undefined {
-  if ((base.status === "failed" || base.status === "canceled") && /^workbench\s+show\b/u.test(next ?? "")) {
+  if (next === null) {
     return undefined;
   }
-  return next;
+  const selected = next ?? defaultNext;
+  if ((base.status === "failed" || base.status === "canceled") && /^workbench\s+show\b/u.test(selected ?? "")) {
+    return undefined;
+  }
+  return selected;
 }
 
 export function createProgressRenderer(input: {

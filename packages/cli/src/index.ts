@@ -1412,6 +1412,9 @@ function readinessNextCommand(
   readiness: WorkbenchLaunchReadiness,
 ): string | null {
   for (const issue of readinessIssuesForNext(readiness.issues)) {
+    if (issue.code === "plan_required" && issue.remediation) {
+      return issue.remediation;
+    }
     const setupCommand = readinessIssueSetupCommands(issue)[0];
     if (setupCommand) {
       return setupCommand;
@@ -1927,6 +1930,7 @@ async function retryCloudRun(
       runs,
       jobs,
       startedAtMs,
+      next: null,
     }), { command: "run retry" });
   };
   const runId = createWorkbenchRunId();
@@ -3211,6 +3215,7 @@ async function startCloudExecution(command: "eval" | "improve", parsed: ParsedAr
       runs,
       jobs,
       startedAtMs,
+      next: null,
     }), { command });
   };
   const interrupt = createCloudInterruptController(command, io);
@@ -6928,7 +6933,11 @@ function statusWithCloudAuthContext(
   const remotes = status.remotes.map((remote) => {
     if (
       remote.kind !== "workbench-cloud" ||
-      (remote.sync.status !== "local_changes" && remote.sync.lastError?.code !== "auth_required")
+      (
+        remote.publication.status !== "published" &&
+        remote.sync.status !== "local_changes" &&
+        remote.sync.lastError?.code !== "auth_required"
+      )
     ) {
       return remote;
     }

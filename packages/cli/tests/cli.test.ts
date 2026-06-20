@@ -2787,6 +2787,59 @@ describe("workbench skill-first CLI", () => {
     });
   });
 
+  test("logged-out Cloud status marks an up-to-date published remote as auth-gated", async () => {
+    const root = await makeTempRoot("workbench-cli-status-cloud-auth-published-");
+    const configRoot = await makeTempRoot("workbench-cli-status-cloud-auth-published-config-");
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(configRoot, "missing-config.json"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", "");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+    const evalResult = await invoke(["eval", "--dir", root, "--json"]);
+    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
+    const currentVersionId = stdoutJson<{ run: { plan: { versionId: string } } }>(evalResult).run.plan.versionId;
+
+    const remoteUrl = "https://cloud.test/skills/alice/published-skill";
+    await addWorkbenchRemote("cloud", remoteUrl, { dir: root });
+    const syncedAt = "2026-06-11T00:00:00.000Z";
+    await fs.mkdir(path.join(root, ".workbench", "sync"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "sync", "cloud.json"), JSON.stringify({
+      schema: "workbench.remote-sync-state.v1",
+      remote: "cloud",
+      url: remoteUrl,
+      status: "synced",
+      localHash: currentVersionId.replace(/^v_/u, ""),
+      remoteHash: currentVersionId.replace(/^v_/u, ""),
+      lastSyncedAt: syncedAt,
+      lastAttemptAt: syncedAt,
+      lastError: null,
+    }, null, 2));
+    await writeRef(root, "remotes/cloud/publication/current-version", currentVersionId);
+    await writeRef(root, `remotes/cloud/publication/versions/${currentVersionId}`, currentVersionId);
+    await writeRef(root, "remotes/cloud/publication/visibility", "private");
+    await writeRef(root, "remotes/cloud/publication/install-handle", "alice/published-skill");
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{
+      next: string | null;
+      remotes: Array<{ name: string; sync: { status: string; lastError: { code: string; message: string } | null } }>;
+    }>(status)).toMatchObject({
+      next: "workbench login",
+      remotes: [expect.objectContaining({
+        name: "cloud",
+        sync: expect.objectContaining({
+          status: "auth_required",
+          lastError: {
+            code: "auth_required",
+            message: "Log in to reconcile Workbench Cloud sync state.",
+          },
+        }),
+      })],
+    });
+  });
+
   test("status recommends eval before login when the current version has no scored proof", async () => {
     const root = await makeTempRoot("workbench-cli-status-current-proof-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "missing-config.json");
@@ -3627,7 +3680,7 @@ describe("workbench skill-first CLI", () => {
           },
         ],
       },
-      next: "workbench publish --as ORG/SKILL",
+      next: "workbench publish --as ORG/SKILL && workbench eval --cloud",
     });
     const dryRunJson = stdoutJson<{
       readiness: { issues: Array<{ code: string; remediation?: string }> };
@@ -3702,13 +3755,14 @@ describe("workbench skill-first CLI", () => {
     const evalResult = await invoke(["eval", "--cloud", "--dir", root, "--json"]);
 
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
-    const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string }>(evalResult);
+    const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(evalResult);
     expect(progress[0]).toMatchObject({
       schema: "workbench.run.v1",
       status: "running",
       phase: "planning",
       variant: "cloud",
     });
+    expect(progress[0]?.next).toBeUndefined();
     expect(stdoutJson(evalResult)).toMatchObject({
       ok: false,
       code: "plan_required",
@@ -3898,7 +3952,7 @@ describe("workbench skill-first CLI", () => {
       const result = await invoke(["eval", "--cloud", "--dir", root, "--json"]);
       expect(result.code, result.stdout || result.stderr).toBe(1);
       expect(localHandleVisibleDuringAutoLink).toBe(true);
-      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string }>(result);
+      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(result);
       expect(progress).toHaveLength(1);
       expect(stdoutJson(result)).toMatchObject({
         ok: false,
@@ -3912,18 +3966,19 @@ describe("workbench skill-first CLI", () => {
         status: "running",
         phase: "planning",
         variant: "cloud",
-	      });
-	      const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
-	      expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
-	        .not.toEqual(expect.arrayContaining([
-	          expect.objectContaining({ id: progress[0]!.id }),
-	        ]));
-	      const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
-	      expect(shown.code, shown.stdout || shown.stderr).toBe(1);
-	      expect(stdoutJson(shown)).toMatchObject({
-	        ok: false,
-	        code: "ref_not_found",
-	      });
+      });
+      expect(progress[0]?.next).toBeUndefined();
+      const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
+      expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
+        .not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: progress[0]!.id }),
+        ]));
+      const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
+      expect(shown.code, shown.stdout || shown.stderr).toBe(1);
+      expect(stdoutJson(shown)).toMatchObject({
+        ok: false,
+        code: "ref_not_found",
+      });
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -4472,13 +4527,14 @@ describe("workbench skill-first CLI", () => {
     try {
       const retried = await invoke(["run", "retry", retryOfRun.id, "--dir", root, "--json"]);
       expect(retried.code, retried.stdout || retried.stderr).toBe(1);
-      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string }>(retried);
+      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(retried);
       expect(progress[0]).toMatchObject({
         schema: "workbench.run.v1",
         status: "running",
         phase: "planning",
         variant: "cloud",
       });
+      expect(progress[0]?.next).toBeUndefined();
       const retriedJson = stdoutJson(retried);
       expect(retriedJson).toMatchObject({
         ok: false,
@@ -5282,25 +5338,26 @@ describe("workbench skill-first CLI", () => {
         message: "codex disconnected.",
         remediation: "codex login --device-auth",
       });
-      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string }>(improved);
+      const progress = stderrJsonLines<{ id: string; schema: string; status: string; phase: string; variant: string; next?: string }>(improved);
       expect(progress).toHaveLength(1);
       expect(progress[0]).toMatchObject({
         schema: "workbench.run.v1",
         status: "running",
         phase: "planning",
         variant: "cloud",
-	      });
-	      const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
-	      expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
-	        .not.toEqual(expect.arrayContaining([
-	          expect.objectContaining({ id: progress[0]!.id }),
-	        ]));
-	      const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
-	      expect(shown.code, shown.stdout || shown.stderr).toBe(1);
-	      expect(stdoutJson(shown)).toMatchObject({
-	        ok: false,
-	        code: "ref_not_found",
-	      });
+      });
+      expect(progress[0]?.next).toBeUndefined();
+      const runs = await invoke(["log", "--runs", "--dir", root, "--json"]);
+      expect(stdoutJson<{ entries: Array<{ id: string; status: string }> }>(runs).entries)
+        .not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: progress[0]!.id }),
+        ]));
+      const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
+      expect(shown.code, shown.stdout || shown.stderr).toBe(1);
+      expect(stdoutJson(shown)).toMatchObject({
+        ok: false,
+        code: "ref_not_found",
+      });
       expect(improved.stderr).not.toContain("workbench cloud:");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
