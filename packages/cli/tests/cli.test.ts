@@ -88,6 +88,13 @@ function stderrJsonLines<T = Record<string, unknown>>(result: { stderr: string }
     : [];
 }
 
+const CODEX_AUTH_JSON = `${JSON.stringify({
+  tokens: {
+    access_token: "test-access-token",
+    refresh_token: "test-refresh-token",
+  },
+}, null, 2)}\n`;
+
 function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = []): Record<string, unknown> {
   const runJobs = jobs.filter((job) => job.runId === run.id && job.caseId !== "current");
   const completed = runJobs.filter((job) =>
@@ -384,6 +391,44 @@ describe("workbench skill-first CLI", () => {
     expect(allHelp.stdout).toContain("workbench run retry RUN_ID");
     const runHelp = await invoke(["run", "--help"]);
     expect(runHelp.stdout).toContain("workbench run watch RUN_ID");
+    expect(runHelp.stdout).toContain("workbench run cancel --run RUN_ID");
+    expect(runHelp.stdout).toContain("workbench run retry --run RUN_ID");
+  });
+
+  test("required command inputs also accept flag aliases", async () => {
+    const root = await makeTempRoot("workbench-cli-input-aliases-");
+    const created = await invoke(["new", "--dest", root, "--agent", "local", "--json"]);
+    expect(created.code, created.stdout || created.stderr).toBe(0);
+
+    const drafted = await invoke(["case", "draft", "--id", "case-flag", "--dir", root, "--json"]);
+    expect(drafted.code, drafted.stdout || drafted.stderr).toBe(0);
+    expect(stdoutJson<{ caseId: string }>(drafted).caseId).toBe("case-flag");
+    await writePassingCaseTest(root, "case-flag");
+
+    const evaluated = await invoke(["eval", "--dir", root, "--json"]);
+    expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
+    const run = stdoutJson<{ run: { id: string; plan: { versionId: string } } }>(evaluated).run;
+
+    const shown = await invoke(["show", "--ref", "current", "--dir", root, "--json"]);
+    expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+    expect(stdoutJson<{ result: { kind: string } }>(shown).result.kind).toBe("version");
+
+    const watched = await invoke(["run", "watch", "--run", run.id, "--dir", root, "--json"]);
+    expect(watched.code, watched.stdout || watched.stderr).toBe(0);
+    expect(stdoutJson<{ run: { id: string } }>(watched).run.id).toBe(run.id);
+
+    const switched = await invoke(["switch", "--version", run.plan.versionId, "--dir", root, "--json"]);
+    expect(switched.code, switched.stdout || switched.stderr).toBe(0);
+    expect(stdoutJson<{ result: { id: string } }>(switched).result.id).toBe(run.plan.versionId);
+
+    const diff = await invoke(["diff", "--range", `${run.plan.versionId}..${run.plan.versionId}`, "--dir", root, "--json"]);
+    expect(diff.code, diff.stdout || diff.stderr).toBe(0);
+
+    const added = await invoke(["agent", "add", "--name", "flagged", "--adapter", "local", "--dir", root, "--json"]);
+    expect(added.code, added.stdout || added.stderr).toBe(0);
+    expect(stdoutJson<{ result: { agent: { name: string } } }>(added).result.agent.name).toBe("flagged");
+    const removed = await invoke(["agent", "rm", "--name", "flagged", "--dir", root, "--json"]);
+    expect(removed.code, removed.stdout || removed.stderr).toBe(0);
   });
 
   test("status in a fresh directory suggests initializing the current directory", async () => {
@@ -559,7 +604,7 @@ describe("workbench skill-first CLI", () => {
 
     const codexProfileRoot = await makeTempRoot("workbench-cli-agent-add-connected-codex-profile-");
     await fs.mkdir(path.join(codexProfileRoot, ".codex"), { recursive: true });
-    await fs.writeFile(path.join(codexProfileRoot, ".codex", "auth.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(codexProfileRoot, ".codex", "auth.json"), CODEX_AUTH_JSON, "utf8");
     const login = await invoke(["login", "codex", "--profile-root", codexProfileRoot, "--json"]);
     expect(login.code, login.stdout || login.stderr).toBe(0);
     vi.stubEnv("HOME", await makeTempRoot("workbench-cli-agent-add-no-native-home-"));
@@ -600,7 +645,7 @@ describe("workbench skill-first CLI", () => {
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", await makeTempRoot("workbench-cli-agent-add-native-store-"));
     const nativeCodexHome = await makeTempRoot("workbench-cli-agent-add-native-home-");
     await fs.mkdir(path.join(nativeCodexHome, ".codex"), { recursive: true });
-    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), CODEX_AUTH_JSON, "utf8");
     vi.stubEnv("HOME", nativeCodexHome);
     const nativeRoot = await makeTempRoot("workbench-cli-eval-improve-native-next-");
     expect((await invoke(["new", nativeRoot, "--agent", "local", "--json"])).code).toBe(0);
@@ -1682,7 +1727,7 @@ describe("workbench skill-first CLI", () => {
       ],
     })));
 
-    const created = await invoke(["clone", "alice/private-skill", root, "--json"]);
+    const created = await invoke(["clone", "--source", "alice/private-skill", "--dest", root, "--json"]);
     expect(created.code, created.stdout || created.stderr).toBe(0);
     expect(stdoutJson(created)).toMatchObject({
       schema: "workbench.cli.clone.v1",
@@ -1899,7 +1944,7 @@ describe("workbench skill-first CLI", () => {
 
     const nativeCodexHome = await makeTempRoot("workbench-cli-native-codex-home-");
     await fs.mkdir(path.join(nativeCodexHome, ".codex"), { recursive: true });
-    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), CODEX_AUTH_JSON, "utf8");
     vi.stubEnv("HOME", nativeCodexHome);
     const nativeCodexRoot = await makeTempRoot("workbench-cli-native-codex-new-");
     const nativeCodex = await invoke(["new", nativeCodexRoot, "--json"]);
@@ -1919,9 +1964,31 @@ describe("workbench skill-first CLI", () => {
       next: `cd ${nativeCodexRoot} && ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`,
     });
 
+    const invalidNativeCodexHome = await makeTempRoot("workbench-cli-invalid-native-codex-home-");
+    await fs.mkdir(path.join(invalidNativeCodexHome, ".codex"), { recursive: true });
+    await fs.writeFile(path.join(invalidNativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    vi.stubEnv("HOME", invalidNativeCodexHome);
+    const invalidNativeCodexRoot = await makeTempRoot("workbench-cli-invalid-native-codex-new-");
+    const invalidNativeCodex = await invoke(["new", invalidNativeCodexRoot, "--json"]);
+    expect(invalidNativeCodex.code, invalidNativeCodex.stdout || invalidNativeCodex.stderr).toBe(0);
+    expect(stdoutJson(invalidNativeCodex)).toMatchObject({
+      result: {
+        defaultAgentSelection: {
+          adapter: "codex",
+          readiness: {
+            nativeAuth: "missing",
+            setupCommands: [
+              "codex login --device-auth",
+              "workbench login codex --method oauth",
+            ],
+          },
+        },
+      },
+    });
+
     const connectedCodexProfileRoot = await makeTempRoot("workbench-cli-connected-codex-profile-");
     await fs.mkdir(path.join(connectedCodexProfileRoot, ".codex"), { recursive: true });
-    await fs.writeFile(path.join(connectedCodexProfileRoot, ".codex", "auth.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(connectedCodexProfileRoot, ".codex", "auth.json"), CODEX_AUTH_JSON, "utf8");
     const connectedCodexLogin = await invoke(["login", "codex", "--profile-root", connectedCodexProfileRoot, "--json"]);
     expect(connectedCodexLogin.code, connectedCodexLogin.stdout || connectedCodexLogin.stderr).toBe(0);
     const connectedCodexHome = await makeTempRoot("workbench-cli-connected-codex-home-");
@@ -2069,7 +2136,7 @@ describe("workbench skill-first CLI", () => {
 
     const nativeCodexHome = await makeTempRoot("workbench-cli-no-case-native-home-");
     await fs.mkdir(path.join(nativeCodexHome, ".codex"), { recursive: true });
-    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), CODEX_AUTH_JSON, "utf8");
     vi.stubEnv("HOME", nativeCodexHome);
     const nativeRoot = await makeTempRoot("workbench-cli-no-case-native-remediation-");
     expect((await invoke(["new", nativeRoot, "--agent", "codex", "--json"])).code).toBe(0);
@@ -2257,6 +2324,23 @@ describe("workbench skill-first CLI", () => {
       },
     });
 
+    await fs.mkdir(path.join(codexProfileRoot, ".codex"), { recursive: true });
+    await fs.writeFile(path.join(codexProfileRoot, ".codex", "auth.json"), "{}\n", "utf8");
+    const invalidCodex = await invoke(["login", "codex", "--profile-root", codexProfileRoot, "--json"]);
+    expect(invalidCodex.code).toBe(2);
+    expect(stdoutJson(invalidCodex)).toMatchObject({
+      ok: false,
+      code: "provider_oauth_invalid",
+      remediation: `mkdir -p ${path.join(codexProfileRoot, ".codex")} && CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
+      subject: {
+        relativePath: ".codex/auth.json",
+        setupCommands: [
+          `mkdir -p ${path.join(codexProfileRoot, ".codex")} && CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
+          `workbench login codex --method oauth --profile-root ${codexProfileRoot}`,
+        ],
+      },
+    });
+
     const claudeEmpty = await invoke(["login", "claude", "--profile-root", claudeProfileRoot, "--json"]);
     expect(claudeEmpty.code).toBe(2);
     expect(stdoutJson(claudeEmpty)).toMatchObject({
@@ -2406,7 +2490,7 @@ describe("workbench skill-first CLI", () => {
 
     const nativeCodexHome = await makeTempRoot("workbench-cli-eval-provider-native-home-");
     await fs.mkdir(path.join(nativeCodexHome, ".codex"), { recursive: true });
-    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), CODEX_AUTH_JSON, "utf8");
     vi.stubEnv("HOME", nativeCodexHome);
     const nativeCodexRoot = await makeTempRoot("workbench-cli-eval-native-codex-auth-");
     expect((await invoke(["new", nativeCodexRoot, "--agent", "codex", "--json"])).code).toBe(0);
@@ -2563,6 +2647,7 @@ describe("workbench skill-first CLI", () => {
     try {
       const installed = await invoke([
         "install",
+        "--source",
         "https://cloud.test/skills/alice/private-skill/versions/v007",
         "--target",
         "codex",
@@ -3011,6 +3096,22 @@ describe("workbench skill-first CLI", () => {
     const baseSkill = await fs.readFile(path.join(root, "SKILL.md"), "utf8");
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nTemporary slow-path edit.\n");
+    const dirtyStatus = await invoke(["status", "--dir", root, "--json"]);
+    expect(dirtyStatus.code, dirtyStatus.stdout || dirtyStatus.stderr).toBe(0);
+    const dirtyStatusJson = stdoutJson<{
+      project: { currentVersionId: string };
+      worktree: { latestVersionId: string; sourceState?: string; wouldCreateVersionId?: string };
+      next: string | null;
+    }>(dirtyStatus);
+    expect(dirtyStatusJson.project.currentVersionId).toBe(baseVersionId);
+    expect(dirtyStatusJson.worktree.sourceState).toBe("would_create");
+    expect(dirtyStatusJson.worktree.latestVersionId).toBe(dirtyStatusJson.worktree.wouldCreateVersionId);
+    expect(dirtyStatusJson.worktree.latestVersionId).not.toBe(baseVersionId);
+    expect(dirtyStatusJson.next).toBe("workbench eval");
+    const dirtyStatusHuman = await invoke(["status", "--dir", root]);
+    expect(dirtyStatusHuman.stdout).toContain("Worktree source: edited");
+    expect(dirtyStatusHuman.stdout).toContain("next: workbench eval");
+
     const evalResult = await invoke(["eval", "--dir", root, "--json"]);
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
     const editedVersionId = stdoutJson<{ run: { plan: { versionId: string } } }>(evalResult).run.plan.versionId;
@@ -7424,12 +7525,16 @@ describe("workbench skill-first CLI", () => {
         }),
         visibility: "public",
         installHandle,
+        installCommand: `workbench install ${installHandle}`,
+        next: `workbench publish --public --dir ${root}`,
       });
       expect(stdoutJson<{ version: { id: string } }>(publish).version.id).toBe(originalVersionId);
       const publishHuman = await invoke(["publish", "--dry-run", "--public", "--dir", root]);
       expect(publishHuman.code, publishHuman.stdout || publishHuman.stderr).toBe(0);
       expect(publishHuman.stdout).toContain(`Would publish ${shortTestRef(originalVersionId)} as ${installHandle} (public).`);
-      expect(publishHuman.stdout).toContain(`next: workbench install ${installHandle}`);
+      expect(publishHuman.stdout).toContain("Dry run made no changes.");
+      expect(publishHuman.stdout).toContain(`after publish: workbench install ${installHandle}`);
+      expect(publishHuman.stdout).toContain(`next: workbench publish --public --dir ${root}`);
       expect(publishHuman.stdout).not.toContain("to remote");
       expect(publishHuman.stdout).not.toContain("Install:");
       expect(publishHuman.stdout).not.toContain("Pinned:");
@@ -7566,6 +7671,8 @@ describe("workbench skill-first CLI", () => {
           url: "https://cloud.test/skills/acme/earnings-prep",
         }),
         installHandle: "acme/earnings-prep",
+        installCommand: "workbench install acme/earnings-prep",
+        next: `workbench publish --as Acme/Earnings.Prep --dir ${root}`,
       });
       expect(stdoutJson(first)).not.toHaveProperty("installUrl");
       expect(stdoutJson(first)).not.toHaveProperty("pinnedInstallUrl");
@@ -7585,6 +7692,8 @@ describe("workbench skill-first CLI", () => {
           url: "https://cloud.test/skills/acme/earnings-prep",
         }),
         installHandle: "acme/earnings-prep",
+        installCommand: "workbench install acme/earnings-prep",
+        next: `workbench publish --as Acme/Earnings.Prep --dir ${root}`,
       });
       expect(stdoutJson(second)).not.toHaveProperty("installUrl");
       expect(stdoutJson(second)).not.toHaveProperty("pinnedInstallUrl");
@@ -9030,10 +9139,17 @@ describe("workbench skill-first CLI", () => {
     expect(versions.code, versions.stdout || versions.stderr).toBe(0);
     expect(runs.code, runs.stdout || runs.stderr).toBe(0);
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
-    const statusJson = stdoutJson<{ project: { currentVersionId: string }; worktree: { latestVersionId: string } }>(status);
+    const statusJson = stdoutJson<{
+      project: { currentVersionId: string };
+      worktree: { latestVersionId: string; sourceState?: string; wouldCreateVersionId?: string };
+      next: string | null;
+    }>(status);
     expect(statusJson.project.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
     expect(statusJson.project.currentVersionId).toBe(initialVersionId);
-    expect(statusJson.worktree.latestVersionId).toBe(statusJson.project.currentVersionId);
+    expect(statusJson.worktree.sourceState).toBe("would_create");
+    expect(statusJson.worktree.latestVersionId).toBe(statusJson.worktree.wouldCreateVersionId);
+    expect(statusJson.worktree.latestVersionId).not.toBe(statusJson.project.currentVersionId);
+    expect(statusJson.next).toBe(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
     expect(stdoutJson<{ entries: Array<{ id: string }> }>(versions).entries.length).toBeGreaterThan(0);
     expect(stdoutJson<{ entries: unknown[] }>(runs).entries).toHaveLength(0);
     expect(stdoutJson(shown)).toMatchObject({

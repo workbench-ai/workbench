@@ -589,6 +589,8 @@ export interface WorkbenchStatusSnapshot {
   };
   worktree: {
     latestVersionId?: string;
+    sourceState?: "committed" | "would_create";
+    wouldCreateVersionId?: string;
   };
   runs: {
     total: number;

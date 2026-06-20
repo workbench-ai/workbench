@@ -355,21 +355,28 @@ describe("remote state lifecycle", () => {
     expect(snapshot.next).toBeNull();
   });
 
-  test("status snapshot reports the reconciled current version without stale dirty flags", async () => {
+  test("status snapshot reports edited source as a would-create version without stale dirty flags", async () => {
     const root = await makeTempRoot("workbench-status-worktree-");
     await createNewWorkbenchSkillProject({ dir: root });
 
     const clean = await workbenchStatusSnapshot({ dir: root });
     expect(clean.worktree).not.toHaveProperty("hasUnversionedChanges");
+    expect(clean.worktree.sourceState).toBe("committed");
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual snapshot edit.\n");
-    const reconciled = await workbenchStatusSnapshot({ dir: root });
-    expect(reconciled.worktree).not.toHaveProperty("hasUnversionedChanges");
-    expect(reconciled.project.currentVersionId).toBe(reconciled.worktree.latestVersionId);
+    const dirty = await workbenchStatusSnapshot({ dir: root });
+    expect(dirty.worktree).not.toHaveProperty("hasUnversionedChanges");
+    expect(dirty.worktree.sourceState).toBe("would_create");
+    expect(typeof dirty.worktree.wouldCreateVersionId).toBe("string");
+    expect(dirty.worktree.latestVersionId).toBe(dirty.worktree.wouldCreateVersionId);
+    expect(dirty.project.currentVersionId).toBe(clean.project.currentVersionId);
+    expect(dirty.project.currentVersionId).not.toBe(dirty.worktree.latestVersionId);
 
     const settled = await workbenchStatusSnapshot({ dir: root });
     expect(settled.worktree).not.toHaveProperty("hasUnversionedChanges");
-    expect(settled.project.currentVersionId).toBe(reconciled.project.currentVersionId);
+    expect(settled.project.currentVersionId).toBe(clean.project.currentVersionId);
+    expect(settled.worktree.sourceState).toBe("would_create");
+    expect(settled.worktree.wouldCreateVersionId).toBe(dirty.worktree.wouldCreateVersionId);
   });
 
   test("invalid remote names are rejected with remote_invalid_name", async () => {

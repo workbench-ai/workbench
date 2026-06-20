@@ -1244,6 +1244,34 @@ export async function workbenchProviderAuthSetupCommandsForTarget(
   });
 }
 
+export function codexAuthJsonHasUsableToken(source: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch {
+    return false;
+  }
+  const record = asRecord(parsed);
+  if (!record) {
+    return false;
+  }
+  if (typeof record.OPENAI_API_KEY === "string" && record.OPENAI_API_KEY.trim()) {
+    return true;
+  }
+  const tokens = asRecord(record.tokens);
+  return Boolean(
+    nonEmptyRecordString(tokens, "access_token") ||
+    nonEmptyRecordString(tokens, "refresh_token") ||
+    nonEmptyRecordString(record, "access_token") ||
+    nonEmptyRecordString(record, "refresh_token"),
+  );
+}
+
+function nonEmptyRecordString(record: Record<string, unknown> | null, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function requiredAdapterAuthTargetsForExecution(
   execution: WorkbenchExecutionSpec,
   args: Pick<WorkbenchExecutionRuntimeInput, "adapterManifests" | "runtimeControlOperation" | "spec">,
@@ -3616,7 +3644,7 @@ async function providerNativeAuthState(
       path.join(homeDir, ".codex"),
     ];
     for (const root of roots) {
-      if (await exists(path.join(root, "auth.json"))) {
+      if (await codexNativeAuthFilePresent(path.join(root, "auth.json"))) {
         return "present";
       }
     }
@@ -3628,6 +3656,16 @@ async function providerNativeAuthState(
     return "present";
   }
   return profile || tokenEnv ? "partial" : "missing";
+}
+
+async function codexNativeAuthFilePresent(filePath: string): Promise<boolean> {
+  const source = await fs.readFile(filePath, "utf8").catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  return source !== null && codexAuthJsonHasUsableToken(source);
 }
 
 function providerSetupCommands(
@@ -3820,10 +3858,18 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
     readSkillFiles(root).then(hashFiles).catch(() => undefined),
   ]);
   const currentVersionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
-  const versionHashes = new Set(localState.versions.map((version) => version.hash));
+  const worktreeSourceVersion = worktreeSourceHash
+    ? localState.versions.find((version) => version.hash === worktreeSourceHash)
+    : undefined;
+  const worktreeWouldCreateVersionId = worktreeSourceHash && !worktreeSourceVersion
+    ? versionIdForHash(worktreeSourceHash)
+    : undefined;
+  const worktreeSourceState: WorkbenchStatusSnapshot["worktree"]["sourceState"] | undefined = worktreeSourceHash
+    ? worktreeSourceVersion ? "committed" : "would_create"
+    : undefined;
   const hasUnsyncedWorktreeSource = Boolean(
     worktreeSourceHash &&
-    !versionHashes.has(worktreeSourceHash),
+    !worktreeSourceVersion,
   );
   const lastRun = [...snapshot.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   const lastRunScore = lastRun ? runQualityScore(lastRun) : undefined;
@@ -3864,7 +3910,9 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
       ...(snapshot.status.defaultAgent ? { defaultAgent: snapshot.status.defaultAgent } : {}),
     },
     worktree: {
-      ...(currentVersionId ? { latestVersionId: currentVersionId } : {}),
+      ...(worktreeWouldCreateVersionId || currentVersionId ? { latestVersionId: worktreeWouldCreateVersionId ?? currentVersionId } : {}),
+      ...(worktreeSourceState ? { sourceState: worktreeSourceState } : {}),
+      ...(worktreeWouldCreateVersionId ? { wouldCreateVersionId: worktreeWouldCreateVersionId } : {}),
     },
     runs: {
       total: snapshot.runs.length,
