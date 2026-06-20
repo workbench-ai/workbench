@@ -92,7 +92,7 @@ versions:
     source: github:anthropics/skills//skills/frontend-design@<40-character-commit-sha>
 ```
 
-For the implicit root `current` version, result labels default to the `name` frontmatter in `SKILL.md` with a selected result-matrix ordinal appended, so JSON consumers can distinguish multiple unrun local source snapshots. Use `label` only when a configured version needs an explicit display override.
+For the implicit root `current` version, result labels default to the `name` frontmatter in `SKILL.md` with a stable local source ordinal appended, so JSON consumers can distinguish multiple unrun local source snapshots even when filtering to one row. Use `label` only when a configured version needs an explicit display override.
 
 Top-level entries are measured versions. Each measured version defines one `source:` string. `source: local:PATH` must stay inside the project root, `source: none` is the no-skill baseline, and external sources must be immutable pins such as `workbench:OWNER/SKILL@VERSION` or `github:OWNER/REPO//PATH@COMMIT`; GitHub `COMMIT` must be the full 40-character SHA, not a branch, tag, or short prefix. Nested `includes` are installed beside one measured version and affect that bundle hash, but they are not result rows.
 
@@ -143,6 +143,8 @@ workbench open
 Use `workbench show <run-id>` first after terminal multi-sample runs. It summarizes run facts, failed and canceled job groups, job ids, and copy-paste complete file commands such as `workbench show <run-id>:cases/.../output/result.json`; then use a specific job or trace ref such as `workbench show <job-id>:stderr.log` when that file is present. Use `workbench run watch <run-id>` for active runs.
 
 Bare `workbench` is the same orientation view as `workbench status`. `status` is a local read and reports active runs with compact concrete progress and `workbench run watch RUN_ID` as the next command when a known run is queued or running. `log` shows one reverse-chronological timeline of versions and runs. `versions` lists committed immutable source versions only; it does not create a new version for edited files. `show REF` lists files for file-backed objects or shows interpreted run/job evidence; file lists print runnable `workbench show REF:PATH` commands and JSON file entries include both `path` and `ref`. `show RUN_ID` includes the same progress snapshot and evidence count used by watch/status before evidence details, and failed or canceled run pages omit self-referential `next: workbench show RUN_ID` hints. Human job sample labels are one-based like live progress. `show REF:PATH` reads one version, artifact, or run/job evidence file by exact path or unique canonical suffix. Internal `.workbench/` runtime files and raw trace metadata files such as `request.json`, `result.json`, and `trace.json` are not addressable evidence. Provider session refs printed by Workbench evidence, such as `codex:SESSION_ID` and `claude:SESSION_ID`, are resolved from that evidence through `show`; native local provider sessions are resolved when the local provider files exist.
+
+`results --versions all` keeps historical source snapshots visible, `results --versions current` narrows to the current source snapshot, and an unambiguous version-id prefix selects that exact result row. Canceled partial evals keep status and sample coverage but show `n/a` quality instead of treating the scored subset as the full result.
 
 `switch` materializes a recorded source version into the working folder and updates the current Workbench ref. It does not invoke Git.
 

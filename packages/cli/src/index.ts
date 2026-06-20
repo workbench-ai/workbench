@@ -746,7 +746,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       const results = await resultsWorkbench({
         ...core,
         projectVersions: "all",
-        versions: stringFlag(parsed, "versions"),
+        resultVersions: stringFlag(parsed, "versions"),
         agents: stringFlag(parsed, "agents"),
       });
       const next = resultsNextCommand(results);
@@ -7059,6 +7059,9 @@ function statusWithCloudAuthContext(
 }
 
 function scoredRunValue(run: WorkbenchRun): number | undefined {
+  if (run.status === "canceled") {
+    return undefined;
+  }
   return typeof run.score === "number" ? run.score : undefined;
 }
 

@@ -630,16 +630,21 @@ describe("skill-first Workbench runtime", () => {
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     const resultVersionsById = new Map(snapshot.results?.versions.map((version) => [version.id, version]));
     const resultCellVersionIds = new Set(snapshot.results?.cells.map((cell) => cell.skillVersionId));
+    const firstLabel = resultVersionsById.get(firstRun.versionId)?.label ?? "";
+    const secondLabel = resultVersionsById.get(secondRun.versionId)?.label ?? "";
+    const firstOrdinal = Number(firstLabel.match(/ v(\d+)$/u)?.[1] ?? "0");
+    const secondOrdinal = Number(secondLabel.match(/ v(\d+)$/u)?.[1] ?? "0");
 
     expect(resultVersionsById.get(firstRun.versionId)).toMatchObject({
-      label: "earnings-prep v1",
       source: "local:.",
     });
     expect(resultVersionsById.get(secondRun.versionId)).toMatchObject({
-      label: "earnings-prep v2",
       source: "local:.",
       current: true,
     });
+    expect(firstLabel).toMatch(/^earnings-prep v\d+$/u);
+    expect(secondLabel).toMatch(/^earnings-prep v\d+$/u);
+    expect(secondOrdinal).toBeGreaterThan(firstOrdinal);
     expect([...resultCellVersionIds]).toEqual(expect.arrayContaining([firstRun.versionId, secondRun.versionId]));
   }, 60_000);
 

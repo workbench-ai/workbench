@@ -969,7 +969,7 @@ describe("workbench skill-first CLI", () => {
 
     const contextualResults = await invoke(["results", "--agents", "strict", "--dir", root]);
     expect(contextualResults.code, contextualResults.stdout || contextualResults.stderr).toBe(0);
-    expect(contextualResults.stdout).toContain(expectedLocalSkillLabel(root, 1));
+    expect(contextualResults.stdout).toMatch(new RegExp(`${expectedLocalSkillLabel(root, 0).replace(/0$/u, "\\d+")} · Current`, "u"));
     expect(contextualResults.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+samples\s+cost\s+latency\s+run/mu);
     expect(contextualResults.stdout).toMatch(/\bstrict\s+succeeded\b/u);
 
@@ -1042,6 +1042,52 @@ describe("workbench skill-first CLI", () => {
     expect(historical).toBeTruthy();
     expect(results.stdout).toContain(historical!.label);
     expect(results.stdout).toContain(`Current version has no recorded results: ${current!.label}.`);
+  });
+
+  test("results --versions current narrows to the current source version", async () => {
+    const root = await makeTempRoot("workbench-cli-results-current-selector-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+
+    expect((await invoke(["eval", "--dir", root, "--json"])).code).toBe(0);
+    const firstVersionId = await currentVersionIdFor(root);
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nCurrent selector edit.\n");
+    const secondVersionId = await currentVersionIdFor(root);
+    expect(secondVersionId).not.toBe(firstVersionId);
+    expect((await invoke(["eval", "--dir", root, "--json"])).code).toBe(0);
+
+    const all = await invoke(["results", "--versions", "all", "--dir", root, "--json"]);
+    expect(all.code, all.stdout || all.stderr).toBe(0);
+    const allPayload = stdoutJson<{
+      result: {
+        versions: Array<{ id: string; label: string; projectVersionId?: string; current?: boolean }>;
+        cells: Array<{ skillVersionId?: string; runId?: string; status?: string }>;
+      };
+    }>(all);
+    const allRecordedProjectIds = new Set(allPayload.result.cells
+      .filter((cell) => cell.runId || cell.status)
+      .map((cell) => allPayload.result.versions.find((version) => version.id === cell.skillVersionId)?.projectVersionId)
+      .filter((id): id is string => typeof id === "string"));
+    expect(allRecordedProjectIds).toEqual(new Set([firstVersionId, secondVersionId]));
+
+    const current = await invoke(["results", "--versions", "current", "--dir", root, "--json"]);
+    expect(current.code, current.stdout || current.stderr).toBe(0);
+    const currentPayload = stdoutJson<typeof allPayload>(current);
+    expect(currentPayload.result.versions.map((version) => version.projectVersionId)).toEqual([secondVersionId]);
+    expect(currentPayload.result.versions[0]).toMatchObject({ current: true });
+    expect(currentPayload.result.cells.every((cell) => cell.skillVersionId === secondVersionId)).toBe(true);
+    const currentLabel = currentPayload.result.versions[0]!.label;
+    const historicalLabel = allPayload.result.versions.find((version) => version.projectVersionId === firstVersionId)!.label;
+
+    const byPrefix = await invoke(["results", "--versions", secondVersionId.slice(0, 12), "--dir", root, "--json"]);
+    expect(byPrefix.code, byPrefix.stdout || byPrefix.stderr).toBe(0);
+    expect(stdoutJson<typeof allPayload>(byPrefix).result.versions.map((version) => version.projectVersionId))
+      .toEqual([secondVersionId]);
+
+    const currentHuman = await invoke(["results", "--versions", "current", "--dir", root]);
+    expect(currentHuman.code, currentHuman.stdout || currentHuman.stderr).toBe(0);
+    expect(currentHuman.stdout).toContain(currentLabel);
+    expect(currentHuman.stdout).not.toContain(historicalLabel);
   });
 
   test("results json labels selected unevaluated local versions distinctly", async () => {
@@ -1119,7 +1165,7 @@ describe("workbench skill-first CLI", () => {
     });
   }, 15_000);
 
-  test("results preserve canceled run status when a canceled run has failed jobs", async () => {
+  test("results suppress partial quality when a canceled run has unscored jobs", async () => {
     const root = await makeTempRoot("workbench-cli-results-canceled-status-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await writePassingCaseTest(root);
@@ -1132,7 +1178,7 @@ describe("workbench skill-first CLI", () => {
     if (!versionId || !bundle || !agent || !evalSnapshot) {
       throw new Error("Expected new local project to expose version, bundle, agent, and eval snapshots.");
     }
-    const createdAt = "2026-06-19T00:00:00.000Z";
+    const createdAt = "2999-06-19T00:00:00.000Z";
     const run: WorkbenchRun = {
       id: "run_canceled_mixed",
       kind: "eval",
@@ -1143,11 +1189,11 @@ describe("workbench skill-first CLI", () => {
       agentName: agent.agent.name,
       agentHash: agent.hash,
       status: "canceled",
-      score: 0,
-      jobIds: ["job_canceled_mixed_failed", "job_canceled_mixed_canceled"],
+      score: 1,
+      jobIds: ["job_canceled_mixed_succeeded", "job_canceled_mixed_canceled"],
       traceIds: [],
       createdAt,
-      finishedAt: "2026-06-19T00:00:02.000Z",
+      finishedAt: "2999-06-19T00:00:02.000Z",
       location: "local",
       requestedSamples: 2,
       operationPlan: {
@@ -1160,8 +1206,8 @@ describe("workbench skill-first CLI", () => {
         samples: 2,
       },
     };
-    const failedJob: WorkbenchJob = {
-      id: "job_canceled_mixed_failed",
+    const succeededJob: WorkbenchJob = {
+      id: "job_canceled_mixed_succeeded",
       runId: run.id,
       kind: "eval",
       versionId,
@@ -1172,41 +1218,49 @@ describe("workbench skill-first CLI", () => {
       agentHash: agent.hash,
       caseId: "case-001",
       sample: 0,
-      status: "failed",
-      score: 0,
+      status: "succeeded",
+      score: 1,
       artifactIds: [],
       traceIds: [],
       createdAt,
       startedAt: createdAt,
-      finishedAt: "2026-06-19T00:00:01.000Z",
+      finishedAt: "2999-06-19T00:00:01.000Z",
       durationMs: 1000,
-      error: "case failed before cancellation",
     };
     const canceledJob: WorkbenchJob = {
-      ...failedJob,
+      ...succeededJob,
       id: "job_canceled_mixed_canceled",
       sample: 1,
       status: "canceled",
       score: undefined,
-      finishedAt: "2026-06-19T00:00:02.000Z",
+      finishedAt: "2999-06-19T00:00:02.000Z",
       error: "canceled by user",
     };
     await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench", "objects", "job"), { recursive: true });
     await fs.writeFile(path.join(root, ".workbench", "objects", "run", `${run.id}.json`), JSON.stringify(run));
-    await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${failedJob.id}.json`), JSON.stringify(failedJob));
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${succeededJob.id}.json`), JSON.stringify(succeededJob));
     await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${canceledJob.id}.json`), JSON.stringify(canceledJob));
 
     const results = await invoke(["results", "--dir", root, "--json"]);
 
     expect(results.code, results.stdout || results.stderr).toBe(0);
-    expect(stdoutJson<{ result: { cells: Array<{ runId?: string; status?: string }> } }>(results).result.cells)
+    expect(stdoutJson<{ result: { cells: Array<{ runId?: string; status?: string; quality?: number; samples?: number }> } }>(results).result.cells)
       .toEqual(expect.arrayContaining([
-        expect.objectContaining({ runId: run.id, status: "canceled" }),
+        expect.objectContaining({ runId: run.id, status: "canceled", samples: 2 }),
       ]));
+    const canceledCell = stdoutJson<{ result: { cells: Array<{ runId?: string; quality?: number }> } }>(results)
+      .result.cells.find((cell) => cell.runId === run.id);
+    expect(canceledCell).not.toHaveProperty("quality");
     const human = await invoke(["results", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toMatch(/\bcanceled\s+0\.000\b/u);
+    expect(human.stdout).toMatch(/\bcanceled\s+n\/a\s+2\b/u);
+    const status = await invoke(["status", "--dir", root, "--json"]);
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{ runs: { lastStatus?: string; lastScore?: number } }>(status).runs).toMatchObject({
+      lastStatus: "canceled",
+    });
+    expect(stdoutJson<{ runs: { lastScore?: number } }>(status).runs).not.toHaveProperty("lastScore");
   });
 
   test("rejects unsupported and context-invalid flags before handlers run", async () => {
@@ -2879,9 +2933,9 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(results)).toMatchObject({
       ok: false,
       code: "usage",
-      message: expect.stringContaining("Version not found: deadbeef..badc0de."),
+      message: expect.stringContaining("Version not found: deadbeef."),
       remediation: "workbench results --versions current",
-      subject: { configuredVersions: ["current"] },
+      subject: { configuredVersions: expect.arrayContaining(["current"]) },
     });
   });
 

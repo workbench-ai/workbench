@@ -3027,6 +3027,7 @@ export interface WorkbenchRunCancellationResult {
 
 export interface WorkbenchResultsOptions extends WorkbenchCommandOptions {
   projectVersions?: string;
+  resultVersions?: string;
   versions?: string;
   agents?: string;
 }
@@ -3825,6 +3826,7 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
     !versionHashes.has(worktreeSourceHash),
   );
   const lastRun = [...snapshot.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  const lastRunScore = lastRun ? runQualityScore(lastRun) : undefined;
   const syncByRemote = new Map(syncStates.map((entry) => [entry.remote, entry]));
   const remotes = snapshot.remotes.map((remote) => {
     const syncRecord = syncByRemote.get(remote.name);
@@ -3869,7 +3871,7 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
       ...(lastRun ? {
         lastRunId: lastRun.id,
         lastStatus: lastRun.status,
-        ...(lastRun.score !== undefined ? { lastScore: lastRun.score } : {}),
+        ...(lastRunScore !== undefined ? { lastScore: lastRunScore } : {}),
       } : {}),
       activeRuns: activeRunStatusEntries(snapshot),
     },
@@ -3927,8 +3929,9 @@ async function workbenchStatusUnlocked(root: string, options: WorkbenchCommandOp
   upsertEvalSnapshotObject(state.evals, await readEvalSnapshot(root));
   await saveState(root, state);
   const lastRun = state.runs
-    .filter((run) => typeof run.score === "number")
+    .filter((run) => runQualityScore(run) !== undefined)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  const lastRunScore = lastRun ? runQualityScore(lastRun) : undefined;
   return {
     root,
     initialized: true,
@@ -3942,7 +3945,7 @@ async function workbenchStatusUnlocked(root: string, options: WorkbenchCommandOp
     runCount: state.runs.length,
     remoteCount: Object.keys(state.remotes).length,
     pendingSyncCount: await pendingSyncCount(root),
-    ...(lastRun?.score !== undefined ? { lastScore: lastRun.score } : {}),
+    ...(lastRunScore !== undefined ? { lastScore: lastRunScore } : {}),
   };
 }
 
@@ -6139,6 +6142,7 @@ function runMeasurementSummary(
   const samples = runJobs.length > 0
     ? new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size
     : run.jobIds?.length;
+  const score = runQualityScore(run);
   return {
     versionId: run.versionId,
     skillName: run.skillName,
@@ -6148,7 +6152,7 @@ function runMeasurementSummary(
     agentHash: run.agentHash,
     runId: run.id,
     status: run.status,
-    ...(run.score !== undefined ? { score: run.score } : {}),
+    ...(score !== undefined ? { score } : {}),
     ...(samples !== undefined && samples > 0 ? { samples } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
@@ -6210,6 +6214,10 @@ function runMeasurementSummaryFromJobs(
     ? jobs.reduce((sum, job) => sum + (job.durationMs ?? 0), 0)
     : undefined;
   const errors = jobs.flatMap((job) => job.error ? [job.error] : []);
+  const status = comparisonJobStatus(jobs, run.status);
+  const score = status === "canceled" || scoredJobs.length === 0
+    ? undefined
+    : Number((scoredJobs.reduce((sum, job) => sum + (job.score ?? 0), 0) / scoredJobs.length).toFixed(3));
   return {
     versionId: firstJob.versionId,
     skillName: firstJob.skillName,
@@ -6218,10 +6226,8 @@ function runMeasurementSummaryFromJobs(
     agentName: firstJob.agentName,
     agentHash: firstJob.agentHash,
     runId: run.id,
-    status: comparisonJobStatus(jobs, run.status),
-    ...(scoredJobs.length > 0 ? {
-      score: Number((scoredJobs.reduce((sum, job) => sum + (job.score ?? 0), 0) / scoredJobs.length).toFixed(3)),
-    } : {}),
+    status,
+    ...(score !== undefined ? { score } : {}),
     ...(samples > 0 ? { samples } : {}),
     ...(latencyMs !== undefined ? { latencyMs } : {}),
     ...(errors.length > 0 ? { error: summarizeJobErrors(errors) } : {}),
@@ -6280,11 +6286,20 @@ function resultsNextCommandForRun(run: WorkbenchRun): string {
 }
 
 function aggregateRunScore(runs: readonly WorkbenchRun[]): number | undefined {
-  const scored = runs.filter((run) => typeof run.score === "number");
+  if (runs.some((run) => run.status === "canceled")) {
+    return undefined;
+  }
+  const scored = runs
+    .map(runQualityScore)
+    .filter((score): score is number => typeof score === "number");
   if (scored.length === 0) {
     return undefined;
   }
-  return Number((scored.reduce((sum, run) => sum + (run.score ?? 0), 0) / scored.length).toFixed(3));
+  return Number((scored.reduce((sum, score) => sum + score, 0) / scored.length).toFixed(3));
+}
+
+function runQualityScore(run: Pick<WorkbenchRun, "status" | "score">): number | undefined {
+  return run.status === "canceled" ? undefined : run.score;
 }
 
 function aggregateRunCost(runs: readonly WorkbenchRun[]): number | undefined {
@@ -6938,22 +6953,106 @@ function isNamedResultsSelection(selection: string | undefined): boolean {
   return Boolean(normalized && normalized !== ALL_SELECTOR);
 }
 
+interface NormalizedResultsSelection {
+  projectVersions: string;
+  skills?: string;
+}
+
+function normalizeWorkbenchResultsSelection(
+  state: WorkbenchProjectState,
+  options: Pick<WorkbenchResultsOptions, "projectVersions" | "resultVersions" | "versions">,
+): NormalizedResultsSelection {
+  const publicVersions = options.resultVersions?.trim();
+  if (!publicVersions) {
+    return {
+      projectVersions: options.projectVersions ?? "current",
+      skills: options.versions,
+    };
+  }
+  if (publicVersions === ALL_SELECTOR) {
+    return {
+      projectVersions: ALL_SELECTOR,
+      skills: ALL_SELECTOR,
+    };
+  }
+  const projectVersions = resolveProjectResultsVersionSelection(state, publicVersions);
+  if (projectVersions) {
+    return {
+      projectVersions,
+      skills: options.versions ?? CURRENT_SKILL_VERSION_NAME,
+    };
+  }
+  return {
+    projectVersions: options.projectVersions ?? ALL_SELECTOR,
+    skills: publicVersions,
+  };
+}
+
+function resolveProjectResultsVersionSelection(
+  state: WorkbenchProjectState,
+  selection: string,
+): string | null {
+  try {
+    resolveVersionSelection(state, selection);
+    return selection;
+  } catch (error) {
+    if (looksLikeProjectVersionSelection(selection)) {
+      throw resultsVersionSelectionError(state, error);
+    }
+    return null;
+  }
+}
+
+function looksLikeProjectVersionSelection(selection: string): boolean {
+  return selection.includes("..") ||
+    selection.split(",").map((part) => part.trim()).filter(Boolean).some((part) =>
+      part === "current" ||
+      part.startsWith("v_") ||
+      /^[0-9a-f]{6,}$/iu.test(part)
+    );
+}
+
+function resultsVersionSelectionError(
+  state: WorkbenchProjectState,
+  error: unknown,
+): WorkbenchCodedError {
+  const message = error instanceof Error ? error.message : String(error);
+  const configuredVersions = resultsConfiguredVersionRefs(state);
+  return new WorkbenchCodedError("usage", message, {
+    remediation: "workbench results --versions current",
+    subject: { configuredVersions },
+    exitCode: 2,
+  });
+}
+
+function resultsConfiguredVersionRefs(state: WorkbenchProjectState): string[] {
+  const refs = [
+    ...(state.refs.current ? ["current"] : []),
+    ...state.versions.slice(-8).map(versionDisplayCandidate),
+  ];
+  return [...new Set(refs)].sort();
+}
+
 export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): Promise<WorkbenchResults> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
   await requireInitialized(root);
   const state = await loadState(root);
+  const selection = normalizeWorkbenchResultsSelection(state, options);
   const internalSelection = {
-    versions: options.projectVersions,
-    skills: options.versions,
+    versions: selection.projectVersions,
+    skills: selection.skills,
     agents: options.agents,
   };
   const recordedComparison = buildInternalComparisonFromState(state, internalSelection);
   if (recordedComparison.cells.some((cell) => cell.runId || cell.status)) {
-    const completedComparison = await completeRecordedResultsSelectionMatrix(state, recordedComparison, options);
+    const completedComparison = await completeRecordedResultsSelectionMatrix(state, recordedComparison, {
+      ...options,
+      versions: selection.skills,
+    });
     return resultsFromInternalComparison(completedComparison, state);
   }
-  let versions = resolveVersionSelection(state, options.projectVersions ?? "current");
+  const versions = resolveVersionSelection(state, selection.projectVersions);
   if (versions.length === 0) {
     return resultsFromInternalComparison({
       versions: [],
@@ -6973,14 +7072,17 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
     let runtime: WorkbenchVersionRuntimeSnapshot;
     try {
       runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
-        skill: options.versions,
+        skill: selection.skills,
         agent: options.agents,
         authToken: options.authToken,
         selectionRemediationCommand: "results",
       });
     } catch (error) {
       const selectionError = await resultsSelectionErrorWithLiveControls(root, error, options);
-      if (shouldSkipVersionForResultsSelection(error, options, versions.length)) {
+      if (shouldSkipVersionForResultsSelection(error, {
+        versions: selection.skills,
+        agents: options.agents,
+      }, versions.length)) {
         skippedSelectionError ??= selectionError;
         skippedVersions.push(version.id);
         continue;
@@ -7163,7 +7265,7 @@ function resultsFromInternalComparison(
   const agentByHash = new Map(comparison.agents.map((agent) => [agent.hash, agent]));
   const evalByHash = new Map(state.evals.map((evalSnapshot) => [evalSnapshot.hash, evalSnapshot]));
   const projectVersionById = new Map(comparison.versions.map((version) => [version.id, version]));
-  const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(comparison);
+  const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(state);
   const resultVersions = new Map<string, WorkbenchResults["versions"][number]>();
   const resultAgents = new Map<string, WorkbenchResults["agents"][number]>();
   const resultEvaluations = new Map<string, WorkbenchResults["evaluations"][number]>();
@@ -7337,24 +7439,8 @@ function skillFrontmatterName(content: string): string | undefined {
   }
 }
 
-function resultLocalVersionOrdinals(comparison: InternalComparison): Map<string, number> {
-  const localVersionIds = new Set<string>();
-  const skillByHash = new Map(comparison.skills.map((skill) => [skill.hash, skill]));
-  for (const cell of comparison.cells) {
-    const skill = skillByHash.get(cell.skillBundleHash);
-    if (
-      skill?.source.kind === "local" &&
-      (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".")
-    ) {
-      localVersionIds.add(cell.versionId);
-    }
-  }
-  const ids = localVersionIds.size > 0
-    ? localVersionIds
-    : new Set(comparison.versions.map((version) => version.id));
-  const sorted = comparison.versions
-    .filter((version) => ids.has(version.id))
-    .sort(compareVersionIds);
+function resultLocalVersionOrdinals(state: WorkbenchProjectState): Map<string, number> {
+  const sorted = [...state.versions].sort(compareVersionIds);
   return new Map(sorted.map((version, index) => [version.id, index + 1]));
 }
 
@@ -8170,8 +8256,9 @@ export function createWorkbenchInspectionSnapshotFromState(
     .map((remote) => ({ ...remote }))
     .sort((left, right) => left.name.localeCompare(right.name));
   const lastRun = state.runs
-    .filter((run) => typeof run.score === "number")
+    .filter((run) => runQualityScore(run) !== undefined)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  const lastRunScore = lastRun ? runQualityScore(lastRun) : undefined;
   const status: WorkbenchStatus = {
     root,
     initialized: true,
@@ -8185,7 +8272,7 @@ export function createWorkbenchInspectionSnapshotFromState(
     runCount: state.runs.length,
     remoteCount: remotes.length,
     ...(options.pendingSyncCount !== undefined ? { pendingSyncCount: options.pendingSyncCount } : {}),
-    ...(lastRun?.score !== undefined ? { lastScore: lastRun.score } : {}),
+    ...(lastRunScore !== undefined ? { lastScore: lastRunScore } : {}),
   };
   return {
     root,
@@ -9598,7 +9685,7 @@ async function executeWorkbenchEvaluationRun(args: {
       : "failed";
   delete run.score;
   const scoredJobs = jobs.filter((job) => typeof job.score === "number");
-  if (scoredJobs.length > 0) {
+  if (run.status !== "canceled" && scoredJobs.length > 0) {
     run.score = Number((scoredJobs.reduce((sum, job) => sum + (job.score ?? 0), 0) / scoredJobs.length).toFixed(3));
   } else {
     delete run.score;
@@ -13562,11 +13649,12 @@ function comparisonEvidenceFromRun(run: WorkbenchRun, jobs: readonly WorkbenchJo
   const latencyMs = run.latencyMs !== undefined && samples > 1
     ? Math.round(run.latencyMs / samples)
     : run.latencyMs;
+  const score = runQualityScore(run);
   return {
     runId: run.id,
     status: run.status,
     createdAt: run.createdAt,
-    ...(run.score !== undefined ? { score: run.score } : {}),
+    ...(score !== undefined ? { score } : {}),
     ...(samples > 0 ? { samples } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(latencyMs !== undefined ? { latencyMs } : {}),
@@ -13586,13 +13674,15 @@ function comparisonEvidenceFromJobs(
     : undefined;
   const errors = jobs.flatMap((job) => job.error ? [job.error] : []);
   const everyRunJobMatches = allRunJobs.filter((job) => job.caseId !== "current").every((job) => jobs.some((entry) => entry.id === job.id));
+  const status = comparisonJobStatus(jobs, run.status);
+  const score = status === "canceled" || scoredJobs.length === 0
+    ? undefined
+    : Number((scoredJobs.reduce((sum, job) => sum + (job.score ?? 0), 0) / scoredJobs.length).toFixed(3));
   return {
     runId: run.id,
-    status: comparisonJobStatus(jobs, run.status),
+    status,
     createdAt: run.createdAt,
-    ...(scoredJobs.length > 0 ? {
-      score: Number((scoredJobs.reduce((sum, job) => sum + (job.score ?? 0), 0) / scoredJobs.length).toFixed(3)),
-    } : {}),
+    ...(score !== undefined ? { score } : {}),
     ...(samples > 0 ? { samples } : {}),
     ...(everyRunJobMatches && run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(latencyMs !== undefined ? { latencyMs } : {}),
