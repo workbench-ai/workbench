@@ -730,7 +730,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       return output(resultsManifest(results), parsed, io, (format) => formatResults(results, format));
     }
     if (command === "switch") {
-      const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.");
+      const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.", "workbench switch VERSION");
       const version = await switchWorkbenchVersion(versionRef, core);
       return output(versionSummary(version), parsed, io, () => `Switched to ${displayRef(version.id)}.`);
     }
@@ -856,7 +856,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       ].join("\n"));
     }
     if (command === "unpublish") {
-      const versionRef = requiredPositional(parsed, 1, "workbench unpublish requires VERSION.");
+      const versionRef = requiredPositional(parsed, 1, "workbench unpublish requires VERSION.", "workbench unpublish VERSION");
       rejectExtraInput(parsed, {
         maxPositionals: 2,
         message: "workbench unpublish accepts one VERSION argument.",
@@ -1076,7 +1076,7 @@ async function assertLocalEvalLaunchReadiness(
     rerun: request.kind === "eval" ? request.rerun : undefined,
     cloud: false,
   });
-  const issue = readinessIssuesForNext(preview.readiness.issues)[0] ?? preview.readiness.issues[0];
+  const issue = preview.readiness.issues[0];
   if (!issue) {
     return;
   }
@@ -1440,10 +1440,10 @@ function readinessIssuesForNext(
 }
 
 function readinessIssueNextPriority(issue: WorkbenchLaunchReadinessIssue): number {
-  if (issue.code === "no_eval_cases") {
+  if (issue.code === "adapter_auth_required" || issue.code === "provider_oauth_missing") {
     return 0;
   }
-  if (issue.code === "adapter_auth_required" || issue.code === "provider_oauth_missing") {
+  if (issue.code === "no_eval_cases") {
     return 1;
   }
   if (issue.code === "auth_required") {
@@ -1592,7 +1592,7 @@ type WorkbenchLogEntry =
   | { kind: "run"; id: string; createdAt: string; status: string; versionId: string; skillName: string; agentName: string; score?: number };
 
 async function handleRun(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const subcommand = requiredPositional(parsed, 1, "workbench run requires watch|cancel|retry.");
+  const subcommand = requiredPositional(parsed, 1, "workbench run requires watch|cancel|retry.", "workbench run watch RUN_ID");
   if (subcommand === "watch") {
     rejectExtraInput(parsed, {
       maxPositionals: 3,
@@ -1624,7 +1624,7 @@ async function handleRun(parsed: ParsedArgs, io: CliIo): Promise<number> {
 }
 
 async function handleRunWatch(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const runRef = requiredPositional(parsed, 2, "workbench run watch requires RUN_ID.");
+  const runRef = requiredPositional(parsed, 2, "workbench run watch requires RUN_ID.", "workbench run watch RUN_ID");
   const core = await coreOptions(parsed);
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
   const run = requiredRunByRef(snapshot, runRef);
@@ -1811,7 +1811,7 @@ async function handleLocalHostedRunWatch(
 }
 
 async function handleRunCancel(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const runRef = requiredPositional(parsed, 2, "workbench run cancel requires RUN_ID.");
+  const runRef = requiredPositional(parsed, 2, "workbench run cancel requires RUN_ID.", "workbench run cancel RUN_ID");
   const core = await coreOptions(parsed);
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
   const run = requiredRunByRef(snapshot, runRef);
@@ -1878,7 +1878,7 @@ async function handleRunCancel(parsed: ParsedArgs, io: CliIo): Promise<number> {
 }
 
 async function handleRunRetry(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const runRef = requiredPositional(parsed, 2, "workbench run retry requires RUN_ID.");
+  const runRef = requiredPositional(parsed, 2, "workbench run retry requires RUN_ID.", "workbench run retry RUN_ID");
   const core = await coreOptions(parsed);
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
   const run = requiredRunByRef(snapshot, runRef);
@@ -2315,7 +2315,7 @@ function runSnapshotStartedAtMs(snapshot: WorkbenchRunSnapshot): number {
 }
 
 async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const ref = requiredPositional(parsed, 1, "workbench show requires REF.");
+  const ref = requiredPositional(parsed, 1, "workbench show requires REF.", "workbench show REF");
   const core = await coreOptions(parsed);
   const evidenceSession = await showWorkbenchEvidenceSession(ref, core);
   if (evidenceSession) {
@@ -6191,9 +6191,15 @@ function optionalPositional(parsed: ParsedArgs, index: number): string | undefin
   return parsed.positionals[index];
 }
 
-function requiredPositional(parsed: ParsedArgs, index: number, message: string): string {
+function requiredPositional(parsed: ParsedArgs, index: number, message: string, remediation?: string): string {
   const value = parsed.positionals[index];
   if (!value) {
+    if (remediation) {
+      throw new WorkbenchCodedError("usage", message, {
+        remediation,
+        exitCode: 2,
+      });
+    }
     throw new WorkbenchUserError(message);
   }
   return value;

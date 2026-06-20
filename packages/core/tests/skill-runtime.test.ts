@@ -3550,6 +3550,12 @@ describe("skill-first Workbench runtime", () => {
     expect(visibility).toBe("public");
     const statusAfterPublish = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
     expect(statusAfterPublish.next).toBeNull();
+    const publishedRemote = statusAfterPublish.remotes.find((entry) => entry.name === "origin");
+    expect(publishedRemote?.sync.status).toBe("up_to_date");
+    const dryRunAfterPublish = await syncWorkbenchRemote({ dir: root, authToken: "test-token", dryRun: true });
+    expect(dryRunAfterPublish.upToDate).toBe(true);
+    expect(dryRunAfterPublish.pushed).toBe(0);
+    expect(dryRunAfterPublish.pulled).toBe(0);
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond published version.\n");
     const secondPublished = await publishWorkbenchVersion({

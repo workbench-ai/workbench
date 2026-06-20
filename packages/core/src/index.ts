@@ -7937,6 +7937,19 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
     Object.assign(syncedState.refs, publishedRefs);
     syncedState.refs = withMergedRemoteTrackingRefs(syncedState.refs, sync.remote.name, publishedRefs);
     await saveState(root, syncedState);
+    const syncedAt = now();
+    await writeRemoteSyncState(root, {
+      schema: "workbench.remote-sync-state.v1",
+      remote: sync.remote.name,
+      url: sync.remote.url,
+      status: "synced",
+      localHash: remoteSyncLocalHash(syncedState, sync.remote),
+      lastSyncedAt: syncedAt,
+      lastAttemptAt: syncedAt,
+      lastError: null,
+      pushed: sync.pushed,
+      pulled: sync.pulled,
+    });
     return {
       remote: sync.remote,
       version,

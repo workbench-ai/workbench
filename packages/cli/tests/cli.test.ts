@@ -1167,6 +1167,26 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(results)).toMatchObject({ schema: "workbench.cli.results.v1", ok: true });
   });
 
+  test("missing required object refs include command-shaped remediation", async () => {
+    const missingShowRef = await invoke(["show", "--json"]);
+    expect(missingShowRef.code).toBe(2);
+    expect(stdoutJson(missingShowRef)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "workbench show requires REF.",
+      remediation: "workbench show REF",
+    });
+
+    const missingRunWatchRef = await invoke(["run", "watch", "--json"]);
+    expect(missingRunWatchRef.code).toBe(2);
+    expect(stdoutJson(missingRunWatchRef)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "workbench run watch requires RUN_ID.",
+      remediation: "workbench run watch RUN_ID",
+    });
+  });
+
   test("new is a strict create command", async () => {
     const root = await makeTempRoot("workbench-cli-new-strict-");
     const created = await invoke(["new", root, "--agent", "local", "--json"]);
@@ -1795,12 +1815,20 @@ describe("workbench skill-first CLI", () => {
           ],
         },
       },
-      next: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
+      next: "codex login --device-auth",
     });
     const improve = await invoke(["improve", "--dir", root, "--json"]);
     expect(improve.code).toBe(2);
     const improveJson = stdoutJson<{ remediation: string }>(improve);
     expect(improveJson).toMatchObject({
+      ok: false,
+      code: "no_eval_cases",
+      remediation: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
+      subject: { directory: ".workbench/cases" },
+    });
+    const realEval = await invoke(["eval", "--dir", root, "--json"]);
+    expect(realEval.code).toBe(1);
+    expect(stdoutJson(realEval)).toMatchObject({
       ok: false,
       code: "no_eval_cases",
       remediation: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
