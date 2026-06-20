@@ -381,7 +381,7 @@ describe("workbench execution DAG scheduler", () => {
       agent: "strict",
     }, [run]);
 
-    expect(snapshot.next).toBe("workbench results --agents 'strict'");
+    expect(snapshot.next).toBe("workbench results --agents strict");
   });
 
   test("local web operation defaults keep CLI current-source semantics", () => {

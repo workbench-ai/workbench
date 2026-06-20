@@ -232,6 +232,9 @@ function hasMutableLatestTag(image: string): boolean {
 }
 
 export function quoteShellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/u.test(value)) {
+    return value;
+  }
   if (value.length === 0) {
     return "''";
   }

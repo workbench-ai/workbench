@@ -340,7 +340,7 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "usage",
       message: "Unsupported flag --agent for workbench eval.",
-      remediation: "workbench eval --agents 'harness'",
+      remediation: "workbench eval --agents harness",
     });
 
     const allHelp = await invoke(["help", "--all"]);
@@ -503,15 +503,15 @@ describe("workbench skill-first CLI", () => {
         setupCommands: [
           "codex login --device-auth",
           "workbench login codex --method oauth",
-          "workbench eval --agents 'improver' --rerun",
-          "workbench improve --agents 'improver'",
+          "workbench eval --agents improver --rerun",
+          "workbench improve --agents improver",
         ],
         next: "codex login --device-auth",
       },
     });
     const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
     expect(stdoutJson<{ next: string | null }>(statusAfterAdd).next)
-      .toBe("codex login --device-auth");
+      .toBe("workbench results");
 
     const codexProfileRoot = await makeTempRoot("workbench-cli-agent-add-connected-codex-profile-");
     await fs.mkdir(path.join(codexProfileRoot, ".codex"), { recursive: true });
@@ -538,10 +538,10 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(connectedAdd)).toMatchObject({
       result: {
         setupCommands: [
-          "workbench eval --agents 'improver' --rerun",
-          "workbench improve --agents 'improver'",
+          "workbench eval --agents improver --rerun",
+          "workbench improve --agents improver",
         ],
-        next: "workbench eval --agents 'improver' --rerun",
+        next: "workbench eval --agents improver --rerun",
       },
     });
     expect(stdoutJson<{ result: { setupCommands: string[] } }>(connectedAdd).result.setupCommands)
@@ -550,7 +550,7 @@ describe("workbench skill-first CLI", () => {
     expect(readyPreview.code, readyPreview.stdout || readyPreview.stderr).toBe(0);
     expect(stdoutJson(readyPreview)).toMatchObject({
       readiness: { ready: true, issues: [] },
-      next: "workbench eval --agents 'improver' --rerun",
+      next: "workbench eval --agents improver --rerun",
     });
   });
 
@@ -854,7 +854,7 @@ describe("workbench skill-first CLI", () => {
 
     const watched = await invoke(["run", "watch", evaluatedRunId, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
-    expect(stdoutJson<{ next: string }>(watched).next).toBe("workbench results --agents 'strict'");
+    expect(stdoutJson<{ next: string }>(watched).next).toBe("workbench results --agents strict");
 
     const shown = await invoke(["show", evaluatedRunId, "--dir", root]);
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
@@ -902,7 +902,7 @@ describe("workbench skill-first CLI", () => {
 
     const retried = await invoke(["run", "retry", evaluatedRunId, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
-    expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench results --agents 'strict'");
+    expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench results --agents strict");
   });
 
   test("terminal run summaries preserve multi-agent measurement context", async () => {
@@ -921,13 +921,13 @@ describe("workbench skill-first CLI", () => {
     expect(watched.stdout).toContain("measurement");
     expect(watched.stdout).toContain("agent=default");
     expect(watched.stdout).toContain("agent=strict");
-    expect(watched.stdout).toContain("next: workbench results --agents 'default,strict'");
+    expect(watched.stdout).toContain("next: workbench results --agents default,strict");
 
     const shown = await invoke(["show", evaluatedJson.run.id, "--dir", root]);
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
     expect(shown.stdout).toContain("agent=default");
     expect(shown.stdout).toContain("agent=strict");
-    expect(shown.stdout).toContain("next: workbench results --agents 'default,strict'");
+    expect(shown.stdout).toContain("next: workbench results --agents default,strict");
 
     const logRuns = await invoke(["log", "--runs", "--dir", root]);
     expect(logRuns.code, logRuns.stdout || logRuns.stderr).toBe(0);
@@ -936,7 +936,7 @@ describe("workbench skill-first CLI", () => {
     const retried = await invoke(["run", "retry", evaluatedJson.run.id, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
     expect(stdoutJson<{ next: string; run: { measurements: Array<{ agentName: string }> } }>(retried)).toMatchObject({
-      next: "workbench results --agents 'default,strict'",
+      next: "workbench results --agents default,strict",
       run: {
         measurements: expect.arrayContaining([
           expect.objectContaining({ agentName: "default" }),
@@ -1592,7 +1592,7 @@ describe("workbench skill-first CLI", () => {
       kind: "provider",
     });
     expect(createdJson.result.defaultAgentSelection.reason).toMatch(/codex|product_default/u);
-    expect(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND).toBe("workbench case draft 'case-001'");
+    expect(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND).toBe("workbench case draft case-001");
     expect(createdJson.result.defaultAgentSelection.readiness.setupCommands.length).toBeGreaterThan(0);
     expect(createdJson.next).toBe(createdJson.result.defaultAgentSelection.readiness.setupCommands[0]);
     expect(createdJson.next).not.toContain(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
@@ -1937,12 +1937,12 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(codex)).toMatchObject({
       ok: false,
       code: "provider_oauth_missing",
-      remediation: `mkdir -p '${path.join(codexProfileRoot, ".codex")}' && CODEX_HOME='${path.join(codexProfileRoot, ".codex")}' codex login --device-auth`,
+      remediation: `mkdir -p ${path.join(codexProfileRoot, ".codex")} && CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
       subject: {
         relativePath: ".codex/auth.json",
         setupCommands: [
-          `mkdir -p '${path.join(codexProfileRoot, ".codex")}' && CODEX_HOME='${path.join(codexProfileRoot, ".codex")}' codex login --device-auth`,
-          `workbench login codex --method oauth --profile-root '${codexProfileRoot}'`,
+          `mkdir -p ${path.join(codexProfileRoot, ".codex")} && CODEX_HOME=${path.join(codexProfileRoot, ".codex")} codex login --device-auth`,
+          `workbench login codex --method oauth --profile-root ${codexProfileRoot}`,
         ],
       },
     });
@@ -1952,14 +1952,14 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(claudeEmpty)).toMatchObject({
       ok: false,
       code: "provider_oauth_missing",
-      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
+      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root ${claudeProfileRoot}.`,
       remediation: "claude setup-token",
       subject: {
         relativePath: ".claude.json",
         env: "CLAUDE_CODE_OAUTH_TOKEN",
         setupCommands: [
           "claude setup-token",
-          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root ${claudeProfileRoot}`,
         ],
       },
     });
@@ -1970,13 +1970,13 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(claudeProfileOnly)).toMatchObject({
       ok: false,
       code: "provider_oauth_missing",
-      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
+      message: `Claude OAuth capture requires Claude Code's profile and the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root ${claudeProfileRoot}.`,
       remediation: "claude setup-token",
       subject: {
         env: "CLAUDE_CODE_OAUTH_TOKEN",
         setupCommands: [
           "claude setup-token",
-          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root ${claudeProfileRoot}`,
         ],
       },
     });
@@ -1987,13 +1987,13 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(claudeInvalidToken)).toMatchObject({
       ok: false,
       code: "provider_oauth_invalid",
-      message: `CLAUDE_CODE_OAUTH_TOKEN must be the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'.`,
+      message: `CLAUDE_CODE_OAUTH_TOKEN must be the OAuth token printed by claude setup-token. Run claude setup-token first, then capture it with CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root ${claudeProfileRoot}.`,
       remediation: "claude setup-token",
       subject: {
         env: "CLAUDE_CODE_OAUTH_TOKEN",
         setupCommands: [
           "claude setup-token",
-          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root '${claudeProfileRoot}'`,
+          `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth --profile-root ${claudeProfileRoot}`,
         ],
       },
     });
@@ -2331,7 +2331,7 @@ describe("workbench skill-first CLI", () => {
       expect(stdoutJson(missingVersionClone)).toMatchObject({
         ok: false,
         code: "source_version_not_found",
-        remediation: `workbench clone https://cloud.test/skills/alice/private-skill '${missingVersionCloneRoot}'`,
+        remediation: `workbench clone https://cloud.test/skills/alice/private-skill ${missingVersionCloneRoot}`,
       });
       const cloneRoot = path.join(await makeTempRoot("workbench-cli-clone-short-ref-parent-"), "clone");
       const clonedShortVersion = await invoke([
@@ -3007,7 +3007,7 @@ describe("workbench skill-first CLI", () => {
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
     const next = stdoutJson<{ next: string | null }>(status).next;
-    expect(next).toBe("workbench improve --versions 'current' --agents 'patcher'");
+    expect(next).toBe("workbench improve --versions current --agents patcher");
     expect(next).not.toMatch(/^workbench switch\b/u);
   }, 60_000);
 
@@ -3241,7 +3241,7 @@ describe("workbench skill-first CLI", () => {
     const traceListing = await invoke(["show", "trace_job_surface", "--dir", root]);
     expect(traceListing.code, traceListing.stdout || traceListing.stderr).toBe(0);
     expect(traceListing.stdout).toContain("trace\ttrace_job");
-    expect(traceListing.stdout).toContain("workbench show 'trace_job_surface:stderr.log'");
+    expect(traceListing.stdout).toContain("workbench show trace_job_surface:stderr.log");
     await fs.writeFile(path.join(root, ".workbench", "objects", "trace", "trace_job_orphan.json"), JSON.stringify({
       id: "trace_job_orphan",
       runId: "run_surface",
@@ -3325,7 +3325,7 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("Provider answer line one.");
     expect(human.stdout).toContain("Session cases/case-001/jobs/job_surface/agent-session.json: codex:session-surface");
     expect(human.stdout).toContain("Rubric cases/case-001/jobs/job_surface/rubric-scorecard.json: score=0.750 summary=Useful answer.");
-    expect(human.stdout).toContain("workbench show 'run_surface:cases/case-001/jobs/job_surface/result.json'");
+    expect(human.stdout).toContain("workbench show run_surface:cases/case-001/jobs/job_surface/result.json");
     expect(human.stdout).not.toContain("job:run_surface:job_surface");
   });
 
@@ -3767,8 +3767,11 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "plan_required",
       remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
-      runId: progress[0]!.id,
+      subject: {
+        correlationRunId: progress[0]!.id,
+      },
     });
+    expect(stdoutJson(evalResult)).not.toHaveProperty("runId");
     const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
     expect(shown.code, shown.stdout || shown.stderr).toBe(1);
     expect(stdoutJson(shown)).toMatchObject({
@@ -3956,11 +3959,11 @@ describe("workbench skill-first CLI", () => {
       expect(progress).toHaveLength(1);
       expect(stdoutJson(result)).toMatchObject({
         ok: false,
-        runId: progress[0]!.id,
         subject: {
-          runId: progress[0]!.id,
+          correlationRunId: progress[0]!.id,
         },
       });
+      expect(stdoutJson(result)).not.toHaveProperty("runId");
       expect(progress[0]).toMatchObject({
         schema: "workbench.run.v1",
         status: "running",
@@ -4449,7 +4452,7 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
-  test("hosted pre-accept run retry error JSON includes the local retry run id", async () => {
+  test("hosted pre-accept run retry error JSON exposes only a cleared correlation id", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-preaccept-retry-error-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
@@ -4540,14 +4543,14 @@ describe("workbench skill-first CLI", () => {
         ok: false,
         code: "plan_required",
         remediation: "workbench publish --as ORG/SKILL && workbench eval --cloud",
-        runId: progress[0]!.id,
         subject: {
           owner: "alice",
           ownerKind: "user",
           requirement: "Publish under an organization-owned skill with an active Team or Enterprise plan, then rerun the hosted command.",
-          runId: progress[0]!.id,
+          correlationRunId: progress[0]!.id,
         },
       });
+      expect(retriedJson).not.toHaveProperty("runId");
       const shown = await invoke(["show", progress[0]!.id, "--dir", root, "--json"]);
       expect(shown.code, shown.stdout || shown.stderr).toBe(1);
       expect(stdoutJson(shown)).toMatchObject({
@@ -4934,7 +4937,7 @@ describe("workbench skill-first CLI", () => {
       expect(improved.code, improved.stdout || improved.stderr).toBe(2);
       expect(stdoutJson(improved)).toMatchObject({
         ok: false,
-        code: "usage",
+        code: "improve_adapter_required",
         message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter."),
         remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
       });
@@ -5085,7 +5088,7 @@ describe("workbench skill-first CLI", () => {
       expect(stdoutJson(improved)).toMatchObject({
         ok: false,
         code: "improve_evidence_required",
-        remediation: "workbench eval --agents 'patcher'",
+        remediation: "workbench eval --agents patcher",
       });
       expect(improved.stderr).not.toContain("workbench improve: preflight");
       expect(fetchMock).not.toHaveBeenCalled();
@@ -5133,7 +5136,7 @@ describe("workbench skill-first CLI", () => {
       expect(stdoutJson(prematureImprove)).toMatchObject({
         ok: false,
         code: "improve_evidence_required",
-        remediation: "workbench case draft 'case-002'",
+        remediation: "workbench case draft case-002",
       });
 
       await writePassingCaseTest(root, "case-002");
@@ -5142,11 +5145,11 @@ describe("workbench skill-first CLI", () => {
       expect(stdoutJson(staleImprove)).toMatchObject({
         ok: false,
         code: "improve_evidence_required",
-        remediation: "workbench eval --agents 'improver'",
+        remediation: "workbench eval --agents improver",
       });
       expect(staleImprove.stdout).not.toContain("case-003");
       const evalPlan = await invoke(["eval", "--dir", root, "--agents", "improver", "--dry-run", "--json"]);
-      expect(stdoutJson<{ next: string | null }>(evalPlan).next).toBe("workbench eval --agents 'improver'");
+      expect(stdoutJson<{ next: string | null }>(evalPlan).next).toBe("workbench eval --agents improver");
     } finally {
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
@@ -5175,7 +5178,7 @@ describe("workbench skill-first CLI", () => {
 
     const beforePerfect = await invoke(["improve", "--dir", root, "--agents", "improver", "--dry-run", "--json"]);
     expect(beforePerfect.code, beforePerfect.stdout || beforePerfect.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(beforePerfect).next).toBe("workbench improve --agents 'improver'");
+    expect(stdoutJson<{ next: string | null }>(beforePerfect).next).toBe("workbench improve --agents improver");
 
     const perfectEval = await invoke(["eval", "--dir", root, "--agents", "improver", "--rerun", "--json"]);
     expect(perfectEval.code, perfectEval.stdout || perfectEval.stderr).toBe(0);
@@ -5186,7 +5189,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(afterPerfect)).toMatchObject({
       ok: false,
       code: "improve_evidence_required",
-      remediation: "workbench case draft 'case-002'",
+      remediation: "workbench case draft case-002",
     });
     expect(afterPerfect.stdout).not.toContain("workbench improve --agents");
   });
@@ -5204,7 +5207,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(improved)).toMatchObject({
       ok: false,
       code: "improve_evidence_required",
-      remediation: "workbench case draft 'case-002'",
+      remediation: "workbench case draft case-002",
     });
     expect(improved.stdout).not.toContain("workbench agent add improver");
   });
@@ -9516,7 +9519,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(prematureImprove)).toMatchObject({
       ok: false,
       code: "improve_evidence_required",
-      remediation: "workbench case draft 'case-002'",
+      remediation: "workbench case draft case-002",
     });
 
     await writeFailingCaseTest(root, "cli workflow failure");
@@ -9581,7 +9584,7 @@ describe("workbench skill-first CLI", () => {
     expect(defaultImprove.stderr).toBe("");
     expect(stdoutJson(defaultImprove)).toMatchObject({
       ok: false,
-      code: "usage",
+      code: "improve_adapter_required",
       message: expect.stringContaining("Agent default cannot run improve because it has no skill-improvement adapter"),
       remediation: "workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default",
     });

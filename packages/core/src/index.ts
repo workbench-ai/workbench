@@ -3709,6 +3709,12 @@ function executableOnPath(command: string): boolean {
 }
 
 function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/u.test(value)) {
+    return value;
+  }
+  if (value.length === 0) {
+    return "''";
+  }
   return `'${value.replace(/'/gu, `'"'"'`)}'`;
 }
 
@@ -4908,7 +4914,7 @@ function workbenchSkillImproveAdapterRequirementIssue(agent: WorkbenchAgent): Wo
 }
 
 function workbenchSkillImproveAdapterRequirementError(agent: WorkbenchAgent): WorkbenchCodedError {
-  return new WorkbenchCodedError("usage", workbenchSkillImproveAdapterRequirementMessage(agent), {
+  return new WorkbenchCodedError("improve_adapter_required", workbenchSkillImproveAdapterRequirementMessage(agent), {
     remediation: workbenchSkillImproveAdapterRemediation(agent),
     subject: {
       agent: agent.name,

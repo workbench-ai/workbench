@@ -3440,7 +3440,7 @@ function hostedRunErrorWithContext(error: unknown, runId: string): WorkbenchCode
     ...(coded.remediation ? { remediation: coded.remediation } : {}),
     subject: {
       ...(coded.subject ?? {}),
-      runId,
+      correlationRunId: runId,
     },
     exitCode: coded.exitCode,
   });
@@ -5716,11 +5716,17 @@ function profileRootFlag(profileRoot: string): string {
 }
 
 function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/u.test(value)) {
+    return value;
+  }
+  if (value.length === 0) {
+    return "''";
+  }
   return `'${value.replace(/'/gu, "'\\''")}'`;
 }
 
 function shellQuoteIfNeeded(value: string): string {
-  return /^[A-Za-z0-9._:@/+,-]+$/u.test(value) ? value : shellQuote(value);
+  return shellQuote(value);
 }
 
 function parseClaudeOauthTokenEnv(value: string): string | null {
@@ -7128,7 +7134,9 @@ async function statusWithCausalNext(
     };
   }
   if (belowPerfectCurrentEvalRuns.length > 0) {
-    return { ...status, next: await belowPerfectEvalNextCommand(core, snapshot, belowPerfectCurrentEvalRuns) };
+    return { ...status, next: await belowPerfectEvalNextCommand(core, snapshot, belowPerfectCurrentEvalRuns, {
+      demoteBlockedProviderImprover: true,
+    }) };
   }
   if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
     return { ...status, next: "workbench results" };
@@ -7195,6 +7203,7 @@ async function belowPerfectEvalNextCommand(
   core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
   snapshot: WorkbenchInspectionSnapshot | null,
   runs: readonly WorkbenchRun[],
+  options: { demoteBlockedProviderImprover?: boolean } = {},
 ): Promise<string> {
   const skillNames = new Set(runs.map((run) => run.skillName));
   const agentNames = new Set(runs.map((run) => run.agentName));
@@ -7210,7 +7219,7 @@ async function belowPerfectEvalNextCommand(
   if (!agent) {
     return "workbench results";
   }
-  return await improveNextCommandForAgent(core, skill, agent, snapshot);
+  return await improveNextCommandForAgent(core, skill, agent, snapshot, options);
 }
 
 async function pendingImproverEvalNextCommand(
@@ -7244,7 +7253,7 @@ async function pendingImproverEvalNextCommand(
   );
   return hasCurrentImproverEvidence
     ? undefined
-    : await evalRerunNextCommandForAgent(core, improvementAgent.name);
+    : await evalRerunNextCommandForImproverStatus(core, improvementAgent.name);
 }
 
 async function evalRerunNextCommandForAgent(
@@ -7261,6 +7270,33 @@ async function evalRerunNextCommandForAgent(
     return readinessNextCommand("eval", preview.readiness) ?? command;
   }
   return command;
+}
+
+function readinessOnlyNeedsProviderAuth(readiness: WorkbenchLaunchReadiness | undefined): boolean {
+  return Boolean(readiness?.issues.length) && readiness!.issues.every((issue) =>
+    issue.code === "adapter_auth_required" ||
+    issue.code === "provider_oauth_missing" ||
+    issue.code === "auth_required"
+  );
+}
+
+async function evalRerunNextCommandForImproverStatus(
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  agentName: string,
+): Promise<string> {
+  const command = `workbench eval --agents ${shellQuote(agentName)} --rerun`;
+  const preview = await previewWorkbenchEval({
+    ...core,
+    agent: agentName,
+    rerun: true,
+  }).catch(() => null);
+  if (preview && preview.readiness.ready) {
+    return command;
+  }
+  return readinessOnlyNeedsProviderAuth(preview?.readiness) ? "workbench results" : readinessNextCommand("eval", preview?.readiness ?? {
+    ready: false,
+    issues: [],
+  }) ?? command;
 }
 
 function postImproveProofEvalNextCommand(
@@ -8332,6 +8368,7 @@ async function improveNextCommandForAgent(
   skill: string,
   agent: WorkbenchAgent,
   snapshot: WorkbenchInspectionSnapshot | null,
+  options: { demoteBlockedProviderImprover?: boolean } = {},
 ): Promise<string> {
   const preview = await previewWorkbenchImprove({
     ...core,
@@ -8347,7 +8384,9 @@ async function improveNextCommandForAgent(
       .filter((candidate) => candidate.name !== "default" && workbenchSkillImproveCanUseQueuedAdapter(candidate))
       .sort((left, right) => left.name.localeCompare(right.name))[0];
     if (improvementAgent) {
-      return await evalRerunNextCommandForAgent(core, improvementAgent.name);
+      return options.demoteBlockedProviderImprover
+        ? await evalRerunNextCommandForImproverStatus(core, improvementAgent.name)
+        : await evalRerunNextCommandForAgent(core, improvementAgent.name);
     }
     return readinessNextCommand("improve", preview?.readiness ?? { ready: false, issues: [] }) ??
       workbenchSkillImproveAdapterRemediation(agent);
