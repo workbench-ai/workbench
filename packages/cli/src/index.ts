@@ -619,7 +619,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         auth: stringFlag(parsed, "auth"),
         adapterAuthStoreRoot: adapterAuthStoreRoot(),
       });
-      const next = newProjectNextCommand(status.root, status);
+      const next = newProjectNextCommand(status.root);
       return emitResult("workbench.cli.new.v1", {
         result: status as unknown as Json,
         defaultAgent: status.defaultAgentSelection as unknown as Json,
@@ -642,7 +642,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         auth: stringFlag(parsed, "auth"),
         adapterAuthStoreRoot: adapterAuthStoreRoot(),
       });
-      const next = newProjectNextCommand(status.root, status);
+      const next = newProjectNextCommand(status.root);
       return emitResult("workbench.cli.init.v1", {
         result: status as unknown as Json,
         defaultAgent: status.defaultAgentSelection as unknown as Json,
@@ -1017,11 +1017,7 @@ function formatInitResult(status: WorkbenchStatus, next: string | null): string 
   ].filter(Boolean).join("\n");
 }
 
-function newProjectNextCommand(projectRoot: string, status: WorkbenchStatus): string | null {
-  const setupCommand = status.defaultAgentSelection?.readiness.setupCommands[0];
-  if (setupCommand) {
-    return setupCommand;
-  }
+function newProjectNextCommand(projectRoot: string): string {
   return projectScopedNextCommand(projectRoot, WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
 }
 

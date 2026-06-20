@@ -1797,8 +1797,7 @@ describe("workbench skill-first CLI", () => {
     expect(createdJson.result.defaultAgentSelection.reason).toMatch(/codex|product_default/u);
     expect(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND).toBe("workbench case draft case-001");
     expect(createdJson.result.defaultAgentSelection.readiness.setupCommands.length).toBeGreaterThan(0);
-    expect(createdJson.next).toBe(createdJson.result.defaultAgentSelection.readiness.setupCommands[0]);
-    expect(createdJson.next).not.toContain(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
+    expect(createdJson.next).toBe(`cd ${root} && ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`);
     expect(createdJson.setupCommands.every((command) => typeof command === "string")).toBe(true);
     const newStatus = await invoke(["status", "--dir", root, "--json"]);
     expect(newStatus.code, newStatus.stdout || newStatus.stderr).toBe(0);
@@ -1857,7 +1856,7 @@ describe("workbench skill-first CLI", () => {
           },
         },
       },
-      next: "workbench login codex --method oauth",
+      next: `cd ${nativeCodexRoot} && ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`,
     });
 
     const connectedCodexProfileRoot = await makeTempRoot("workbench-cli-connected-codex-profile-");
@@ -8136,6 +8135,44 @@ describe("workbench skill-first CLI", () => {
         .resolves.toBe(privateSkillMarkdown);
       await expect(fs.access(path.join(root, ".claude", "skills", "private-skill", "SKILL.md")))
         .rejects.toMatchObject({ code: "ENOENT" });
+      await fs.appendFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "\nFolder-local edit.\n");
+      const bareDryRunOverwrite = await invoke(["install", "alice/private-skill", "--dry-run", "--json"]);
+      expect(bareDryRunOverwrite.code, bareDryRunOverwrite.stdout || bareDryRunOverwrite.stderr).toBe(1);
+      expect(stdoutJson(bareDryRunOverwrite)).toMatchObject({
+        ok: false,
+        result: "blocked",
+        requiresOverwrite: true,
+        remediation: "workbench install alice/private-skill --yes",
+        next: "workbench install alice/private-skill --yes",
+        target: "codex",
+        currentAgent: "codex",
+        targets: [expect.objectContaining({
+          target: "codex",
+          result: "blocked",
+          requiresOverwrite: true,
+          remediation: "workbench install alice/private-skill --yes",
+        })],
+      });
+      const bareOverwriteRefusal = await invoke(["install", "alice/private-skill", "--json"]);
+      expect(bareOverwriteRefusal.code).toBe(1);
+      expect(stdoutJson(bareOverwriteRefusal)).toMatchObject({
+        ok: false,
+        code: "install_failed",
+        remediation: "workbench install alice/private-skill --yes",
+        subject: {
+          target: "codex",
+          status: "modified",
+        },
+      });
+      const bareOverwrite = await invoke(["install", "alice/private-skill", "--yes", "--json"]);
+      expect(bareOverwrite.code, bareOverwrite.stdout || bareOverwrite.stderr).toBe(0);
+      expect(stdoutJson(bareOverwrite)).toMatchObject({
+        result: "installed",
+        target: "codex",
+        currentAgent: "codex",
+      });
+      await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8"))
+        .resolves.toBe(privateSkillMarkdown);
       const globalNoise = path.join(homeRoot, ".agents", "skills", "aaa-global-noise");
       await fs.mkdir(globalNoise, { recursive: true });
       await fs.writeFile(path.join(globalNoise, "SKILL.md"), [

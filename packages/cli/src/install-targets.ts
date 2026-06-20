@@ -289,7 +289,7 @@ export async function installSnapshotToSkillTargets(options: {
   const target = request.targets[0]!.id;
   const overwriteRemediation = installOverwriteRemediation({
     handle: options.sourceForRemediation ?? options.provenance.handle,
-    target,
+    target: request.target,
     scope: request.scopes[0] ?? "folder",
     dir: request.scopes.includes("folder") && options.dir ? request.dir : undefined,
   });
