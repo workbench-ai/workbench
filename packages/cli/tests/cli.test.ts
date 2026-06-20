@@ -8262,6 +8262,36 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
+  test("skills empty inventory explains configured roots instead of arbitrary sibling search", async () => {
+    const parent = await makeTempRoot("workbench-cli-skills-empty-parent-");
+    const sibling = path.join(parent, "sibling-skill");
+    const homeRoot = await makeTempRoot("workbench-cli-skills-empty-home-");
+    vi.stubEnv("HOME", homeRoot);
+    vi.stubEnv("CODEX_HOME", "");
+    await fs.mkdir(sibling, { recursive: true });
+    await fs.writeFile(path.join(sibling, "SKILL.md"), [
+      "---",
+      "name: sibling-skill",
+      "description: Not in a configured agent skill root.",
+      "---",
+      "# Sibling Skill",
+      "",
+    ].join("\n"));
+
+    const human = await invoke(["skills", "--dir", parent]);
+    expect(human.code, human.stdout || human.stderr).toBe(0);
+    expect(human.stdout).toContain("No skills accessible.");
+    expect(human.stdout).toContain("configured Codex/Claude skill roots");
+    expect(human.stdout).toContain("cd there and run workbench init");
+
+    const json = await invoke(["skills", "--dir", parent, "--json"]);
+    expect(json.code, json.stdout || json.stderr).toBe(0);
+    expect(stdoutJson<{ skills: unknown[]; next: string | null }>(json)).toMatchObject({
+      skills: [],
+      next: null,
+    });
+  });
+
   test("installs source snapshots to an explicit Codex global target", async () => {
     const root = await makeTempRoot("workbench-cli-install-canonical-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");

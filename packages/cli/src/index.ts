@@ -9099,6 +9099,7 @@ function formatInstalledInventory(
       : "";
     return [
       `No skills accessible${scopeText}.`,
+      "hint: workbench skills scans configured Codex/Claude skill roots and the current Workbench project only; for an arbitrary sibling SKILL.md, cd there and run workbench init or use shell search.",
       ...(inventory.next ? [`next: ${inventory.next}`] : []),
     ].filter(Boolean).join("\n");
   }
