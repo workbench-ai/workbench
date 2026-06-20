@@ -1841,7 +1841,7 @@ describe("skill-first Workbench runtime", () => {
     });
   });
 
-  test("skips historical versions that cannot define explicit compare axes", async () => {
+  test("agent manifest changes do not create source versions but define current compare axes", async () => {
     const root = await makeTempRoot("workbench-compare-axis-history-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
@@ -1854,18 +1854,15 @@ describe("skill-first Workbench runtime", () => {
       },
     });
     const versionsAfterAgent = await listWorkbenchVersions({ dir: root });
-    const patcherVersion = versionsAfterAgent.find((version) => version.id !== initial.id);
-    if (!patcherVersion) {
-      throw new Error("Expected agent change to create a source version.");
-    }
+    expect(versionsAfterAgent.map((version) => version.id)).toEqual([initial.id]);
 
     const comparison = await resultsWorkbench({ dir: root, projectVersions: "all", agents: "patcher" });
 
-    expect(comparison.versions.map((version) => version.id)).toEqual([patcherVersion.id]);
+    expect(comparison.versions.map((version) => version.id)).toEqual([initial.id]);
     expect(comparison.agents.map((agent) => agent.name)).toEqual(["patcher"]);
     expect(comparison.cells).toHaveLength(1);
     expect(comparison.cells[0]).toMatchObject({
-      skillVersionId: patcherVersion.id,
+      skillVersionId: initial.id,
       agentVersionId: comparison.agents[0]?.id,
     });
     expect(comparison.cells[0]?.runId).toBeUndefined();

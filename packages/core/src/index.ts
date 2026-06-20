@@ -3091,6 +3091,8 @@ interface InternalComparisonSelection {
   versions?: string;
   skills?: string;
   agents?: string;
+  availableAgents?: readonly WorkbenchAgent[];
+  defaultAgent?: string;
 }
 
 export interface WorkbenchRemoteOptions extends WorkbenchCommandOptions {
@@ -3134,6 +3136,13 @@ export interface WorkbenchUnpublishResult {
   currentVersionId?: string;
   publishedVersionIds: string[];
   dryRun?: boolean;
+}
+
+export interface WorkbenchDeletedCloudProjectLocalStateCleanup {
+  root: string;
+  initialized: boolean;
+  removedRemotes: string[];
+  clearedPublication: boolean;
 }
 
 export interface WorkbenchAddRemoteOptions extends WorkbenchCommandOptions {
@@ -3929,7 +3938,7 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
   ]);
   const currentVersionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
   const worktreeSourceVersion = worktreeSourceHash
-    ? localState.versions.find((version) => version.hash === worktreeSourceHash)
+    ? findWorkbenchVersionBySourceHash(localState.versions, worktreeSourceHash)
     : undefined;
   const worktreeWouldCreateVersionId = worktreeSourceHash && !worktreeSourceVersion
     ? versionIdForHash(worktreeSourceHash)
@@ -4154,11 +4163,13 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
     await requireInitialized(root);
     const state = await loadState(root);
     const version = await resolveOrCreateRunVersion(root, state, options.version);
+    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
     const runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
       skill: options.skill,
       agent: options.agent,
       authToken: options.authToken,
       selectionRemediationCommand: "eval",
+      ...runtimeAgents,
     });
     const agents = runtime.selectedAgents;
     for (const agent of agents) {
@@ -4241,11 +4252,13 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
     message: SOURCE_SNAPSHOT_MESSAGE,
   });
   const version = source.version;
+  const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
   const runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
     skill: options.skill,
     agent: options.agent,
     authToken: options.authToken,
     selectionRemediationCommand: "eval",
+    ...runtimeAgents,
   });
   for (const agent of runtime.selectedAgents) {
     assertSkillEvalAgentSupported(agent);
@@ -4525,11 +4538,13 @@ export async function prepareWorkbenchCloudImproveRequest(
     const state = await loadState(root);
     const base = await resolveOrCreateRunVersion(root, state);
     await saveState(root, state);
+    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
     const runtime = await createWorkbenchVersionRuntimeSnapshot(base, {
       skill: options.skill,
       agent: options.agent,
       authToken: options.authToken,
       selectionRemediationCommand: "improve",
+      ...runtimeAgents,
     });
     const { skillBundle, evalAgent } = requireWorkbenchImproveTarget(runtime, { requireAdapter: false });
     if (runtime.cases.length === 0) {
@@ -4545,7 +4560,7 @@ export async function prepareWorkbenchCloudImproveRequest(
     });
     const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
     if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
-      throw workbenchSkillImproveAdapterRequirementError(evalAgent);
+      throw workbenchSkillImproveAdapterRequirementError(evalAgent, state.agents);
     }
     if (improvementEvidence.length === 0) {
       throw workbenchImproveEvidenceRequirementError({
@@ -5045,7 +5060,18 @@ function providerAgentSetupCommand(adapter: WorkbenchProviderAgentAdapter, agent
   return [...providerAgentAuthSetupCommands(adapter), providerAgentAddCommand(adapter, agentName)].join(" && ");
 }
 
-export function workbenchSkillImproveAdapterSetupCommands(agent: WorkbenchAgent): string[] {
+export function workbenchSkillImproveAdapterSetupCommands(
+  agent: WorkbenchAgent,
+  availableAgents: readonly WorkbenchAgent[] = [],
+): string[] {
+  const configuredImproveAgent = configuredImproveAdapterAgent(agent, availableAgents);
+  if (configuredImproveAgent) {
+    return [
+      ...providerImproveAgentAuthSetupCommands(configuredImproveAgent),
+      `workbench eval --agents ${configuredImproveAgent.name} --rerun`,
+      `workbench improve --agents ${configuredImproveAgent.name}`,
+    ];
+  }
   const adapter = agent.adapter.trim().toLowerCase();
   if (adapter === "codex" || adapter === "claude") {
     return [...providerAgentAuthSetupCommands(adapter), providerAgentAddCommand(adapter, agent.name)];
@@ -5058,28 +5084,58 @@ export function workbenchSkillImproveAdapterSetupCommands(agent: WorkbenchAgent)
   ];
 }
 
-export function workbenchSkillImproveAdapterRemediation(agent: WorkbenchAgent): string {
-  return workbenchSkillImproveAdapterSetupCommands(agent)[0] ?? providerAgentAddCommand("codex", "improver");
+function configuredImproveAdapterAgent(
+  selectedAgent: WorkbenchAgent,
+  availableAgents: readonly WorkbenchAgent[],
+): WorkbenchAgent | undefined {
+  const candidates = availableAgents.filter((agent) =>
+    agent.name !== selectedAgent.name &&
+    agent.name !== "default" &&
+    workbenchSkillImproveCanUseQueuedAdapter(agent)
+  );
+  return candidates.find((agent) => agent.name === "improver") ?? (candidates.length === 1 ? candidates[0] : undefined);
 }
 
-function workbenchSkillImproveAdapterRequirementIssue(agent: WorkbenchAgent): WorkbenchLaunchReadinessIssue {
+function providerImproveAgentAuthSetupCommands(agent: WorkbenchAgent): string[] {
+  const adapter = agent.adapter.trim().toLowerCase();
+  return adapter === "codex" || adapter === "claude"
+    ? providerAgentAuthSetupCommands(adapter)
+    : [];
+}
+
+export function workbenchSkillImproveAdapterRemediation(
+  agent: WorkbenchAgent,
+  availableAgents: readonly WorkbenchAgent[] = [],
+): string {
+  return workbenchSkillImproveAdapterSetupCommands(agent, availableAgents)[0] ?? providerAgentAddCommand("codex", "improver");
+}
+
+function workbenchSkillImproveAdapterRequirementIssue(
+  agent: WorkbenchAgent,
+  availableAgents: readonly WorkbenchAgent[] = [],
+): WorkbenchLaunchReadinessIssue {
+  const setupCommands = workbenchSkillImproveAdapterSetupCommands(agent, availableAgents);
   return {
     code: "improve_adapter_required",
     message: workbenchSkillImproveAdapterRequirementMessage(agent),
-    remediation: workbenchSkillImproveAdapterRemediation(agent),
+    remediation: workbenchSkillImproveAdapterRemediation(agent, availableAgents),
     subject: {
       agent: agent.name,
-      setupCommands: workbenchSkillImproveAdapterSetupCommands(agent),
+      setupCommands,
     },
   };
 }
 
-function workbenchSkillImproveAdapterRequirementError(agent: WorkbenchAgent): WorkbenchCodedError {
+function workbenchSkillImproveAdapterRequirementError(
+  agent: WorkbenchAgent,
+  availableAgents: readonly WorkbenchAgent[] = [],
+): WorkbenchCodedError {
+  const setupCommands = workbenchSkillImproveAdapterSetupCommands(agent, availableAgents);
   return new WorkbenchCodedError("improve_adapter_required", workbenchSkillImproveAdapterRequirementMessage(agent), {
-    remediation: workbenchSkillImproveAdapterRemediation(agent),
+    remediation: workbenchSkillImproveAdapterRemediation(agent, availableAgents),
     subject: {
       agent: agent.name,
-      setupCommands: workbenchSkillImproveAdapterSetupCommands(agent),
+      setupCommands,
     },
     exitCode: 2,
   });
@@ -5229,6 +5285,8 @@ export async function createWorkbenchVersionRuntimeSnapshot(
     evalHash?: string;
     authToken?: string;
     selectionRemediationCommand?: WorkbenchSelectorCommand;
+    agents?: readonly WorkbenchAgent[];
+    defaultAgent?: string;
   } = {},
 ): Promise<WorkbenchVersionRuntimeSnapshot> {
   return withMaterializedVersionRoot(version, async (sourceRoot) => {
@@ -5239,8 +5297,21 @@ export async function createWorkbenchVersionRuntimeSnapshot(
     if (options.evalHash && options.evalHash !== evalSnapshot.hash) {
       throw new WorkbenchUserError(`Eval snapshot ${options.evalHash} is not authored by version ${version.id}.`);
     }
-    const agents = await readAgents(sourceRoot);
-    const selectedAgents = await resolveRequestedAgents(sourceRoot, options.agent, options.selectionRemediationCommand);
+    const agents = await readAgents(sourceRoot).catch((error) => {
+      if (options.agents && options.agents.length > 0) {
+        return options.agents.map(copyAgent);
+      }
+      throw error;
+    });
+    const defaultAgent = await readDefaultAgentSelection(sourceRoot, agents).catch(() =>
+      options.defaultAgent && (options.defaultAgent === ALL_SELECTOR || agents.some((agent) => agent.name === options.defaultAgent))
+        ? options.defaultAgent
+        : agents[0]?.name
+    );
+    if (!defaultAgent) {
+      throw new WorkbenchUserError(`No agents configured in ${path.join(".workbench", AGENTS_FILE)}. Run \`${providerAgentSetupCommand("codex", "default")}\`.`);
+    }
+    const selectedAgents = resolveNamedSelection(agents, options.agent, defaultAgent, "agent", options.selectionRemediationCommand);
     const transientState: WorkbenchProjectState = {
       schema: STATE_SCHEMA,
       root: sourceRoot,
@@ -5266,7 +5337,6 @@ export async function createWorkbenchVersionRuntimeSnapshot(
       authToken: options.authToken,
       remediationCommand: options.selectionRemediationCommand,
     });
-    const defaultAgent = await readDefaultAgentSelection(sourceRoot, agents);
     const defaultSkill = await readDefaultSkillSelection(sourceRoot, transientState.skillSources);
     const cases = await readEvalCases(sourceRoot);
     return {
@@ -5399,11 +5469,13 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     let state = await loadState(root);
     const base = await resolveOrCreateRunVersion(root, state, options.version);
     await saveState(root, state);
+    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
     const runtime = await createWorkbenchVersionRuntimeSnapshot(base, {
       skill: options.skill,
       agent: options.agent,
       authToken: options.authToken,
       selectionRemediationCommand: "improve",
+      ...runtimeAgents,
     });
     const { skillBundle, evalAgent } = requireWorkbenchImproveTarget(runtime, { requireAdapter: false });
     if (runtime.cases.length === 0) {
@@ -5423,7 +5495,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     });
     const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
     if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
-      throw workbenchSkillImproveAdapterRequirementError(evalAgent);
+      throw workbenchSkillImproveAdapterRequirementError(evalAgent, state.agents);
     }
     if (improvementEvidence.length === 0) {
       throw workbenchImproveEvidenceRequirementError({
@@ -5590,6 +5662,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
       agent: evalAgent.name,
       authToken: options.authToken,
       selectionRemediationCommand: "improve",
+      ...runtimeAgents,
     });
     const [outputSkillBundle] = outputRuntime.skillBundles;
     if (!outputSkillBundle) {
@@ -5675,11 +5748,13 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
     message: SOURCE_SNAPSHOT_MESSAGE,
   });
   const base = source.version;
+  const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
   const runtime = await createWorkbenchVersionRuntimeSnapshot(base, {
     skill: options.skill,
     agent: options.agent,
     authToken: options.authToken,
     selectionRemediationCommand: "improve",
+    ...runtimeAgents,
   });
   const { skillBundle, evalAgent } = requireWorkbenchImproveTarget(runtime, { requireAdapter: false });
   if (runtime.cases.length === 0) {
@@ -5710,7 +5785,7 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
     ? options.cloud === true
       ? readyWorkbenchLaunchReadiness()
       : await localWorkbenchLaunchReadiness([evalAgent], options)
-    : readinessFromIssues([workbenchSkillImproveAdapterRequirementIssue(evalAgent)]);
+    : readinessFromIssues([workbenchSkillImproveAdapterRequirementIssue(evalAgent, state.agents)]);
   const adapterAuthTargets = canImproveWithSelectedAgent
     ? uniqueLocalAdapterAuthTargets([evalAgent].flatMap(localAdapterAuthTargetsForAgent))
     : [];
@@ -7162,16 +7237,21 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
   await requireInitialized(root);
   const state = await loadState(root);
   const selection = normalizeWorkbenchResultsSelection(state, options);
-  const internalSelection = {
+  const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
+  const internalSelection: InternalComparisonSelection = {
     versions: selection.projectVersions,
     skills: selection.skills,
     agents: options.agents,
+    availableAgents: runtimeAgents.agents,
+    ...(runtimeAgents.defaultAgent ? { defaultAgent: runtimeAgents.defaultAgent } : {}),
   };
   const recordedComparison = buildInternalComparisonFromState(state, internalSelection);
   if (recordedComparison.cells.some((cell) => cell.runId || cell.status)) {
     const completedComparison = await completeRecordedResultsSelectionMatrix(state, recordedComparison, {
       ...options,
       versions: selection.skills,
+      availableAgents: runtimeAgents.agents,
+      ...(runtimeAgents.defaultAgent ? { defaultAgent: runtimeAgents.defaultAgent } : {}),
     });
     return resultsFromInternalComparison(completedComparison, state);
   }
@@ -7199,6 +7279,7 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
         agent: options.agents,
         authToken: options.authToken,
         selectionRemediationCommand: "results",
+        ...runtimeAgents,
       });
     } catch (error) {
       const selectionError = await resultsSelectionErrorWithLiveControls(root, error, options);
@@ -7272,7 +7353,10 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
 async function completeRecordedResultsSelectionMatrix(
   state: WorkbenchProjectState,
   comparison: InternalComparison,
-  options: Pick<WorkbenchResultsOptions, "versions" | "agents" | "authToken">,
+  options: Pick<WorkbenchResultsOptions, "versions" | "agents" | "authToken"> & {
+    availableAgents?: readonly WorkbenchAgent[];
+    defaultAgent?: string;
+  },
 ): Promise<InternalComparison> {
   const versions = comparison.versions;
   const cells = [...comparison.cells];
@@ -7284,6 +7368,7 @@ async function completeRecordedResultsSelectionMatrix(
   ]);
   const existingCellKeys = new Set(cells.map(comparisonCellAxisKey));
   const versionOrder = new Map(versions.map((version, index) => [version.id, index]));
+  const defaultAgent = options.defaultAgent ?? defaultWorkbenchAgentSelectionFromState(state);
 
   for (const version of versions) {
     let runtime: WorkbenchVersionRuntimeSnapshot;
@@ -7293,6 +7378,8 @@ async function completeRecordedResultsSelectionMatrix(
         agent: options.agents,
         authToken: options.authToken,
         selectionRemediationCommand: "results",
+        agents: options.availableAgents ?? state.agents,
+        ...(defaultAgent ? { defaultAgent } : {}),
       });
     } catch (error) {
       const alreadyHasEvidence = cells.some((cell) => cell.versionId === version.id && (cell.runId || cell.status));
@@ -7664,7 +7751,10 @@ export function buildInternalComparisonFromState(
   const entryVersions = [...new Map(entries.map((entry) => [entry.version.id, entry.version])).values()];
   const agentsByVersionId = new Map(entryVersions.map((version) => [
     version.id,
-    resolveComparisonAgentsForVersionFromState(state, version, options.agents),
+    resolveComparisonAgentsForVersionFromState(state, version, options.agents, {
+      ...(options.availableAgents ? { availableAgents: options.availableAgents } : {}),
+      ...(options.defaultAgent ? { defaultAgent: options.defaultAgent } : {}),
+    }),
   ]));
   const comparedAgents = uniqueResolvedAgentSnapshots(
     entries.flatMap((entry) => agentsByVersionId.get(entry.version.id) ?? []),
@@ -7919,7 +8009,6 @@ export async function addWorkbenchAgent(input: WorkbenchCommandOptions & {
   await writeAgents(root, next, defaultAgent);
   const state = await loadState(root);
   upsertAgentSnapshots(state.agents, next);
-  await reconcileWorkbenchVersion(root, state, "agent source");
   await saveState(root, state);
   return agent;
   });
@@ -7945,7 +8034,6 @@ export async function removeWorkbenchAgent(name: string, options: WorkbenchComma
   await writeAgents(root, next, defaultAgent);
   const state = await loadState(root);
   upsertAgentSnapshots(state.agents, next);
-  await reconcileWorkbenchVersion(root, state, "agent source");
   await saveState(root, state);
   return { removed: agentName };
   });
@@ -7966,7 +8054,6 @@ export async function setDefaultWorkbenchAgent(name: string, options: WorkbenchC
   await writeAgents(root, agents, selection);
   const state = await loadState(root);
   upsertAgentSnapshots(state.agents, agents);
-  await reconcileWorkbenchVersion(root, state, "agent source");
   await saveState(root, state);
   return { defaultAgent: selection };
   });
@@ -8030,10 +8117,81 @@ export async function removeWorkbenchRemote(name: string, options: WorkbenchComm
   });
 }
 
+export async function clearDeletedWorkbenchCloudProjectLocalState(options: WorkbenchCommandOptions & {
+  baseUrl: string;
+  handle: string;
+}): Promise<WorkbenchDeletedCloudProjectLocalStateCleanup> {
+  const root = resolveRoot(options.dir);
+  if (!await exists(workbenchDir(root))) {
+    return { root, initialized: false, removedRemotes: [], clearedPublication: false };
+  }
+  return withWorkbenchProjectLockRoot(root, async () => {
+    await requireInitialized(root);
+    const state = await loadState(root);
+    const handle = options.handle.trim();
+    const removedRemotes: string[] = [];
+    for (const [remoteName, remote] of Object.entries(state.remotes)) {
+      if (!workbenchCloudRemoteMatchesHandle(remote, options.baseUrl, handle)) {
+        continue;
+      }
+      delete state.remotes[remoteName];
+      await clearRemoteLocalState(root, state, remoteName);
+      removedRemotes.push(remoteName);
+    }
+    const clearedPublication = clearPublicationRefsForHandle(state.refs, handle);
+    if (removedRemotes.length > 0 || clearedPublication) {
+      await saveState(root, state);
+    }
+    return {
+      root,
+      initialized: true,
+      removedRemotes: removedRemotes.sort(),
+      clearedPublication,
+    };
+  });
+}
+
+function workbenchCloudRemoteMatchesHandle(remote: WorkbenchRemote, baseUrl: string, handle: string): boolean {
+  if (remote.kind !== "workbench-cloud") {
+    return false;
+  }
+  try {
+    const parsed = parseHttpRemote(remote);
+    return normalizedBaseUrl(parsed.baseUrl) === normalizedBaseUrl(baseUrl) &&
+      `${parsed.owner}/${parsed.name}` === handle;
+  } catch {
+    return false;
+  }
+}
+
+function clearPublicationRefsForHandle(refs: WorkbenchRefs, handle: string): boolean {
+  if (refs["publication/install-handle"] !== handle) {
+    return false;
+  }
+  for (const name of Object.keys(refs)) {
+    if (isPublicationRef(name)) {
+      delete refs[name];
+    }
+  }
+  return true;
+}
+
+function normalizedBaseUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\/+$/u, "");
+    return url.toString().replace(/\/$/u, "");
+  } catch {
+    return value.trim().replace(/\/+$/u, "");
+  }
+}
+
 export async function listWorkbenchRemotes(options: WorkbenchCommandOptions = {}): Promise<WorkbenchRemote[]> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
-    await requireInitialized(root);
+  await requireInitialized(root);
     const state = await loadState(root);
     await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
     await saveState(root, state);
@@ -8491,7 +8649,7 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
     readSkillFiles(root).then(hashFiles).catch(() => undefined),
   ]);
   const sourceVersionId = sourceHash
-    ? state.versions.find((version) => version.hash === sourceHash)?.id
+    ? findWorkbenchVersionBySourceHash(state.versions, sourceHash)?.id
     : undefined;
   const defaultSkill = await readDefaultSkillSelection(root, skillSources)
     .catch(() => defaultWorkbenchSkillSelectionFromState({ ...state, skillSources }));
@@ -10996,7 +11154,7 @@ async function planWorkbenchLaunchSource(
   }
   const files = await readSkillFiles(root);
   const hash = hashFiles(files);
-  const existing = state.versions.find((version) => version.hash === hash);
+  const existing = findWorkbenchVersionBySourceHash(state.versions, hash);
   if (existing) {
     if (options.commit) {
       state.refs.current = existing.id;
@@ -11037,6 +11195,24 @@ async function planWorkbenchLaunchSource(
     version,
     sourceState: "committed",
   };
+}
+
+function findWorkbenchVersionBySourceHash(
+  versions: readonly WorkbenchVersion[],
+  hash: string,
+): WorkbenchVersion | undefined {
+  return versions.find((version) =>
+    version.hash === hash ||
+    sourceComparableHashForVersion(version) === hash
+  );
+}
+
+function sourceComparableHashForVersion(version: WorkbenchVersion): string {
+  return hashFiles(version.files.filter((file) => !isWorkbenchAgentConfigPath(file.path)));
+}
+
+function isWorkbenchAgentConfigPath(filePath: string): boolean {
+  return normalizeRelativePath(filePath) === `${WORKBENCH_DIR}/${AGENTS_FILE}`;
 }
 
 async function resolveOrCreateRunVersion(root: string, state: WorkbenchProjectState, ref?: string): Promise<WorkbenchVersion> {
@@ -11081,6 +11257,23 @@ async function resolveRequestedAgents(
 ): Promise<WorkbenchAgent[]> {
   const agents = await readAgents(root);
   return resolveNamedSelection(agents, agentSelection, await readDefaultAgentSelection(root, agents), "agent", remediationCommand);
+}
+
+async function runtimeAgentOptionsForRoot(
+  root: string,
+  state: WorkbenchProjectState,
+): Promise<Pick<NonNullable<Parameters<typeof createWorkbenchVersionRuntimeSnapshot>[1]>, "agents" | "defaultAgent">> {
+  const agents = await readAgents(root).catch(() => state.agents.map(copyAgent));
+  const defaultAgent = await readDefaultAgentSelection(root, agents).catch(() =>
+    defaultWorkbenchAgentSelectionFromState({
+      ...state,
+      agents: agents.map(copyAgent),
+    })
+  );
+  return {
+    agents,
+    ...(defaultAgent ? { defaultAgent } : {}),
+  };
 }
 
 async function readAgents(root: string): Promise<WorkbenchAgent[]> {
@@ -11517,7 +11710,6 @@ async function readSkillFiles(root: string): Promise<SurfaceSnapshotFile[]> {
   const authoredWorkbenchFiles = [
     ...await readOptionalFile(path.join(workbenchDir(root), EVAL_FILE), `${WORKBENCH_DIR}/${EVAL_FILE}`),
     ...await readFilesUnder(path.join(workbenchDir(root), CASES_DIR), `${WORKBENCH_DIR}/${CASES_DIR}`),
-    ...await readOptionalFile(path.join(workbenchDir(root), AGENTS_FILE), `${WORKBENCH_DIR}/${AGENTS_FILE}`),
     ...await readOptionalFile(path.join(workbenchDir(root), VERSIONS_FILE), `${WORKBENCH_DIR}/${VERSIONS_FILE}`),
     ...await readFilesUnder(path.join(workbenchDir(root), ENVIRONMENT_DIR), `${WORKBENCH_DIR}/${ENVIRONMENT_DIR}`),
   ];
@@ -12224,7 +12416,6 @@ async function removeAuthoredWorkbenchFiles(root: string): Promise<void> {
   await Promise.all([
     fs.rm(path.join(workbenchRoot, EVAL_FILE), { force: true }),
     fs.rm(path.join(workbenchRoot, CASES_DIR), { recursive: true, force: true }),
-    fs.rm(path.join(workbenchRoot, AGENTS_FILE), { force: true }),
     fs.rm(path.join(workbenchRoot, VERSIONS_FILE), { force: true }),
     fs.rm(path.join(workbenchRoot, ENVIRONMENT_DIR), { recursive: true, force: true }),
   ]);
@@ -13873,9 +14064,13 @@ function resolveComparisonAgentsForVersionFromState(
   state: WorkbenchProjectState,
   version: WorkbenchVersion,
   selection: string | undefined,
+  options: {
+    availableAgents?: readonly WorkbenchAgent[];
+    defaultAgent?: string;
+  } = {},
 ): WorkbenchAgentSnapshot[] {
   const manifest = readVersionAgentManifestIfValid(version);
-  const selected = comparisonAgentSelection(selection, manifest?.defaultAgent);
+  const selected = comparisonAgentSelection(selection, manifest?.defaultAgent ?? options.defaultAgent);
   const agents = new Map<string, WorkbenchAgentSnapshot>();
 
   for (const run of state.runs) {
@@ -13919,7 +14114,7 @@ function resolveComparisonAgentsForVersionFromState(
   }
 
   try {
-    for (const agent of manifest?.agents ?? readVersionAgents(version)) {
+    for (const agent of manifest?.agents ?? options.availableAgents ?? readVersionAgents(version)) {
       const snapshot = agentSnapshot(agent);
       if (!comparisonAgentSelectionIncludes(selected, agent.name, snapshot.hash)) {
         continue;
@@ -13981,7 +14176,8 @@ function readVersionAgentManifestIfValid(
   version: WorkbenchVersion,
 ): { agents: WorkbenchAgent[]; defaultAgent: string } | null {
   try {
-    return readVersionAgentManifest(version);
+    const manifest = readVersionAgentManifest(version);
+    return manifest.agents.length > 0 ? manifest : null;
   } catch {
     return null;
   }

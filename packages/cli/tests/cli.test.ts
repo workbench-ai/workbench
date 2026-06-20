@@ -18,6 +18,7 @@ import {
   createWorkbenchReadOnlyInspectionSnapshot,
   hashFiles,
   hashJson,
+  listWorkbenchAgents,
   prepareWorkbenchCloudEvalRequest,
   recordWorkbenchLocalHostedRunHandle,
   withWorkbenchProjectLock,
@@ -673,6 +674,7 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("next: workbench agent add improver --adapter codex");
     expect(human.stdout).not.toContain("next: workbench improve\n");
 
+    const versionBeforeAgentAdd = await currentVersionIdFor(root);
     const added = await invoke(["agent", "add", "improver", "--dir", root, "--adapter", "codex", "--model", "gpt-5.4-mini", "--json"]);
     expect(added.code, added.stdout || added.stderr).toBe(0);
       expect(stdoutJson(added)).toMatchObject({
@@ -691,7 +693,28 @@ describe("workbench skill-first CLI", () => {
           next: "codex login --device-auth",
         },
       });
-    const humanAddRoot = await makeTempRoot("workbench-cli-eval-improve-human-agent-add-");
+    const statusAfterAgentAdd = await invoke(["status", "--dir", root, "--json"]);
+    expect(statusAfterAgentAdd.code, statusAfterAgentAdd.stdout || statusAfterAgentAdd.stderr).toBe(0);
+    expect(stdoutJson<{
+      project: { currentVersionId?: string };
+      worktree: { sourceState?: string };
+      next: string | null;
+    }>(statusAfterAgentAdd)).toMatchObject({
+      project: { currentVersionId: versionBeforeAgentAdd },
+      worktree: { sourceState: "committed" },
+      next: "workbench results",
+    });
+    const resultsAfterAgentAdd = await invoke(["results", "--dir", root]);
+    expect(resultsAfterAgentAdd.code, resultsAfterAgentAdd.stdout || resultsAfterAgentAdd.stderr).toBe(0);
+    expect(resultsAfterAgentAdd.stdout).not.toContain("Current version has no recorded results");
+    const cloudImprovePlan = await invoke(["improve", "--dry-run", "--cloud", "--dir", root, "--json"]);
+    expect(cloudImprovePlan.code, cloudImprovePlan.stdout || cloudImprovePlan.stderr).toBe(0);
+    expect(stdoutJson<{
+      readiness: { issues: Array<{ subject?: { setupCommands?: string[] } }> };
+      next: string | null;
+    }>(cloudImprovePlan).next).toBe("workbench login");
+    expect(JSON.stringify(stdoutJson(cloudImprovePlan))).not.toContain("workbench agent add improver");
+      const humanAddRoot = await makeTempRoot("workbench-cli-eval-improve-human-agent-add-");
     expect((await invoke(["new", humanAddRoot, "--agent", "local", "--json"])).code).toBe(0);
     await seedFailedImproveEvidence(humanAddRoot, "default", { status: "succeeded", score: 0.5 });
     const humanAdd = await invoke(["agent", "add", "improver", "--dir", humanAddRoot, "--adapter", "codex", "--model", "gpt-5.4-mini"]);
@@ -1254,6 +1277,10 @@ describe("workbench skill-first CLI", () => {
       expectedLocalSkillLabel(root, 2),
     ]));
     expect(new Set(labels).size).toBe(labels.length);
+
+    const human = await invoke(["results", "--versions", "all", "--dir", root]);
+    expect(human.code, human.stdout || human.stderr).toBe(0);
+    expect(human.stdout).toContain(`Unrun versions omitted from table: ${expectedLocalSkillLabel(root, 1)}.`);
   });
 
   test("results does not write Workbench state for unevaluated projects", async () => {
@@ -8134,8 +8161,10 @@ describe("workbench skill-first CLI", () => {
   });
 
   test("delete previews and confirms Workbench Cloud skill project deletion", async () => {
-    const root = await makeTempRoot("workbench-cli-delete-cloud-skill-");
+    const root = await makeTempRoot("workbench-cli-delete-cloud-skill-config-");
+    const projectRoot = await makeTempRoot("workbench-cli-delete-cloud-skill-project-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
+    const previousCwd = process.cwd();
     const configPath = path.join(root, "config.json");
     process.env.WORKBENCH_CONFIG = configPath;
     await fs.writeFile(configPath, JSON.stringify({
@@ -8162,6 +8191,25 @@ describe("workbench skill-first CLI", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     try {
+      expect((await invoke(["new", projectRoot, "--agent", "local", "--json"])).code).toBe(0);
+      const currentVersionId = await currentVersionIdFor(projectRoot);
+      await fs.writeFile(path.join(projectRoot, ".workbench", "remotes.yaml"), [
+        "schema: workbench.remotes.v1",
+        "remotes:",
+        "  cloud:",
+        "    url: https://cloud.test/skills/alice/disposable-skill",
+        "    kind: workbench-cloud",
+        "",
+      ].join("\n"));
+      await writeRef(projectRoot, "publication/current-version", currentVersionId);
+      await writeRef(projectRoot, `publication/versions/${currentVersionId}`, currentVersionId);
+      await writeRef(projectRoot, "publication/install-handle", "alice/disposable-skill");
+      await writeRef(projectRoot, "publication/visibility", "private");
+      await writeRef(projectRoot, "remotes/cloud/publication/current-version", currentVersionId);
+      await writeRef(projectRoot, `remotes/cloud/publication/versions/${currentVersionId}`, currentVersionId);
+      await writeRef(projectRoot, "remotes/cloud/publication/install-handle", "alice/disposable-skill");
+      await writeRef(projectRoot, "remotes/cloud/publication/visibility", "private");
+
       const dryRun = await invoke(["delete", "alice/disposable-skill", "--dry-run", "--json"]);
       expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
       expect(stdoutJson(dryRun)).toMatchObject({
@@ -8192,6 +8240,7 @@ describe("workbench skill-first CLI", () => {
       });
       expect(deleteRequests).toBe(0);
 
+      process.chdir(projectRoot);
       const deleted = await invoke(["delete", "https://cloud.test/skills/alice/disposable-skill", "--yes", "--json"]);
       expect(deleted.code, deleted.stdout || deleted.stderr).toBe(0);
       expect(deleted.stderr).toBe("");
@@ -8201,10 +8250,19 @@ describe("workbench skill-first CLI", () => {
         handle: "alice/disposable-skill",
         skillId: "skill_delete",
         deleted: true,
+        localState: {
+          initialized: true,
+          removedRemotes: ["cloud"],
+          clearedPublication: true,
+        },
         next: null,
       });
       expect(deleteRequests).toBe(1);
+      const status = await invoke(["status", "--json"]);
+      expect(stdoutJson<{ remotes: unknown[] }>(status).remotes).toEqual([]);
+      expect(status.stdout).not.toContain("alice/disposable-skill");
     } finally {
+      process.chdir(previousCwd);
       if (previousConfig === undefined) {
         delete process.env.WORKBENCH_CONFIG;
       } else {
@@ -10938,7 +10996,8 @@ async function seedFailedImproveEvidence(
   if (!version) {
     throw new Error("Expected seeded version.");
   }
-  const runtime = await createWorkbenchVersionRuntimeSnapshot(version, { agent });
+  const agents = await listWorkbenchAgents({ dir: root });
+  const runtime = await createWorkbenchVersionRuntimeSnapshot(version, { agent, agents });
   const skillBundle = runtime.skillBundles[0];
   const selectedAgent = runtime.selectedAgents[0];
   if (!skillBundle || !selectedAgent) {

@@ -14,6 +14,7 @@ import {
   createWorkbenchRunSnapshotForRun,
   createWorkbenchAdapterAuthBundle,
   createWorkbenchReadOnlyInspectionSnapshot,
+  clearDeletedWorkbenchCloudProjectLocalState,
   diffWorkbenchVersions,
   createNewWorkbenchSkillProject,
   initExistingWorkbenchSkillProject,
@@ -3079,15 +3080,24 @@ async function handleDelete(parsed: ParsedArgs, io: CliIo): Promise<number> {
     { method: "DELETE" },
     source.baseUrl,
   );
+  const localState = await clearDeletedWorkbenchCloudProjectLocalState({
+    ...(parsed.flags.dir ? { dir: String(parsed.flags.dir) } : {}),
+    baseUrl: source.baseUrl,
+    handle,
+  });
   return emitResult("workbench.cli.delete.v1", {
     handle,
     skillId: skill.id,
     baseUrl: source.baseUrl,
     deleted: true,
+    localState: localState as unknown as Json,
     next: null,
   }, parsed, io, () => [
     `Deleted Workbench Cloud skill project ${handle}.`,
     "Published source, install package, hosted runs, and synced objects for that Cloud project are no longer available.",
+    ...(localState.removedRemotes.length > 0 || localState.clearedPublication
+      ? [`Cleared local publication state for ${handle}.`]
+      : []),
   ].join("\n"));
 }
 
@@ -7597,10 +7607,11 @@ async function statusWithCausalNext(
   if (belowPerfectCurrentEvalRuns.length > 0) {
     return { ...status, next: await belowPerfectEvalNextCommand(core, snapshot, belowPerfectCurrentEvalRuns, {
       demoteBlockedProviderImprover: true,
+      resultsCommand: statusResultsNextCommandFromRuns(belowPerfectCurrentEvalRuns),
     }) };
   }
   if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
-    return { ...status, next: "workbench results" };
+    return { ...status, next: statusResultsNextCommandFromRuns(currentScoredEvalRuns) };
   }
   if (cloudAuthMissing && (canPublish || cloudRemoteNeedsAuth)) {
     return { ...status, next: "workbench login" };
@@ -7638,7 +7649,7 @@ async function statusWithCausalNext(
   }
   return {
     ...status,
-    next: canPublish ? "workbench results" : null,
+    next: canPublish ? statusResultsNextCommandFromRuns(currentScoredEvalRuns) : null,
   };
 }
 
@@ -7684,6 +7695,15 @@ function statusEvalSelectionFromRuns(runs: readonly WorkbenchRun[]): { command: 
     : { command: `workbench eval --agents ${shellQuote(agent)}`, agent };
 }
 
+function statusResultsNextCommandFromRuns(runs: readonly WorkbenchRun[]): string {
+  const skillNames = new Set(runs.map((run) => run.skillName));
+  const agentNames = new Set(runs.map((run) => run.agentName));
+  if (skillNames.size !== 1 || agentNames.size !== 1) {
+    return "workbench results";
+  }
+  return resultsNextCommandForRun(runs[0]!);
+}
+
 function latestScoredEvalRunsForVersion(
   snapshot: WorkbenchInspectionSnapshot,
   versionId: string,
@@ -7706,21 +7726,21 @@ async function belowPerfectEvalNextCommand(
   core: CliCoreOptions,
   snapshot: WorkbenchInspectionSnapshot | null,
   runs: readonly WorkbenchRun[],
-  options: { demoteBlockedProviderImprover?: boolean } = {},
+  options: { demoteBlockedProviderImprover?: boolean; resultsCommand?: string } = {},
 ): Promise<string> {
   const skillNames = new Set(runs.map((run) => run.skillName));
   const agentNames = new Set(runs.map((run) => run.agentName));
   if (skillNames.size !== 1 || agentNames.size !== 1) {
-    return "workbench results";
+    return options.resultsCommand ?? "workbench results";
   }
   const skill = [...skillNames][0]!;
   const agentName = [...agentNames][0]!;
   if (skill !== CURRENT_SKILL_VERSION_NAME) {
-    return "workbench results";
+    return options.resultsCommand ?? "workbench results";
   }
   const agent = snapshot?.agents.find((entry) => entry.agent.name === agentName)?.agent;
   if (!agent) {
-    return "workbench results";
+    return options.resultsCommand ?? "workbench results";
   }
   return await improveNextCommandForAgent(core, skill, agent, snapshot, options);
 }
@@ -7786,6 +7806,7 @@ function readinessOnlyNeedsProviderAuth(readiness: WorkbenchLaunchReadiness | un
 async function evalRerunNextCommandForImproverStatus(
   core: CliCoreOptions,
   agentName: string,
+  fallbackResultsCommand = "workbench results",
 ): Promise<string> {
   const command = `workbench eval --agents ${shellQuote(agentName)} --rerun`;
   const preview = await previewWorkbenchEval({
@@ -7796,7 +7817,7 @@ async function evalRerunNextCommandForImproverStatus(
   if (preview && preview.readiness.ready) {
     return command;
   }
-  return readinessOnlyNeedsProviderAuth(preview?.readiness) ? "workbench results" : readinessNextCommand("eval", preview?.readiness ?? {
+  return readinessOnlyNeedsProviderAuth(preview?.readiness) ? fallbackResultsCommand : readinessNextCommand("eval", preview?.readiness ?? {
     ready: false,
     issues: [],
   }) ?? command;
@@ -8871,7 +8892,7 @@ async function improveNextCommandForAgent(
   skill: string,
   agent: WorkbenchAgent,
   snapshot: WorkbenchInspectionSnapshot | null,
-  options: { demoteBlockedProviderImprover?: boolean } = {},
+  options: { demoteBlockedProviderImprover?: boolean; resultsCommand?: string } = {},
 ): Promise<string> {
   const preview = await previewWorkbenchImprove({
     ...core,
@@ -8888,7 +8909,7 @@ async function improveNextCommandForAgent(
       .sort((left, right) => left.name.localeCompare(right.name))[0];
     if (improvementAgent) {
       return options.demoteBlockedProviderImprover
-        ? await evalRerunNextCommandForImproverStatus(core, improvementAgent.name)
+        ? await evalRerunNextCommandForImproverStatus(core, improvementAgent.name, options.resultsCommand)
         : await evalRerunNextCommandForAgent(core, improvementAgent.name);
     }
     return readinessNextCommand("improve", preview?.readiness ?? { ready: false, issues: [] }) ??
@@ -9261,6 +9282,7 @@ function formatResults(
 ): string {
   const evidenceCells = results.cells.filter((cell) => cell.runId || cell.status);
   const missingCurrent = currentResultVersionsWithoutEvidence(results);
+  const hiddenUnrun = historicalResultVersionsWithoutEvidence(results);
   const next = resultsNextCommand(results);
   const lines = evidenceCells.length === 0
     ? ["No results."]
@@ -9293,6 +9315,9 @@ function formatResults(
   if (missingCurrent.length > 0) {
     lines.push(`Current version has no recorded results: ${formatResultVersionList(missingCurrent)}.`);
   }
+  if (hiddenUnrun.length > 0) {
+    lines.push(`Unrun versions omitted from table: ${formatResultVersionList(hiddenUnrun)}.`);
+  }
   if (next) {
     lines.push(`next: ${next}`);
   }
@@ -9306,6 +9331,14 @@ function resultsNextCommand(results: WorkbenchResults): string | null {
 function currentResultVersionsWithoutEvidence(results: WorkbenchResults): WorkbenchResults["versions"] {
   return results.versions.filter((version) =>
     version.current &&
+    !results.cells.some((cell) => cell.skillVersionId === version.id && (cell.runId || cell.status))
+  );
+}
+
+function historicalResultVersionsWithoutEvidence(results: WorkbenchResults): WorkbenchResults["versions"] {
+  return results.versions.filter((version) =>
+    !version.current &&
+    results.cells.some((cell) => cell.skillVersionId === version.id) &&
     !results.cells.some((cell) => cell.skillVersionId === version.id && (cell.runId || cell.status))
   );
 }
