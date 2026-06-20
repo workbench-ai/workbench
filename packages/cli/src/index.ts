@@ -2183,7 +2183,7 @@ function runWatchNextCommand(run: WorkbenchRun): string {
     return `workbench run watch ${run.id}`;
   }
   if (run.status === "failed" || run.status === "canceled") {
-    return `workbench show ${run.id}`;
+    return terminalRunRepairCommand(run) ?? `workbench show ${run.id}`;
   }
   return run.kind === "improve" ? "workbench eval --rerun -n 5" : resultsNextCommandForRun(run);
 }
@@ -2201,6 +2201,19 @@ function runProgressNextCommand(run: WorkbenchRun): string | null {
   return showRunNextCommand(run);
 }
 
+function terminalRunRepairCommand(run: WorkbenchRun): string | null {
+  const message = run.error?.trim();
+  if (!message) {
+    return null;
+  }
+  const match = /\bNext:\s*(.+?)(?:\.\s|$)/u.exec(message);
+  const command = match?.[1]?.trim();
+  if (!command || !commandRemediationOrUndefined(command)) {
+    return null;
+  }
+  return command;
+}
+
 function resultsNextCommandForRun(run: WorkbenchRun): string {
   const parts = ["workbench results"];
   const skillSelection = run.operationPlan?.skills.join(",") || run.skillName;
@@ -2212,6 +2225,20 @@ function resultsNextCommandForRun(run: WorkbenchRun): string {
     parts.push("--agents", shellQuote(agentSelection));
   }
   return parts.join(" ");
+}
+
+function postAgentAddSetupCommands(agent: WorkbenchAgent): string[] {
+  const adapter = agent.adapter.trim().toLowerCase();
+  const providerSetup = adapter === "codex" || adapter === "claude"
+    ? workbenchProviderAuthSetupCommands(adapter)
+    : [];
+  const agentSelector = shellQuote(agent.name);
+  const isImprover = agent.name === "improver";
+  return [
+    ...providerSetup,
+    `workbench eval --agents ${agentSelector}${isImprover ? " --rerun" : ""}`,
+    ...(isImprover ? [`workbench improve --agents ${agentSelector}`] : []),
+  ];
 }
 
 function formatRunWatchResult(
@@ -2333,7 +2360,16 @@ async function handleAgent(parsed: ParsedArgs, io: CliIo): Promise<number> {
       model: stringFlag(parsed, "model"),
       config,
     });
-    return output(agent, parsed, io, () => `Configured agent ${formatAgentInline(agent)}.`);
+    const setupCommands = postAgentAddSetupCommands(agent);
+    const next = setupCommands[0] ?? null;
+    return output({
+      agent: agent as unknown as Json,
+      setupCommands: setupCommands as unknown as Json,
+      next: next as Json,
+    }, parsed, io, () => [
+      `Configured agent ${formatAgentInline(agent)}.`,
+      ...(next ? [`next: ${next}`] : []),
+    ].join("\n"));
   }
   if (subcommand === "rm") {
     const result = await removeWorkbenchAgent(requiredPositional(parsed, 2, "workbench agent rm requires NAME."), await coreOptions(parsed));

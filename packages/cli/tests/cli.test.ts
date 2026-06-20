@@ -479,8 +479,24 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("next: workbench agent add improver --adapter codex");
     expect(human.stdout).not.toContain("next: workbench improve\n");
 
-    const added = await invoke(["agent", "add", "improver", "--dir", root, "--adapter", "codex", "--model", "gpt-5.4-mini"]);
+    const added = await invoke(["agent", "add", "improver", "--dir", root, "--adapter", "codex", "--model", "gpt-5.4-mini", "--json"]);
     expect(added.code, added.stdout || added.stderr).toBe(0);
+    expect(stdoutJson(added)).toMatchObject({
+      result: {
+        agent: {
+          name: "improver",
+          adapter: "codex",
+          model: "gpt-5.4-mini",
+        },
+        setupCommands: [
+          "codex login --device-auth",
+          "workbench login codex --method oauth",
+          "workbench eval --agents 'improver' --rerun",
+          "workbench improve --agents 'improver'",
+        ],
+        next: "codex login --device-auth",
+      },
+    });
     const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
     expect(stdoutJson<{ next: string | null }>(statusAfterAdd).next)
       .toBe("workbench eval --agents 'improver' --rerun");
@@ -4299,6 +4315,14 @@ describe("workbench skill-first CLI", () => {
             error: expect.stringContaining("Next: workbench publish --as ORG/SKILL && workbench eval --cloud."),
           }),
         },
+      });
+      const watched = await invoke(["run", "watch", progress[0]!.id, "--dir", root, "--json"]);
+      expect(watched.code, watched.stdout || watched.stderr).toBe(0);
+      expect(stdoutJson(watched)).toMatchObject({
+        schema: "workbench.cli.run-watch.v1",
+        ok: true,
+        run: { id: progress[0]!.id, status: "failed" },
+        next: "workbench publish --as ORG/SKILL && workbench eval --cloud",
       });
     } finally {
       if (previousConfig === undefined) {
