@@ -6790,16 +6790,24 @@ describe("workbench skill-first CLI", () => {
       expect(publishHuman.stdout).not.toContain("Pinned:");
       expect(publishHuman.stdout).not.toContain("https://");
       const team = await invoke(["publish", "--dry-run", "--team", "--dir", root, "--json"]);
-      expect(team.code, team.stdout || team.stderr).toBe(0);
+      expect(team.code, team.stdout || team.stderr).toBe(1);
       expect(stdoutJson(team)).toMatchObject({
-        schema: "workbench.cli.publish.v1",
-        ok: true,
-        dryRun: true,
-        visibility: "team",
+        schema: "workbench.cli.error.v1",
+        ok: false,
+        code: "validation_failed",
+        message: "Team source visibility requires an organization-owned skill.",
+        remediation: "workbench publish --as ORG/SKILL --team",
+        subject: {
+          owner: "alice-user",
+          visibility: "team",
+          requirement: "Publish under an organization-owned skill to use team visibility.",
+        },
       });
       const teamHuman = await invoke(["publish", "--dry-run", "--team", "--dir", root]);
-      expect(teamHuman.code, teamHuman.stdout || teamHuman.stderr).toBe(0);
-      expect(teamHuman.stdout).toContain(`Would publish ${shortTestRef(originalVersionId)} as ${installHandle} (team).`);
+      expect(teamHuman.code, teamHuman.stdout || teamHuman.stderr).toBe(1);
+      const teamHumanOutput = teamHuman.stdout + teamHuman.stderr;
+      expect(teamHumanOutput).toContain("Team source visibility requires an organization-owned skill.");
+      expect(teamHumanOutput).toContain("next: workbench publish --as ORG/SKILL --team");
       await expect(fs.access(path.join(root, ".workbench", "remotes.yaml"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       if (previousConfig === undefined) {
@@ -9064,9 +9072,23 @@ describe("workbench skill-first CLI", () => {
             handle: "alice/private-skill",
           })],
           next: null,
-        });
+      });
 
-      await fs.appendFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "\nLocal edit.\n");
+      const installedSkillPath = path.join(root, ".agents", "skills", "private-skill");
+      process.chdir(installedSkillPath);
+      const initializedInstalledSkill = await invoke(["init", "--agent", "local", "--json"]);
+      process.chdir(cwdRoot);
+      expect(initializedInstalledSkill.code, initializedInstalledSkill.stdout || initializedInstalledSkill.stderr).toBe(0);
+      const currentAfterInit = await invoke(["skills", "--target", "codex", "--scope", "global", "--json"]);
+      expect(currentAfterInit.code).toBe(0);
+      expect(stdoutJson<{ skills: Array<{ name: string; status: string; workbenchProject?: boolean }> }>(currentAfterInit).skills)
+        .toEqual([expect.objectContaining({
+          name: "private-skill",
+          status: "current",
+          workbenchProject: true,
+        })]);
+
+      await fs.appendFile(path.join(installedSkillPath, "SKILL.md"), "\nLocal edit.\n");
       await fs.mkdir(path.join(root, ".agents", "skills", "unmanaged-skill"), { recursive: true });
       await fs.writeFile(path.join(root, ".agents", "skills", "unmanaged-skill", "SKILL.md"), [
         "---",

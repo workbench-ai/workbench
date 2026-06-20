@@ -6168,14 +6168,58 @@ async function previewPublishWithDerivedRemote(parsed: ParsedArgs, visibility: "
       exitCode: 1,
     });
   }
+  const selectedVisibility = visibility ??
+    normalizePublishVisibility(reconciledSnapshot.refs["publication/visibility"]) ??
+    "private";
+  await assertTeamPublishPreviewAllowed(remote, selectedVisibility);
   return {
     remote,
     version,
-    visibility: visibility ??
-      normalizePublishVisibility(reconciledSnapshot.refs["publication/visibility"]) ??
-      "private",
+    visibility: selectedVisibility,
     installHandle: installHandleFromCloudRemote(remote),
   };
+}
+
+async function assertTeamPublishPreviewAllowed(
+  remote: WorkbenchRemote,
+  visibility: "private" | "internal" | "public",
+): Promise<void> {
+  if (visibility !== "internal") {
+    return;
+  }
+  const source = parseWorkbenchInstallSource(remote.url);
+  if (!source) {
+    return;
+  }
+  const config = await loadConfig();
+  const personalOwner = config.username ? normalizeWorkbenchSkillName(config.username) : "";
+  if (source.owner === personalOwner) {
+    throw teamVisibilityRequiresOrganizationError(source);
+  }
+  const existing = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
+  if (existing?.ownerKind === "organization") {
+    return;
+  }
+  if (existing?.ownerKind === "user") {
+    throw teamVisibilityRequiresOrganizationError(source);
+  }
+  const organizationReadiness = await cloudOrganizationHostedOperationReadiness(source.baseUrl, source.owner);
+  if (!organizationReadiness.ready) {
+    throw teamVisibilityRequiresOrganizationError(source);
+  }
+}
+
+function teamVisibilityRequiresOrganizationError(source: ParsedWorkbenchInstallSource): WorkbenchCodedError {
+  return new WorkbenchCodedError("validation_failed", "Team source visibility requires an organization-owned skill.", {
+    remediation: "workbench publish --as ORG/SKILL --team",
+    subject: {
+      owner: source.owner,
+      skill: source.skill,
+      visibility: "team",
+      requirement: "Publish under an organization-owned skill to use team visibility.",
+    },
+    exitCode: 1,
+  });
 }
 
 function normalizePublishVisibility(value: string | undefined): "private" | "internal" | "public" | undefined {
@@ -7003,7 +7047,7 @@ async function statusWithCausalNext(
     };
   }
   if (belowPerfectCurrentEvalRuns.length > 0) {
-    return { ...status, next: belowPerfectEvalNextCommand(snapshot, belowPerfectCurrentEvalRuns) };
+    return { ...status, next: await belowPerfectEvalNextCommand(core, snapshot, belowPerfectCurrentEvalRuns) };
   }
   if (!hasWorkflowCase && hasCurrentScoredEvalRun) {
     return { ...status, next: "workbench results" };
@@ -7066,10 +7110,11 @@ function latestScoredEvalRunsForVersion(
   return [...latestBySelection.values()];
 }
 
-function belowPerfectEvalNextCommand(
+async function belowPerfectEvalNextCommand(
+  core: { dir?: string; authToken?: string },
   snapshot: WorkbenchInspectionSnapshot | null,
   runs: readonly WorkbenchRun[],
-): string {
+): Promise<string> {
   const skillNames = new Set(runs.map((run) => run.skillName));
   const agentNames = new Set(runs.map((run) => run.agentName));
   if (skillNames.size !== 1 || agentNames.size !== 1) {
@@ -7084,7 +7129,7 @@ function belowPerfectEvalNextCommand(
   if (!agent) {
     return "workbench results";
   }
-  return improveNextCommandForAgent(skill, agent, snapshot);
+  return await improveNextCommandForAgent(core, skill, agent, snapshot);
 }
 
 function pendingImproverEvalNextCommand(
@@ -8176,7 +8221,7 @@ async function evalSuccessNextCommand(
     if (postImproveValidationBeatsIncumbent(snapshot, runs)) {
       return await publishReadyNextCommand(core);
     }
-    return belowPerfectEvalNextCommand(snapshot, runs);
+    return await belowPerfectEvalNextCommand(core, snapshot, runs);
   }
   if (!snapshotHasWorkflowCase(snapshot)) {
     return "workbench results";
@@ -8184,12 +8229,21 @@ async function evalSuccessNextCommand(
   return await publishReadyNextCommand(core);
 }
 
-function improveNextCommandForAgent(
+async function improveNextCommandForAgent(
+  core: { dir?: string; authToken?: string },
   skill: string,
   agent: WorkbenchAgent,
   snapshot: WorkbenchInspectionSnapshot | null,
-): string {
-  if (!workbenchSkillImproveCanUseQueuedAdapter(agent)) {
+): Promise<string> {
+  const preview = await previewWorkbenchImprove({
+    ...core,
+    skill,
+    agent: agent.name,
+  }).catch(() => null);
+  const selectedAgentNeedsImproveAdapter = preview?.readiness.issues.some((issue) =>
+    issue.code === "improve_adapter_required"
+  ) ?? !workbenchSkillImproveCanUseQueuedAdapter(agent);
+  if (selectedAgentNeedsImproveAdapter) {
     const improvementAgent = snapshot?.agents
       .map((entry) => entry.agent)
       .filter((candidate) => candidate.name !== "default" && workbenchSkillImproveCanUseQueuedAdapter(candidate))
@@ -8197,7 +8251,8 @@ function improveNextCommandForAgent(
     if (improvementAgent) {
       return `workbench eval --agents ${shellQuote(improvementAgent.name)} --rerun`;
     }
-    return workbenchSkillImproveAdapterRemediation(agent);
+    return readinessNextCommand("improve", preview?.readiness ?? { ready: false, issues: [] }) ??
+      workbenchSkillImproveAdapterRemediation(agent);
   }
   return `workbench improve --versions ${shellQuote(skill)} --agents ${shellQuote(agent.name)}`;
 }

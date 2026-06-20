@@ -650,7 +650,7 @@ async function readRootInventory(root: SkillAccessTargetRoot): Promise<Workbench
     const metadata = parseSkillMetadata(skillMarkdown);
     const contentHash = await readExistingTreeHash(skillPath);
     const record = validLedgerRecord(ledger.skills[entry.name], root.target);
-    const workbenchProject = !record && await isWorkbenchProjectSkillPath(skillPath);
+    const workbenchProject = await isWorkbenchProjectSkillPath(skillPath);
     const status: WorkbenchSkillAccessStatus = record
       ? contentHash === record.contentHash ? "current" : "modified"
       : workbenchProject ? "project" : "unmanaged";
@@ -999,14 +999,17 @@ async function readExistingTreeInto(
     if (relativePath === INSTALLS_FILE) {
       continue;
     }
+    const normalizedPath = relativePath.replace(/\\/gu, "/");
+    if (!isInstallPackagePath(normalizedPath)) {
+      continue;
+    }
     const fullPath = path.join(root, relativePath);
     if (entry.isDirectory()) {
       await readExistingTreeInto(root, relativePath, result, executable);
     } else if (entry.isFile()) {
       const stat = await fs.stat(fullPath);
-      const normalized = relativePath.replace(/\\/gu, "/");
-      result.set(normalized, await fs.readFile(fullPath));
-      executable.set(normalized, (stat.mode & 0o111) !== 0);
+      result.set(normalizedPath, await fs.readFile(fullPath));
+      executable.set(normalizedPath, (stat.mode & 0o111) !== 0);
     }
   }
 }
