@@ -3582,6 +3582,14 @@ describe("skill-first Workbench runtime", () => {
       authToken: "test-token",
     })).rejects.toMatchObject({
       code: "published_version_current",
+      remediation: `workbench publish ${currentVersionId}`,
+      subject: expect.objectContaining({
+        versionId: secondVersionId,
+        currentVersionId: secondVersionId,
+        replacementVersionId: currentVersionId,
+        publishedVersionIds: expect.arrayContaining([currentVersionId, secondVersionId]),
+        installHandle: "alice/http-skill",
+      }),
     });
     expect(deletePaths).toEqual([]);
 

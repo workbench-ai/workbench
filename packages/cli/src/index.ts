@@ -176,6 +176,12 @@ const HELP = [
   "",
   "More:",
   "  workbench help --all",
+  "",
+  "Examples:",
+  "  workbench new ./earnings-prep --agent local",
+  "  workbench case draft case-001 --dir ./earnings-prep",
+  "  workbench eval --dir ./earnings-prep --json",
+  "  workbench install test/workbench-smoke --target codex --scope folder",
 ].join("\n");
 
 const HELP_ALL = [
@@ -216,6 +222,13 @@ const HELP_ALL = [
   "Remote URLs:",
   "  https://HOST/skills/OWNER/SKILL  Workbench Cloud skill remote",
   "  file:///absolute/path            local file remote for plumbing sync",
+  "",
+  "Examples:",
+  "  workbench new ./earnings-prep --agent local",
+  "  workbench case draft case-001 --dir ./earnings-prep",
+  "  workbench eval --dir ./earnings-prep --json",
+  "  workbench publish --as OWNER/SKILL --private",
+  "  workbench install OWNER/SKILL --target codex --scope folder",
 ].join("\n");
 
 const COMMAND_HELP: Record<string, string> = {
@@ -1173,6 +1186,8 @@ async function waitForLocalRunTerminal(input: {
   const renderer = createProgressRenderer({ stderr: input.io.stderr, json: input.json === true });
   const startedAtMs = Date.now();
   const deadline = Date.now() + (positiveIntEnv("WORKBENCH_RUN_WATCH_TIMEOUT_MS") ?? CLOUD_RUN_TIMEOUT_MS);
+  const suppressAlreadyTerminalJsonProgress =
+    input.json === true && isTerminalRunSnapshotStatus(input.initialSnapshot.status);
   let detached = false;
   const onSigint = (): void => {
     detached = true;
@@ -1205,7 +1220,9 @@ async function waitForLocalRunTerminal(input: {
         startedAtMs,
         next: progressNext ?? undefined,
       });
-      renderer.render(progressSnapshot, { force: terminal || detached, command: input.command });
+      if (!(suppressAlreadyTerminalJsonProgress && terminal)) {
+        renderer.render(progressSnapshot, { force: terminal || detached, command: input.command });
+      }
       const runSnapshot = progressSnapshot ?? baseRunSnapshot;
       if (detached) {
         return { snapshot: runSnapshot, run, jobs, detached: true };
@@ -1230,6 +1247,10 @@ async function waitForLocalRunTerminal(input: {
   } finally {
     process.off("SIGINT", onSigint);
   }
+}
+
+function isTerminalRunSnapshotStatus(status: WorkbenchRunSnapshot["status"]): boolean {
+  return status === "succeeded" || status === "failed" || status === "canceled";
 }
 
 function runFromSnapshot(snapshot: WorkbenchRunSnapshot): WorkbenchRun {

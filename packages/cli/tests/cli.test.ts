@@ -318,6 +318,9 @@ describe("workbench skill-first CLI", () => {
     expect(help.stdout).toContain("workbench run cancel RUN_ID");
     expect(help.stdout).toContain("workbench run retry RUN_ID");
     expect(help.stdout).toContain("workbench help --all");
+    expect(help.stdout).toContain("Examples:");
+    expect(help.stdout).toContain("workbench new ./earnings-prep --agent local");
+    expect(help.stdout).toContain("workbench eval --dir ./earnings-prep --json");
     expect(help.stdout).not.toContain("workbench log");
     expect(help.stdout).not.toContain("workbench show");
     expect(help.stdout).not.toContain("workbench open");
@@ -325,6 +328,9 @@ describe("workbench skill-first CLI", () => {
     const allHelpSurface = await invoke(["help", "--all"]);
     expect(allHelpSurface.code).toBe(0);
     expect(allHelpSurface.stdout).toContain("workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]");
+    expect(allHelpSurface.stdout).toContain("Examples:");
+    expect(allHelpSurface.stdout).toContain("workbench publish --as OWNER/SKILL --private");
+    expect(allHelpSurface.stdout).toContain("workbench install OWNER/SKILL --target codex --scope folder");
 
     for (const command of ["results", "diff", "open", "agent"]) {
       const commandHelp = await invoke(["help", command]);
@@ -465,6 +471,14 @@ describe("workbench skill-first CLI", () => {
         cachedRunIds: [evaluatedRunId],
       },
     });
+    const evaluated = await invoke(["eval", "--dir", root, "--json"]);
+    expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
+    const freshRunId = stdoutJson<{ run: { id: string } }>(evaluated).run.id;
+    expect(freshRunId).not.toBe(evaluatedRunId);
+    const cachedEval = await invoke(["eval", "--dir", root, "--json"]);
+    expect(cachedEval.code, cachedEval.stdout || cachedEval.stderr).toBe(0);
+    expect(stdoutJson<{ run: { id: string } }>(cachedEval).run.id).toBe(freshRunId);
+    expect(cachedEval.stderr).toBe("");
 
     vi.stubEnv("WORKBENCH_CONFIG", path.join(await makeTempRoot("workbench-cli-cloud-cache-config-"), "config.json"));
     vi.stubEnv("WORKBENCH_API_TOKEN", "");
@@ -7765,10 +7779,25 @@ describe("workbench skill-first CLI", () => {
       expect(dryUnpublishHuman.stdout).toContain("Dry run made no changes.");
       expect(dryUnpublishHuman.stdout).toContain(`Current published version: ${shortTestRef(currentVersionId)}.`);
       expect(deleteRequests).toBe(0);
+      const dryUnpublishCurrent = await invoke(["unpublish", currentVersionId, "--dry-run", "--dir", root, "--json"]);
+      expect(dryUnpublishCurrent.code, dryUnpublishCurrent.stdout || dryUnpublishCurrent.stderr).toBe(1);
+      expect(stdoutJson(dryUnpublishCurrent)).toMatchObject({
+        code: "published_version_current",
+        remediation: `workbench publish ${firstVersionId}`,
+        subject: {
+          versionId: currentVersionId,
+          currentVersionId,
+          replacementVersionId: firstVersionId,
+          publishedVersionIds: expect.arrayContaining([firstVersionId, currentVersionId]),
+          installHandle: "alice/progress-skill",
+        },
+      });
+      expect(dryUnpublishCurrent.stderr).not.toContain("removing exact source availability");
       const unpublishCurrent = await invoke(["unpublish", currentVersionId, "--dir", root]);
       expect(unpublishCurrent.code, unpublishCurrent.stdout || unpublishCurrent.stderr).toBe(1);
       expect(unpublishCurrent.stderr).toContain(`workbench unpublish: checking exact source availability for ${currentVersionId}.`);
       expect(unpublishCurrent.stderr).toContain("error[published_version_current]");
+      expect(unpublishCurrent.stderr).toContain(`next: workbench publish ${firstVersionId}`);
       expect(unpublishCurrent.stderr).not.toContain("removing exact source availability");
     } finally {
       if (previousConfig === undefined) {
@@ -9395,6 +9424,28 @@ describe("workbench skill-first CLI", () => {
   });
 
   test("provider logout keeps local disconnect successful when remote auth is gone", async () => {
+    const cleanRoot = await makeTempRoot("workbench-cli-provider-logout-clean-");
+    const cleanAuthRoot = path.join(cleanRoot, "auth-store");
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(cleanRoot, "missing-config.json"));
+    vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", cleanAuthRoot);
+    vi.stubEnv("WORKBENCH_API_TOKEN", undefined);
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", undefined);
+    vi.stubEnv("WORKBENCH_API_URL", undefined);
+    const cleanResult = await invoke(["logout", "codex", "--json"]);
+    expect(cleanResult.code, cleanResult.stdout || cleanResult.stderr).toBe(0);
+    expect(stdoutJson(cleanResult)).toMatchObject({
+      schema: "workbench.cli.logout.v1",
+      ok: true,
+      provider: "codex",
+      localAdapter: { adapter: "codex", profile: "default", status: "disconnected" },
+      remoteAdapterAuth: {
+        status: "unknown",
+        sync: "skipped",
+        reason: "workbench_not_authenticated",
+      },
+    });
+    await expect(fs.stat(cleanAuthRoot)).rejects.toMatchObject({ code: "ENOENT" });
+
     const root = await makeTempRoot("workbench-cli-provider-logout-auth-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
     vi.stubEnv("WORKBENCH_CONFIG", configPath);

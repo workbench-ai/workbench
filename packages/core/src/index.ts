@@ -8054,10 +8054,14 @@ export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptio
       });
     }
     if (publication.currentVersionId === version.id) {
+      const replacementVersionId = unpublishReplacementVersionId(publication, version.id, syncedState.versions);
       throw new WorkbenchCodedError("published_version_current", `Version ${version.id} is the current published version and cannot be unpublished directly.`, {
-        remediation: "workbench publish OTHER_VERSION",
+        remediation: replacementVersionId ? `workbench publish ${replacementVersionId}` : "workbench versions",
         subject: {
           versionId: version.id,
+          currentVersionId: publication.currentVersionId,
+          ...(replacementVersionId ? { replacementVersionId } : {}),
+          publishedVersionIds: publication.publishedVersionIds ?? [],
           ...(publication.installHandle ? { installHandle: publication.installHandle } : {}),
         },
         exitCode: 1,
@@ -8098,6 +8102,24 @@ export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptio
       publishedVersionIds: remotePublication.publishedVersionIds,
     };
   });
+}
+
+function unpublishReplacementVersionId(
+  publication: { publishedVersionIds?: readonly string[] },
+  currentVersionId: string,
+  versions: readonly WorkbenchVersion[],
+): string | undefined {
+  const replacementIds = new Set(
+    (publication.publishedVersionIds ?? []).filter((versionId) => versionId !== currentVersionId),
+  );
+  if (replacementIds.size === 0) {
+    return undefined;
+  }
+  const latestKnownVersion = versions
+    .filter((version) => replacementIds.has(version.id))
+    .sort(compareVersionIds)
+    .at(-1);
+  return latestKnownVersion?.id ?? [...replacementIds].sort().at(-1);
 }
 
 function assertPublishableRemote(remote: WorkbenchRemote): void {

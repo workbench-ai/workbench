@@ -218,6 +218,9 @@ class FileWorkbenchAdapterAuthStore implements WorkbenchAdapterAuthStore {
   async disconnect(target: WorkbenchAdapterAuthTarget, reason = "disconnected"): Promise<void> {
     const normalized = normalizeWorkbenchAdapterAuthTarget(target);
     const existing = await this.readRecord(normalized).catch(() => null);
+    if (!existing) {
+      return;
+    }
     await this.writeRecord({
       target: normalized,
       status: "disconnected",
