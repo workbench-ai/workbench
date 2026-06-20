@@ -2939,7 +2939,7 @@ async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
       await fs.chmod(target, 0o755);
     }
   }
-  const next = `${EDITOR_COMMAND} .workbench/cases/${caseId}/case.yaml`;
+  const next = draftCaseEditCommand(files);
   return emitResult("workbench.cli.case-draft.v1", {
     caseId,
     files: files.map((file) => file.path) as unknown as Json,
@@ -2949,6 +2949,10 @@ async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
     ...files.map((file) => `  ${file.path}`),
     `next: ${next}`,
   ].join("\n"));
+}
+
+function draftCaseEditCommand(files: readonly SurfaceSnapshotFile[]): string {
+  return [EDITOR_COMMAND, ...files.map((file) => file.path)].join(" ");
 }
 
 function assertDraftCaseId(caseId: string): void {

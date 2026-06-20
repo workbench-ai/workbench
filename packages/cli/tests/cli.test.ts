@@ -1820,7 +1820,7 @@ describe("workbench skill-first CLI", () => {
         ".workbench/cases/case-001/case.yaml",
         ".workbench/cases/case-001/tests/test.sh",
       ],
-      next: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml",
+      next: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml .workbench/cases/case-001/tests/test.sh",
     });
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
       .resolves.toContain("command: sh \"$CASE_DIR/tests/test.sh\"");
