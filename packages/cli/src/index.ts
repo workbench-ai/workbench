@@ -46,6 +46,7 @@ import {
   workbenchJobEvidenceForSnapshot,
   workbenchProviderAuthSetupCommand,
   workbenchProviderAuthSetupCommands,
+  workbenchProviderAuthSetupCommandsForTarget,
   workbenchSkillImproveAdapterRemediation,
   workbenchSkillImproveCanUseQueuedAdapter,
   workbenchStatusSnapshot,
@@ -131,6 +132,14 @@ interface ParsedArgs {
   flags: Record<string, string | boolean | string[]>;
 }
 
+interface CliCoreOptions {
+  dir?: string;
+  authToken?: string;
+  adapterAuthStoreRoot?: string;
+  homeDir?: string;
+  env?: Record<string, string | undefined>;
+}
+
 interface WorkbenchSkillHandle {
   owner: string;
   skill: string;
@@ -179,7 +188,7 @@ const HELP_ALL = [
   "  workbench results [--versions all|LIST] [--agents all|LIST] [--json]",
   "  workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
-  "  workbench unpublish VERSION [--dir DIR] [--json]",
+  "  workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]",
   "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
   "  workbench install OWNER/SKILL[@VERSION]|URL [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
   "",
@@ -1075,13 +1084,11 @@ function evalOperationRequest(parsed: ParsedArgs, variant: "local" | "cloud" = "
 }
 
 async function assertLocalEvalLaunchReadiness(
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
   request: WorkbenchOperationRequest,
 ): Promise<void> {
   const preview = await previewWorkbenchEval({
-    dir: core.dir,
-    authToken: core.authToken,
-    adapterAuthStoreRoot: core.adapterAuthStoreRoot,
+    ...core,
     version: request.versionId,
     skill: request.skill,
     agent: request.agent,
@@ -2261,7 +2268,7 @@ function resultsNextCommandForRun(run: WorkbenchRun): string {
 
 async function postAgentAddSetupCommands(
   agent: WorkbenchAgent,
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
 ): Promise<string[]> {
   const adapter = agent.adapter.trim().toLowerCase();
   const agentSelector = shellQuote(agent.name);
@@ -2287,7 +2294,7 @@ async function postAgentAddSetupCommands(
       }
     }
   } else if (!preview && (adapter === "codex" || adapter === "claude")) {
-    for (const setupCommand of workbenchProviderAuthSetupCommands(adapter)) {
+    for (const setupCommand of await workbenchProviderAuthSetupCommandsForTarget({ adapterId: adapter, profile: "default" }, core)) {
       commands.add(setupCommand);
     }
   }
@@ -6192,11 +6199,13 @@ function dirFlag(parsed: ParsedArgs): string | undefined {
   return stringFlag(parsed, "dir");
 }
 
-async function coreOptions(parsed: ParsedArgs): Promise<{ dir?: string; authToken?: string; adapterAuthStoreRoot?: string }> {
+async function coreOptions(parsed: ParsedArgs): Promise<CliCoreOptions> {
   return {
     dir: dirFlag(parsed),
     authToken: await workbenchCloudToken(),
     adapterAuthStoreRoot: adapterAuthStoreRoot(),
+    homeDir: process.env.HOME,
+    env: process.env,
   };
 }
 
@@ -7125,7 +7134,7 @@ async function firstExistingPath(paths: readonly string[]): Promise<string | nul
 async function statusWithCausalNext(
   status: Awaited<ReturnType<typeof workbenchStatusSnapshot>>,
   auth: WorkbenchCliAuthStatus,
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
   machine: WorkbenchMachineStatus,
   inspection?: WorkbenchInspectionSnapshot | null,
 ): Promise<Awaited<ReturnType<typeof workbenchStatusSnapshot>>> {
@@ -7254,7 +7263,7 @@ function latestScoredEvalRunsForVersion(
 }
 
 async function belowPerfectEvalNextCommand(
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
   snapshot: WorkbenchInspectionSnapshot | null,
   runs: readonly WorkbenchRun[],
   options: { demoteBlockedProviderImprover?: boolean } = {},
@@ -7277,7 +7286,7 @@ async function belowPerfectEvalNextCommand(
 }
 
 async function pendingImproverEvalNextCommand(
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
   snapshot: WorkbenchInspectionSnapshot | null,
   currentVersionId: string | undefined,
 ): Promise<string | undefined> {
@@ -7311,7 +7320,7 @@ async function pendingImproverEvalNextCommand(
 }
 
 async function evalRerunNextCommandForAgent(
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
   agentName: string,
 ): Promise<string> {
   const command = `workbench eval --agents ${shellQuote(agentName)} --rerun`;
@@ -7335,7 +7344,7 @@ function readinessOnlyNeedsProviderAuth(readiness: WorkbenchLaunchReadiness | un
 }
 
 async function evalRerunNextCommandForImproverStatus(
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
   agentName: string,
 ): Promise<string> {
   const command = `workbench eval --agents ${shellQuote(agentName)} --rerun`;
@@ -8418,7 +8427,7 @@ async function evalSuccessNextCommand(
 }
 
 async function improveNextCommandForAgent(
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string },
+  core: CliCoreOptions,
   skill: string,
   agent: WorkbenchAgent,
   snapshot: WorkbenchInspectionSnapshot | null,

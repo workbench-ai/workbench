@@ -718,10 +718,13 @@ describe("skill-first Workbench runtime", () => {
       config: { auth: "default" },
     });
     await setDefaultWorkbenchAgent("codex", { dir: root });
+    const homeDir = await makeTempRoot("workbench-operation-eval-preview-home-");
 
     const preview = await previewLocalWorkbenchOperation({
       dir: root,
       adapterAuthStoreRoot: path.join(root, "adapter-auth"),
+      homeDir,
+      env: { PATH: process.env.PATH },
       request: { kind: "eval", variant: "local" },
     });
 
@@ -747,10 +750,13 @@ describe("skill-first Workbench runtime", () => {
       model: "gpt-5.4-mini",
       config: { auth: "default" },
     });
+    const homeDir = await makeTempRoot("workbench-operation-improve-preview-home-");
 
     const preview = await previewLocalWorkbenchOperation({
       dir: root,
       adapterAuthStoreRoot: path.join(root, "adapter-auth"),
+      homeDir,
+      env: { PATH: process.env.PATH },
       request: { kind: "improve", variant: "local", agent: "codex" },
     });
 
@@ -5366,7 +5372,10 @@ function expectBlockedCodexOperationPreview(
     canStart: false,
     agents: [expect.objectContaining({ name: "codex" })],
     disabledReason: expect.stringContaining("codex disconnected"),
-    setupCommands: ["codex login --device-auth"],
+    setupCommands: [
+      "codex login --device-auth",
+      "workbench login codex --method oauth",
+    ],
   });
 }
 

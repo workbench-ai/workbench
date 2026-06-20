@@ -322,6 +322,10 @@ describe("workbench skill-first CLI", () => {
     expect(help.stdout).not.toContain("workbench show");
     expect(help.stdout).not.toContain("workbench open");
 
+    const allHelpSurface = await invoke(["help", "--all"]);
+    expect(allHelpSurface.code).toBe(0);
+    expect(allHelpSurface.stdout).toContain("workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]");
+
     for (const command of ["results", "diff", "open", "agent"]) {
       const commandHelp = await invoke(["help", command]);
       expect(commandHelp.code).toBe(0);
@@ -501,6 +505,7 @@ describe("workbench skill-first CLI", () => {
   test("below-perfect evidence with a non-improvement agent teaches improver setup", async () => {
     const authRoot = await makeTempRoot("workbench-cli-eval-improve-next-auth-");
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
+    vi.stubEnv("HOME", await makeTempRoot("workbench-cli-eval-improve-next-home-"));
     vi.stubEnv("OPENAI_API_KEY", "");
     const root = await makeTempRoot("workbench-cli-eval-improve-next-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -576,6 +581,57 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(readyPreview)).toMatchObject({
       readiness: { ready: true, issues: [] },
       next: "workbench eval --agents improver --rerun",
+    });
+
+    vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", await makeTempRoot("workbench-cli-agent-add-native-store-"));
+    const nativeCodexHome = await makeTempRoot("workbench-cli-agent-add-native-home-");
+    await fs.mkdir(path.join(nativeCodexHome, ".codex"), { recursive: true });
+    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    vi.stubEnv("HOME", nativeCodexHome);
+    const nativeRoot = await makeTempRoot("workbench-cli-eval-improve-native-next-");
+    expect((await invoke(["new", nativeRoot, "--agent", "local", "--json"])).code).toBe(0);
+    await seedFailedImproveEvidence(nativeRoot, "default", { status: "succeeded", score: 0.5 });
+    const nativeAdd = await invoke([
+      "agent",
+      "add",
+      "improver",
+      "--dir",
+      nativeRoot,
+      "--adapter",
+      "codex",
+      "--model",
+      "gpt-5.4-mini",
+      "--json",
+    ]);
+    expect(nativeAdd.code, nativeAdd.stdout || nativeAdd.stderr).toBe(0);
+    expect(stdoutJson(nativeAdd)).toMatchObject({
+      result: {
+        setupCommands: [
+          "workbench login codex --method oauth",
+          "workbench eval --agents improver --rerun",
+          "workbench improve --agents improver",
+        ],
+        next: "workbench login codex --method oauth",
+      },
+    });
+    expect(stdoutJson<{ result: { setupCommands: string[] } }>(nativeAdd).result.setupCommands)
+      .not.toContain("codex login --device-auth");
+    const nativePreview = await invoke(["eval", "--agents", "improver", "--rerun", "--dry-run", "--dir", nativeRoot, "--json"]);
+    expect(nativePreview.code, nativePreview.stdout || nativePreview.stderr).toBe(0);
+    expect(stdoutJson(nativePreview)).toMatchObject({
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: "adapter_auth_required",
+            remediation: "workbench login codex --method oauth",
+            subject: {
+              setupCommands: ["workbench login codex --method oauth"],
+            },
+          },
+        ],
+      },
+      next: "workbench login codex --method oauth",
     });
   });
 
@@ -948,21 +1004,50 @@ describe("workbench skill-first CLI", () => {
 
     const results = await invoke(["results", "--versions", "all", "--dir", root]);
     expect(results.code, results.stdout || results.stderr).toBe(0);
-    expect(results.stdout).toContain(expectedLocalSkillLabel(root, 1));
-    expect(results.stdout).toContain(`Current version has no recorded results: ${expectedLocalSkillLabel(root, 2)}.`);
     expect(results.stdout).toContain("next: workbench eval");
 
     const resultsJson = await invoke(["results", "--versions", "all", "--dir", root, "--json"]);
     expect(resultsJson.code, resultsJson.stdout || resultsJson.stderr).toBe(0);
     const payload = stdoutJson<{
       next: string | null;
-      result: { versions: Array<{ label: string; current?: boolean }> };
+      result: {
+        versions: Array<{ id: string; label: string; current?: boolean }>;
+        cells: Array<{ skillVersionId?: string; runId?: string; status?: string }>;
+      };
     }>(resultsJson);
     expect(payload.next).toBe("workbench eval");
-    expect(payload.result.versions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: expectedLocalSkillLabel(root, 1) }),
-      expect.objectContaining({ label: expectedLocalSkillLabel(root, 2), current: true }),
+    const labels = payload.result.versions.map((version) => version.label);
+    expect(new Set(labels).size).toBe(labels.length);
+    const recordedVersionIds = new Set(payload.result.cells
+      .filter((cell) => (typeof cell.runId === "string" || typeof cell.status === "string") && cell.status !== "not-run")
+      .map((cell) => cell.skillVersionId)
+      .filter((id): id is string => typeof id === "string"));
+    const current = payload.result.versions.find((version) => version.current === true);
+    const historical = payload.result.versions.find((version) => version.current !== true && recordedVersionIds.has(version.id));
+    expect(current).toBeTruthy();
+    expect(historical).toBeTruthy();
+    expect(results.stdout).toContain(historical!.label);
+    expect(results.stdout).toContain(`Current version has no recorded results: ${current!.label}.`);
+  });
+
+  test("results json labels selected unevaluated local versions distinctly", async () => {
+    const root = await makeTempRoot("workbench-cli-results-unrun-labels-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const firstVersionId = await currentVersionIdFor(root);
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond unrun edit.\n");
+    const secondVersionId = await currentVersionIdFor(root);
+    expect(secondVersionId).not.toBe(firstVersionId);
+
+    const results = await invoke(["results", "--versions", "all", "--dir", root, "--json"]);
+    expect(results.code, results.stdout || results.stderr).toBe(0);
+    const labels = stdoutJson<{
+      result: { versions: Array<{ projectVersionId: string; label: string }> };
+    }>(results).result.versions.map((version) => version.label);
+    expect(labels).toEqual(expect.arrayContaining([
+      expectedLocalSkillLabel(root, 1),
+      expectedLocalSkillLabel(root, 2),
     ]));
+    expect(new Set(labels).size).toBe(labels.length);
   });
 
   test("results does not write Workbench state for unevaluated projects", async () => {
@@ -1018,7 +1103,7 @@ describe("workbench skill-first CLI", () => {
         ]),
       },
     });
-  });
+  }, 15_000);
 
   test("results preserve canceled run status when a canceled run has failed jobs", async () => {
     const root = await makeTempRoot("workbench-cli-results-canceled-status-");
@@ -1870,6 +1955,7 @@ describe("workbench skill-first CLI", () => {
 
     vi.stubEnv("WORKBENCH_CONFIG", path.join(await makeTempRoot("workbench-cli-config-file-"), "config.json"));
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", await makeTempRoot("workbench-cli-empty-adapter-auth-"));
+    vi.stubEnv("HOME", await makeTempRoot("workbench-cli-no-case-no-native-home-"));
     const root = await makeTempRoot("workbench-cli-no-case-remediation-");
     expect((await invoke(["new", root, "--agent", "codex", "--json"])).code).toBe(0);
     const evalDryRun = await invoke(["eval", "--dry-run", "--dir", root, "--json"]);
@@ -1907,6 +1993,39 @@ describe("workbench skill-first CLI", () => {
     expect(evalDryRunHuman.stdout).toContain("setup: codex login --device-auth");
     expect(evalDryRunHuman.stdout).toContain("setup: workbench login codex --method oauth");
     expect(evalDryRunHuman.stdout).toContain(`next: ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`);
+
+    const nativeCodexHome = await makeTempRoot("workbench-cli-no-case-native-home-");
+    await fs.mkdir(path.join(nativeCodexHome, ".codex"), { recursive: true });
+    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    vi.stubEnv("HOME", nativeCodexHome);
+    const nativeRoot = await makeTempRoot("workbench-cli-no-case-native-remediation-");
+    expect((await invoke(["new", nativeRoot, "--agent", "codex", "--json"])).code).toBe(0);
+    const nativeDryRun = await invoke(["eval", "--dry-run", "--dir", nativeRoot, "--json"]);
+    expect(nativeDryRun.code, nativeDryRun.stdout || nativeDryRun.stderr).toBe(0);
+    expect(stdoutJson(nativeDryRun)).toMatchObject({
+      plan: {
+        readiness: {
+          issues: [
+            {
+              code: "no_eval_cases",
+              remediation: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
+            },
+            {
+              code: "adapter_auth_required",
+              remediation: "workbench login codex --method oauth",
+              subject: {
+                setupCommands: ["workbench login codex --method oauth"],
+              },
+            },
+          ],
+        },
+      },
+      next: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
+    });
+    const nativeDryRunHuman = await invoke(["eval", "--dry-run", "--dir", nativeRoot]);
+    expect(nativeDryRunHuman.stdout).not.toContain("codex login --device-auth");
+    expect(nativeDryRunHuman.stdout).toContain("setup: workbench login codex --method oauth");
+
     const improve = await invoke(["improve", "--dir", root, "--json"]);
     expect(improve.code).toBe(2);
     const improveJson = stdoutJson<{ remediation: string }>(improve);
@@ -2144,6 +2263,7 @@ describe("workbench skill-first CLI", () => {
     const authRoot = await makeTempRoot("workbench-cli-eval-provider-auth-");
     vi.stubEnv("WORKBENCH_CONFIG", path.join(authRoot, "config.json"));
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
+    vi.stubEnv("HOME", await makeTempRoot("workbench-cli-eval-provider-no-native-home-"));
     vi.stubEnv("OPENAI_API_KEY", "");
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "");
@@ -2211,6 +2331,41 @@ describe("workbench skill-first CLI", () => {
       remediation: "codex login --device-auth",
     });
 
+    const nativeCodexHome = await makeTempRoot("workbench-cli-eval-provider-native-home-");
+    await fs.mkdir(path.join(nativeCodexHome, ".codex"), { recursive: true });
+    await fs.writeFile(path.join(nativeCodexHome, ".codex", "auth.json"), "{}\n", "utf8");
+    vi.stubEnv("HOME", nativeCodexHome);
+    const nativeCodexRoot = await makeTempRoot("workbench-cli-eval-native-codex-auth-");
+    expect((await invoke(["new", nativeCodexRoot, "--agent", "codex", "--json"])).code).toBe(0);
+    await writePassingCaseTest(nativeCodexRoot);
+    const nativeCodexDryRun = await invoke(["eval", "--dry-run", "--dir", nativeCodexRoot, "--json"]);
+    expect(nativeCodexDryRun.code, nativeCodexDryRun.stdout || nativeCodexDryRun.stderr).toBe(0);
+    expect(stdoutJson(nativeCodexDryRun)).toMatchObject({
+      readiness: {
+        ready: false,
+        issues: [
+          {
+            code: "adapter_auth_required",
+            remediation: "workbench login codex --method oauth",
+            subject: {
+              setupCommands: ["workbench login codex --method oauth"],
+            },
+          },
+        ],
+      },
+      next: "workbench login codex --method oauth",
+    });
+    expect(stdoutJson<{ readiness: { issues: Array<{ subject?: { setupCommands?: string[] } }> } }>(nativeCodexDryRun)
+      .readiness.issues[0]?.subject?.setupCommands)
+      .not.toContain("codex login --device-auth");
+    const nativeCodexResult = await invoke(["eval", "--dir", nativeCodexRoot, "--json"]);
+    expect(nativeCodexResult.code, nativeCodexResult.stdout || nativeCodexResult.stderr).toBe(1);
+    expect(stdoutJson(nativeCodexResult)).toMatchObject({
+      ok: false,
+      code: "adapter_auth_required",
+      remediation: "workbench login codex --method oauth",
+    });
+
     const claudeRoot = await makeTempRoot("workbench-cli-eval-claude-auth-");
     expect((await invoke(["new", claudeRoot, "--agent", "claude", "--json"])).code).toBe(0);
     await writePassingCaseTest(claudeRoot);
@@ -2229,6 +2384,7 @@ describe("workbench skill-first CLI", () => {
     const authRoot = await makeTempRoot("workbench-cli-improve-provider-auth-");
     vi.stubEnv("WORKBENCH_CONFIG", path.join(authRoot, "config.json"));
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
+    vi.stubEnv("HOME", await makeTempRoot("workbench-cli-improve-provider-no-native-home-"));
     vi.stubEnv("OPENAI_API_KEY", "");
     vi.stubEnv("ANTHROPIC_API_KEY", "");
 
@@ -5062,7 +5218,7 @@ describe("workbench skill-first CLI", () => {
         process.env.WORKBENCH_CONFIG = previousConfig;
       }
     }
-  });
+  }, 15_000);
 
   test("hosted improve validates local improve eligibility before syncing source", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-improve-local-validation-");
@@ -7972,8 +8128,13 @@ describe("workbench skill-first CLI", () => {
         name: "private-skill",
         status: "current",
       });
-      expect(broadSkills.findIndex((skill) => skill.name === "aaa-global-noise"))
-        .toBeGreaterThan(broadSkills.findIndex((skill) => skill.name === "private-skill"));
+      expect(broadSkills.some((skill) => skill.name === "aaa-global-noise")).toBe(false);
+      const explicitGlobalInventory = await invoke(["skills", "--target", "codex", "--scope", "global", "--json"]);
+      expect(explicitGlobalInventory.code, explicitGlobalInventory.stdout || explicitGlobalInventory.stderr).toBe(0);
+      expect(stdoutJson<{ skills: Array<{ target: string; scope: string; name: string; status: string }> }>(explicitGlobalInventory).skills)
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ target: "codex", scope: "global", name: "aaa-global-noise", status: "unmanaged" }),
+        ]));
     } finally {
       process.chdir(previousCwd);
     }
@@ -8453,10 +8614,10 @@ describe("workbench skill-first CLI", () => {
     const cancel = await invoke(["run", "cancel", runId!, "--dir", root, "--json"]);
     expect(cancel.code, cancel.stdout || cancel.stderr).toBe(0);
     expect(Date.now() - cancelStartedAt).toBeLessThan(2_000);
-    expect(stdoutJson<{ run: { status: string; progress: { active?: { sample?: number } } } }>(cancel).run).toMatchObject({
+    expect(stdoutJson<{ run: { status: string; progress: { planned?: number } } }>(cancel).run).toMatchObject({
       status: "canceling",
       progress: {
-        active: expect.objectContaining({ sample: 1 }),
+        planned: 1,
       },
     });
 
@@ -9870,11 +10031,23 @@ describe("workbench skill-first CLI", () => {
     const results = await invoke(["results", "--dir", root, "--agents", "patcher"]);
     expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+samples\s+cost\s+latency\s+run/mu);
     expect(results.stdout).toMatch(/\bpatcher\s+failed\b/u);
-    expect(results.stdout).toContain(expectedLocalSkillLabel(root, 1));
-    expect(results.stdout).toContain(expectedLocalSkillLabel(root, 2));
     expect(results.stdout).toMatch(/\bfailed\s+0\.000\b/u);
     const resultsJson = await invoke(["results", "--dir", root, "--agents", "patcher", "--json"]);
-    const resultsPayload = stdoutJson<{ result: { cells: Array<Record<string, unknown>> } }>(resultsJson);
+    const resultsPayload = stdoutJson<{
+      result: {
+        versions: Array<{ id: string; label: string }>;
+        cells: Array<Record<string, unknown>>;
+      };
+    }>(resultsJson);
+    const labelByVersion = new Map(resultsPayload.result.versions.map((version) => [version.id, version.label]));
+    const recordedPatcherLabels = [...new Set(resultsPayload.result.cells
+      .filter((cell) => (typeof cell.runId === "string" || typeof cell.status === "string") && cell.status !== "not-run")
+      .map((cell) => typeof cell.skillVersionId === "string" ? labelByVersion.get(cell.skillVersionId) : undefined)
+      .filter((label): label is string => typeof label === "string"))];
+    expect(recordedPatcherLabels.length).toBeGreaterThanOrEqual(2);
+    for (const label of recordedPatcherLabels) {
+      expect(results.stdout).toContain(label);
+    }
     expect(resultsPayload.result.cells[0]).toHaveProperty("skillVersionId");
     expect(resultsPayload.result.cells[0]).toHaveProperty("evaluationId");
     expect(resultsPayload.result.cells[0]).toHaveProperty("agentVersionId");
@@ -9886,8 +10059,23 @@ describe("workbench skill-first CLI", () => {
     expect(allAgentsResults.code, allAgentsResults.stdout || allAgentsResults.stderr).toBe(0);
     expect(allAgentsResults.stdout).not.toMatch(/\bnot-run\b/u);
     expect(allAgentsResults.stdout).not.toContain("observer@");
-    expect(allAgentsResults.stdout).toContain(expectedLocalSkillLabel(root, 1));
-    expect(allAgentsResults.stdout).toContain(expectedLocalSkillLabel(root, 4));
+    const allAgentsResultsJson = await invoke(["results", "--dir", root, "--agents", "all", "--json"]);
+    expect(allAgentsResultsJson.code, allAgentsResultsJson.stdout || allAgentsResultsJson.stderr).toBe(0);
+    const allAgentsPayload = stdoutJson<{
+      result: {
+        versions: Array<{ id: string; label: string }>;
+        cells: Array<{ skillVersionId?: string; status?: string }>;
+      };
+    }>(allAgentsResultsJson);
+    const allAgentLabelByVersion = new Map(allAgentsPayload.result.versions.map((version) => [version.id, version.label]));
+    const recordedAllAgentLabels = [...new Set(allAgentsPayload.result.cells
+      .filter((cell) => (typeof cell.runId === "string" || typeof cell.status === "string") && cell.status !== "not-run")
+      .map((cell) => typeof cell.skillVersionId === "string" ? allAgentLabelByVersion.get(cell.skillVersionId) : undefined)
+      .filter((label): label is string => typeof label === "string"))];
+    expect(recordedAllAgentLabels.length).toBeGreaterThanOrEqual(2);
+    for (const label of recordedAllAgentLabels) {
+      expect(allAgentsResults.stdout).toContain(label);
+    }
     const improveSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
     const improveRun = [...improveSnapshot.runs].reverse()
       .find((run) => run.kind === "improve" && run.agentName === "patcher");

@@ -1225,6 +1225,25 @@ export function workbenchProviderAuthSetupCommands(adapterId: string): string[] 
   return [`workbench login ${normalized}`];
 }
 
+export async function workbenchProviderAuthSetupCommandsForTarget(
+  target: WorkbenchAdapterAuthTarget,
+  options: Pick<WorkbenchCommandOptions, "homeDir" | "env"> = {},
+): Promise<string[]> {
+  const adapter = providerAgentAdapterFromId(target.adapterId);
+  if (!adapter) {
+    return workbenchProviderAuthSetupCommands(target.adapterId);
+  }
+  const env = options.env ?? process.env;
+  const nativeAuth = await providerNativeAuthState(adapter, options.homeDir?.trim() || os.homedir(), env);
+  return providerSetupCommands(adapter, {
+    executable: true,
+    nativeAuth,
+    workbenchProviderAuth: "missing",
+    profile: target.profile || "default",
+    env,
+  });
+}
+
 function requiredAdapterAuthTargetsForExecution(
   execution: WorkbenchExecutionSpec,
   args: Pick<WorkbenchExecutionRuntimeInput, "adapterManifests" | "runtimeControlOperation" | "spec">,
@@ -3272,6 +3291,11 @@ const WORKBENCH_PROVIDER_AGENT_DEFAULTS: Record<WorkbenchProviderAgentAdapter, {
   },
 };
 
+function providerAgentAdapterFromId(value: string): WorkbenchProviderAgentAdapter | null {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "codex" || normalized === "claude" ? normalized : null;
+}
+
 export async function createNewWorkbenchSkillProject(options: WorkbenchInitOptions = {}): Promise<WorkbenchStatus> {
   const root = resolveRoot(options.dir);
   const rootExists = await exists(root);
@@ -3372,7 +3396,12 @@ export async function initializeHydratedWorkbenchSkillProject(options: Workbench
   await refreshLocalWorkbenchFiles(root, state);
   await saveState(root, state);
   return {
-    ...await workbenchStatus({ dir: root, adapterAuthStoreRoot: options.adapterAuthStoreRoot }),
+    ...await workbenchStatus({
+      dir: root,
+      adapterAuthStoreRoot: options.adapterAuthStoreRoot,
+      homeDir: options.homeDir,
+      env: options.env,
+    }),
     ...(createdPaths.length ? { createdPaths } : {}),
     ...(createdPaths.includes(`.workbench/${AGENTS_FILE}`) ? { defaultAgentSelection } : {}),
   };
@@ -3580,7 +3609,17 @@ async function providerNativeAuthState(
   env: Record<string, string | undefined>,
 ): Promise<"present" | "partial" | "missing"> {
   if (adapter === "codex") {
-    return await exists(path.join(homeDir, ".codex", "auth.json")) ? "present" : "missing";
+    const codexHome = env.CODEX_HOME?.trim();
+    const roots = [
+      ...(codexHome ? [codexHome] : []),
+      path.join(homeDir, ".codex"),
+    ];
+    for (const root of roots) {
+      if (await exists(path.join(root, "auth.json"))) {
+        return "present";
+      }
+    }
+    return "missing";
   }
   const profile = await exists(path.join(homeDir, ".claude.json"));
   const tokenEnv = Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
@@ -3626,9 +3665,9 @@ function providerSetupCommands(
 
 async function assertLocalWorkbenchAdapterAuthReady(
   agents: readonly WorkbenchAgent[],
-  adapterAuthStoreRoot?: string,
+  options?: string | Pick<WorkbenchCommandOptions, "adapterAuthStoreRoot" | "homeDir" | "env">,
 ): Promise<void> {
-  const readiness = await localWorkbenchAdapterAuthReadiness(agents, adapterAuthStoreRoot);
+  const readiness = await localWorkbenchAdapterAuthReadiness(agents, options);
   const issue = readiness.issues[0];
   if (issue) {
     throw new WorkbenchCodedError("adapter_auth_required", issue.message, {
@@ -3641,26 +3680,28 @@ async function assertLocalWorkbenchAdapterAuthReady(
 
 async function localWorkbenchAdapterAuthReadiness(
   agents: readonly WorkbenchAgent[],
-  adapterAuthStoreRoot?: string,
+  input?: string | Pick<WorkbenchCommandOptions, "adapterAuthStoreRoot" | "homeDir" | "env">,
 ): Promise<WorkbenchLaunchReadiness> {
+  const options = typeof input === "string" ? { adapterAuthStoreRoot: input } : input ?? {};
   const targets = uniqueLocalAdapterAuthTargets(agents.flatMap(localAdapterAuthTargetsForAgent));
   if (targets.length === 0) {
     return readyWorkbenchLaunchReadiness();
   }
-  const store = localWorkbenchAdapterAuthStore(adapterAuthStoreRoot);
+  const store = localWorkbenchAdapterAuthStore(options.adapterAuthStoreRoot);
   const issues: WorkbenchLaunchReadinessIssue[] = [];
   for (const target of targets) {
     const status = await store.status(target);
     if (status.status !== "connected") {
+      const setupCommands = await workbenchProviderAuthSetupCommandsForTarget(target, options);
       issues.push({
         code: "adapter_auth_required",
         message: `${workbenchAdapterAuthTargetLabel(target)} disconnected.`,
-        remediation: workbenchProviderAuthSetupCommand(target.adapterId),
+        remediation: setupCommands[0] ?? workbenchProviderAuthSetupCommand(target.adapterId),
         subject: {
           adapterId: target.adapterId,
           profile: target.profile,
           ...(target.slot ? { slot: target.slot } : {}),
-          setupCommands: workbenchProviderAuthSetupCommands(target.adapterId),
+          setupCommands,
         },
       });
     }
@@ -4008,7 +4049,7 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
       throw noEvalCasesError();
     }
     if ((options.location ?? "local") === "local") {
-      await assertLocalWorkbenchAdapterAuthReady(agents, options.adapterAuthStoreRoot);
+      await assertLocalWorkbenchAdapterAuthReady(agents, options);
     }
     for (const bundle of skillBundles) {
       upsertByHash(state.skillBundles, bundle);
@@ -4090,7 +4131,7 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
   }
   const authReadiness = options.cloud === true
     ? readyWorkbenchLaunchReadiness()
-    : await localWorkbenchAdapterAuthReadiness(runtime.selectedAgents, options.adapterAuthStoreRoot);
+    : await localWorkbenchAdapterAuthReadiness(runtime.selectedAgents, options);
   const readiness = runtime.cases.length === 0
     ? readinessFromIssues([noEvalCasesReadinessIssue(), ...authReadiness.issues])
     : authReadiness;
@@ -5542,7 +5583,7 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
   const readiness = canImproveWithSelectedAgent
     ? options.cloud === true
       ? readyWorkbenchLaunchReadiness()
-      : await localWorkbenchAdapterAuthReadiness([evalAgent], options.adapterAuthStoreRoot)
+      : await localWorkbenchAdapterAuthReadiness([evalAgent], options)
     : readinessFromIssues([workbenchSkillImproveAdapterRequirementIssue(evalAgent)]);
   const adapterAuthTargets = canImproveWithSelectedAgent
     ? uniqueLocalAdapterAuthTargets([evalAgent].flatMap(localAdapterAuthTargetsForAgent))
@@ -5622,6 +5663,8 @@ export async function previewLocalWorkbenchOperation(
         dir: options.dir,
         authToken: options.authToken,
         adapterAuthStoreRoot: options.adapterAuthStoreRoot,
+        homeDir: options.homeDir,
+        env: options.env,
         version: request.versionId,
         skill: request.skill,
         agent: request.agent,
@@ -5635,6 +5678,8 @@ export async function previewLocalWorkbenchOperation(
       dir: options.dir,
       authToken: options.authToken,
       adapterAuthStoreRoot: options.adapterAuthStoreRoot,
+      homeDir: options.homeDir,
+      env: options.env,
       version: request.versionId,
       skill: request.skill,
       agent: request.agent,
@@ -5669,6 +5714,8 @@ async function executeLocalWorkbenchOperation(
         dir: options.dir,
         authToken: options.authToken,
         adapterAuthStoreRoot: options.adapterAuthStoreRoot,
+        homeDir: options.homeDir,
+        env: options.env,
         version: request.versionId,
         skill: request.skill,
         agent: request.agent,
@@ -5683,6 +5730,8 @@ async function executeLocalWorkbenchOperation(
           dir: options.dir,
           authToken: options.authToken,
           adapterAuthStoreRoot: options.adapterAuthStoreRoot,
+          homeDir: options.homeDir,
+          env: options.env,
           version: request.versionId,
           skill: request.skill,
           agent: request.agent,
@@ -6418,14 +6467,29 @@ function operationPreviewReadiness(
   if (readiness.ready) {
     return { canStart: true };
   }
-  const setupCommands = [...new Set(readiness.issues
-    .map((issue) => issue.remediation)
-    .filter((command): command is string => Boolean(command?.trim())))];
+  const setupCommands = uniqueSetupCommands(readiness.issues.flatMap((issue) => {
+    const commands = setupCommandsFromSubject(issue.subject);
+    return commands.length > 0 ? commands : issue.remediation ? [issue.remediation] : [];
+  }));
   return {
     canStart: false,
     disabledReason: readiness.issues.map((issue) => issue.message).join(" ") || "Launch readiness is blocked.",
     ...(setupCommands.length ? { setupCommands } : {}),
   };
+}
+
+function setupCommandsFromSubject(subject: Json | undefined): string[] {
+  if (!subject || typeof subject !== "object" || Array.isArray(subject)) {
+    return [];
+  }
+  const commands = (subject as Record<string, Json>).setupCommands;
+  return Array.isArray(commands)
+    ? commands.filter((command): command is string => typeof command === "string" && command.trim().length > 0)
+    : [];
+}
+
+function uniqueSetupCommands(commands: readonly string[]): string[] {
+  return [...new Set(commands.map((command) => command.trim()).filter(Boolean))];
 }
 
 function operationSelection(value: { name: string; hash?: string }): WorkbenchOperationSelection {
@@ -6440,6 +6504,10 @@ function disabledOperationPreviewFromError(
   error: unknown,
 ): WorkbenchOperationPreview {
   const coded = codedErrorFromUnknown(error);
+  const subjectSetupCommands = setupCommandsFromSubject(coded.subject);
+  const setupCommands = uniqueSetupCommands(subjectSetupCommands.length > 0
+    ? subjectSetupCommands
+    : coded.remediation ? [coded.remediation] : []);
   return {
     kind: request.kind,
     variant: request.variant,
@@ -6450,7 +6518,7 @@ function disabledOperationPreviewFromError(
     samples: request.samples ?? 1,
     ...(request.kind === "improve" ? { budget: request.budget ?? 1 } : {}),
     disabledReason: coded.message,
-    ...(coded.remediation ? { setupCommands: [coded.remediation] } : {}),
+    ...(setupCommands.length ? { setupCommands } : {}),
     cliEquivalent: workbenchOperationCliEquivalent(request),
   };
 }
@@ -7095,7 +7163,7 @@ function resultsFromInternalComparison(
   const agentByHash = new Map(comparison.agents.map((agent) => [agent.hash, agent]));
   const evalByHash = new Map(state.evals.map((evalSnapshot) => [evalSnapshot.hash, evalSnapshot]));
   const projectVersionById = new Map(comparison.versions.map((version) => [version.id, version]));
-  const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(comparison, state.refs.current);
+  const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(comparison);
   const resultVersions = new Map<string, WorkbenchResults["versions"][number]>();
   const resultAgents = new Map<string, WorkbenchResults["agents"][number]>();
   const resultEvaluations = new Map<string, WorkbenchResults["evaluations"][number]>();
@@ -7269,22 +7337,14 @@ function skillFrontmatterName(content: string): string | undefined {
   }
 }
 
-function resultLocalVersionOrdinals(comparison: InternalComparison, currentVersionId?: string): Map<string, number> {
+function resultLocalVersionOrdinals(comparison: InternalComparison): Map<string, number> {
   const localVersionIds = new Set<string>();
   const skillByHash = new Map(comparison.skills.map((skill) => [skill.hash, skill]));
   for (const cell of comparison.cells) {
     const skill = skillByHash.get(cell.skillBundleHash);
     if (
       skill?.source.kind === "local" &&
-      (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".") &&
-      (
-        cell.versionId === currentVersionId ||
-        cell.runId ||
-        cell.status ||
-        cell.score !== undefined ||
-        cell.latencyMs !== undefined ||
-        cell.costUsd !== undefined
-      )
+      (skill.source.source === "local:." || !skill.source.path || skill.source.path === ".")
     ) {
       localVersionIds.add(cell.versionId);
     }

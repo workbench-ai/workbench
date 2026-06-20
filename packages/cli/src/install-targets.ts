@@ -193,16 +193,29 @@ async function readInventoryForRequest(request: {
     markDuplicateSkillNames(targetRows);
     skills.push(...targetRows);
   }
-  skills.sort((left, right) => compareInstalledSkills(left, right, request.currentAgent));
+  const visibleSkills = skills
+    .filter((skill) => broadInventoryIncludesSkill(skill, request))
+    .sort((left, right) => compareInstalledSkills(left, right, request.currentAgent));
   return {
     scopes: [...request.scopes],
     ...(request.dir ? { dir: request.dir } : {}),
     ...(request.target ? { target: request.target } : {}),
     ...(request.currentAgent ? { currentAgent: request.currentAgent } : {}),
     targets: request.targets,
-    skills,
+    skills: visibleSkills,
     next: null,
   };
+}
+
+function broadInventoryIncludesSkill(
+  skill: WorkbenchInstalledSkill,
+  request: { scopes: readonly SkillAccessScope[] },
+): boolean {
+  const broadScope = request.scopes.includes("folder") && request.scopes.includes("global");
+  if (!broadScope || skill.scope !== "global") {
+    return true;
+  }
+  return Boolean(skill.handle || skill.workbenchProject || skill.status === "missing");
 }
 
 function compareInstalledSkills(
