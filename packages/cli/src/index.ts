@@ -174,6 +174,7 @@ const HELP = [
   "  workbench run retry RUN_ID [--dir DIR] [--json]",
   "  workbench versions [--dir DIR] [--json]",
   "  workbench case draft [ID] [--dir DIR] [--json]",
+  "  workbench delete OWNER/SKILL|URL [--dry-run] [--yes] [--json]",
   "",
   "More:",
   "  workbench help --all",
@@ -199,6 +200,7 @@ const HELP_ALL = [
   "  workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]",
   "  workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]",
   "  workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]",
+  "  workbench delete OWNER/SKILL|URL [--dry-run] [--yes] [--json]",
   "  workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]",
   "  workbench install OWNER/SKILL[@VERSION]|URL [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json]",
   "",
@@ -462,6 +464,16 @@ const COMMAND_HELP: Record<string, string> = {
     "Example:",
     "  workbench unpublish v_abc123 --dry-run",
   ].join("\n"),
+  delete: [
+    "Usage:",
+    "  workbench delete OWNER/SKILL|URL [--dry-run] [--yes] [--json]",
+    "  workbench delete --source OWNER/SKILL|URL [--dry-run] [--yes] [--json]",
+    "",
+    "Deletes an entire Workbench Cloud skill project. Use unpublish for one exact source version.",
+    "",
+    "Example:",
+    "  workbench delete test/disposable-skill --dry-run",
+  ].join("\n"),
   login: [
     "Usage:",
     "  workbench login [PROVIDER] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--local-only] [--json]",
@@ -502,6 +514,7 @@ const VERSION_FLAG = {
 } as const satisfies FlagSpec;
 
 const COMMAND_FLAGS: Record<string, FlagSpec> = {
+  delete: { ...COMMON_FLAGS, ...HELP_FLAG, "dry-run": "boolean", source: "string", yes: "boolean" },
   diff: { ...PROJECT_FLAGS, ...HELP_FLAG, range: "string" },
   eval: {
     ...PROJECT_FLAGS,
@@ -626,6 +639,9 @@ export async function runCli(argv: readonly string[], io: CliIo = {
     }
     if (command === "clone") {
       return await handleClone(parsed, io);
+    }
+    if (command === "delete") {
+      return await handleDelete(parsed, io);
     }
     if (command === "new") {
       rejectExtraInput(parsed, {
@@ -2990,6 +3006,91 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
   });
 }
 
+async function handleDelete(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  rejectExtraInput(parsed, {
+    maxPositionals: 2,
+    message: "workbench delete accepts one OWNER/SKILL or URL argument.",
+    remediation: "workbench delete OWNER/SKILL --dry-run",
+  });
+  const sourceInput = requiredInput(
+    parsed,
+    1,
+    "source",
+    "workbench delete source",
+    "workbench delete requires OWNER/SKILL or a Workbench Cloud skill URL.",
+    "workbench delete OWNER/SKILL --dry-run",
+  );
+  const sourceUrl = await resolveWorkbenchCloudSkillProjectInput(sourceInput, "workbench delete");
+  const source = parseWorkbenchInstallSource(sourceUrl);
+  if (!source) {
+    throw new WorkbenchCodedError("usage", "workbench delete requires a Workbench Cloud skill URL.", {
+      remediation: "workbench delete OWNER/SKILL --dry-run",
+      exitCode: 2,
+    });
+  }
+  const handle = `${source.owner}/${source.skill}`;
+  if (source.version) {
+    throw new WorkbenchCodedError("usage", "workbench delete removes an entire Cloud skill project, not one published version.", {
+      remediation: `workbench unpublish ${source.version}`,
+      subject: { handle, version: source.version },
+      exitCode: 2,
+    });
+  }
+  if (!await workbenchCloudToken({ baseUrl: source.baseUrl })) {
+    throw new WorkbenchCodedError("auth_required", "workbench delete requires Workbench Cloud auth.", {
+      remediation: workbenchLoginRemediation(source.baseUrl),
+      subject: { handle, baseUrl: source.baseUrl },
+      exitCode: 1,
+    });
+  }
+  const skill = await getCloudSkillByHandle(source.baseUrl, source.owner, source.skill);
+  if (!skill?.id) {
+    throw new WorkbenchCodedError("remote_not_found", `Workbench Cloud skill not found: ${handle}.`, {
+      remediation: "workbench publish --as OWNER/SKILL",
+      subject: { handle, baseUrl: source.baseUrl },
+      exitCode: 1,
+    });
+  }
+  const dryRun = parsed.flags["dry-run"] === true;
+  const next = dryRun ? `workbench delete ${handle} --yes` : null;
+  if (dryRun) {
+    return emitResult("workbench.cli.delete.v1", {
+      handle,
+      skillId: skill.id,
+      baseUrl: source.baseUrl,
+      dryRun: true,
+      next,
+    }, parsed, io, () => [
+      `Would delete Workbench Cloud skill project ${handle}.`,
+      "Dry run made no changes.",
+      `next: ${next}`,
+    ].join("\n"));
+  }
+  if (parsed.flags.yes !== true) {
+    throw new WorkbenchCodedError("confirmation_required", `Deleting Workbench Cloud skill project ${handle} requires --yes.`, {
+      remediation: `workbench delete ${handle} --yes`,
+      subject: { handle, skillId: skill.id, baseUrl: source.baseUrl },
+      exitCode: 2,
+    });
+  }
+  writeCliProgress(parsed, io, `workbench delete: deleting Cloud skill project ${handle}.`);
+  await apiRequest<{ ok: boolean }>(
+    `/api/workbench/skills/${encodeURIComponent(skill.id)}`,
+    { method: "DELETE" },
+    source.baseUrl,
+  );
+  return emitResult("workbench.cli.delete.v1", {
+    handle,
+    skillId: skill.id,
+    baseUrl: source.baseUrl,
+    deleted: true,
+    next: null,
+  }, parsed, io, () => [
+    `Deleted Workbench Cloud skill project ${handle}.`,
+    "Published source, install package, hosted runs, and synced objects for that Cloud project are no longer available.",
+  ].join("\n"));
+}
+
 async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
   rejectExtraInput(parsed, {
     maxPositionals: 1,
@@ -3336,7 +3437,9 @@ function formatInstallOutcome(
   if (dryRun) {
     const nextLine = next ? `\nnext: ${next}` : "";
     if (target.previous === "unchanged") {
-      return `Already installed ${result.skill} for ${targetSummary} (unchanged; dry run made no changes).`;
+      return target.metadataChanged
+        ? `Would update install metadata for ${result.skill} on ${targetSummary} (package files unchanged; dry run made no changes).`
+        : `Already installed ${result.skill} for ${targetSummary} (unchanged; dry run made no changes).`;
     }
     if (target.previous === "updated") {
       return `Would update ${result.skill} for ${targetSummary} (dry run made no changes).`;
@@ -3353,6 +3456,9 @@ function formatInstallOutcome(
     return `Already installed ${result.skill} for ${targetSummary} (unchanged).${nextLine}`;
   }
   const nextLine = next ? `\nnext: ${next}` : "";
+  if (target.previous === "unchanged" && target.metadataChanged) {
+    return `Updated install metadata for ${result.skill} on ${targetSummary} (package files unchanged).${nextLine}`;
+  }
   if (target.previous === "updated") {
     return `Updated ${result.skill} for ${targetSummary} (${formatFileCount(result.filesCopied)}).${nextLine}`;
   }
@@ -6871,6 +6977,24 @@ async function resolveWorkbenchInstallSourceInput(input: string): Promise<string
   return parsed.version ? `${basePath}/versions/${encodeURIComponent(parsed.version)}` : basePath;
 }
 
+async function resolveWorkbenchCloudSkillProjectInput(input: string, action: string): Promise<string> {
+  if (/^https?:\/\//u.test(input)) {
+    return input;
+  }
+  const parsed = parseOwnerSkillSourceSpec(input);
+  const handle = parsed?.handle;
+  if (!handle) {
+    throw new WorkbenchCodedError("usage", `${action} expects OWNER/SKILL or a Workbench Cloud skill URL.`, {
+      remediation: `${action} OWNER/SKILL --dry-run`,
+      exitCode: 2,
+    });
+  }
+  const config = await loadConfig();
+  const baseUrl = optionalWorkbenchBaseUrl({ configBaseUrl: config.baseUrl }) ?? DEFAULT_WORKBENCH_CLOUD_BASE_URL;
+  const basePath = `${baseUrl}/skills/${encodeURIComponent(handle.owner)}/${encodeURIComponent(handle.skill)}`;
+  return parsed.version ? `${basePath}/versions/${encodeURIComponent(parsed.version)}` : basePath;
+}
+
 function parseOwnerSkillSourceSpec(value: string): { handle: WorkbenchSkillHandle; version?: string } | null {
   const trimmed = value.trim();
   const atIndex = trimmed.lastIndexOf("@");
@@ -7441,15 +7565,15 @@ async function statusWithCausalNext(
   if (!hasAnyEvalCase) {
     return { ...status, next: authorEvalCaseCommand(snapshot, liveCases.caseIds) };
   }
-  if (status.worktree.sourceState === "would_create") {
-    return { ...status, next: "workbench eval" };
-  }
   if ((lastRun?.status === "failed" || lastRun?.status === "canceled") && lastRun.id) {
     return { ...status, next: `workbench show ${displayRef(lastRun.id)}` };
   }
   const currentScoredEvalRuns = snapshot && currentVersionId
     ? latestScoredEvalRunsForVersion(snapshot, currentVersionId)
     : [];
+  if (status.worktree.sourceState === "would_create") {
+    return { ...status, next: await statusDirtySourceEvalNextCommand(core, currentScoredEvalRuns) };
+  }
   const hasCurrentScoredEvalRun = currentScoredEvalRuns.length > 0;
   const belowPerfectCurrentEvalRuns = currentScoredEvalRuns.filter(scoredRunIsBelowPerfect);
   const canPublish = hasWorkflowCase && hasCurrentScoredEvalRun && belowPerfectCurrentEvalRuns.length === 0;
@@ -7460,14 +7584,14 @@ async function statusWithCausalNext(
     return { ...status, next: `workbench switch ${displayRef(promotedImproveVersionId)}` };
   }
   if ((snapshot?.runs.length ?? status.runs.total) === 0) {
-    return { ...status, next: "workbench eval" };
+    return { ...status, next: await statusDefaultEvalNextCommand(core) };
   }
   if (!hasCurrentScoredEvalRun) {
     return {
       ...status,
       next: postImproveProofEvalNextCommand(snapshot, currentVersionId) ??
         await pendingImproverEvalNextCommand(core, snapshot, currentVersionId) ??
-        "workbench eval",
+        await statusDefaultEvalNextCommand(core),
     };
   }
   if (belowPerfectCurrentEvalRuns.length > 0) {
@@ -7516,6 +7640,48 @@ async function statusWithCausalNext(
     ...status,
     next: canPublish ? "workbench results" : null,
   };
+}
+
+async function statusDefaultEvalNextCommand(core: CliCoreOptions): Promise<string> {
+  return statusEvalNextCommand(core, { command: "workbench eval" });
+}
+
+async function statusDirtySourceEvalNextCommand(
+  core: CliCoreOptions,
+  currentScoredEvalRuns: readonly WorkbenchRun[],
+): Promise<string> {
+  return statusEvalNextCommand(core, statusEvalSelectionFromRuns(currentScoredEvalRuns));
+}
+
+async function statusEvalNextCommand(
+  core: CliCoreOptions,
+  selection: { command: string; agent?: string } | null = null,
+): Promise<string> {
+  const command = selection?.command ?? "workbench eval";
+  const preview = await previewWorkbenchEval({
+    ...core,
+    ...(selection?.agent ? { agent: selection.agent } : {}),
+  }).catch(() => null);
+  if (preview && !preview.readiness.ready) {
+    return readinessNextCommand("eval", preview.readiness) ?? command;
+  }
+  return command;
+}
+
+function statusEvalSelectionFromRuns(runs: readonly WorkbenchRun[]): { command: string; agent?: string } | null {
+  const skillNames = new Set(runs.map((run) => run.skillName));
+  const agentNames = new Set(runs.map((run) => run.agentName));
+  if (skillNames.size !== 1 || agentNames.size !== 1) {
+    return null;
+  }
+  const skill = [...skillNames][0]!;
+  const agent = [...agentNames][0]!;
+  if (skill !== CURRENT_SKILL_VERSION_NAME) {
+    return null;
+  }
+  return agent === "default"
+    ? { command: "workbench eval" }
+    : { command: `workbench eval --agents ${shellQuote(agent)}`, agent };
 }
 
 function latestScoredEvalRunsForVersion(

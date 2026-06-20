@@ -90,6 +90,7 @@ export interface WorkbenchInstallTargetResult {
   result: "installed" | "planned" | "blocked" | "unchanged";
   requiresOverwrite?: boolean;
   remediation?: string;
+  metadataChanged?: boolean;
   filesCopied: number;
   contentHash: string;
   ledgerPath: string;
@@ -104,6 +105,7 @@ export interface WorkbenchInstallTargetsResult {
   target: SkillAccessTargetId;
   currentAgent?: SkillAccessTargetId;
   skill: string;
+  metadataChanged?: boolean;
   filesCopied: number;
   contentHash: string;
   targets: WorkbenchInstallTargetResult[];
@@ -376,9 +378,11 @@ export async function installSnapshotToSkillTargets(options: {
   }
   const filesCopied = results.reduce((sum, result) => sum + result.filesCopied, 0);
   const blocked = results.some((entry) => entry.result === "blocked");
+  const unchanged = results.every((entry) => entry.result === "unchanged");
+  const metadataChanged = results.some((entry) => entry.metadataChanged);
   const result = options.dryRun
-    ? blocked ? "blocked" : "planned"
-    : results.every((entry) => entry.result === "unchanged")
+    ? blocked ? "blocked" : unchanged ? "unchanged" : "planned"
+    : unchanged
       ? "unchanged"
       : "installed";
   const remediation = results.find((entry) => entry.remediation)?.remediation;
@@ -391,6 +395,7 @@ export async function installSnapshotToSkillTargets(options: {
     target,
     ...(request.currentAgent ? { currentAgent: request.currentAgent } : {}),
     skill: skillName,
+    ...(metadataChanged ? { metadataChanged: true } : {}),
     filesCopied,
     contentHash,
     targets: results,
@@ -470,6 +475,7 @@ export function installResultToJson(result: WorkbenchInstallTargetsResult): Reco
     target: result.target,
     ...(result.currentAgent ? { currentAgent: result.currentAgent } : {}),
     skill: result.skill,
+    ...(result.metadataChanged ? { metadataChanged: true } : {}),
     filesCopied: result.filesCopied,
     contentHash: result.contentHash,
     targets: result.targets.map((target) => ({
@@ -481,6 +487,7 @@ export function installResultToJson(result: WorkbenchInstallTargetsResult): Reco
       result: target.result,
       ...(target.requiresOverwrite ? { requiresOverwrite: true } : {}),
       ...(target.remediation ? { remediation: target.remediation } : {}),
+      ...(target.metadataChanged ? { metadataChanged: true } : {}),
       filesCopied: target.filesCopied,
       contentHash: target.contentHash,
       ledgerPath: target.ledgerPath,
@@ -914,6 +921,7 @@ async function installPackageInRoot(args: {
     await writeInstallLedgerRecord(root, args.skillName, nextLedgerRecord);
   }
   const filesCopied = !args.dryRun && previous !== "unchanged" ? args.files.length : 0;
+  const metadataChanged = previous === "unchanged" && ledgerChanged;
   return {
     target: args.target.id,
     scope: args.target.scope,
@@ -921,9 +929,10 @@ async function installPackageInRoot(args: {
     destination,
     previous,
     result: args.dryRun
-      ? requiresOverwrite ? "blocked" : "planned"
+      ? requiresOverwrite ? "blocked" : metadataChanged ? "planned" : previous === "unchanged" ? "unchanged" : "planned"
       : previous === "unchanged" && !ledgerChanged ? "unchanged" : "installed",
     ...(requiresOverwrite ? { requiresOverwrite: true, remediation: args.overwriteRemediation } : {}),
+    ...(metadataChanged ? { metadataChanged: true } : {}),
     filesCopied,
     contentHash: args.contentHash,
     ledgerPath: installsPathForRoot(root),
