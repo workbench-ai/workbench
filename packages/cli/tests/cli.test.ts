@@ -2690,6 +2690,48 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("next: workbench login");
   });
 
+  test("logged-out Cloud status does not trust legacy synced state without a local hash", async () => {
+    const root = await makeTempRoot("workbench-cli-status-cloud-legacy-sync-");
+    const configRoot = await makeTempRoot("workbench-cli-status-cloud-legacy-sync-config-");
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(configRoot, "missing-config.json"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", "");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+
+    const remoteUrl = "https://cloud.test/skills/alice/legacy-sync";
+    await addWorkbenchRemote("cloud", remoteUrl, { dir: root });
+    await fs.mkdir(path.join(root, ".workbench", "sync"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "sync", "cloud.json"), JSON.stringify({
+      schema: "workbench.remote-sync-state.v1",
+      remote: "cloud",
+      url: remoteUrl,
+      status: "synced",
+      lastSyncedAt: "2026-06-11T00:00:00.000Z",
+      lastAttemptAt: "2026-06-11T00:00:00.000Z",
+      lastError: null,
+    }, null, 2));
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{
+      next: string | null;
+      remotes: Array<{ name: string; sync: { status: string; lastError: { code: string; message: string } | null } }>;
+    }>(status)).toMatchObject({
+      next: "workbench login",
+      remotes: [expect.objectContaining({
+        name: "cloud",
+        sync: expect.objectContaining({
+          status: "auth_required",
+          lastError: {
+            code: "auth_required",
+            message: "Log in to reconcile Workbench Cloud sync state.",
+          },
+        }),
+      })],
+    });
+  });
+
   test("status recommends eval before login when the current version has no scored proof", async () => {
     const root = await makeTempRoot("workbench-cli-status-current-proof-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "missing-config.json");
@@ -7709,6 +7751,17 @@ describe("workbench skill-first CLI", () => {
       remediation: "workbench results --agents default",
       subject: { configuredAgents: ["default"] },
     });
+
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond version.\n");
+    const multiVersionResult = await invoke(["results", "--dir", root, "--versions", "all", "--agents", "missing", "--json"]);
+    expect(multiVersionResult.code).toBe(2);
+    expect(stdoutJson(multiVersionResult)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Agent not found: missing. Configured agents: default.",
+      remediation: "workbench results --agents default",
+      subject: { configuredAgents: ["default"] },
+    });
   });
 
   test("improve selector errors include command-shaped remediation", async () => {
@@ -9115,9 +9168,9 @@ describe("workbench skill-first CLI", () => {
         ]));
       vi.stubGlobal("fetch", fetchMock);
       const dryRunModified = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run", "--json"]);
-      expect(dryRunModified.code, dryRunModified.stdout || dryRunModified.stderr).toBe(0);
+      expect(dryRunModified.code, dryRunModified.stdout || dryRunModified.stderr).toBe(1);
       expect(stdoutJson(dryRunModified)).toMatchObject({
-        ok: true,
+        ok: false,
         result: "blocked",
         requiresOverwrite: true,
         remediation: "workbench install alice/private-skill --target codex --scope global --yes",
@@ -9134,7 +9187,7 @@ describe("workbench skill-first CLI", () => {
       await expect(fs.readFile(path.join(root, ".agents", "skills", "private-skill", "SKILL.md"), "utf8"))
         .resolves.toContain("Local edit.");
       const dryRunModifiedHuman = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--dry-run"]);
-      expect(dryRunModifiedHuman.code, dryRunModifiedHuman.stdout || dryRunModifiedHuman.stderr).toBe(0);
+      expect(dryRunModifiedHuman.code, dryRunModifiedHuman.stdout || dryRunModifiedHuman.stderr).toBe(1);
       expect(dryRunModifiedHuman.stdout).toContain("Would require --yes to overwrite private-skill for codex global (dry run made no changes).");
       expect(dryRunModifiedHuman.stdout).toContain("next: workbench install alice/private-skill --target codex --scope global --yes");
       const realOverwrite = await invoke(["install", "alice/private-skill", "--target", "codex", "--scope", "global", "--json"]);

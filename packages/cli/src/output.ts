@@ -9,7 +9,7 @@ export interface ParsedCliFlags {
 
 export interface WorkbenchCliSuccessEnvelope {
   schema: string;
-  ok: true;
+  ok: boolean;
   [key: string]: Json | undefined;
 }
 
@@ -30,9 +30,10 @@ export function emitResult(
   parsed: ParsedCliFlags,
   io: CliIo,
   text: (format: HumanFormatOptions) => string,
+  options: { ok?: boolean; exitCode?: number } = {},
 ): number {
   if (parsed.flags.json === true) {
-    const envelope: WorkbenchCliSuccessEnvelope = { schema, ok: true };
+    const envelope: WorkbenchCliSuccessEnvelope = { schema, ok: options.ok ?? true };
     for (const [key, value] of Object.entries(body)) {
       if (value !== undefined) {
         envelope[key] = value;
@@ -42,7 +43,7 @@ export function emitResult(
   } else {
     io.stdout.write(`${text(humanFormatOptions(io.stdout))}\n`);
   }
-  return 0;
+  return options.exitCode ?? 0;
 }
 
 export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): number {

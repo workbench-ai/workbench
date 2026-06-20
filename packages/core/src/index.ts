@@ -3789,7 +3789,7 @@ export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions =
       ? {
           status: sync.status === "error"
             ? "error"
-            : hasUnsyncedWorktreeSource || (sync.localHash && sync.localHash !== remoteSyncLocalHash(localState, remote))
+            : hasUnsyncedWorktreeSource || !sync.localHash || sync.localHash !== remoteSyncLocalHash(localState, remote)
               ? "local_changes"
               : "up_to_date",
           ...(sync.lastSyncedAt ? { lastSyncedAt: sync.lastSyncedAt } : {}),
@@ -6873,6 +6873,7 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
   const comparedAgents: WorkbenchAgent[] = [];
   const comparedVersions: WorkbenchVersion[] = [];
   const skippedVersions: string[] = [];
+  let skippedSelectionError: unknown;
   const evalHashes = new Set<string>();
   for (const version of versions) {
     let runtime: WorkbenchVersionRuntimeSnapshot;
@@ -6885,6 +6886,7 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
       });
     } catch (error) {
       if (shouldSkipVersionForResultsSelection(error, options, versions.length)) {
+        skippedSelectionError ??= error;
         skippedVersions.push(version.id);
         continue;
       }
@@ -6931,6 +6933,9 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
     }
   }
   if (comparedVersions.length === 0 && skippedVersions.length > 0) {
+    if (skippedSelectionError) {
+      throw skippedSelectionError;
+    }
     throw new WorkbenchUserError("No selected versions define the requested result versions or agents.");
   }
   await saveState(root, state);

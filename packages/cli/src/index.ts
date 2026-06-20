@@ -2739,12 +2739,16 @@ async function handleInstall(parsed: ParsedArgs, io: CliIo): Promise<number> {
   });
   const dryRun = parsed.flags["dry-run"] === true;
   const next = result.remediation ?? (dryRun ? null : "workbench skills");
+  const blockedDryRun = dryRun && result.result === "blocked";
   return emitResult("workbench.cli.install.v3", {
     source: sourceSummary,
     ...installResultToJson(result),
     next: next as Json,
     ...(dryRun ? { dryRun: true } : {}),
-  }, parsed, io, () => formatInstallOutcome(result, dryRun, next));
+  }, parsed, io, () => formatInstallOutcome(result, dryRun, next), {
+    ok: !blockedDryRun,
+    exitCode: blockedDryRun ? 1 : 0,
+  });
 }
 
 async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
@@ -7070,7 +7074,7 @@ async function statusWithCausalNext(
   const stalePublishedCloudRemote = status.remotes.find((remote) =>
     remote.kind === "workbench-cloud" &&
     remote.publication.status === "published" &&
-    remote.sync.status === "up_to_date" &&
+    (remote.sync.status === "up_to_date" || remote.sync.status === "local_changes") &&
     currentVersionId !== undefined &&
     remote.publication.currentVersionId !== currentVersionId
   );
