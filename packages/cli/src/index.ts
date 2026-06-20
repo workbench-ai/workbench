@@ -898,6 +898,9 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         remote,
         dryRun,
       }), { json: parsed.flags.json === true });
+      const next = result.dryRun
+        ? projectScopedNextCommand(core.dir ?? process.cwd(), `workbench unpublish ${result.version.id}`)
+        : result.currentVersionId ? `workbench install ${result.installHandle ?? "OWNER/SKILL"}@${result.currentVersionId}` : null;
       return emitResult("workbench.cli.unpublish.v1", {
         remote: result.remote as unknown as Json,
         version: versionSummary(result.version),
@@ -906,11 +909,12 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         currentVersionId: result.currentVersionId ?? null,
         publishedVersionIds: result.publishedVersionIds,
         ...(result.dryRun ? { dryRun: true } : {}),
-        next: result.currentVersionId ? `workbench install ${result.installHandle ?? "OWNER/SKILL"}@${result.currentVersionId}` : null,
+        next,
       }, parsed, io, () => [
         `${result.dryRun ? "Would unpublish" : "Unpublished"} ${displayRef(result.version.id)}${result.installHandle ? ` from ${result.installHandle}` : ""}.`,
         ...(result.dryRun ? ["Dry run made no changes."] : []),
         ...(result.currentVersionId ? [`Current published version: ${displayRef(result.currentVersionId)}.`] : []),
+        ...(next ? [`next: ${next}`] : []),
       ].join("\n"));
     }
     if (command === "open") {
@@ -986,10 +990,8 @@ function formatNewResult(status: WorkbenchStatus, next: string | null): string {
     `Created Workbench skill at ${status.root}.`,
     agent,
     ...(selection?.readiness.warnings ?? []),
-    ...(selection?.readiness.setupCommands.length
-      ? ["setup:", ...selection.readiness.setupCommands.map((command) => `  ${command}`)]
-      : []),
     "Add eval cases under .workbench/cases before running eval.",
+    ...newProjectSetupLines(selection),
     ...(next ? [`next: ${next}`] : []),
   ].filter(Boolean).join("\n");
 }
@@ -1009,12 +1011,21 @@ function formatInitResult(status: WorkbenchStatus, next: string | null): string 
     `Initialized Workbench controls at ${status.root}.`,
     agent,
     ...(selection?.readiness.warnings ?? []),
-    ...(selection?.readiness.setupCommands.length
-      ? ["setup:", ...selection.readiness.setupCommands.map((command) => `  ${command}`)]
-      : []),
     "Add eval cases under .workbench/cases before running eval.",
+    ...newProjectSetupLines(selection),
     ...(next ? [`next: ${next}`] : []),
   ].filter(Boolean).join("\n");
+}
+
+function newProjectSetupLines(selection: WorkbenchStatus["defaultAgentSelection"]): string[] {
+  if (!selection?.readiness.setupCommands.length) {
+    return [];
+  }
+  return [
+    ...(selection.kind === "provider" ? ["Provider setup is still required before provider-backed eval."] : []),
+    "setup:",
+    ...selection.readiness.setupCommands.map((command) => `  ${command}`),
+  ];
 }
 
 function newProjectNextCommand(projectRoot: string): string {

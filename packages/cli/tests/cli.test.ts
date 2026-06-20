@@ -1799,6 +1799,12 @@ describe("workbench skill-first CLI", () => {
     expect(createdJson.result.defaultAgentSelection.readiness.setupCommands.length).toBeGreaterThan(0);
     expect(createdJson.next).toBe(`cd ${root} && ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`);
     expect(createdJson.setupCommands.every((command) => typeof command === "string")).toBe(true);
+    const humanRoot = await makeTempRoot("workbench-cli-new-provider-human-");
+    const createdHuman = await invoke(["new", humanRoot]);
+    expect(createdHuman.code, createdHuman.stdout || createdHuman.stderr).toBe(0);
+    expect(createdHuman.stdout).toContain("Provider setup is still required before provider-backed eval.");
+    expect(createdHuman.stdout).toContain("setup:");
+    expect(createdHuman.stdout).toContain(`next: cd ${humanRoot} && ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`);
     const newStatus = await invoke(["status", "--dir", root, "--json"]);
     expect(newStatus.code, newStatus.stdout || newStatus.stderr).toBe(0);
     expect(stdoutJson<{ next: string | null }>(newStatus).next).toBe(WORKBENCH_AUTHOR_EVAL_CASE_COMMAND);
@@ -7771,12 +7777,14 @@ describe("workbench skill-first CLI", () => {
         installHandle: "alice/progress-skill",
         currentVersionId,
         publishedVersionIds: expect.arrayContaining([firstVersionId, currentVersionId]),
+        next: `cd ${root} && workbench unpublish ${firstVersionId}`,
       });
       const dryUnpublishHuman = await invoke(["unpublish", firstVersionId, "--dry-run", "--dir", root]);
       expect(dryUnpublishHuman.code, dryUnpublishHuman.stdout || dryUnpublishHuman.stderr).toBe(0);
       expect(dryUnpublishHuman.stdout).toContain("Would unpublish ");
       expect(dryUnpublishHuman.stdout).toContain("Dry run made no changes.");
       expect(dryUnpublishHuman.stdout).toContain(`Current published version: ${shortTestRef(currentVersionId)}.`);
+      expect(dryUnpublishHuman.stdout).toContain(`next: cd ${root} && workbench unpublish ${firstVersionId}`);
       expect(deleteRequests).toBe(0);
       const dryUnpublishCurrent = await invoke(["unpublish", currentVersionId, "--dry-run", "--dir", root, "--json"]);
       expect(dryUnpublishCurrent.code, dryUnpublishCurrent.stdout || dryUnpublishCurrent.stderr).toBe(1);
@@ -7804,6 +7812,55 @@ describe("workbench skill-first CLI", () => {
       } else {
         process.env.WORKBENCH_CONFIG = previousConfig;
       }
+    }
+  });
+
+  test("skills includes the current editable Workbench project from its root", async () => {
+    const root = await makeTempRoot("workbench-cli-skills-current-project-");
+    const homeRoot = await makeTempRoot("workbench-cli-skills-current-project-home-");
+    const previousCwd = process.cwd();
+    vi.stubEnv("WORKBENCH_CURRENT_AGENT", "codex");
+    vi.stubEnv("HOME", homeRoot);
+    vi.stubEnv("CODEX_HOME", "");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+
+    process.chdir(root);
+    try {
+      const currentProjectRoot = process.cwd();
+      const inventory = await invoke(["skills", "--json"]);
+      expect(inventory.code, inventory.stdout || inventory.stderr).toBe(0);
+      expect(stdoutJson<{
+        currentAgent?: string;
+        skills: Array<{
+          target: string;
+          scope: string;
+          name: string;
+          directoryName: string;
+          path?: string;
+          status: string;
+          workbenchProject?: boolean;
+        }>;
+        next: string | null;
+      }>(inventory)).toMatchObject({
+        currentAgent: "codex",
+        skills: [expect.objectContaining({
+          target: "codex",
+          scope: "folder",
+          directoryName: path.basename(root),
+          path: currentProjectRoot,
+          status: "project",
+          workbenchProject: true,
+        })],
+        next: null,
+      });
+
+      const human = await invoke(["skills"]);
+      expect(human.code, human.stdout || human.stderr).toBe(0);
+      expect(human.stdout).toContain("workbench-cli-skills-current-project");
+      expect(human.stdout).toContain("project");
+      expect(human.stdout).not.toContain("No skills accessible");
+    } finally {
+      process.chdir(previousCwd);
     }
   });
 
@@ -8427,7 +8484,7 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "usage",
       message: "Agent not found: nope. Configured agents: default, improver.",
-      remediation: "workbench results --agents all",
+      remediation: "workbench results --agents default",
       subject: { configuredAgents: ["default", "improver"] },
     });
 
@@ -8438,7 +8495,7 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "usage",
       message: "Agent not found: missing. Configured agents: default, improver.",
-      remediation: "workbench results --agents all",
+      remediation: "workbench results --agents default",
       subject: { configuredAgents: ["default", "improver"] },
     });
   });

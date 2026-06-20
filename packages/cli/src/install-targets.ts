@@ -193,6 +193,10 @@ async function readInventoryForRequest(request: {
     markDuplicateSkillNames(targetRows);
     skills.push(...targetRows);
   }
+  const currentProject = await currentProjectInventoryRow(request, skills);
+  if (currentProject) {
+    skills.push(currentProject);
+  }
   const visibleSkills = skills
     .filter((skill) => broadInventoryIncludesSkill(skill, request))
     .sort((left, right) => compareInstalledSkills(left, right, request.currentAgent));
@@ -205,6 +209,69 @@ async function readInventoryForRequest(request: {
     skills: visibleSkills,
     next: null,
   };
+}
+
+async function currentProjectInventoryRow(
+  request: {
+    scopes: SkillAccessScope[];
+    dir?: string;
+    target?: SkillAccessTargetId;
+    currentAgent?: SkillAccessTargetId;
+    targets: SkillAccessTargetView[];
+  },
+  existingSkills: readonly WorkbenchInstalledSkill[],
+): Promise<WorkbenchInstalledSkill | undefined> {
+  if (!request.scopes.includes("folder")) {
+    return undefined;
+  }
+  const target = currentProjectInventoryTarget(request);
+  if (!target) {
+    return undefined;
+  }
+  const projectRoot = path.resolve(request.dir ?? process.cwd());
+  if (existingSkills.some((skill) => skill.path && path.resolve(skill.path) === projectRoot)) {
+    return undefined;
+  }
+  const skillMarkdown = await fs.readFile(path.join(projectRoot, "SKILL.md"), "utf8").catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  if (skillMarkdown === null || !await isWorkbenchProjectSkillPath(projectRoot)) {
+    return undefined;
+  }
+  const metadata = parseSkillMetadata(skillMarkdown);
+  const directoryName = path.basename(projectRoot);
+  const contentHash = await readExistingTreeHash(projectRoot);
+  return {
+    target: target.id,
+    targetDisplayName: target.displayName,
+    scope: "folder",
+    root: path.dirname(projectRoot),
+    name: metadata.name ?? directoryName,
+    directoryName,
+    ...(metadata.description ? { description: metadata.description } : {}),
+    path: projectRoot,
+    status: "project",
+    workbenchProject: true,
+    contentHash,
+  };
+}
+
+function currentProjectInventoryTarget(request: {
+  target?: SkillAccessTargetId;
+  currentAgent?: SkillAccessTargetId;
+  targets: readonly SkillAccessTargetView[];
+}): SkillAccessTargetView | undefined {
+  const folderTargets = request.targets.filter((target) => target.scope === "folder");
+  if (request.target) {
+    return folderTargets.find((target) => target.id === request.target) ?? folderTargets[0];
+  }
+  if (request.currentAgent) {
+    return folderTargets.find((target) => target.id === request.currentAgent) ?? folderTargets[0];
+  }
+  return folderTargets[0];
 }
 
 function broadInventoryIncludesSkill(

@@ -10981,7 +10981,7 @@ function resolveNamedSelection<T extends { name: string }>(
     if (!entry) {
       const configured = entries.map((candidate) => candidate.name).sort();
       throw new WorkbenchCodedError("usage", `${capitalize(noun)} not found: ${name}. Configured ${noun}s: ${configuredSelectionNames(entries)}.`, {
-        remediation: namedSelectionRemediation(noun, entries, remediationCommand),
+        remediation: namedSelectionRemediation(noun, entries, remediationCommand, name),
         subject: noun === "agent"
           ? { configuredAgents: configured }
           : noun === "version"
@@ -11007,6 +11007,7 @@ function namedSelectionRemediation<T extends { name: string }>(
   noun: WorkbenchManifestEntryNoun,
   entries: readonly T[],
   command: WorkbenchSelectorCommand = "eval",
+  missingName?: string,
 ): string {
   const flag = noun === "agent" ? "--agents" : "--versions";
   const configured = entries.map((entry) => entry.name).sort();
@@ -11027,9 +11028,19 @@ function namedSelectionRemediation<T extends { name: string }>(
   if (command === "improve" && noun === "agent" && !improvementAgent) {
     return providerAgentSetupCommand("codex", "default");
   }
-  const first = improvementAgent ?? firstConfigured;
-  const selection = command === "improve" || configured.length === 1 ? first : ALL_SELECTOR;
+  const first = improvementAgent ?? closestConfiguredSelectionName(missingName, configured) ?? firstConfigured;
+  const selection = missingName || command === "improve" || configured.length === 1 ? first : ALL_SELECTOR;
   return `workbench ${command} ${flag} ${selection}`;
+}
+
+function closestConfiguredSelectionName(missingName: string | undefined, configured: readonly string[]): string | undefined {
+  const normalized = missingName?.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  return configured.find((name) => name.toLowerCase() === normalized) ??
+    configured.find((name) => name.toLowerCase().startsWith(normalized) || normalized.startsWith(name.toLowerCase())) ??
+    configured.find((name) => name.toLowerCase().includes(normalized) || normalized.includes(name.toLowerCase()));
 }
 
 function firstImprovementCapableAgentName(entries: readonly { name: string }[]): string | undefined {
