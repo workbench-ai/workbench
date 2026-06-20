@@ -1815,8 +1815,14 @@ describe("workbench skill-first CLI", () => {
           ],
         },
       },
-      next: "codex login --device-auth",
+      next: WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
     });
+    const evalDryRunHuman = await invoke(["eval", "--dry-run", "--dir", root]);
+    expect(evalDryRunHuman.code, evalDryRunHuman.stdout || evalDryRunHuman.stderr).toBe(0);
+    expect(evalDryRunHuman.stdout).toContain(`setup: ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`);
+    expect(evalDryRunHuman.stdout).toContain("setup: codex login --device-auth");
+    expect(evalDryRunHuman.stdout).toContain("setup: workbench login codex --method oauth");
+    expect(evalDryRunHuman.stdout).toContain(`next: ${WORKBENCH_AUTHOR_EVAL_CASE_COMMAND}`);
     const improve = await invoke(["improve", "--dir", root, "--json"]);
     expect(improve.code).toBe(2);
     const improveJson = stdoutJson<{ remediation: string }>(improve);
@@ -2415,6 +2421,63 @@ describe("workbench skill-first CLI", () => {
       }
     }
   }, 30_000);
+
+  test("logged-out private Workbench source install reports auth remediation", async () => {
+    const configRoot = await makeTempRoot("workbench-cli-install-logged-out-config-");
+    vi.stubEnv("WORKBENCH_CONFIG", path.join(configRoot, "config.json"));
+    vi.stubEnv("WORKBENCH_API_TOKEN", "");
+    vi.stubEnv("WORKBENCH_SMOKE_BEARER_TOKEN", "");
+    await fs.writeFile(path.join(configRoot, "config.json"), JSON.stringify({
+      schema: "workbench.cli.config.v1",
+      baseUrl: "https://cloud.test",
+    }));
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
+      expect(new Headers(init?.headers).get("authorization")).toBeNull();
+      if (url.pathname === "/api/workbench/source/skills/alice/private-skill/source") {
+        return jsonResponse({
+          schema: "workbench.cloud.error.v1",
+          code: "source_not_available",
+          message: "No published source is available.",
+          retryable: false,
+          remediation: "workbench login",
+          subject: { owner: "alice", skill: "private-skill" },
+        }, 404);
+      }
+      return jsonResponse({ message: `Unexpected path ${url.pathname}` }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const targetRoot = await makeTempRoot("workbench-cli-install-logged-out-target-");
+
+    const result = await invoke([
+      "install",
+      "alice/private-skill",
+      "--target",
+      "codex",
+      "--scope",
+      "folder",
+      "--dir",
+      targetRoot,
+      "--dry-run",
+      "--json",
+    ]);
+
+    expect(result.code, result.stdout || result.stderr).toBe(1);
+    expect(stdoutJson(result)).toMatchObject({
+      ok: false,
+      code: "auth_required",
+      message: "Log in to check access to Workbench source alice/private-skill. It may be private, team-only, or missing.",
+      remediation: "workbench login",
+      subject: {
+        owner: "alice",
+        skill: "private-skill",
+        source: "alice/private-skill",
+        authenticated: false,
+        originalCode: "source_not_available",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 
   test("keeps sync plumbing available", async () => {
     const root = await makeTempRoot("workbench-cli-remotes-");

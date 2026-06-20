@@ -1440,10 +1440,10 @@ function readinessIssuesForNext(
 }
 
 function readinessIssueNextPriority(issue: WorkbenchLaunchReadinessIssue): number {
-  if (issue.code === "adapter_auth_required" || issue.code === "provider_oauth_missing") {
+  if (issue.code === "no_eval_cases") {
     return 0;
   }
-  if (issue.code === "no_eval_cases") {
+  if (issue.code === "adapter_auth_required" || issue.code === "provider_oauth_missing") {
     return 1;
   }
   if (issue.code === "auth_required") {
@@ -1509,7 +1509,10 @@ function formatLaunchReadinessLines(readiness: WorkbenchLaunchReadiness): string
   const lines = ["readiness=blocked"];
   for (const issue of readiness.issues) {
     lines.push(`blocked: ${issue.message}`);
-    if (issue.remediation) {
+    const setupCommands = readinessIssueSetupCommands(issue);
+    if (setupCommands.length > 0) {
+      lines.push(...setupCommands.map((command) => `setup: ${command}`));
+    } else if (issue.remediation) {
       lines.push(`setup: ${issue.remediation}`);
     }
   }
@@ -4715,6 +4718,26 @@ async function fetchWorkbenchInstallSourceSnapshot(
   const text = await response.text();
   const cloudError = parseWorkbenchCloudErrorBody(text);
   if (cloudError) {
+    if (
+      cloudError.code === "source_not_available" &&
+      !token &&
+      cloudError.remediation === "workbench login"
+    ) {
+      const sourceHandle = workbenchInstallSourceArgument(source);
+      throw new WorkbenchCodedError("auth_required", `Log in to check access to Workbench source ${sourceHandle}. It may be private, team-only, or missing.`, {
+        retryable: false,
+        remediation: cloudError.remediation,
+        subject: {
+          ...(cloudError.subject ?? {}),
+          source: sourceHandle,
+          owner: source.owner,
+          skill: source.skill,
+          authenticated: false,
+          originalCode: cloudError.code,
+        },
+        exitCode: 1,
+      });
+    }
     if (cloudError.code === "source_not_available" && token) {
       throw new WorkbenchCodedError(cloudError.code, `${cloudError.message} You are already logged in; verify the OWNER/SKILL handle or ask the owner for access.`, {
         retryable: false,
