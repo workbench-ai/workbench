@@ -2068,12 +2068,18 @@ describe("workbench skill-first CLI", () => {
         ".workbench/cases/case-001/case.yaml",
         ".workbench/cases/case-001/tests/test.sh",
       ],
-      next: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml .workbench/cases/case-001/tests/test.sh",
+      editFiles: [
+        ".workbench/cases/case-001/case.yaml",
+      ],
+      harnessPath: ".workbench/cases/case-001/tests/test.sh",
+      next: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml",
     });
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
       .resolves.not.toContain("command:");
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), "utf8"))
       .resolves.toContain("$OUTPUT_DIR/result.json");
+    await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), "utf8"))
+      .resolves.not.toContain("before using eval evidence");
     const duplicateCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
     expect(duplicateCase.code).toBe(2);
     expect(stdoutJson(duplicateCase)).toMatchObject({
@@ -3899,6 +3905,20 @@ describe("workbench skill-first CLI", () => {
     expect(gradeHuman.code, gradeHuman.stdout || gradeHuman.stderr).toBe(0);
     expect(gradeHuman.stdout).toContain(`grade job: ${gradeJob.id}`);
     expect(gradeHuman.stdout).toContain(`show=workbench show ${gradeJob.id}`);
+
+    const splitEvalDryRun = await invoke(["eval", "--dry-run", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
+    expect(splitEvalDryRun.code, splitEvalDryRun.stdout || splitEvalDryRun.stderr).toBe(0);
+    const splitEvalDryRunJson = stdoutJson<{
+      plan: {
+        cachedRunIds: string[];
+        cachedJobIds: string[];
+      };
+    }>(splitEvalDryRun);
+    expect(splitEvalDryRunJson.plan.cachedRunIds.sort()).toEqual([runId, gradeId].sort());
+    expect(splitEvalDryRunJson.plan.cachedJobIds).toEqual(expect.arrayContaining([executeJob.id, gradeJob.id]));
+    const splitEvalDryRunHuman = await invoke(["eval", "--dry-run", "--dir", root, "--agents", "default", "--cases", "investor-focus"]);
+    expect(splitEvalDryRunHuman.code, splitEvalDryRunHuman.stdout || splitEvalDryRunHuman.stderr).toBe(0);
+    expect(splitEvalDryRunHuman.stdout).toContain("cached=2");
 
     const beforeEvalJobIds = new Set(splitSnapshot.jobs.map((job) => job.id));
     const evalResult = await invoke(["eval", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);

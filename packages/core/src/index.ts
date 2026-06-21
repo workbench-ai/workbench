@@ -376,7 +376,7 @@ export function workbenchDraftEvalCaseFiles(caseId = "case-001"): WorkbenchDraft
   const casePath = `${caseDir}/case.yaml`;
   const testPath = `${testDir}/test.sh`;
   const placeholderSummary =
-    `Draft case ${caseId} still contains placeholder assertions. Replace ${casePath} and ${testPath} before using eval evidence.`;
+    `Draft case ${caseId} still contains placeholder local/command assertions. Provider-backed grading can use ${casePath}; replace ${testPath} before using this case with local or command agents.`;
   const caseLines = [
     "version: 1",
     `id: ${caseId}`,
@@ -513,6 +513,7 @@ export interface WorkbenchEvalPreview {
   cases: number;
   samples: number;
   cachedRunIds: string[];
+  cachedJobIds: string[];
   adapterAuthTargets: WorkbenchAdapterAuthTarget[];
   readiness: WorkbenchLaunchReadiness;
 }
@@ -4976,24 +4977,21 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
     : readinessFromIssues([...draftCaseIssues, ...localReadiness.issues]);
   const adapterAuthTargets = uniqueLocalAdapterAuthTargets(runtime.selectedAgents.flatMap(localAdapterAuthTargetsForAgent));
   const samples = options.samples ?? 1;
-  const cachedRunIds = options.cloud === true || options.rerun === true
-    ? []
-    : runtime.skillBundles.flatMap((skillBundle) =>
-      runtime.selectedAgents.flatMap((agent) => {
-        const reusable = latestReusableEvalRun({
-          state,
-          versionId: version.id,
-          skillName: skillBundle.skillName,
-          skillBundleHash: skillBundle.hash,
-          evalHash: runtime.evalSnapshot.hash,
-          agentName: agent.name,
-          agentHash: hashJson(agent),
-          samples,
-          caseCount: selectedCases.length,
-        });
-        return reusable ? [reusable.id] : [];
-      })
-    );
+  const targets = runtime.skillBundles.flatMap((skillBundle) =>
+    runtime.selectedAgents.map((agent): WorkbenchEvaluationRunTarget => ({ skillBundle, agent }))
+  );
+  const cached = cachedEvalPreviewEvidence({
+    state,
+    version,
+    evalSnapshot: runtime.evalSnapshot,
+    targets,
+    cases: selectedCases,
+    samples,
+    kind: options.kind ?? "eval",
+    cloud: options.cloud === true,
+    rerun: options.rerun === true,
+    selectedSamples: options.selectedSamples,
+  });
   return {
     dryRun: true,
     location: options.cloud === true ? "cloud" : "local",
@@ -5005,9 +5003,65 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
     agents: runtime.selectedAgents.map((agent) => ({ name: agent.name, hash: hashJson(agent) })),
     cases: selectedCases.length,
     samples,
-    cachedRunIds,
+    cachedRunIds: cached.runIds,
+    cachedJobIds: cached.jobIds,
     adapterAuthTargets,
     readiness,
+  };
+}
+
+function cachedEvalPreviewEvidence(args: {
+  state: WorkbenchProjectState;
+  version: WorkbenchVersion;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  targets: readonly WorkbenchEvaluationRunTarget[];
+  cases: readonly WorkbenchEvalCaseRuntime[];
+  samples: number;
+  kind: WorkbenchRunKind;
+  cloud: boolean;
+  rerun: boolean;
+  selectedSamples?: readonly unknown[];
+}): { runIds: string[]; jobIds: string[] } {
+  if (
+    args.cloud ||
+    args.rerun ||
+    args.kind !== "eval" ||
+    args.cases.length === 0 ||
+    (args.selectedSamples?.length ?? 0) > 0
+  ) {
+    return { runIds: [], jobIds: [] };
+  }
+  const wholeRunIds = uniqueStrings(args.targets.flatMap((target) => {
+    const reusable = latestReusableEvalRun({
+      state: args.state,
+      versionId: args.version.id,
+      skillName: target.skillBundle.skillName,
+      skillBundleHash: target.skillBundle.hash,
+      evalHash: args.evalSnapshot.hash,
+      agentName: target.agent.name,
+      agentHash: hashJson(target.agent),
+      samples: args.samples,
+      caseCount: args.cases.length,
+    });
+    return reusable ? [reusable.id] : [];
+  }));
+  if (wholeRunIds.length > 0) {
+    return { runIds: wholeRunIds, jobIds: [] };
+  }
+  const split = reusableSplitEvalMatrixEvidence({
+    state: args.state,
+    version: args.version,
+    evalSnapshot: args.evalSnapshot,
+    targets: args.targets,
+    cases: args.cases,
+    samples: args.samples,
+  });
+  if (!split) {
+    return { runIds: [], jobIds: [] };
+  }
+  return {
+    runIds: uniqueStrings(split.jobs.map((job) => job.runId)),
+    jobIds: split.jobs.map((job) => job.id),
   };
 }
 
@@ -7238,7 +7292,12 @@ function runMeasurementSummaries(
       runsByReferencedJobId.set(jobId, current);
     }
   }
-  const jobsByMeasurement = new Map<string, { run: WorkbenchRun; jobs: WorkbenchJob[] }>();
+  const jobsByMeasurement = new Map<string, {
+    run: WorkbenchRun;
+    jobs: WorkbenchJob[];
+    versionId: string;
+    evalHash: string;
+  }>();
   for (const job of jobs) {
     if (job.caseId === "current") {
       continue;
@@ -7247,23 +7306,25 @@ function runMeasurementSummaries(
     if (!run) {
       continue;
     }
+    const versionId = run.operationPlan?.versionId ?? run.versionId ?? job.versionId;
+    const evalHash = run.operationPlan?.evalHash ?? run.evalHash ?? job.evalHash;
     const key = [
       run.id,
-      job.versionId,
+      versionId,
       job.skillName,
       job.skillBundleHash,
-      job.evalHash,
+      evalHash,
       job.agentName,
       job.agentHash,
     ].join("\0");
-    const current = jobsByMeasurement.get(key) ?? { run, jobs: [] };
+    const current = jobsByMeasurement.get(key) ?? { run, jobs: [], versionId, evalHash };
     current.jobs.push(job);
     jobsByMeasurement.set(key, current);
   }
   const measuredRunIds = new Set<string>();
-  const measurements = [...jobsByMeasurement.values()].map(({ run, jobs: measurementJobs }) => {
+  const measurements = [...jobsByMeasurement.values()].map(({ run, jobs: measurementJobs, versionId, evalHash }) => {
     measuredRunIds.add(run.id);
-    return runMeasurementSummaryFromJobs(run, measurementJobs);
+    return runMeasurementSummaryFromJobs(run, measurementJobs, { versionId, evalHash });
   });
   for (const run of runs) {
     if (!measuredRunIds.has(run.id)) {
@@ -7276,6 +7337,7 @@ function runMeasurementSummaries(
 function runMeasurementSummaryFromJobs(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
+  options: { versionId?: string; evalHash?: string } = {},
 ): WorkbenchMeasurementSummary {
   const [firstJob] = jobs;
   if (!firstJob) {
@@ -7292,10 +7354,10 @@ function runMeasurementSummaryFromJobs(
     ? undefined
     : averageScores(scoredJobs.map(jobQualityScore));
   return {
-    versionId: firstJob.versionId,
+    versionId: options.versionId ?? firstJob.versionId,
     skillName: firstJob.skillName,
     skillBundleHash: firstJob.skillBundleHash,
-    evalHash: firstJob.evalHash,
+    evalHash: options.evalHash ?? firstJob.evalHash,
     agentName: firstJob.agentName,
     agentHash: firstJob.agentHash,
     runId: run.id,

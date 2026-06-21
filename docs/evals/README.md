@@ -40,7 +40,7 @@ score:
   adapter: tests
 ```
 
-`workbench new` creates the eval definition and an empty `.workbench/cases/` directory. Add at least one case before running `workbench eval`; a real eval with no cases fails with `no_eval_cases` and prints `workbench case draft CASE_ID`, while `eval --dry-run` still previews `cases=0` plus any non-case launch readiness without writing state. `workbench case draft CASE_ID` creates a draft case plus an executable `tests/test.sh` harness, then prints an editor `next` command for both generated files. The harness intentionally fails with score `0` until the placeholder prompt, rubric, and assertions are replaced.
+`workbench new` creates the eval definition and an empty `.workbench/cases/` directory. Add at least one case before running `workbench eval`; a real eval with no cases fails with `no_eval_cases` and prints `workbench case draft CASE_ID`, while `eval --dry-run` still previews `cases=0` plus any non-case launch readiness without writing state. `workbench case draft CASE_ID` creates a draft case plus an executable local/command `tests/test.sh` harness. Provider-backed projects open only `case.yaml` in `next`; local and command-backed projects open both generated files. The harness intentionally fails with score `0` until its placeholder assertions are replaced, and provider-backed cases can use prompt/rubric-only `case.yaml`.
 
 Shell tests write one public result file:
 
@@ -83,7 +83,7 @@ Skill eval jobs support Docker-style command tests through `local` or `command` 
 workbench new ./earnings-prep
 cd ./earnings-prep
 workbench case draft case-001
-# edit .workbench/cases/case-001/case.yaml and tests/test.sh
+# edit .workbench/cases/case-001/case.yaml; edit tests/test.sh for local/command agents
 workbench eval --agents default -n 1
 workbench results
 workbench log --versions

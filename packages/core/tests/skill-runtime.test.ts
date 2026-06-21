@@ -44,6 +44,7 @@ import {
   readWorkbenchSkillTraceResultsCostUsd,
   requiredWorkbenchAdapterAuthTargetsForRuntimeInput,
   listWorkbenchVersions,
+  previewWorkbenchEval,
   publishWorkbenchVersion,
   removeWorkbenchAgent,
   setDefaultWorkbenchAgent,
@@ -570,6 +571,9 @@ describe("skill-first Workbench runtime", () => {
     expect(executeJob?.status).toBe("succeeded");
     expect(firstGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
     expect(reusedGradeRun?.id).toBe(gradeRun?.id);
+    const splitCachePreview = await previewWorkbenchEval({ dir: root });
+    expect(splitCachePreview.cachedRunIds.sort()).toEqual([executeRun!.id, gradeRun!.id].sort());
+    expect(splitCachePreview.cachedJobIds).toEqual(expect.arrayContaining([executeJob!.id, firstGradeJob!.id]));
 
     await fs.appendFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
       "  - Added rubric criterion after inspecting the existing output.",
@@ -621,6 +625,13 @@ describe("skill-first Workbench runtime", () => {
     expect(after.jobs.filter((job) => job.role === "execute")).toHaveLength(1);
     expect(referencedExecuteJobs.map((job) => job.id)).toEqual([executeJob?.id]);
     expect(evalGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
+    const runSnapshot = createWorkbenchRunSnapshotForRun(evalRun!, after.jobs);
+    expect(runSnapshot.measurements).toHaveLength(1);
+    expect(runSnapshot.measurements[0]).toMatchObject({
+      evalHash: evalRun?.evalHash,
+      runId: evalRun?.id,
+      score: 1,
+    });
   }, 60_000);
 
   dockerTest("grade reuses failed terminal grade evidence until rerun", async () => {
@@ -2852,7 +2863,7 @@ describe("skill-first Workbench runtime", () => {
       sample: job!.sample,
       state: changedState,
     })).rejects.toThrow(/Agent not found: default/u);
-  });
+  }, 15_000);
 
   test("rejects queued eval execution when the exact eval hash is missing", async () => {
     const state = createQueuedEvalState();

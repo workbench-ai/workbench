@@ -417,7 +417,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  workbench case draft [ID] [--dir DIR] [--json]",
     "  workbench case draft --id ID [--dir DIR] [--json]",
     "",
-    "Creates a draft eval case with case.yaml and tests/test.sh. Omit ID to use the next available case id.",
+    "Creates a draft eval case with case.yaml plus a local tests/test.sh harness. Omit ID to use the next available case id.",
     "",
     "Example:",
     "  workbench case draft case-001",
@@ -1203,11 +1203,15 @@ async function handleEvalDryRun(parsed: ParsedArgs, io: CliIo, command: "run" | 
   }, parsed, io, () => [
     `Would run ${command} ${plan.location}: version=${displayRef(plan.versionId)} eval=${plan.evalHash}`,
     `versions=${plan.skills.map((skill) => skill.name).join(",")} agents=${plan.agents.map((agent) => agent.name).join(",")}`,
-    `cases=${plan.cases} samples=${plan.samples} cached=${plan.cachedRunIds.length}`,
+    `cases=${plan.cases} samples=${plan.samples} cached=${previewCachedCount(plan)}`,
     ...formatLaunchReadinessLines(readiness),
     "No files or Workbench state were written.",
     ...(next ? [`next: ${next}`] : []),
   ].join("\n"));
+}
+
+function previewCachedCount(plan: WorkbenchEvalPreview): number {
+  return plan.cachedJobIds.length > 0 ? plan.cachedJobIds.length : plan.cachedRunIds.length;
 }
 
 function evalOperationRequest(
@@ -3203,20 +3207,57 @@ async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
       await fs.chmod(target, 0o755);
     }
   }
-  const next = draftCaseEditCommand(files);
+  const includeHarnessInNext = caseDraftShouldEditHarness(snapshot);
+  const editFiles = draftCaseEditFiles(files, { includeHarness: includeHarnessInNext });
+  const next = draftCaseEditCommand(editFiles);
+  const harnessPath = caseDraftHarnessPath(files);
   return emitResult("workbench.cli.case-draft.v1", {
     caseId,
     files: files.map((file) => file.path) as unknown as Json,
+    editFiles: editFiles.map((file) => file.path) as unknown as Json,
+    ...(harnessPath ? { harnessPath } : {}),
     next,
   }, parsed, io, () => [
     `Drafted eval case ${caseId}.`,
     ...files.map((file) => `  ${file.path}`),
+    ...(!includeHarnessInNext && harnessPath
+      ? [`Provider-backed cases can start with case.yaml; edit ${harnessPath} for local or command-agent harnesses.`]
+      : []),
     `next: ${next}`,
   ].join("\n"));
 }
 
+function draftCaseEditFiles(
+  files: readonly SurfaceSnapshotFile[],
+  options: { includeHarness: boolean },
+): SurfaceSnapshotFile[] {
+  if (options.includeHarness) {
+    return [...files];
+  }
+  return files.filter((file) => !isDraftCaseHarnessPath(file.path));
+}
+
 function draftCaseEditCommand(files: readonly SurfaceSnapshotFile[]): string {
   return [EDITOR_COMMAND, ...files.map((file) => file.path)].join(" ");
+}
+
+function caseDraftShouldEditHarness(snapshot: WorkbenchInspectionSnapshot): boolean {
+  const defaultAgent = snapshot.status.defaultAgent
+    ? snapshot.agents.find((entry) => entry.agent.name === snapshot.status.defaultAgent)?.agent
+    : snapshot.agents[0]?.agent;
+  return !defaultAgent || !isProviderBackedCaseDraftAgent(defaultAgent.adapter);
+}
+
+function isProviderBackedCaseDraftAgent(adapter: string): boolean {
+  return adapter === "codex" || adapter === "claude";
+}
+
+function caseDraftHarnessPath(files: readonly SurfaceSnapshotFile[]): string | undefined {
+  return files.find((file) => isDraftCaseHarnessPath(file.path))?.path;
+}
+
+function isDraftCaseHarnessPath(filePath: string): boolean {
+  return filePath.endsWith("/tests/test.sh");
 }
 
 function assertDraftCaseId(caseId: string): void {
