@@ -1464,16 +1464,16 @@ function adapterAuthRequestEntry(
   } as unknown as Json;
 }
 
-function adapterAuthRequestForStep(
-  args: Pick<WorkbenchExecutionRuntimeInput, "adapterAuthProfiles" | "adapterAuthRoot" | "adapterAuthRequest">,
-  adapterId: string,
+function adapterAuthRequestForOperation(
+  args: Pick<WorkbenchExecutionRuntimeInput, "adapterAuthProfiles" | "adapterAuthRoot" | "adapterAuthRequest" | "adapterManifests">,
+  operation: WorkbenchRuntimeControlOperation,
 ): Json | undefined {
   const profiles = (args.adapterAuthProfiles ?? [])
     .map((bundle) => sanitizeWorkbenchAdapterAuthBundle(bundle));
   if (profiles.length === 0) {
     return args.adapterAuthRequest;
   }
-  return adapterAuthRequest(profiles, args.adapterAuthRoot, adapterId);
+  return adapterAuthRequest(profiles, args.adapterAuthRoot, operation.invocation.use);
 }
 
 function adapterAuthEnvForStep(
@@ -1848,8 +1848,18 @@ async function runRuntimeControlOperationSequence(args: {
   if (request.operations.length === 0) {
     throw new Error("Runtime-control operation sequence must include at least one operation.");
   }
+  const adapterAuth = await materializeSandboxAdapterAuth(args.args, args.execution);
+  const runtimeArgs: WorkbenchExecutionRuntimeInput = {
+    ...args.args,
+    ...(adapterAuth.root ? { adapterAuthRoot: adapterAuth.root } : {}),
+    adapterAuthEnv: {
+      ...(args.args.adapterAuthEnv ?? {}),
+      ...adapterAuth.env,
+    },
+  };
+  try {
   await stageRuntimeControlWorkspace({
-    args: args.args,
+    args: runtimeArgs,
     execution: args.execution,
     workspace: args.workspace,
     request,
@@ -1865,32 +1875,32 @@ async function runRuntimeControlOperationSequence(args: {
     const label = runtimeControlOperationLabel(operation, index);
     await fs.rm(workbenchAdapterOperationResultPath(runtimeControlOutputDir(args.workspace)), { force: true }).catch(() => undefined);
     const requestPath = await writeRuntimeControlAdapterRequest({
-      args: args.args,
+      args: runtimeArgs,
       execution: args.execution,
       workspace: args.workspace,
       operation,
       label,
       index,
     });
-    const command = runtimeControlOperationCommand(operation, args.args.adapterManifests);
+    const command = runtimeControlOperationCommand(operation, runtimeArgs.adapterManifests);
     const stepAdapterId = operation.invocation.use;
     const stepTimeoutMs = runtimeControlStepTimeoutMs(args.execution);
     const result = await runRuntimeControlShellCommand(command, {
       cwd: args.workspace,
       timeout: stepTimeoutMs + RUNTIME_CONTROL_STEP_GRACE_MS,
-      progressTarget: args.args.progress,
+      progressTarget: runtimeArgs.progress,
       signal: args.signal,
       env: runtimeControlAdapterEnv({
         requestPath,
         outputDir: runtimeControlOutputDir(args.workspace),
-        adapterEnv: adapterAuthEnvForStep(args.args, stepAdapterId),
-        runtimeEnv: args.args.adapterRuntimeEnv,
+        adapterEnv: adapterAuthEnvForStep(runtimeArgs, stepAdapterId),
+        runtimeEnv: runtimeArgs.adapterRuntimeEnv,
         timeoutMs: stepTimeoutMs,
       }),
     });
     await writeSurfaceFiles(runtimeControlOutputDir(args.workspace), [
-      textFile(`.workbench/traces/${args.args.job.id}/${label}/stdout.log`, result.stdout ?? ""),
-      textFile(`.workbench/traces/${args.args.job.id}/${label}/stderr.log`, result.stderr ?? ""),
+      textFile(`.workbench/traces/${runtimeArgs.job.id}/${label}/stdout.log`, result.stdout ?? ""),
+      textFile(`.workbench/traces/${runtimeArgs.job.id}/${label}/stderr.log`, result.stderr ?? ""),
     ]);
     if (result.error || result.status !== 0) {
       sequenceError = runtimeControlStepFailureMessage({
@@ -1903,7 +1913,7 @@ async function runRuntimeControlOperationSequence(args: {
         textFile("stderr.log", runtimeControlFailureStderrEvidence(sequenceError, result.stderr ?? "")),
         textFile("stdout.log", result.stdout ?? ""),
         textFile(
-          `.workbench/traces/${args.args.job.id}/${label}/error.json`,
+          `.workbench/traces/${runtimeArgs.job.id}/${label}/error.json`,
           `${JSON.stringify(runtimeControlStepErrorEvidence({
             label,
             operation,
@@ -1922,7 +1932,7 @@ async function runRuntimeControlOperationSequence(args: {
     operationResults.push(operationResult);
     await writeSurfaceFiles(runtimeControlOutputDir(args.workspace), [
       textFile(
-        `.workbench/traces/${args.args.job.id}/${label}/result.json`,
+        `.workbench/traces/${runtimeArgs.job.id}/${label}/result.json`,
         `${JSON.stringify(operationResult, null, 2)}\n`,
       ),
     ]);
@@ -1955,6 +1965,14 @@ async function runRuntimeControlOperationSequence(args: {
     ...(gradeResult?.feedback !== undefined ? { feedback: gradeResult.feedback } : {}),
     ...(sequenceError ? { error: sequenceError } : {}),
   };
+  } finally {
+    if (adapterAuth.captureUpdates) {
+      await persistMaterializedAdapterAuthUpdates(runtimeArgs, adapterAuth.captureUpdates);
+    }
+    if (adapterAuth.cleanup) {
+      await adapterAuth.cleanup().catch(() => undefined);
+    }
+  }
 }
 
 function runtimeControlSkillRunResult(args: {
@@ -2167,6 +2185,7 @@ async function writeRuntimeControlAdapterRequest(args: {
   const caseId = runtimeControlCaseId(args.args, args.execution);
   const casePrompt = args.args.engineCases.find((entry) => entry.id === caseId)?.case.prompt;
   const requestId = `${args.execution.id}:${args.label}:${args.index}`;
+  const auth = adapterAuthRequestForOperation(args.args, args.operation);
   const payload: Record<string, unknown> = {
     protocol: "workbench.adapter.v3",
     id: requestId,
@@ -2187,9 +2206,7 @@ async function writeRuntimeControlAdapterRequest(args: {
       with: args.operation.invocation.with ?? {},
       ...(args.operation.invocation.auth !== undefined ? { auth: args.operation.invocation.auth } : {}),
     },
-    ...(adapterAuthRequestForStep(args.args, args.operation.invocation.use) !== undefined
-      ? { auth: adapterAuthRequestForStep(args.args, args.operation.invocation.use) }
-      : {}),
+    ...(auth !== undefined ? { auth } : {}),
     context: {
       eval: {
         name: args.args.spec.eval.name,
@@ -4435,7 +4452,7 @@ function gradeSubjectsForRuntime(args: {
     target,
   ]));
   const currentGradedSubjectJobIds = new Set(args.state.jobs.flatMap((job) =>
-    job.role === "grade" && job.status === "succeeded" && job.evalHash === args.evalSnapshot.hash
+    job.role === "grade" && isReusableTerminalGradeStatus(job.status) && job.evalHash === args.evalSnapshot.hash
       ? (job.dependencies ?? []).flatMap((dependency) => dependency.jobId ? [dependency.jobId] : [])
       : []
   ));
@@ -4502,14 +4519,14 @@ function latestReusableGradeRun(args: {
     .filter((run) =>
       run.kind === "grade" &&
       run.evalHash === args.evalHash &&
-      run.status === "succeeded"
+      isReusableTerminalGradeStatus(run.status)
     )
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     .find((run) => {
       const gradeJobs = args.state.jobs.filter((job) =>
         job.runId === run.id &&
         job.role === "grade" &&
-        job.status === "succeeded" &&
+        isReusableTerminalGradeStatus(job.status) &&
         job.evalHash === args.evalHash
       );
       const gradedSubjectIds = new Set(gradeJobs.flatMap((job) =>
@@ -4517,6 +4534,10 @@ function latestReusableGradeRun(args: {
       ));
       return [...eligibleSubjectJobIds].every((jobId) => gradedSubjectIds.has(jobId));
     });
+}
+
+function isReusableTerminalGradeStatus(status: WorkbenchJob["status"] | WorkbenchRun["status"]): boolean {
+  return status === "succeeded" || status === "failed";
 }
 
 function materializeReusableSplitEvalMatrixRun(args: {
@@ -4608,7 +4629,7 @@ function reusableSplitEvalMatrixEvidence(args: {
   ]));
   const expectedKeySet = new Set(expectedKeys);
   for (const job of args.state.jobs) {
-    if ((job.role ?? "execute") !== "execute" || job.status !== "succeeded" || job.versionId !== args.version.id) {
+    if ((job.role ?? "execute") !== "execute" || job.status !== "succeeded") {
       continue;
     }
     const runtimeCase = casesById.get(job.caseId);
@@ -4634,7 +4655,6 @@ function reusableSplitEvalMatrixEvidence(args: {
     if (
       job.role !== "grade" ||
       job.status !== "succeeded" ||
-      job.versionId !== args.version.id ||
       job.evalHash !== args.evalSnapshot.hash ||
       jobQualityScore(job) === undefined
     ) {
@@ -4682,7 +4702,6 @@ function splitEvalTargetKey(args: {
   agentHash: string;
 }): string {
   return [
-    args.versionId,
     args.skillName,
     args.skillBundleHash,
     args.agentName,
@@ -4779,6 +4798,61 @@ function comparableEvalCaseDescriptorContent(content: string): string {
   const record = parseCaseSnapshotRecord(content);
   delete record.rubric;
   return `${YAML.stringify(canonicalize(record)).trimEnd()}\n`;
+}
+
+function reusableExecutionSubjectForPlannedJob(args: {
+  state: WorkbenchProjectState;
+  version: WorkbenchVersion;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  plannedJob: PlannedWorkbenchEvaluationJob;
+}): WorkbenchGradeSubject | undefined {
+  const candidates = args.state.jobs
+    .filter((job) =>
+      (job.role ?? "execute") === "execute" &&
+      job.status === "succeeded" &&
+      job.skillBundleHash === args.plannedJob.skillBundle.hash &&
+      job.agentHash === hashJson(args.plannedJob.agent) &&
+      job.caseId === args.plannedJob.runtimeCase.id &&
+      job.sample === args.plannedJob.sample &&
+      executionJobMatchesCurrentEvalCase(args.state, job, args.evalSnapshot, args.plannedJob.runtimeCase)
+    )
+    .sort(compareJobsNewestFirst);
+  for (const job of candidates) {
+    const artifact = job.artifactIds.flatMap((id) => args.state.artifacts.find((entry) => entry.id === id) ?? [])[0];
+    const trace = job.traceIds.flatMap((id) => args.state.traces.find((entry) => entry.id === id) ?? [])[0];
+    if (!artifact || !trace) {
+      continue;
+    }
+    return {
+      job,
+      artifact,
+      trace,
+      skillBundle: args.plannedJob.skillBundle,
+      agent: args.plannedJob.agent,
+      runtimeCase: args.plannedJob.runtimeCase,
+    };
+  }
+  return undefined;
+}
+
+function latestReusableTerminalGradeJobForExecution(args: {
+  state: WorkbenchProjectState;
+  evalHash: string;
+  executionJob: WorkbenchJob;
+}): WorkbenchJob | undefined {
+  return args.state.jobs
+    .filter((job) =>
+      job.role === "grade" &&
+      isReusableTerminalGradeStatus(job.status) &&
+      job.evalHash === args.evalHash &&
+      job.versionId === args.executionJob.versionId &&
+      job.skillBundleHash === args.executionJob.skillBundleHash &&
+      job.agentHash === args.executionJob.agentHash &&
+      job.caseId === args.executionJob.caseId &&
+      job.sample === args.executionJob.sample &&
+      (job.dependencies ?? []).some((dependency) => dependency.jobId === args.executionJob.id)
+    )
+    .sort(compareJobsNewestFirst)[0];
 }
 
 function completedEvaluationJobFromGradeSubject(args: {
@@ -10646,10 +10720,43 @@ async function executeWorkbenchEvaluationRun(args: {
       }
     }
   }
-  const inputsByJobId = new Map(planned.map((entry) => [entry.input.job.id, entry]));
-  run.jobIds = Array.from(new Set([...(args.run?.jobIds ?? []), ...planned.map((entry) => entry.input.job.id)]));
-  upsertRunObject(args.state.runs, run, args.run ? { replace: true } : {});
+  const reusableCompletedExecutionJobs: CompletedWorkbenchEvaluationJob[] = [];
+  const plannedForExecution: PlannedWorkbenchEvaluationJob[] = [];
   for (const plannedJob of planned) {
+    const reusableSubject = args.kind === "eval" && args.rerun !== true
+      ? reusableExecutionSubjectForPlannedJob({
+          state: args.state,
+          version: args.version,
+          evalSnapshot: args.evalSnapshot,
+          plannedJob,
+        })
+      : undefined;
+    if (reusableSubject) {
+      reusableCompletedExecutionJobs.push(completedEvaluationJobFromGradeSubject({
+        root: args.root,
+        state: args.state,
+        run,
+        version: args.version,
+        evalSnapshot: args.evalSnapshot,
+        environmentDockerfile,
+        subject: reusableSubject,
+      }));
+      continue;
+    }
+    plannedForExecution.push(plannedJob);
+  }
+  const inputsByJobId = new Map(plannedForExecution.map((entry) => [entry.input.job.id, entry]));
+  run.jobIds = Array.from(new Set([
+    ...(args.run?.jobIds ?? []),
+    ...reusableCompletedExecutionJobs.map((entry) => entry.objects.job.id),
+    ...plannedForExecution.map((entry) => entry.input.job.id),
+  ]));
+  run.traceIds = Array.from(new Set([
+    ...run.traceIds,
+    ...reusableCompletedExecutionJobs.flatMap((entry) => entry.objects.job.traceIds),
+  ]));
+  upsertRunObject(args.state.runs, run, args.run ? { replace: true } : {});
+  for (const plannedJob of plannedForExecution) {
     upsertJobObject(args.state.jobs, skillEvalLifecycleJobFromRemoteJob({
       remoteJob: plannedJob.input.job,
       run,
@@ -10699,68 +10806,76 @@ async function executeWorkbenchEvaluationRun(args: {
     upsertImmutableById(args.state.traces, result.trace, "trace");
     await enqueueRunStateSave();
   };
-  let dag: Awaited<ReturnType<typeof runWorkbenchExecutionDag>>;
-  try {
-    dag = await runWorkbenchExecutionDag({
-      jobs: planned.map((entry) => entry.input.job),
-      capacity: await localWorkbenchSkillEvalCapacity(args.root),
-      sandboxBackend: DOCKER_SANDBOX_BACKEND,
-      onJobStarted: async (job) => {
-        const plannedJob = inputsByJobId.get(job.id);
-        if (!plannedJob) {
-          return;
-        }
-        upsertJobObject(args.state.jobs, skillEvalLifecycleJobFromRemoteJob({
-          remoteJob: job,
-          run,
-          version: args.version,
-          skillBundle: plannedJob.skillBundle,
-          evalSnapshot: args.evalSnapshot,
-          agent: plannedJob.agent,
-          runtimeCase: plannedJob.runtimeCase,
-          sample: plannedJob.sample,
-        }));
-        run.lastProgressAt = job.startedAt ?? now();
-        upsertRunObject(args.state.runs, run, args.run ? { replace: true } : {});
-        await enqueueRunStateSave();
-      },
-      onJobFinished: persistTerminalJob,
-      shouldCancelJob: async () => await hasLocalRunCancellationRequest(args.root, run.id),
-      executeJob: async (job, control) => {
-        const plannedJob = inputsByJobId.get(job.id);
-        if (!plannedJob) {
-          throw new Error(`Missing planned skill eval job: ${job.id}`);
-        }
-        return await executeWorkbenchExecutionJob({
-          ...plannedJob.input,
-          job,
-          progress: localWorkbenchExecutionProgressTarget({
-            root: args.root,
-            state: args.state,
-            projectId: job.projectId,
-            runId: run.id,
-            jobId: job.id,
-          }),
-        }, {
-          sandboxBackend: DOCKER_SANDBOX_BACKEND,
-          loadLocalAdapterAuthProfiles: isProviderBackedSkillEvalAgent(plannedJob.agent),
-          adapterAuthStoreRoot: args.adapterAuthStoreRoot,
-          signal: control.signal,
-        });
-      },
-    });
-  } catch (error) {
-    const finishedAt = now();
-    run.finishedAt = finishedAt;
-    run.status = "failed";
-    run.error = error instanceof Error ? error.message : String(error);
-    upsertRunObject(args.state.runs, run, args.run ? { replace: true } : {});
-    await saveState(args.root, args.state);
-    return run;
+  let dagJobs: RemoteWorkbenchJob[] = [];
+  if (plannedForExecution.length > 0) {
+    try {
+      const dag = await runWorkbenchExecutionDag({
+        jobs: plannedForExecution.map((entry) => entry.input.job),
+        capacity: await localWorkbenchSkillEvalCapacity(args.root),
+        sandboxBackend: DOCKER_SANDBOX_BACKEND,
+        onJobStarted: async (job) => {
+          const plannedJob = inputsByJobId.get(job.id);
+          if (!plannedJob) {
+            return;
+          }
+          upsertJobObject(args.state.jobs, skillEvalLifecycleJobFromRemoteJob({
+            remoteJob: job,
+            run,
+            version: args.version,
+            skillBundle: plannedJob.skillBundle,
+            evalSnapshot: args.evalSnapshot,
+            agent: plannedJob.agent,
+            runtimeCase: plannedJob.runtimeCase,
+            sample: plannedJob.sample,
+          }));
+          run.lastProgressAt = job.startedAt ?? now();
+          upsertRunObject(args.state.runs, run, args.run ? { replace: true } : {});
+          await enqueueRunStateSave();
+        },
+        onJobFinished: persistTerminalJob,
+        shouldCancelJob: async () => await hasLocalRunCancellationRequest(args.root, run.id),
+        executeJob: async (job, control) => {
+          const plannedJob = inputsByJobId.get(job.id);
+          if (!plannedJob) {
+            throw new Error(`Missing planned skill eval job: ${job.id}`);
+          }
+          return await executeWorkbenchExecutionJob({
+            ...plannedJob.input,
+            job,
+            progress: localWorkbenchExecutionProgressTarget({
+              root: args.root,
+              state: args.state,
+              projectId: job.projectId,
+              runId: run.id,
+              jobId: job.id,
+            }),
+          }, {
+            sandboxBackend: DOCKER_SANDBOX_BACKEND,
+            loadLocalAdapterAuthProfiles: isProviderBackedSkillEvalAgent(plannedJob.agent),
+            adapterAuthStoreRoot: args.adapterAuthStoreRoot,
+            signal: control.signal,
+          });
+        },
+      });
+      dagJobs = dag.jobs;
+    } catch (error) {
+      const finishedAt = now();
+      run.finishedAt = finishedAt;
+      run.status = "failed";
+      run.error = error instanceof Error ? error.message : String(error);
+      upsertRunObject(args.state.runs, run, args.run ? { replace: true } : {});
+      await saveState(args.root, args.state);
+      return run;
+    }
   }
   const jobs: WorkbenchJob[] = [];
-  const completedExecutionJobs: CompletedWorkbenchEvaluationJob[] = [];
-  for (const completed of dag.jobs) {
+  const completedExecutionJobs: CompletedWorkbenchEvaluationJob[] = [...reusableCompletedExecutionJobs];
+  for (const reused of reusableCompletedExecutionJobs) {
+    jobs.push(reused.objects.job);
+    run.jobIds = Array.from(new Set([...(run.jobIds ?? []), reused.objects.job.id]));
+    run.traceIds = Array.from(new Set([...run.traceIds, ...reused.objects.job.traceIds]));
+  }
+  for (const completed of dagJobs) {
     const plannedJob = inputsByJobId.get(completed.id);
     if (!plannedJob) {
       continue;
@@ -10791,6 +10906,22 @@ async function executeWorkbenchEvaluationRun(args: {
   if (shouldRunGradersForEvaluationRun(args.kind)) {
     for (const completed of completedExecutionJobs) {
       if (completed.objects.job.status !== "succeeded") {
+        continue;
+      }
+      const reusableGradeJob = args.kind === "eval" && args.rerun !== true
+        ? latestReusableTerminalGradeJobForExecution({
+            state: args.state,
+            evalHash: args.evalSnapshot.hash,
+            executionJob: completed.objects.job,
+          })
+        : undefined;
+      if (reusableGradeJob) {
+        jobs.push(reusableGradeJob);
+        run.jobIds = Array.from(new Set([...(run.jobIds ?? []), reusableGradeJob.id]));
+        run.traceIds = Array.from(new Set([...run.traceIds, ...reusableGradeJob.traceIds]));
+        run.lastProgressAt = reusableGradeJob.finishedAt ?? reusableGradeJob.startedAt ?? now();
+        upsertRunObject(args.state.runs, run, args.run ? { replace: true } : {});
+        await enqueueRunStateSave();
         continue;
       }
       const result = await executeSkillEvalGradeJob({

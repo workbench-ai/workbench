@@ -71,6 +71,13 @@ export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): nu
         io.stderr.write(`  ${command}\n`);
       }
     }
+    const candidateCommands = candidateCommandsFromSubject(envelope.subject);
+    if (candidateCommands.length > 0) {
+      io.stderr.write(`${styleHint("candidates", format)}:\n`);
+      for (const command of candidateCommands) {
+        io.stderr.write(`  ${command}\n`);
+      }
+    }
     if (envelope.remediation) {
       io.stderr.write(`${styleHint("next", format)}: ${envelope.remediation}\n`);
     }
@@ -80,6 +87,13 @@ export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): nu
 
 function setupCommandsFromSubject(subject: Record<string, Json> | undefined): string[] {
   const commands = subject?.setupCommands;
+  return Array.isArray(commands)
+    ? commands.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
+}
+
+function candidateCommandsFromSubject(subject: Record<string, Json> | undefined): string[] {
+  const commands = subject?.candidateCommands;
   return Array.isArray(commands)
     ? commands.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
     : [];

@@ -3976,6 +3976,13 @@ describe("workbench skill-first CLI", () => {
     expect(body.subject.candidateCommands).toEqual(
       body.subject.candidateRefs.map((ref) => `workbench show ${ref}`),
     );
+
+    const human = await invoke(["show", `${runId}:result.json`, "--dir", root]);
+    expect(human.code).toBe(2);
+    expect(human.stderr).toContain("candidates:");
+    for (const command of body.subject.candidateCommands) {
+      expect(human.stderr).toContain(`  ${command}\n`);
+    }
   }, 60_000);
 
   test("status points at a running run before generic next steps", async () => {

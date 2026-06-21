@@ -597,6 +597,60 @@ describe("skill-first Workbench runtime", () => {
     await expect(gradeWorkbenchSkill({ dir: root, rerun: true })).rejects.toThrow(/No ungraded execution jobs/u);
   }, 60_000);
 
+  dockerTest("eval grades reusable execution evidence after rubric-only edits", async () => {
+    const root = await makeTempRoot("workbench-eval-reuse-execute-rubric-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+
+    const [executeRun] = await evalWorkbenchSkill({ dir: root, kind: "run" });
+    const before = await createWorkbenchInspectionSnapshot({ dir: root });
+    const executeJob = before.jobs.find((job) => job.runId === executeRun?.id && job.role === "execute");
+    expect(executeJob?.status).toBe("succeeded");
+
+    await fs.appendFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+      "  - Added rubric criterion after inspecting the existing output.",
+      "",
+    ].join("\n"));
+    const [evalRun] = await evalWorkbenchSkill({ dir: root });
+    const after = await createWorkbenchInspectionSnapshot({ dir: root });
+    const runJobIds = new Set(evalRun?.jobIds ?? []);
+    const referencedExecuteJobs = after.jobs.filter((job) => runJobIds.has(job.id) && job.role === "execute");
+    const evalGradeJob = after.jobs.find((job) => job.runId === evalRun?.id && job.role === "grade");
+
+    expect(evalRun?.status).toBe("succeeded");
+    expect(after.jobs.filter((job) => job.role === "execute")).toHaveLength(1);
+    expect(referencedExecuteJobs.map((job) => job.id)).toEqual([executeJob?.id]);
+    expect(evalGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
+  }, 60_000);
+
+  dockerTest("grade reuses failed terminal grade evidence until rerun", async () => {
+    const root = await makeTempRoot("workbench-grade-reuse-failed-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+    const failingGradeCommand = nodeCommand([
+      "console.error('current grade failure should be reused');",
+      "process.exit(42);",
+    ]);
+    await fs.writeFile(path.join(root, ".workbench", "eval.yaml"), [
+      "version: 1",
+      "name: failing-grade",
+      "grade:",
+      "  adapter: command",
+      "  with:",
+      `    command: ${JSON.stringify(failingGradeCommand)}`,
+      "",
+    ].join("\n"));
+
+    await evalWorkbenchSkill({ dir: root, kind: "run" });
+    const [failedGradeRun] = await gradeWorkbenchSkill({ dir: root });
+    const [reusedFailedGradeRun] = await gradeWorkbenchSkill({ dir: root });
+    const [rerunGradeRun] = await gradeWorkbenchSkill({ dir: root, rerun: true });
+
+    expect(failedGradeRun?.status).toBe("failed");
+    expect(reusedFailedGradeRun?.id).toBe(failedGradeRun?.id);
+    expect(rerunGradeRun?.id).not.toBe(failedGradeRun?.id);
+  }, 60_000);
+
   dockerTest("bare compare uses the current version and manifest default agent", async () => {
     const root = await makeTempRoot("workbench-compare-default-agent-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
@@ -4233,6 +4287,115 @@ describe("skill-first Workbench runtime", () => {
     expect(scoreStdout).toContain("score visible stdout");
     expect(`${runnerStdout}${scoreStdout}`).not.toContain("__WORKBENCH_PROGRESS__");
     expect(`${runnerStdout}${scoreStdout}`).not.toContain("progress-token");
+  });
+
+  test("passes nested provider auth to rubric runtime-control steps", async () => {
+    const createdAt = new Date().toISOString();
+    const authRoot = await makeTempRoot("workbench-runtime-control-auth-");
+    const command = nodeCommand([
+      "const fs = require('node:fs');",
+      "const request = JSON.parse(fs.readFileSync(process.env.WORKBENCH_ADAPTER_REQUEST, 'utf8'));",
+      "const codex = request.auth && request.auth.adapters && request.auth.adapters.codex && request.auth.adapters.codex.default;",
+      "fs.writeFileSync(process.env.WORKBENCH_RESULT, JSON.stringify({",
+      "  protocol: 'workbench.adapter-result.v1',",
+      "  operation: 'grade.run',",
+      "  ok: true,",
+      "  value: { score: 1 },",
+      "  feedback: { authSeen: Boolean(codex), filesRoot: codex && codex.filesRoot, files: codex && codex.files },",
+      "}, null, 2) + '\\n');",
+    ]);
+    const execution = {
+      id: "exec_runtime_control_rubric_auth",
+      projectId: "local",
+      runId: "run_runtime_control_rubric_auth",
+      versionId: "v001",
+      purpose: "attempt" as const,
+      adapter: { use: "command", with: {} },
+      sandbox: { kind: "oci" as const, ref: "docker://workbench/workbench-node-22:envv_node_22" },
+      inputs: [],
+      outputs: [{ name: "result", schema: "workbench.result.v1" as const, required: true }],
+      policy: {
+        tenantId: "local",
+        resources: { cpu: 1, memoryGb: 1, diskGb: 1, timeoutMinutes: 1 },
+        network: { egress: "none" as const },
+      },
+      metadata: { caseId: "case-001" },
+    };
+    const completed = await executeRuntimeControlOperationSequenceInCurrentRuntime({
+      job: {
+        id: "job_runtime_control_rubric_auth",
+        projectId: "local",
+        runId: "run_runtime_control_rubric_auth",
+        kind: "execute",
+        status: "queued",
+        attempt: 0,
+        createdAt,
+        updatedAt: createdAt,
+        input: {
+          execution,
+          versionId: "v001",
+          attemptIndex: 0,
+          sampleIndex: 0,
+          caseId: "case-001",
+        },
+      },
+      spec: runtimeControlSpec(),
+      baseFiles: [textFixture("current/SKILL.md", "# Runtime Control Skill\n")],
+      engineResolveFiles: [textFixture("prompt.md", "Public case.\n")],
+      engineCases: [runtimeControlCase()],
+      adapterAuthRoot: authRoot,
+      adapterAuthProfiles: [{
+        adapterId: "codex",
+        profile: "default",
+        method: "oauth",
+        status: "connected",
+        version: 1,
+        updatedAt: createdAt,
+        files: [{ path: ".codex/auth.json", encoding: "utf8", content: "{\"tokens\":{\"access_token\":\"test\"}}\n" }],
+      }],
+      runtimeControlOperation: {
+        prepare: true,
+        operations: [{
+          label: "rubric",
+          operation: "grade.run",
+          invocation: {
+            use: "rubric",
+            with: { judge: { use: "codex", with: { model: "gpt-5.4" } } },
+            command,
+          },
+        }],
+      },
+      adapterManifests: [
+        {
+          id: "rubric",
+          protocol: "workbench.adapter-manifest.v1",
+          install: [],
+          operations: { "grade.run": { command } },
+          slots: { judge: { path: "/judge", operation: "skill.run" } },
+        },
+        {
+          id: "codex",
+          protocol: "workbench.adapter-manifest.v1",
+          install: [],
+          operations: { "skill.run": { command: "workbench-adapter-codex" } },
+          auth: { methods: { oauth: { files: [{ path: ".codex/auth.json" }] } } },
+        },
+      ],
+    }, execution, createdAt);
+    const output = completed.output as {
+      ok?: boolean;
+      feedback?: {
+        authSeen?: boolean;
+        filesRoot?: string;
+        files?: Array<{ path: string; encoding: string }>;
+      };
+    };
+
+    expect(completed.status).toBe("succeeded");
+    expect(output.ok).toBe(true);
+    expect(output.feedback?.authSeen).toBe(true);
+    expect(output.feedback?.filesRoot).toEqual(expect.stringContaining("/codex/_/default"));
+    expect(output.feedback?.files).toEqual([{ path: ".codex/auth.json", encoding: "utf8" }]);
   });
 
   test("synthesizes a result for skill-only runtime-control execution", async () => {
