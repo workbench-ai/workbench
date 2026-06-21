@@ -3867,6 +3867,40 @@ describe("workbench skill-first CLI", () => {
     });
   });
 
+  test("show keeps split run and grade evidence causally inspectable", async () => {
+    const root = await makeTempRoot("workbench-cli-show-split-run-grade-");
+    expect((await invoke(["new", root, "--agent", "command", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root, "investor-focus");
+
+    const runResult = await invoke(["run", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
+    expect(runResult.code, runResult.stdout || runResult.stderr).toBe(0);
+    const runId = stdoutJson<{ run: { id: string }; next: string }>(runResult).run.id;
+    expect(stdoutJson<{ next: string }>(runResult).next).toBe("workbench grade");
+
+    const shownRun = await invoke(["show", runId, "--dir", root]);
+    expect(shownRun.code, shownRun.stdout || shownRun.stderr).toBe(0);
+    expect(shownRun.stdout.split("\n")[0]).toContain("score=n/a");
+    expect(shownRun.stdout).toContain("next: workbench grade");
+    expect(shownRun.stdout).not.toContain("next: workbench results");
+
+    const gradeResult = await invoke(["grade", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
+    expect(gradeResult.code, gradeResult.stdout || gradeResult.stderr).toBe(0);
+    const gradeId = stdoutJson<{ run: { id: string; result?: { score?: number } } }>(gradeResult).run.id;
+    expect(stdoutJson<{ run: { result?: { score?: number } } }>(gradeResult).run.result?.score).toBe(1);
+
+    const shownGrade = await invoke(["show", gradeId, "--dir", root]);
+    expect(shownGrade.code, shownGrade.stdout || shownGrade.stderr).toBe(0);
+    expect(shownGrade.stdout.split("\n")[0]).toContain("score=1.000");
+    const shownGradeJson = await invoke(["show", gradeId, "--dir", root, "--json"]);
+    expect(shownGradeJson.code, shownGradeJson.stdout || shownGradeJson.stderr).toBe(0);
+    expect(stdoutJson<{ result?: { run?: { score?: number }; progress?: { result?: { score?: number } } } }>(shownGradeJson)).toMatchObject({
+      result: {
+        run: { score: 1 },
+        progress: { result: { score: 1 } },
+      },
+    });
+  });
+
   test("status points at a running run before generic next steps", async () => {
     const root = await makeTempRoot("workbench-cli-status-running-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);

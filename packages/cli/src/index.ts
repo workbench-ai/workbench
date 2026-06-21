@@ -2367,6 +2367,9 @@ function runWatchNextCommand(run: WorkbenchRun): string {
   if (run.status === "failed" || run.status === "canceled") {
     return terminalRunRepairCommand(run) ?? `workbench show ${run.id}`;
   }
+  if (run.kind === "run") {
+    return "workbench grade";
+  }
   return run.kind === "improve" ? "workbench eval --rerun -n 5" : resultsNextCommandForRun(run);
 }
 

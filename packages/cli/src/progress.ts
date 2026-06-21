@@ -207,7 +207,7 @@ export function formatProgressDuration(elapsedMs: number): string {
 
 function progressOperationRequest(input: RunProgressSnapshotInput): WorkbenchOperationRequest | undefined {
   const firstRun = input.runs[0];
-  if (!firstRun || (firstRun.kind !== "eval" && firstRun.kind !== "improve")) {
+  if (!firstRun) {
     return undefined;
   }
   const storedPlan = firstRun.operationPlan;

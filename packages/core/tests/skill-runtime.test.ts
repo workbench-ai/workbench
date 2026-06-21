@@ -32,6 +32,7 @@ import {
   evalWorkbenchSkill,
   exportObjectPack,
   filesForWorkbenchRef,
+  gradeWorkbenchSkill,
   hashFiles,
   hashJson,
   improveWorkbenchSkill,
@@ -552,6 +553,48 @@ describe("skill-first Workbench runtime", () => {
       ["none", 0.1],
       ["local:.", 0.9],
     ]));
+  }, 60_000);
+
+  dockerTest("grade reuses current grade evidence and reruns after rubric-only edits", async () => {
+    const root = await makeTempRoot("workbench-grade-reuse-rubric-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+
+    const [executeRun] = await evalWorkbenchSkill({ dir: root, kind: "run" });
+    const [gradeRun] = await gradeWorkbenchSkill({ dir: root });
+    const [reusedGradeRun] = await gradeWorkbenchSkill({ dir: root });
+    const firstSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const executeJob = firstSnapshot.jobs.find((job) => job.runId === executeRun?.id && job.role === "execute");
+    const firstGradeJob = firstSnapshot.jobs.find((job) => job.runId === gradeRun?.id && job.role === "grade");
+
+    expect(executeJob?.status).toBe("succeeded");
+    expect(firstGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
+    expect(reusedGradeRun?.id).toBe(gradeRun?.id);
+
+    await fs.appendFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+      "  - Added rubric criterion after inspecting the existing output.",
+      "",
+    ].join("\n"));
+    const [rubricRegradeRun] = await gradeWorkbenchSkill({ dir: root });
+    const [forcedRegradeRun] = await gradeWorkbenchSkill({ dir: root, rerun: true });
+    const regradeSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const rubricGradeJob = regradeSnapshot.jobs.find((job) => job.runId === rubricRegradeRun?.id && job.role === "grade");
+    const forcedGradeJob = regradeSnapshot.jobs.find((job) => job.runId === forcedRegradeRun?.id && job.role === "grade");
+
+    expect(rubricRegradeRun?.id).not.toBe(gradeRun?.id);
+    expect(forcedRegradeRun?.id).not.toBe(rubricRegradeRun?.id);
+    expect(rubricGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
+    expect(forcedGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
+
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+      "version: 1",
+      "id: case-001",
+      "prompt: A changed prompt must require a fresh execution.",
+      "rubric:",
+      "  - Captures workflow-specific success evidence.",
+      "",
+    ].join("\n"));
+    await expect(gradeWorkbenchSkill({ dir: root, rerun: true })).rejects.toThrow(/No ungraded execution jobs/u);
   }, 60_000);
 
   dockerTest("bare compare uses the current version and manifest default agent", async () => {

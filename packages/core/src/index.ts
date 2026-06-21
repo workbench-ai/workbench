@@ -4260,14 +4260,17 @@ export async function gradeWorkbenchSkill(options: WorkbenchEvalOptions = {}): P
     const targets = runtime.skillBundles.flatMap((skillBundle) =>
       agents.map((agent): WorkbenchEvaluationRunTarget => ({ skillBundle, agent }))
     );
-    const subjects = gradeSubjectsForRuntime({
+    const gradeSelection = gradeSubjectsForRuntime({
       state,
-      evalHash: runtime.evalSnapshot.hash,
+      evalSnapshot: runtime.evalSnapshot,
       targets,
       cases: selectedCases,
       rerun: options.rerun === true,
     });
-    if (subjects.length === 0) {
+    if (gradeSelection.subjects.length === 0) {
+      if (options.rerun !== true && gradeSelection.reusableRun) {
+        return [copyRun(gradeSelection.reusableRun)];
+      }
       throw new WorkbenchCodedError("no_grade_subjects", "No ungraded execution jobs found for the selected skill, agent, and cases.", {
         remediation: "workbench run",
         exitCode: 2,
@@ -4308,7 +4311,7 @@ export async function gradeWorkbenchSkill(options: WorkbenchEvalOptions = {}): P
     await saveState(root, state);
     await options.onRunStarted?.(copyRun(run));
     const jobs: WorkbenchJob[] = [];
-    for (const subject of subjects) {
+    for (const subject of gradeSelection.subjects) {
       const completed = completedEvaluationJobFromGradeSubject({
         root,
         state,
@@ -4367,11 +4370,11 @@ interface WorkbenchGradeSubject {
 
 function gradeSubjectsForRuntime(args: {
   state: WorkbenchProjectState;
-  evalHash: string;
+  evalSnapshot: WorkbenchEvalSnapshot;
   targets: readonly WorkbenchEvaluationRunTarget[];
   cases: readonly WorkbenchEvalCaseRuntime[];
   rerun: boolean;
-}): WorkbenchGradeSubject[] {
+}): { subjects: WorkbenchGradeSubject[]; reusableRun?: WorkbenchRun } {
   const casesById = new Map(args.cases.flatMap((runtimeCase) => [
     [runtimeCase.id, runtimeCase],
     [runtimeCase.path, runtimeCase],
@@ -4380,29 +4383,27 @@ function gradeSubjectsForRuntime(args: {
     gradeTargetKey(target.skillBundle.hash, hashJson(target.agent)),
     target,
   ]));
-  const gradedSubjectJobIds = args.rerun
-    ? new Set<string>()
-    : new Set(args.state.jobs.flatMap((job) =>
-      job.role === "grade" && job.status === "succeeded"
-        ? (job.dependencies ?? []).flatMap((dependency) => dependency.jobId ? [dependency.jobId] : [])
-        : []
-    ));
-  const subjects: WorkbenchGradeSubject[] = [];
+  const currentGradedSubjectJobIds = new Set(args.state.jobs.flatMap((job) =>
+    job.role === "grade" && job.status === "succeeded" && job.evalHash === args.evalSnapshot.hash
+      ? (job.dependencies ?? []).flatMap((dependency) => dependency.jobId ? [dependency.jobId] : [])
+      : []
+  ));
+  const eligibleSubjects: WorkbenchGradeSubject[] = [];
   for (const job of args.state.jobs) {
     if ((job.role ?? "execute") !== "execute" || job.status !== "succeeded") {
       continue;
     }
-    if (job.evalHash !== args.evalHash || gradedSubjectJobIds.has(job.id)) {
-      continue;
-    }
     const target = targetsByKey.get(gradeTargetKey(job.skillBundleHash, job.agentHash));
     const runtimeCase = casesById.get(job.caseId);
+    if (!target || !runtimeCase || !executionJobMatchesCurrentEvalCase(args.state, job, args.evalSnapshot, runtimeCase)) {
+      continue;
+    }
     const artifact = job.artifactIds.flatMap((id) => args.state.artifacts.find((entry) => entry.id === id) ?? [])[0];
     const trace = job.traceIds.flatMap((id) => args.state.traces.find((entry) => entry.id === id) ?? [])[0];
     if (!target || !runtimeCase || !artifact || !trace) {
       continue;
     }
-    subjects.push({
+    eligibleSubjects.push({
       job,
       artifact,
       trace,
@@ -4411,17 +4412,131 @@ function gradeSubjectsForRuntime(args: {
       runtimeCase,
     });
   }
-  return subjects.sort((left, right) =>
+  const sortedEligibleSubjects = eligibleSubjects.sort((left, right) =>
     left.job.caseId.localeCompare(right.job.caseId) ||
     left.job.sample - right.job.sample ||
     left.job.skillName.localeCompare(right.job.skillName) ||
     left.job.agentName.localeCompare(right.job.agentName) ||
     left.job.id.localeCompare(right.job.id)
   );
+  const subjects = args.rerun
+    ? sortedEligibleSubjects
+    : sortedEligibleSubjects.filter((subject) => !currentGradedSubjectJobIds.has(subject.job.id));
+  return {
+    subjects,
+    ...(args.rerun ? {} : {
+      reusableRun: latestReusableGradeRun({
+        state: args.state,
+        evalHash: args.evalSnapshot.hash,
+        eligibleSubjects: sortedEligibleSubjects,
+      }),
+    }),
+  };
 }
 
 function gradeTargetKey(skillBundleHash: string, agentHash: string): string {
   return `${skillBundleHash}\0${agentHash}`;
+}
+
+function latestReusableGradeRun(args: {
+  state: WorkbenchProjectState;
+  evalHash: string;
+  eligibleSubjects: readonly WorkbenchGradeSubject[];
+}): WorkbenchRun | undefined {
+  const eligibleSubjectJobIds = new Set(args.eligibleSubjects.map((subject) => subject.job.id));
+  if (eligibleSubjectJobIds.size === 0) {
+    return undefined;
+  }
+  return args.state.runs
+    .filter((run) =>
+      run.kind === "grade" &&
+      run.evalHash === args.evalHash &&
+      run.status === "succeeded"
+    )
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .find((run) => {
+      const gradeJobs = args.state.jobs.filter((job) =>
+        job.runId === run.id &&
+        job.role === "grade" &&
+        job.status === "succeeded" &&
+        job.evalHash === args.evalHash
+      );
+      const gradedSubjectIds = new Set(gradeJobs.flatMap((job) =>
+        (job.dependencies ?? []).flatMap((dependency) => dependency.jobId ? [dependency.jobId] : [])
+      ));
+      return [...eligibleSubjectJobIds].every((jobId) => gradedSubjectIds.has(jobId));
+    });
+}
+
+function executionJobMatchesCurrentEvalCase(
+  state: WorkbenchProjectState,
+  job: WorkbenchJob,
+  evalSnapshot: WorkbenchEvalSnapshot,
+  runtimeCase: WorkbenchEvalCaseRuntime,
+): boolean {
+  if (job.evalHash === evalSnapshot.hash) {
+    return true;
+  }
+  const jobEvalSnapshot = state.evals.find((entry) => entry.hash === job.evalHash);
+  if (!jobEvalSnapshot) {
+    return false;
+  }
+  const previous = evalCaseExecutionFingerprint(jobEvalSnapshot, runtimeCase.id);
+  const current = evalCaseExecutionFingerprint(evalSnapshot, runtimeCase.id);
+  return previous !== null && current !== null && previous === current;
+}
+
+function evalCaseExecutionFingerprint(evalSnapshot: WorkbenchEvalSnapshot, caseId: string): string | null {
+  const runtimeCase = evalSnapshot.cases.find((entry) => entry.id === caseId);
+  if (!runtimeCase) {
+    return null;
+  }
+  const caseRoot = evalSnapshotCaseRoot(runtimeCase);
+  const caseFiles = runtimeCase.files.map((file) => {
+    const localPath = normalizeEvalCaseLocalPath(file.path, caseRoot);
+    const content = isCaseDescriptorPath(localPath)
+      ? comparableEvalCaseDescriptorContent(file.content)
+      : file.content;
+    return {
+      ...copyFile(file),
+      path: normalizeRelativePath(`${CASES_DIR}/${runtimeCase.id}/${localPath}`),
+      content,
+    };
+  });
+  const environmentFiles = evalSnapshot.files
+    .filter((file) => normalizeRelativePath(file.path).startsWith(`${ENVIRONMENT_DIR}/`))
+    .map(copyFile);
+  return hashFiles([...caseFiles, ...environmentFiles].sort((left, right) => left.path.localeCompare(right.path)));
+}
+
+function evalSnapshotCaseRoot(runtimeCase: WorkbenchEvalCaseSnapshot): string {
+  const normalized = normalizeRelativePath(runtimeCase.path);
+  if (!normalized.startsWith(`${CASES_DIR}/`)) {
+    return "";
+  }
+  return isCaseDescriptorPath(normalized.slice(CASES_DIR.length + 1))
+    ? normalizeRelativePath(path.posix.dirname(normalized))
+    : normalized;
+}
+
+function normalizeEvalCaseLocalPath(filePath: string, caseRoot: string): string {
+  const normalized = normalizeRelativePath(filePath);
+  if (caseRoot && normalized.startsWith(`${caseRoot}/`)) {
+    return normalized.slice(caseRoot.length + 1);
+  }
+  if (caseRoot && normalized === caseRoot) {
+    return path.posix.basename(normalized);
+  }
+  if (normalized.startsWith(`${CASES_DIR}/`)) {
+    return normalized.slice(CASES_DIR.length + 1);
+  }
+  return normalized;
+}
+
+function comparableEvalCaseDescriptorContent(content: string): string {
+  const record = parseCaseSnapshotRecord(content);
+  delete record.rubric;
+  return `${YAML.stringify(canonicalize(record)).trimEnd()}\n`;
 }
 
 function completedEvaluationJobFromGradeSubject(args: {
