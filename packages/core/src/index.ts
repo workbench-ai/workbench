@@ -7289,13 +7289,16 @@ function aggregateJobScore(jobs: readonly WorkbenchJob[]): number | undefined {
 }
 
 export function runQualityScoreFromJobs(
-  run: Pick<WorkbenchRun, "id" | "status">,
+  run: Pick<WorkbenchRun, "id" | "status"> & { jobIds?: readonly string[] },
   jobs: readonly WorkbenchJob[],
 ): number | undefined {
   if (run.status === "canceled") {
     return undefined;
   }
-  return aggregateJobScore(jobs.filter((job) => job.runId === run.id && job.role === "grade"));
+  const referencedJobIds = new Set(run.jobIds ?? []);
+  return aggregateJobScore(jobs.filter((job) =>
+    (job.runId === run.id || referencedJobIds.has(job.id)) && job.role === "grade"
+  ));
 }
 
 export function jobQualityScore(job: Pick<WorkbenchJob, "result">): number | undefined {
@@ -15124,7 +15127,7 @@ function latestMatchingRun(
 }
 
 function comparisonRunSamples(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): number {
-  const runJobs = jobs.filter((job) => job.runId === run.id && job.caseId !== "current");
+  const runJobs = jobs.filter((job) => runOwnsJob(run, job) && job.caseId !== "current");
   if (runJobs.length > 0) {
     return new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
   }

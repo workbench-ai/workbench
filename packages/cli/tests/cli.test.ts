@@ -3903,11 +3903,17 @@ describe("workbench skill-first CLI", () => {
     const beforeEvalJobIds = new Set(splitSnapshot.jobs.map((job) => job.id));
     const evalResult = await invoke(["eval", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
-    const evalId = stdoutJson<{ run: { id: string; result?: { score?: number } }; coverage: Array<{ jobs: number }> }>(evalResult).run.id;
+    const evalJson = stdoutJson<{
+      run: { id: string; result?: { score?: number } };
+      coverage: Array<{ jobs: number }>;
+      next: string | null;
+    }>(evalResult);
+    const evalId = evalJson.run.id;
     expect(evalId).not.toBe(runId);
     expect(evalId).not.toBe(gradeId);
-    expect(stdoutJson<{ run: { result?: { score?: number } }; coverage: Array<{ jobs: number }> }>(evalResult).run.result?.score).toBe(1);
-    expect(stdoutJson<{ coverage: Array<{ jobs: number }> }>(evalResult).coverage[0]?.jobs).toBe(2);
+    expect(evalJson.run.result?.score).toBe(1);
+    expect(evalJson.next).toBe("workbench login");
+    expect(evalJson.coverage[0]?.jobs).toBe(2);
     const afterEvalSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
     expect(afterEvalSnapshot.jobs.filter((job) => !beforeEvalJobIds.has(job.id))).toEqual([]);
     const evalRun = afterEvalSnapshot.runs.find((run) => run.id === evalId);
@@ -3919,7 +3925,20 @@ describe("workbench skill-first CLI", () => {
 
     const repeatEval = await invoke(["eval", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
     expect(repeatEval.code, repeatEval.stdout || repeatEval.stderr).toBe(0);
-    expect(stdoutJson<{ run: { id: string } }>(repeatEval).run.id).toBe(evalId);
+    expect(stdoutJson<{ run: { id: string }; next: string | null }>(repeatEval)).toMatchObject({
+      run: { id: evalId },
+      next: "workbench login",
+    });
+
+    const logJson = await invoke(["log", "--runs", "--dir", root, "--json"]);
+    expect(logJson.code, logJson.stdout || logJson.stderr).toBe(0);
+    const logEntry = stdoutJson<{ entries: Array<{ id: string; score?: number }> }>(logJson)
+      .entries.find((entry) => entry.id === evalId);
+    expect(logEntry).toMatchObject({ score: 1 });
+    const logHuman = await invoke(["log", "--runs", "--dir", root]);
+    expect(logHuman.code, logHuman.stdout || logHuman.stderr).toBe(0);
+    expect(logHuman.stdout).toContain(shortTestRef(evalId));
+    expect(logHuman.stdout).toContain("1.000");
 
     const shownGrade = await invoke(["show", gradeId, "--dir", root]);
     expect(shownGrade.code, shownGrade.stdout || shownGrade.stderr).toBe(0);
@@ -3932,6 +3951,31 @@ describe("workbench skill-first CLI", () => {
         progress: { result: { score: 1 } },
       },
     });
+  }, 60_000);
+
+  test("ambiguous show file refs teach exact candidate file commands", async () => {
+    const root = await makeTempRoot("workbench-cli-show-ambiguous-file-");
+    expect((await invoke(["new", root, "--agent", "command", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root, "case-001");
+
+    const evaluated = await invoke(["eval", "--dir", root, "-n", "2", "--json"]);
+    expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
+    const runId = stdoutJson<{ run: { id: string } }>(evaluated).run.id;
+
+    const ambiguous = await invoke(["show", `${runId}:result.json`, "--dir", root, "--json"]);
+    expect(ambiguous.code).toBe(2);
+    const body = stdoutJson<{
+      code: string;
+      remediation: string;
+      subject: { candidateRefs: string[]; candidateCommands: string[] };
+    }>(ambiguous);
+    expect(body.code).toBe("ref_ambiguous");
+    expect(body.remediation).toMatch(new RegExp(`^workbench show ${runId}:cases/.+/result\\.json$`, "u"));
+    expect(body.subject.candidateRefs).toHaveLength(2);
+    expect(body.subject.candidateRefs.every((ref) => ref.startsWith(`${runId}:cases/`))).toBe(true);
+    expect(body.subject.candidateCommands).toEqual(
+      body.subject.candidateRefs.map((ref) => `workbench show ${ref}`),
+    );
   }, 60_000);
 
   test("status points at a running run before generic next steps", async () => {

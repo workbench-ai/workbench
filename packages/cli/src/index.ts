@@ -7504,8 +7504,9 @@ function scoredRunValue(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = []): 
   if (run.status === "canceled") {
     return undefined;
   }
+  const referencedJobIds = new Set(run.jobIds ?? []);
   const scores = jobs
-    .filter((job) => job.runId === run.id && job.role === "grade")
+    .filter((job) => (job.runId === run.id || referencedJobIds.has(job.id)) && job.role === "grade")
     .map(scoredJobValue)
     .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
   if (scores.length === 0) {
@@ -8784,9 +8785,16 @@ function ambiguousShowPath(
   candidates: readonly SurfaceSnapshotFile[],
 ): WorkbenchCodedError {
   const candidatePaths = candidates.map((file) => file.path);
+  const candidateRefs = candidatePaths.map((candidatePath) => showFileRef(objectRef, candidatePath));
   return new WorkbenchCodedError("ref_ambiguous", `File path is ambiguous in ${objectRef}: ${requestedPath}. Candidates: ${candidatePaths.join(", ")}.`, {
-    remediation: `workbench show ${objectRef}`,
-    subject: { ref: objectRef, path: requestedPath, candidates: candidatePaths },
+    remediation: candidateRefs[0] ? `workbench show ${quoteShellArg(candidateRefs[0])}` : `workbench show ${objectRef}`,
+    subject: {
+      ref: objectRef,
+      path: requestedPath,
+      candidates: candidatePaths,
+      candidateRefs,
+      candidateCommands: candidateRefs.map((candidateRef) => `workbench show ${quoteShellArg(candidateRef)}`),
+    },
     exitCode: 2,
   });
 }
@@ -9109,15 +9117,24 @@ function bestScoredEvalRunForSelection(
     .map((run) => ({
       run,
       score: scoredRunValue(run, snapshot.jobs)!,
-      samples: new Set(snapshot.jobs
-        .filter((job) => job.runId === run.id && job.caseId !== "current")
-        .map((job) => `${job.caseId}\0${job.sample}`)).size || run.jobIds?.length || 0,
+      samples: comparisonRunSamples(run, snapshot.jobs),
     }))
     .sort((left, right) =>
       right.samples - left.samples ||
       runEvidenceTime(right.run).localeCompare(runEvidenceTime(left.run))
     );
   return candidates[0] ?? null;
+}
+
+function comparisonRunSamples(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): number {
+  const referencedJobIds = new Set(run.jobIds ?? []);
+  const runJobs = jobs.filter((job) =>
+    (job.runId === run.id || referencedJobIds.has(job.id)) && job.caseId !== "current"
+  );
+  if (runJobs.length > 0) {
+    return new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
+  }
+  return run.jobIds?.length ?? 0;
 }
 
 function statusHasPublishedCurrentCloudSource(status: Awaited<ReturnType<typeof workbenchStatusSnapshot>>): boolean {
