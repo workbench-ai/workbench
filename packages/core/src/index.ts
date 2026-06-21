@@ -370,7 +370,10 @@ export interface WorkbenchDraftEvalCaseFile {
 const DRAFT_CASE_PROMPT_PLACEHOLDER = "Replace this with a representative workflow prompt.";
 const DRAFT_CASE_RUBRIC_PLACEHOLDER = "Replace this with observable acceptance criteria.";
 
-export function workbenchDraftEvalCaseFiles(caseId = "case-001"): WorkbenchDraftEvalCaseFile[] {
+export function workbenchDraftEvalCaseFiles(
+  caseId = "case-001",
+  options: { includeHarness?: boolean } = {},
+): WorkbenchDraftEvalCaseFile[] {
   const caseDir = `.workbench/cases/${caseId}`;
   const testDir = `${caseDir}/tests`;
   const casePath = `${caseDir}/case.yaml`;
@@ -399,7 +402,7 @@ export function workbenchDraftEvalCaseFiles(caseId = "case-001"): WorkbenchDraft
   ];
   return [
     { path: casePath, content: `${caseLines.join("\n")}\n` },
-    { path: testPath, content: `${testLines.join("\n")}\n`, executable: true },
+    ...(options.includeHarness === false ? [] : [{ path: testPath, content: `${testLines.join("\n")}\n`, executable: true }]),
   ];
 }
 
@@ -4239,6 +4242,22 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
       throw new WorkbenchUserError("No eval targets resolved for this run.");
     }
     await saveState(root, state);
+    const reusableRunEvidence = options.rerun === true || reusableCaseCount === undefined || (options.kind ?? "eval") !== "run"
+      ? undefined
+      : materializeReusableExecutionMatrixRun({
+          state,
+          version,
+          evalSnapshot,
+          targets,
+          cases: selectedCases,
+          samples,
+          location: options.location ?? "local",
+          remoteName: options.remoteName,
+        });
+    if (reusableRunEvidence) {
+      await saveState(root, state);
+      return [copyRun(reusableRunEvidence)];
+    }
     const reusable = options.rerun === true || reusableCaseCount === undefined || (options.kind ?? "eval") !== "eval"
       ? undefined
       : latestReusableEvalMatrixRun({
@@ -4593,7 +4612,59 @@ function materializeReusableSplitEvalMatrixRun(args: {
   return run;
 }
 
-function reusableSplitEvalMatrixEvidence(args: {
+function materializeReusableExecutionMatrixRun(args: {
+  state: WorkbenchProjectState;
+  version: WorkbenchVersion;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  targets: readonly WorkbenchEvaluationRunTarget[];
+  cases: readonly WorkbenchEvalCaseRuntime[];
+  samples: number;
+  location: WorkbenchRunLocation;
+  remoteName?: string;
+}): WorkbenchRun | undefined {
+  const primaryTarget = args.targets[0];
+  if (!primaryTarget) {
+    return undefined;
+  }
+  const evidence = reusableExecutionMatrixEvidence(args);
+  if (!evidence) {
+    return undefined;
+  }
+  const createdAt = now();
+  const run: WorkbenchRun = {
+    id: nextRunId(),
+    kind: "run",
+    versionId: args.version.id,
+    skillName: primaryTarget.skillBundle.skillName,
+    skillBundleHash: primaryTarget.skillBundle.hash,
+    evalHash: args.evalSnapshot.hash,
+    agentName: primaryTarget.agent.name,
+    agentHash: hashJson(primaryTarget.agent),
+    status: "succeeded",
+    jobIds: evidence.jobs.map((job) => job.id),
+    traceIds: uniqueStrings(evidence.jobs.flatMap((job) => job.traceIds)),
+    createdAt,
+    finishedAt: createdAt,
+    lastProgressAt: createdAt,
+    location: args.location,
+    ...(args.remoteName ? { remoteName: args.remoteName } : {}),
+    requestedSamples: Math.max(1, Math.floor(args.samples)),
+    operationPlan: operationPlanSummaryForRun({
+      kind: "run",
+      variant: args.location,
+      versionId: args.version.id,
+      evalHash: args.evalSnapshot.hash,
+      skillNames: args.targets.map((target) => target.skillBundle.skillName),
+      agentNames: args.targets.map((target) => target.agent.name),
+      caseIds: args.cases.map((runtimeCase) => runtimeCase.id),
+      samples: Math.max(1, Math.floor(args.samples)),
+    }),
+  };
+  upsertRunObject(args.state.runs, run);
+  return run;
+}
+
+function reusableExecutionMatrixEvidence(args: {
   state: WorkbenchProjectState;
   version: WorkbenchVersion;
   evalSnapshot: WorkbenchEvalSnapshot;
@@ -4650,6 +4721,63 @@ function reusableSplitEvalMatrixEvidence(args: {
   }
   for (const jobs of executeJobsByKey.values()) {
     jobs.sort(compareJobsNewestFirst);
+  }
+  const reusableJobs: WorkbenchJob[] = [];
+  for (const key of expectedKeys.sort()) {
+    const executeJob = executeJobsByKey.get(key)?.[0];
+    if (!executeJob) {
+      return undefined;
+    }
+    reusableJobs.push(executeJob);
+  }
+  return { jobs: dedupeJobs(reusableJobs) };
+}
+
+function reusableSplitEvalMatrixEvidence(args: {
+  state: WorkbenchProjectState;
+  version: WorkbenchVersion;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  targets: readonly WorkbenchEvaluationRunTarget[];
+  cases: readonly WorkbenchEvalCaseRuntime[];
+  samples: number;
+}): { jobs: WorkbenchJob[] } | undefined {
+  const execution = reusableExecutionMatrixEvidence(args);
+  if (!execution) {
+    return undefined;
+  }
+  const samples = Math.max(1, Math.floor(args.samples));
+  const targetsByKey = new Map(args.targets.map((target) => [
+    splitEvalTargetKey({
+      versionId: args.version.id,
+      skillName: target.skillBundle.skillName,
+      skillBundleHash: target.skillBundle.hash,
+      agentName: target.agent.name,
+      agentHash: hashJson(target.agent),
+    }),
+    target,
+  ]));
+  if (targetsByKey.size === 0 || args.cases.length === 0) {
+    return undefined;
+  }
+  const expectedKeys: string[] = [];
+  for (const targetKey of targetsByKey.keys()) {
+    for (const runtimeCase of args.cases) {
+      for (const sample of sampleIndexesForRun(runtimeCase, samples, undefined)) {
+        expectedKeys.push(splitEvalEvidenceKey(targetKey, runtimeCase.id, sample));
+      }
+    }
+  }
+  const expectedKeySet = new Set(expectedKeys);
+  const executeJobsByKey = new Map<string, WorkbenchJob[]>();
+  for (const job of execution.jobs) {
+    const targetKey = splitEvalTargetKey(job);
+    const key = splitEvalEvidenceKey(targetKey, job.caseId, job.sample);
+    if (!targetsByKey.has(targetKey) || !expectedKeySet.has(key)) {
+      continue;
+    }
+    const current = executeJobsByKey.get(key) ?? [];
+    current.push(job);
+    executeJobsByKey.set(key, current);
   }
   const gradeJobsByExecuteJobId = new Map<string, WorkbenchJob[]>();
   for (const job of args.state.jobs) {
@@ -5025,10 +5153,28 @@ function cachedEvalPreviewEvidence(args: {
   if (
     args.cloud ||
     args.rerun ||
-    args.kind !== "eval" ||
     args.cases.length === 0 ||
     (args.selectedSamples?.length ?? 0) > 0
   ) {
+    return { runIds: [], jobIds: [] };
+  }
+  if (args.kind === "run") {
+    const execution = reusableExecutionMatrixEvidence({
+      state: args.state,
+      version: args.version,
+      evalSnapshot: args.evalSnapshot,
+      targets: args.targets,
+      cases: args.cases,
+      samples: args.samples,
+    });
+    return execution
+      ? {
+          runIds: uniqueStrings(execution.jobs.map((job) => job.runId)),
+          jobIds: execution.jobs.map((job) => job.id),
+        }
+      : { runIds: [], jobIds: [] };
+  }
+  if (args.kind !== "eval") {
     return { runIds: [], jobIds: [] };
   }
   const wholeRunIds = uniqueStrings(args.targets.flatMap((target) => {
@@ -6696,6 +6842,7 @@ export async function previewLocalWorkbenchOperation(
         agent: request.agent,
         caseIds: request.caseIds,
         samples: request.samples,
+        kind: request.kind,
         rerun: request.rerun,
         cloud: false,
       });

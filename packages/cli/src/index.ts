@@ -417,7 +417,7 @@ const COMMAND_HELP: Record<string, string> = {
     "  workbench case draft [ID] [--dir DIR] [--json]",
     "  workbench case draft --id ID [--dir DIR] [--json]",
     "",
-    "Creates a draft eval case with case.yaml plus a local tests/test.sh harness. Omit ID to use the next available case id.",
+    "Creates a draft eval case. Local and command-backed projects also get a tests/test.sh harness.",
     "",
     "Example:",
     "  workbench case draft case-001",
@@ -788,6 +788,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         ...formatEvalCoverageLines(coverage),
         ...formatEvalDeltaLines(deltas),
         ...formatCompletedJobReferenceLines(command, completed.jobs),
+        ...formatRerunGuidanceLines(command, parsed.flags.rerun === true),
         ...(next ? [`next: ${next}`] : []),
       ].filter(Boolean).join("\n"));
     }
@@ -3188,7 +3189,8 @@ async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
   const caseId = optionalInput(parsed, 2, "id", "workbench case id", "workbench case draft case-001") ?? nextEvalCaseId(snapshot);
   assertDraftCaseId(caseId);
-  const files = workbenchDraftEvalCaseFiles(caseId);
+  const includeHarness = caseDraftShouldCreateHarness(snapshot);
+  const files = workbenchDraftEvalCaseFiles(caseId, { includeHarness });
   for (const file of files) {
     const target = path.join(snapshot.root, file.path);
     if (await pathExists(target)) {
@@ -3207,8 +3209,7 @@ async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
       await fs.chmod(target, 0o755);
     }
   }
-  const includeHarnessInNext = caseDraftShouldEditHarness(snapshot);
-  const editFiles = draftCaseEditFiles(files, { includeHarness: includeHarnessInNext });
+  const editFiles = draftCaseEditFiles(files, { includeHarness });
   const next = draftCaseEditCommand(editFiles);
   const harnessPath = caseDraftHarnessPath(files);
   return emitResult("workbench.cli.case-draft.v1", {
@@ -3220,9 +3221,6 @@ async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
   }, parsed, io, () => [
     `Drafted eval case ${caseId}.`,
     ...files.map((file) => `  ${file.path}`),
-    ...(!includeHarnessInNext && harnessPath
-      ? [`Provider-backed cases can start with case.yaml; edit ${harnessPath} for local or command-agent harnesses.`]
-      : []),
     `next: ${next}`,
   ].join("\n"));
 }
@@ -3241,7 +3239,7 @@ function draftCaseEditCommand(files: readonly SurfaceSnapshotFile[]): string {
   return [EDITOR_COMMAND, ...files.map((file) => file.path)].join(" ");
 }
 
-function caseDraftShouldEditHarness(snapshot: WorkbenchInspectionSnapshot): boolean {
+function caseDraftShouldCreateHarness(snapshot: WorkbenchInspectionSnapshot): boolean {
   const defaultAgent = snapshot.status.defaultAgent
     ? snapshot.agents.find((entry) => entry.agent.name === snapshot.status.defaultAgent)?.agent
     : snapshot.agents[0]?.agent;
@@ -8952,6 +8950,13 @@ function formatCompletedJobReferenceLines(
       left.id.localeCompare(right.id)
     )
     .map((job) => `grade job: ${job.id}\tcase=${job.caseId}\tshow=workbench show ${job.id}`);
+}
+
+function formatRerunGuidanceLines(command: WorkbenchProgressCommand, rerun: boolean): string[] {
+  if (command !== "grade" || !rerun) {
+    return [];
+  }
+  return ["rerun: fresh grade judgment recorded; repeat without --rerun to reuse this judgment."];
 }
 
 function formatEvalCoverage(coverage: EvalCoverage, includeRunLabels = false): string {

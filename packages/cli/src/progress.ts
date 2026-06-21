@@ -392,6 +392,9 @@ function progressCounterParts(snapshot: WorkbenchRunSnapshot): string[] {
   const parts: Array<string | undefined> = [];
   if (progress.planned > 0) {
     parts.push(`work ${progress.completed}/${progress.planned} complete`);
+    if (snapshot.phase !== "complete" && progress.completed < progress.planned) {
+      parts.push(`remaining ${progress.planned - progress.completed}`);
+    }
   }
   if (progress.scored > 0) {
     parts.push(`scored ${progress.scored}`);

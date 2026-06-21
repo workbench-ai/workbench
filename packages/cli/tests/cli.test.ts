@@ -2066,20 +2066,16 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       files: [
         ".workbench/cases/case-001/case.yaml",
-        ".workbench/cases/case-001/tests/test.sh",
       ],
       editFiles: [
         ".workbench/cases/case-001/case.yaml",
       ],
-      harnessPath: ".workbench/cases/case-001/tests/test.sh",
       next: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml",
     });
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
       .resolves.not.toContain("command:");
-    await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), "utf8"))
-      .resolves.toContain("$OUTPUT_DIR/result.json");
-    await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), "utf8"))
-      .resolves.not.toContain("before using eval evidence");
+    await expect(fs.access(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh")))
+      .rejects.toMatchObject({ code: "ENOENT" });
     const duplicateCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
     expect(duplicateCase.code).toBe(2);
     expect(stdoutJson(duplicateCase)).toMatchObject({
@@ -2341,10 +2337,11 @@ describe("workbench skill-first CLI", () => {
     });
     const authorCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
     expect(authorCase.code, authorCase.stdout || authorCase.stderr).toBe(0);
+    expect(stdoutJson<{ files: string[] }>(authorCase).files).toEqual([".workbench/cases/case-001/case.yaml"]);
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
       .resolves.not.toContain("command:");
-    const testStat = await fs.stat(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"));
-    expect(testStat.mode & 0o111).not.toBe(0);
+    await expect(fs.stat(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh")))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 
   dockerTest("draft case placeholders block judgment until prompt and rubric are authored", async () => {
@@ -3920,7 +3917,21 @@ describe("workbench skill-first CLI", () => {
     expect(splitEvalDryRunHuman.code, splitEvalDryRunHuman.stdout || splitEvalDryRunHuman.stderr).toBe(0);
     expect(splitEvalDryRunHuman.stdout).toContain("cached=2");
 
-    const beforeEvalJobIds = new Set(splitSnapshot.jobs.map((job) => job.id));
+    const runDryRun = await invoke(["run", "--dry-run", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
+    expect(runDryRun.code, runDryRun.stdout || runDryRun.stderr).toBe(0);
+    expect(stdoutJson<{ plan: { cachedRunIds: string[]; cachedJobIds: string[] } }>(runDryRun).plan).toMatchObject({
+      cachedRunIds: [runId],
+      cachedJobIds: [executeJob.id],
+    });
+    const repeatedRun = await invoke(["run", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
+    expect(repeatedRun.code, repeatedRun.stdout || repeatedRun.stderr).toBe(0);
+    const repeatedRunId = stdoutJson<{ run: { id: string } }>(repeatedRun).run.id;
+    expect(repeatedRunId).not.toBe(runId);
+    const afterRepeatedRunSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    expect(afterRepeatedRunSnapshot.runs.find((run) => run.id === repeatedRunId)?.jobIds).toEqual([executeJob.id]);
+    expect(afterRepeatedRunSnapshot.jobs.filter((job) => job.role !== "grade")).toHaveLength(1);
+
+    const beforeEvalJobIds = new Set(afterRepeatedRunSnapshot.jobs.map((job) => job.id));
     const evalResult = await invoke(["eval", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
     const evalJson = stdoutJson<{
@@ -5086,7 +5097,7 @@ describe("workbench skill-first CLI", () => {
       expect(result.stderr).not.toContain("waiting for a hosted worker");
       expect(result.stderr).toContain(`resume with workbench watch ${hostedRunId}`);
       expect(result.stderr).toContain("workbench eval: sync with Workbench Cloud");
-      expect(result.stderr.match(/workbench eval: running, work 0\/1 complete, failed 0, (?:evidence \d+, )?elapsed \d+s\./gu)).toHaveLength(1);
+      expect(result.stderr.match(/workbench eval: running, work 0\/1 complete, remaining 1, failed 0, (?:evidence \d+, )?elapsed \d+s\./gu)).toHaveLength(1);
       expect(result.stderr.match(/workbench eval: complete, work 1\/1 complete, scored 1, failed 0, (?:evidence \d+, )?elapsed \d+s\./gu)).toHaveLength(1);
       expect(result.stderr).not.toContain("synced cloud while waiting");
       expect(objectReadsAfterStart).toBe(1);

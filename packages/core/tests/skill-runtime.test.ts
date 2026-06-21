@@ -574,6 +574,14 @@ describe("skill-first Workbench runtime", () => {
     const splitCachePreview = await previewWorkbenchEval({ dir: root });
     expect(splitCachePreview.cachedRunIds.sort()).toEqual([executeRun!.id, gradeRun!.id].sort());
     expect(splitCachePreview.cachedJobIds).toEqual(expect.arrayContaining([executeJob!.id, firstGradeJob!.id]));
+    const runCachePreview = await previewWorkbenchEval({ dir: root, kind: "run" });
+    expect(runCachePreview.cachedRunIds).toEqual([executeRun!.id]);
+    expect(runCachePreview.cachedJobIds).toEqual([executeJob!.id]);
+    const [reusedExecuteRun] = await evalWorkbenchSkill({ dir: root, kind: "run" });
+    const reusedExecuteSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(reusedExecuteRun?.id).not.toBe(executeRun?.id);
+    expect(reusedExecuteRun?.jobIds).toEqual([executeJob!.id]);
+    expect(reusedExecuteSnapshot.jobs.filter((job) => job.role === "execute")).toHaveLength(1);
 
     await fs.appendFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
       "  - Added rubric criterion after inspecting the existing output.",

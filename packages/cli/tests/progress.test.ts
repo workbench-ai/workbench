@@ -63,7 +63,7 @@ describe("Workbench CLI progress projection", () => {
       },
     });
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench eval: running, work 2/3 complete, scored 1, partial score 1.000, failed 1, active case=case-001 sample=2 job=job_a_1, elapsed 42s.");
+      .toBe("workbench eval: running, work 2/3 complete, remaining 1, scored 1, partial score 1.000, failed 1, active case=case-001 sample=2 job=job_a_1, elapsed 42s.");
   });
 
   test("projects concrete evidence and usage facts", () => {
@@ -153,6 +153,7 @@ describe("Workbench CLI progress projection", () => {
       failed: 0,
     });
     expect(formatProgressSnapshot(snapshot)).toContain("work 0/10 complete");
+    expect(formatProgressSnapshot(snapshot)).toContain("remaining 10");
   });
 
   test("uses durable finish time for terminal elapsed duration", () => {
@@ -263,7 +264,7 @@ describe("Workbench CLI progress projection", () => {
       },
     });
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench improve: proof eval running, work 0/1 complete, failed 0, elapsed 8s.");
+      .toBe("workbench improve: proof eval running, work 0/1 complete, remaining 1, failed 0, elapsed 8s.");
   });
 
   test("renders only meaningful changes and heartbeat intervals", () => {
@@ -312,11 +313,11 @@ describe("Workbench CLI progress projection", () => {
     renderer.render(complete);
 
     expect(stream.value).toBe([
-      "workbench eval: queued on Workbench Cloud, work 0/1 complete, failed 0, elapsed 0s.",
+      "workbench eval: queued on Workbench Cloud, work 0/1 complete, remaining 1, failed 0, elapsed 0s.",
       "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch run_cloud.",
-      "workbench eval: queued on Workbench Cloud, work 0/1 complete, failed 0, elapsed 1m.",
+      "workbench eval: queued on Workbench Cloud, work 0/1 complete, remaining 1, failed 0, elapsed 1m.",
       "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch run_cloud.",
-      "workbench eval: running, work 0/1 complete, failed 0, active case=case-001 sample=1 job=job_cloud, elapsed 1m 1s.",
+      "workbench eval: running, work 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_cloud, elapsed 1m 1s.",
       "workbench eval: press Ctrl-C to detach; resume with workbench watch run_cloud.",
       "workbench eval: complete, work 1/1 complete, scored 1, failed 0, elapsed 1m 20s.",
       "",
@@ -379,9 +380,9 @@ describe("Workbench CLI progress projection", () => {
     renderer.render(heartbeat);
 
     expect(stream.value).toBe([
-      "workbench eval: running, work 0/1 complete, failed 0, active case=case-001 sample=1 job=job_local, elapsed 0s.",
+      "workbench eval: running, work 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_local, elapsed 0s.",
       "workbench eval: inspect current evidence with workbench show run_local.",
-      "workbench eval: running, work 0/1 complete, failed 0, active case=case-001 sample=1 job=job_local, elapsed 1m.",
+      "workbench eval: running, work 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_local, elapsed 1m.",
       "workbench eval: inspect current evidence with workbench show run_local.",
       "",
     ].join("\n"));
