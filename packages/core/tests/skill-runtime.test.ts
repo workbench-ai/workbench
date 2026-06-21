@@ -22,6 +22,7 @@ import {
   createWorkbenchInspectionSnapshot,
   createWorkbenchRunSnapshotForRun,
   createWorkbenchReadOnlyInspectionSnapshot,
+  createWorkbenchVersionRuntimeSnapshot,
   diffWorkbenchVersions,
   DOCKER_SANDBOX_BACKEND,
   executeQueuedWorkbenchSkillEvalJob,
@@ -53,6 +54,7 @@ import {
   unpublishWorkbenchVersion,
   type Json,
   type SandboxPlane,
+  type WorkbenchJob,
   type WorkbenchProjectState,
   type WorkbenchExecutionRuntimeInput,
   type WorkbenchTrace,
@@ -143,7 +145,7 @@ describe("skill-first Workbench runtime", () => {
 
     const runs = await evalWorkbenchSkill({ dir: root });
     const initial = (await listWorkbenchVersions({ dir: root })).find((version) => version.id === runs[0]?.versionId)!;
-    await expect(improveWorkbenchSkill({ dir: root, budget: 1 })).rejects.toThrow(/needs scored below-perfect, failed, or reviewed eval evidence/u);
+    await expect(improveWorkbenchSkill({ dir: root, budget: 1 })).rejects.toThrow(/needs graded below-perfect, failed, or reviewed eval evidence/u);
     await addWorkbenchAgent({
       dir: root,
       name: "patcher",
@@ -152,30 +154,35 @@ describe("skill-first Workbench runtime", () => {
         improveCommand: "printf '\\nCommand-backed improvement from trace evidence.\\n' >> \"$SKILL_DIR/SKILL.md\"",
       },
     });
-    await expect(improveWorkbenchSkill({ dir: root, agent: "patcher", budget: 1 })).rejects.toThrow(/needs scored below-perfect, failed, or reviewed eval evidence/u);
+    await expect(improveWorkbenchSkill({ dir: root, agent: "patcher", budget: 1 })).rejects.toThrow(/needs graded below-perfect, failed, or reviewed eval evidence/u);
     await writeFailingCaseTest(root, "missing workflow-specific output");
     const defaultFailingRuns = await evalWorkbenchSkill({ dir: root, rerun: true });
     await expect(improveWorkbenchSkill({ dir: root, budget: 1 })).rejects.toThrow(/no skill-improvement adapter/u);
     const failingRuns = await evalWorkbenchSkill({ dir: root, agent: "patcher" });
-    await expect(improveWorkbenchSkill({ dir: root, agent: "patcher", budget: 1 }))
-      .rejects.toThrow(/Improve proof eval failed/u);
+    const failedImprove = await improveWorkbenchSkill({ dir: root, agent: "patcher", budget: 1 });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     const proofRun = snapshot.runs.find((run) => run.kind === "improve" && run.agentName === "patcher");
     const improvedVersion = snapshot.versions.find((version) => version.id === proofRun?.outputVersionId);
     if (!proofRun || !improvedVersion) {
-      throw new Error("Expected failed improve proof run and candidate version.");
+      throw new Error("Expected improve proof run and candidate version.");
     }
     const diff = await diffWorkbenchVersions(`${initial.id}..${improvedVersion.id}`, { dir: root });
 
     expect(initial.id).toMatch(/^v_[a-f0-9]{64}$/u);
     expect(runs[0]).toMatchObject({ versionId: initial.id, status: "succeeded" });
-    expect(runs[0]?.score).toBe(1);
     expect(runs[0]?.costUsd).toBeUndefined();
-    expect(runs[0]?.jobIds).toHaveLength(1);
-    const runTrace = snapshot.traces.find((trace) => trace.runId === runs[0]?.id);
-    expect((runTrace?.result as Record<string, unknown> | undefined)?.score).toBe(1);
-    expect(((runTrace?.result as { metrics?: Record<string, unknown> } | undefined)?.metrics)?.score).toBe(1);
-    expect(((runTrace?.result as { cases?: Array<{ metrics?: Record<string, unknown> }> } | undefined)?.cases?.[0]?.metrics)?.score).toBe(1);
+    expect(runs[0]?.jobIds).toHaveLength(2);
+    const initialJobs = snapshot.jobs.filter((job) => job.runId === runs[0]?.id);
+    const executeJob = initialJobs.find((job) => job.role === "execute");
+    const gradeJob = initialJobs.find((job) => job.role === "grade");
+    expect(gradeJob?.result?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "score", score: 1 }),
+    ]));
+    const runTrace = snapshot.traces.find((trace) => trace.jobId === executeJob?.id);
+    const gradeTrace = snapshot.traces.find((trace) => trace.jobId === gradeJob?.id);
+    expect((gradeTrace?.result as Record<string, unknown> | undefined)?.score).toBe(1);
+    expect(((gradeTrace?.result as { metrics?: Record<string, unknown> } | undefined)?.metrics)?.score).toBe(1);
+    expect(((gradeTrace?.result as { cases?: Array<{ metrics?: Record<string, unknown> }> } | undefined)?.cases?.[0]?.metrics)?.score).toBe(1);
     const runExecution = (runTrace?.request as { execution?: {
       id?: string;
       versionId?: string;
@@ -194,9 +201,10 @@ describe("skill-first Workbench runtime", () => {
       agentName: "default",
       executionAdapter: "command",
     });
-    expect(defaultFailingRuns[0]).toMatchObject({ status: "failed" });
-    expect(failingRuns[0]).toMatchObject({ agentName: "patcher", status: "failed" });
-    expect(proofRun).toMatchObject({ status: "failed", outputVersionId: improvedVersion.id });
+    expect(defaultFailingRuns[0]).toMatchObject({ status: "succeeded" });
+    expect(failingRuns[0]).toMatchObject({ agentName: "patcher", status: "succeeded" });
+    expect(failedImprove).toMatchObject({ promoted: false, switched: false, outputScore: 0 });
+    expect(proofRun).toMatchObject({ status: "succeeded", outputVersionId: improvedVersion.id });
     expect(improvedVersion.parentIds).toEqual([failingRuns[0]!.versionId]);
     expect(improvedVersion.id).not.toBe(failingRuns[0]!.versionId);
     expect(await fs.readFile(path.join(root, "SKILL.md"), "utf8")).not.toContain("Workbench Improvement Notes");
@@ -228,7 +236,7 @@ describe("skill-first Workbench runtime", () => {
     })).rejects.toThrow(/Agent default cannot run improve because it has no skill-improvement adapter/u);
 
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    expect(failingRun).toMatchObject({ agentName: "default", status: "failed" });
+    expect(failingRun).toMatchObject({ agentName: "default", status: "succeeded" });
     expect(snapshot.runs.some((run) => run.kind === "improve")).toBe(false);
     expect(snapshot.status.currentVersionId).toBe(failingRun?.versionId);
   }, 60_000);
@@ -236,41 +244,54 @@ describe("skill-first Workbench runtime", () => {
   dockerTest("preserves command-provided Workbench result payloads in sandbox evals", async () => {
     const root = await makeTempRoot("workbench-command-result-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    const gradeCommand = nodeCommand([
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const caseId = process.env.WORKBENCH_CASE_ID || 'missing-case-id';",
+      "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
+      "fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'workbench-result.json'), JSON.stringify({",
+      "  protocol: 'workbench.adapter-result.v1',",
+      "  operation: 'grade.run',",
+      "  ok: true,",
+      "  value: {",
+      "    score: 0.42,",
+      "    summary: 'command result preserved',",
+      "    feedback: { review: 'command review preserved' },",
+      "    cases: [{ id: caseId, status: 'completed', metrics: { score: 0.42 } }],",
+      "  },",
+      "  summary: 'command result preserved',",
+      "}, null, 2) + '\\n');",
+    ]);
+    await fs.writeFile(path.join(root, ".workbench", "eval.yaml"), [
+      "version: 1",
+      "grade:",
+      "  adapter: command",
+      "  with:",
+      `    command: ${JSON.stringify(gradeCommand)}`,
+      "",
+    ].join("\n"));
     await addWorkbenchAgent({
       dir: root,
       name: "scored-command",
       adapter: "command",
       config: {
-        command: nodeCommand([
-          "const fs = require('node:fs');",
-          "const path = require('node:path');",
-          "const caseId = process.env.WORKBENCH_CASE_ID || 'missing-case-id';",
-          "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
-          "fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'workbench-result.json'), JSON.stringify({",
-          "  protocol: 'workbench.adapter-result.v1',",
-          "  operation: 'engine.run',",
-          "  ok: true,",
-          "  value: {",
-          "    score: 0.42,",
-          "    summary: 'command result preserved',",
-          "    feedback: { review: 'command review preserved' },",
-          "    cases: [{ id: caseId, status: 'completed', metrics: { score: 0.42 } }],",
-          "  },",
-          "  summary: 'command result preserved',",
-          "}, null, 2) + '\\n');",
-        ]),
+        command: "true",
       },
     });
     await writeFailingCaseTest(root, "case should be measured, not treated as smoke");
 
     const [run] = await evalWorkbenchSkill({ dir: root, agent: "scored-command", rerun: true });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const trace = snapshot.traces.find((entry) => entry.runId === run?.id);
+    const gradeJob = snapshot.jobs.find((entry) => entry.runId === run?.id && entry.role === "grade");
+    const trace = snapshot.traces.find((entry) => entry.jobId === gradeJob?.id);
 
     expect(run).toMatchObject({
       status: "succeeded",
-      score: 0.42,
     });
+    expect(run).not.toHaveProperty("score");
+    expect(gradeJob?.result?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "score", value: 0.42 }),
+    ]));
     expect(trace?.result).toMatchObject({
       score: 0.42,
       summary: "command result preserved",
@@ -293,7 +314,6 @@ describe("skill-first Workbench runtime", () => {
       "version: 1",
       "id: case-001",
       "prompt: Exercise a workflow-specific result payload.",
-      "command: sh \"$CASE_DIR/tests/test.sh\"",
       "",
     ].join("\n"));
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -308,15 +328,19 @@ describe("skill-first Workbench runtime", () => {
 
     const [run] = await evalWorkbenchSkill({ dir: root, rerun: true });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const trace = snapshot.traces.find((entry) => entry.runId === run?.id);
+    const gradeJob = snapshot.jobs.find((entry) => entry.runId === run?.id && entry.role === "grade");
+    const trace = snapshot.traces.find((entry) => entry.jobId === gradeJob?.id);
 
     expect(run).toMatchObject({
-      status: "failed",
-      score: 0,
-      error: "missing marker",
+      status: "succeeded",
     });
+    expect(run).not.toHaveProperty("score");
+    expect(gradeJob?.result?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "score", value: 0 }),
+      expect.objectContaining({ kind: "text", body: "missing marker" }),
+    ]));
     expect(trace?.result).toMatchObject({
-      status: "failed",
+      status: "succeeded",
       score: 0,
       summary: "missing marker",
       cases: [
@@ -344,21 +368,18 @@ describe("skill-first Workbench runtime", () => {
           "const caseId = process.env.WORKBENCH_CASE_ID || 'case-001';",
           "setTimeout(() => {",
           "  fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
-          "  fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'workbench-result.json'), JSON.stringify({",
-          "    protocol: 'workbench.adapter-result.v1',",
-          "    operation: 'engine.run',",
+          "  fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'result.json'), JSON.stringify({",
           "    ok: true,",
-          "    value: {",
-          "      score: 0.8,",
-          "      summary: 'slow command completed',",
-          "      cases: [{ id: caseId, status: 'completed', metrics: { score: 0.8 } }],",
-          "    },",
+          "    score: 0.8,",
+          "    summary: 'slow command completed',",
+          "    cases: [{ id: caseId, status: 'completed', metrics: { score: 0.8 } }],",
           "  }, null, 2) + '\\n');",
           "}, 3000);",
         ]),
       },
     });
     await writeFailingCaseTest(root, "slow case should be measured by command result");
+    await gradeFromRunnerResult(root);
 
     const supervisor = superviseLocalWorkbenchOperation({
       dir: root,
@@ -431,6 +452,7 @@ describe("skill-first Workbench runtime", () => {
       "",
     ].join("\n"));
     await writeFailingCaseTest(root, "comparison probe should be measured");
+    await gradeFromRunnerResult(root);
     await addWorkbenchAgent({
       dir: root,
       name: "skill-probe",
@@ -455,17 +477,12 @@ describe("skill-first Workbench runtime", () => {
           "  }",
           "}",
           "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
-          "fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'workbench-result.json'), JSON.stringify({",
-          "  protocol: 'workbench.adapter-result.v1',",
-          "  operation: 'engine.run',",
+          "fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'result.json'), JSON.stringify({",
           "  ok: true,",
-          "  value: {",
-          "    score,",
-          "    summary,",
-          "    feedback: { review: `${skillName}: ${summary}` },",
-          "    cases: [{ id: caseId, status: 'completed', metrics: { score } }],",
-          "  },",
+          "  score,",
           "  summary,",
+          "  feedback: { review: `${skillName}: ${summary}` },",
+          "  cases: [{ id: caseId, status: 'completed', metrics: { score } }],",
           "}, null, 2) + '\\n');",
         ]),
       },
@@ -487,18 +504,12 @@ describe("skill-first Workbench runtime", () => {
       agents: "skill-probe",
     });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const runSnapshot = createWorkbenchRunSnapshotForRun(
-      matrixRun,
-      snapshot.jobs.filter((job) => job.runId === matrixRun.id),
-    );
     const version = (await listWorkbenchVersions({ dir: root })).find((entry) => entry.id === runVersionIds[0]);
     const versionById = new Map(comparison.versions.map((entry) => [entry.id, entry]));
     const scoreByVersionSource = new Map(comparison.cells.map((cell) => {
       const resultVersion = versionById.get(cell.skillVersionId);
       return [resultVersion?.source ?? cell.skillVersionId, cell.quality];
     }));
-    const measurementScoreBySkill = new Map(runSnapshot.measurements
-      .map((measurement) => [measurement.skillName, measurement.score]));
     const snapshotVersionById = new Map(snapshot.results?.versions.map((entry) => [entry.id, entry]));
     const snapshotAgentNameById = new Map(snapshot.results?.agents.map((agent) => [agent.id, agent.name]));
     const snapshotScoreByVersionSource = new Map(snapshot.results?.cells
@@ -509,17 +520,12 @@ describe("skill-first Workbench runtime", () => {
     }));
 
     expect(runs).toHaveLength(1);
-    expect(matrixRun.jobIds).toHaveLength(3);
+    expect(matrixRun.jobIds).toHaveLength(6);
     expect([...(matrixRun.operationPlan?.skills ?? [])].sort()).toEqual(["current", "dummy-skill", "no-skill"]);
     expect(matrixRun.operationPlan?.agents).toEqual(["skill-probe"]);
     expect(runVersionIds).toHaveLength(1);
     expect(version?.files.map((file) => file.path)).toContain("baselines/dummy-skill/SKILL.md");
     expect(version?.files.map((file) => file.path)).not.toContain("baselines/no-skill/README.md");
-    expect(measurementScoreBySkill).toEqual(new Map([
-      ["dummy-skill", 0.3],
-      ["no-skill", 0.1],
-      ["current", 0.9],
-    ]));
     expect(comparison.versions.map((entry) => entry.source).sort()).toEqual([
       "local:.",
       "local:baselines/dummy-skill",
@@ -552,6 +558,7 @@ describe("skill-first Workbench runtime", () => {
     const root = await makeTempRoot("workbench-compare-default-agent-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
+    await gradeFromRunnerResult(root);
     await addWorkbenchAgent({
       dir: root,
       name: "default",
@@ -613,6 +620,7 @@ describe("skill-first Workbench runtime", () => {
       "utf8",
     );
     await writePassingCaseTest(root);
+    await gradeFromRunnerResult(root);
     await addWorkbenchAgent({
       dir: root,
       name: "patcher",
@@ -652,6 +660,7 @@ describe("skill-first Workbench runtime", () => {
     const root = await makeTempRoot("workbench-compare-samples-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
+    await gradeFromRunnerResult(root);
     await addWorkbenchAgent({
       dir: root,
       name: "default",
@@ -682,6 +691,7 @@ describe("skill-first Workbench runtime", () => {
     const root = await makeTempRoot("workbench-improve-incumbent-samples-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
+    await gradeFromRunnerResult(root);
     await addWorkbenchAgent({
       dir: root,
       name: "patcher",
@@ -715,6 +725,7 @@ describe("skill-first Workbench runtime", () => {
     const root = await makeTempRoot("workbench-operation-eval-preview-auth-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
+    await gradeFromRunnerResult(root);
     await addWorkbenchAgent({
       dir: root,
       name: "codex",
@@ -837,7 +848,6 @@ describe("skill-first Workbench runtime", () => {
       ...seedRun,
       id: "run_matrix",
       status: "succeeded" as const,
-      score: 0.65,
       jobIds: ["job_matrix_default", "job_matrix_patcher"],
       traceIds: [],
       createdAt: "2099-01-01T00:00:00.000Z",
@@ -876,17 +886,19 @@ describe("skill-first Workbench runtime", () => {
     await fs.writeFile(path.join(root, ".workbench", "objects", "job", "job_matrix_default.json"), `${JSON.stringify({
       ...jobBase,
       id: "job_matrix_default",
+      role: "grade",
       agentName: defaultAgent.name,
       agentHash: hashJson(defaultAgent),
-      score: 0.4,
+      result: { items: [{ kind: "score", score: 0.4, value: 0.4 }] },
       durationMs: 400,
     }, null, 2)}\n`);
     await fs.writeFile(path.join(root, ".workbench", "objects", "job", "job_matrix_patcher.json"), `${JSON.stringify({
       ...jobBase,
       id: "job_matrix_patcher",
+      role: "grade",
       agentName: patcherAgent.name,
       agentHash: hashJson(patcherAgent),
-      score: 0.9,
+      result: { items: [{ kind: "score", score: 0.9, value: 0.9 }] },
       durationMs: 900,
     }, null, 2)}\n`);
 
@@ -951,7 +963,12 @@ describe("skill-first Workbench runtime", () => {
 
     await writeFailingCaseTest(root, "current case should not be used by v001");
     const currentRuns = await evalWorkbenchSkill({ dir: root, rerun: true });
-    expect(currentRuns[0]).toMatchObject({ status: "failed" });
+    const currentSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const currentGrade = currentSnapshot.jobs.find((job) => job.runId === currentRuns[0]?.id && job.role === "grade");
+    expect(currentRuns[0]).toMatchObject({ status: "succeeded" });
+    expect(currentGrade?.result?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "score", score: 0 }),
+    ]));
 
     const selectedRuns = await evalWorkbenchSkill({ dir: root, version: initial.id, rerun: true });
     expect(selectedRuns[0]).toMatchObject({ versionId: initial.id, status: "succeeded" });
@@ -1349,7 +1366,6 @@ describe("skill-first Workbench runtime", () => {
         agentName: "default",
         agentHash: oldAgentHash,
         status: "succeeded",
-        score: 0.1,
         traceIds: [],
         createdAt: "2026-06-09T00:01:00.000Z",
       }, {
@@ -1362,11 +1378,13 @@ describe("skill-first Workbench runtime", () => {
         agentName: "default",
         agentHash: newAgentHash,
         status: "succeeded",
-        score: 0.9,
         traceIds: [],
         createdAt: "2026-06-09T00:02:00.000Z",
       }],
-      jobs: [],
+      jobs: [
+        scoredGradeJob("job_old_grade", "run_old", oldAgentHash, 0.1),
+        scoredGradeJob("job_new_grade", "run_new", newAgentHash, 0.9),
+      ],
       traces: [],
       executionEvents: [],
       artifacts: [],
@@ -1507,12 +1525,11 @@ describe("skill-first Workbench runtime", () => {
         agentName: "codex",
         agentHash,
         status: "failed",
-        score: 1,
         error: "ADAPTER_AUTH_REQUIRED: codex disconnected",
         traceIds: [],
         createdAt: "2026-06-09T00:01:00.000Z",
       }],
-      jobs: [],
+      jobs: [scoredGradeJob("job_failed_grade", "run_failed", agentHash, 1, { status: "failed" })],
       traces: [],
       executionEvents: [],
       artifacts: [],
@@ -1632,7 +1649,6 @@ describe("skill-first Workbench runtime", () => {
         agentName: "default",
         agentHash,
         status: "failed",
-        score: 0.5,
         traceIds: [],
         createdAt: "2026-06-09T00:01:00.000Z",
       }, {
@@ -1648,7 +1664,7 @@ describe("skill-first Workbench runtime", () => {
         traceIds: [],
         createdAt: "2026-06-09T00:02:00.000Z",
       }],
-      jobs: [],
+      jobs: [scoredGradeJob("job_scored_grade", "run_scored", agentHash, 0.5, { status: "failed" })],
       traces: [],
       executionEvents: [],
       artifacts: [],
@@ -1732,11 +1748,10 @@ describe("skill-first Workbench runtime", () => {
         agentName: "patcher",
         agentHash,
         status: "succeeded",
-        score: 1,
         traceIds: [],
         createdAt: "2026-06-09T00:11:00.000Z",
       }],
-      jobs: [],
+      jobs: [scoredGradeJob("job_good_grade", "run_good", agentHash, 1, { versionId: "v002" })],
       traces: [],
       executionEvents: [],
       artifacts: [],
@@ -1820,11 +1835,13 @@ describe("skill-first Workbench runtime", () => {
         agentName: "old-agent",
         agentHash: oldAgentHash,
         status: "succeeded",
-        score: 0.1,
         traceIds: [],
         createdAt: "2026-06-09T00:01:00.000Z",
       }],
-      jobs: [],
+      jobs: [scoredGradeJob("job_old_grade", "run_old", oldAgentHash, 0.1, {
+        versionId: "v001",
+        agentName: "old-agent",
+      })],
       traces: [],
       executionEvents: [],
       artifacts: [],
@@ -1838,6 +1855,71 @@ describe("skill-first Workbench runtime", () => {
     expect(comparison.cells[0]).toMatchObject({
       skillVersionId: "v002",
       agentVersionId: sparkAgentHash,
+    });
+  });
+
+  test("live comparison agents override legacy version agent files", () => {
+    const legacyAgent = { name: "old-agent", adapter: "codex", model: "old-model", config: { auth: "default" } };
+    const liveAgent = { name: "patcher", adapter: "command", config: { command: "true" } };
+    const liveAgentHash = hashJson(liveAgent);
+    const source = { name: "current", kind: "local" as const, path: "." };
+    const state: WorkbenchProjectState = {
+      schema: "workbench.skill.state.v1",
+      root: "/tmp/comparison-live-agents",
+      refs: { current: "v001" },
+      remotes: {},
+      versions: [{
+        id: "v001",
+        hash: "version_hash_legacy_agents",
+        message: "Legacy source snapshot",
+        parentIds: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+        files: [
+          textFixture("SKILL.md", "# Runtime source\n"),
+          textFixture(".workbench/agents.yaml", [
+            "default: old-agent",
+            "agents:",
+            "  old-agent:",
+            "    adapter: codex",
+            "    model: old-model",
+            "    with:",
+            "      auth: default",
+            "",
+          ].join("\n")),
+        ],
+      }],
+      skillSources: [source],
+      skillBundles: [{
+        hash: "bundle_hash",
+        skillName: "current",
+        entryName: "current",
+        source,
+        files: [],
+        includedSkills: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+      }],
+      evals: [evalFixture()],
+      agents: [legacyAgent, liveAgent],
+      runs: [],
+      jobs: [],
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+
+    const comparison = buildWorkbenchResultsFromState(state, {
+      versions: "v001",
+      agents: liveAgent.name,
+      availableAgents: [liveAgent],
+      defaultAgent: liveAgent.name,
+    });
+
+    expect(comparison.agents.map((agent) => agent.id)).toEqual([liveAgentHash]);
+    expect(comparison.cells).toHaveLength(1);
+    expect(comparison.cells[0]).toMatchObject({
+      skillVersionId: "v001",
+      agentVersionId: liveAgentHash,
     });
   });
 
@@ -1866,6 +1948,49 @@ describe("skill-first Workbench runtime", () => {
       agentVersionId: comparison.agents[0]?.id,
     });
     expect(comparison.cells[0]?.runId).toBeUndefined();
+  });
+
+  test("live runtime agents override legacy version agent files", async () => {
+    const legacyAgent = { name: "old-agent", adapter: "codex", model: "old-model", config: { auth: "default" } };
+    const liveAgent = { name: "patcher", adapter: "command", config: { command: "true" } };
+    const files = [
+      textFixture("SKILL.md", "# Runtime source\n"),
+      textFixture(".workbench/eval.yaml", [
+        "version: 1",
+        "name: runtime",
+        "grade:",
+        "  adapter: tests",
+        "",
+      ].join("\n")),
+      textFixture(".workbench/agents.yaml", [
+        "default: old-agent",
+        "agents:",
+        "  old-agent:",
+        "    adapter: codex",
+        "    model: old-model",
+        "    with:",
+        "      auth: default",
+        "",
+      ].join("\n")),
+    ];
+    const hash = hashFiles(files);
+    const runtime = await createWorkbenchVersionRuntimeSnapshot({
+      id: `v_${hash}`,
+      hash,
+      message: "legacy source snapshot",
+      parentIds: [],
+      createdAt: "2026-06-20T00:00:00.000Z",
+      files,
+    }, {
+      agent: liveAgent.name,
+      agents: [liveAgent],
+      defaultAgent: liveAgent.name,
+    });
+
+    expect(runtime.defaultAgent).toBe(liveAgent.name);
+    expect(runtime.agents).toEqual([liveAgent]);
+    expect(runtime.selectedAgents).toEqual([liveAgent]);
+    expect(runtime.agents).not.toContainEqual(legacyAgent);
   });
 
   test("status records automatic versions locally without syncing them", async () => {
@@ -2760,7 +2885,6 @@ describe("skill-first Workbench runtime", () => {
         "version: 1",
         "id: case-002",
         "prompt: Create an earnings prep note for GOOGL.",
-        "command: sh \"$CASE_DIR/tests/test.sh\"",
         "rubric:",
         "  - Cites the key evidence.",
         "",
@@ -2968,14 +3092,14 @@ describe("skill-first Workbench runtime", () => {
         caseCount: 1,
         createdAt: "2026-06-09T01:00:00.000Z",
         updatedAt: "2026-06-09T01:00:00.000Z",
-        scoreAdapter: "tests",
+        gradeAdapter: "tests",
       }],
     });
 
     expect(() => importObjectPack(state, remotePack)).not.toThrow();
     expect(state.evals).toHaveLength(1);
     expect(state.evals[0]?.caseCount).toBe(1);
-    expect(state.evals[0]?.scoreAdapter).toBe("tests");
+    expect(state.evals[0]?.gradeAdapter).toBe("tests");
     expect(state.evals[0]?.createdAt).toBe("2026-06-09T00:00:00.000Z");
     expect(state.evals[0]?.updatedAt).toBe("2026-06-09T01:00:00.000Z");
   });
@@ -3025,7 +3149,7 @@ describe("skill-first Workbench runtime", () => {
         caseCount: 0,
         createdAt: "2026-06-09T00:00:00.000Z",
         updatedAt: "2026-06-09T00:00:00.000Z",
-        scoreAdapter: "tests",
+        gradeAdapter: "tests",
       }],
     });
 
@@ -3260,7 +3384,6 @@ describe("skill-first Workbench runtime", () => {
       agentName: "default",
       agentHash: "agent_delta",
       status: "succeeded",
-      score: 1,
       jobIds: ["job_delta"],
       traceIds: ["trace_delta"],
       createdAt: "2026-06-09T00:00:00.000Z",
@@ -3279,7 +3402,8 @@ describe("skill-first Workbench runtime", () => {
       caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: ["trace_delta"],
       createdAt: run.createdAt,
@@ -3816,14 +3940,13 @@ describe("skill-first Workbench runtime", () => {
     await writeFailingCaseTest(root, "command improve failure");
     const [failingRun] = await evalWorkbenchSkill({ dir: root, agent: "patcher" });
 
-    await expect(improveWorkbenchSkill({ dir: root, agent: "patcher" }))
-      .rejects.toThrow(/Improve proof eval failed/u);
+    const failedImprove = await improveWorkbenchSkill({ dir: root, agent: "patcher" });
     const skill = await fs.readFile(path.join(root, "SKILL.md"), "utf8");
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     const proofRun = snapshot.runs.find((run) => run.kind === "improve" && run.agentName === "patcher");
     const improvedVersion = snapshot.versions.find((version) => version.id === proofRun?.outputVersionId);
     if (!proofRun || !improvedVersion) {
-      throw new Error("Expected failed improve proof run and candidate version.");
+      throw new Error("Expected improve proof run and candidate version.");
     }
     const improvedSkill = improvedVersion.files.find((file) => file.path === "SKILL.md")?.content ?? "";
     const diff = await diffWorkbenchVersions(`${failingRun!.versionId}..${improvedVersion.id}`, { dir: root });
@@ -3832,7 +3955,8 @@ describe("skill-first Workbench runtime", () => {
     const proofTrace = improveTraces.find((trace) => (trace.request as Record<string, unknown>).improvementMode === "command");
 
     expect(improvedVersion.parentIds).toEqual([failingRun!.versionId]);
-    expect(proofRun).toMatchObject({ status: "failed", outputVersionId: improvedVersion.id });
+    expect(failedImprove).toMatchObject({ promoted: false, switched: false, outputScore: 0 });
+    expect(proofRun).toMatchObject({ status: "succeeded", outputVersionId: improvedVersion.id });
     expect(skill).not.toContain("Command-backed improvement from trace evidence.");
     expect(improvedSkill).toContain("Command-backed improvement from trace evidence.");
     expect(skill).not.toContain("Workbench Improvement Notes");
@@ -3924,7 +4048,7 @@ describe("skill-first Workbench runtime", () => {
       "        source: 'adapter',",
       "        role: 'engine',",
       "        schema: 'workbench.execution.step.v1',",
-      "        payload: { step: 'engine.run', status: 'started' },",
+      "        payload: { step: 'grade.run', status: 'started' },",
       "      }],",
       "    },",
       "  },",
@@ -3932,7 +4056,7 @@ describe("skill-first Workbench runtime", () => {
       "fs.writeFileSync(`${process.env.WORKBENCH_OUTPUT}/score.txt`, 'score output\\n');",
       "fs.writeFileSync(process.env.WORKBENCH_RESULT, JSON.stringify({",
       "  protocol: 'workbench.adapter-result.v1',",
-      "  operation: 'engine.run',",
+      "  operation: 'grade.run',",
       "  ok: true,",
       "  value: { score: 1, metrics: { score: 1 }, summary: 'runtime control scored' },",
       "  summary: 'runtime control scored',",
@@ -3999,7 +4123,7 @@ describe("skill-first Workbench runtime", () => {
         engine: { use: "command", with: {} },
         engineResolve: { use: "command", with: {} },
         run: { use: "command", with: {} },
-        engineRun: { use: "command", with: {} },
+        gradeRun: { use: "command", with: {} },
       },
       baseFiles: [textFixture("current/SKILL.md", "# Runtime Control Skill\n")],
       engineResolveFiles: [textFixture("prompt.md", "Public case.\n")],
@@ -4025,7 +4149,7 @@ describe("skill-first Workbench runtime", () => {
         prepare: true,
         operations: [
           { label: "runner", operation: "skill.run", invocation: { use: "command", command: skillCommand } },
-          { label: "score", operation: "engine.run", invocation: { use: "command", command: engineCommand } },
+          { label: "score", operation: "grade.run", invocation: { use: "command", command: engineCommand } },
         ],
       },
     }, execution, createdAt);
@@ -4040,7 +4164,7 @@ describe("skill-first Workbench runtime", () => {
     expect(completed.status).toBe("succeeded");
     expect(output.ok).toBe(true);
     expect(output.result?.score).toBe(1);
-    expect(output.operationResults?.map((result) => result.operation)).toEqual(["skill.run", "engine.run"]);
+    expect(output.operationResults?.map((result) => result.operation)).toEqual(["skill.run", "grade.run"]);
     expect(output.usage?.runner?.costUsd).toBe(0.02);
     expect(output.usage?.engine?.costUsd).toBe(0.03);
     expect(output.files?.map((file) => file.path)).toEqual(expect.arrayContaining([
@@ -4279,7 +4403,7 @@ describe("skill-first Workbench runtime", () => {
       "  });",
       "  fs.writeFileSync(process.env.WORKBENCH_RESULT, JSON.stringify({",
       "    protocol: 'workbench.adapter-result.v1',",
-      "    operation: 'engine.run',",
+      "    operation: 'grade.run',",
       "    ok: child.ok,",
       "    value: child.result || { score: 0 },",
       "    feedback: { childOperationResults: child.operationResults.length },",
@@ -4329,12 +4453,20 @@ describe("skill-first Workbench runtime", () => {
       baseFiles: [textFixture("current/SKILL.md", "# Host Runtime Control Skill\n")],
       engineResolveFiles: [textFixture("prompt.md", "Public case.\n")],
       engineCases: [runtimeControlCase()],
+      runtimeControlOperation: {
+        prepare: true,
+        operations: [{
+          label: "host",
+          operation: "grade.run",
+          invocation: { use: "host-engine", with: {} },
+        }],
+      },
       adapterManifests: [{
         id: "host-engine",
         protocol: "workbench.adapter-manifest.v1",
         install: [],
         operations: {
-          "engine.run": { command: hostCommand, executor: "host" },
+          "grade.run": { command: hostCommand, executor: "host" },
         },
       }],
     }, {
@@ -4352,7 +4484,7 @@ describe("skill-first Workbench runtime", () => {
     expect(completed.status).toBe("succeeded");
     expect(output.ok).toBe(true);
     expect(output.result?.score).toBe(0.9);
-    expect(output.operationResults?.map((result) => result.operation)).toEqual(["engine.run"]);
+    expect(output.operationResults?.map((result) => result.operation)).toEqual(["grade.run"]);
     expect(output.usage?.runner?.costUsd).toBe(0.07);
     expect(childRequests).toHaveLength(1);
     expect(childRequests[0]?.runtimeControlOperation?.operations).toEqual([
@@ -4438,12 +4570,20 @@ describe("skill-first Workbench runtime", () => {
       baseFiles: [textFixture("current/SKILL.md", "# Host Runtime Control Skill\n")],
       engineResolveFiles: [textFixture("prompt.md", "Public case.\n")],
       engineCases: [runtimeControlCase()],
+      runtimeControlOperation: {
+        prepare: true,
+        operations: [{
+          label: "host",
+          operation: "grade.run",
+          invocation: { use: "host-engine", with: {} },
+        }],
+      },
       adapterManifests: [{
         id: "host-engine",
         protocol: "workbench.adapter-manifest.v1",
         install: [],
         operations: {
-          "engine.run": { command: hostCommand, executor: "host" },
+          "grade.run": { command: hostCommand, executor: "host" },
         },
       }],
     }, {
@@ -4457,7 +4597,7 @@ describe("skill-first Workbench runtime", () => {
     };
 
     expect(completed.status).toBe("failed");
-    expect(completed.error).toContain("Runtime-control step host (engine.run via host-engine) exited with status 42: host failed with dangling callback");
+    expect(completed.error).toContain("Runtime-control step host (grade.run via host-engine) exited with status 42: host failed with dangling callback");
     expect(output.ok).toBe(false);
     expect(output.files?.map((file) => file.path)).toEqual(expect.arrayContaining([
       "stderr.log",
@@ -4604,7 +4744,7 @@ describe("skill-first Workbench runtime", () => {
     expect(output.skillPatch?.fileChanges).toEqual(["SKILL.md"]);
   }, 60_000);
 
-  test("plans provider-backed agent execution through direct score adapters", () => {
+  test("plans provider-backed agent execution through direct grade adapters", () => {
     const createdAt = new Date().toISOString();
     const input = createWorkbenchSkillEvalRuntimeInput({
       ownerUserId: "local",
@@ -4665,7 +4805,7 @@ describe("skill-first Workbench runtime", () => {
     });
     expect(input.spec.run.with).not.toHaveProperty("network");
     expect(input.spec.environment.network).toEqual({ egress: "open" });
-    expect(input.spec.engineRun).toMatchObject({
+    expect(input.spec.gradeRun).toMatchObject({
       use: "tests",
     });
     expect(input.adapterManifests?.map((manifest) => manifest.id).sort()).toEqual(["codex", "tests"]);
@@ -4683,10 +4823,10 @@ describe("skill-first Workbench runtime", () => {
       runtimeControlOperation: {
         operations: [{
           label: "host",
-          operation: "engine.run",
+          operation: "grade.run",
           invocation: {
             use: "tests",
-            with: input.spec.engineRun.with,
+            with: input.spec.gradeRun.with,
           },
         }],
       },
@@ -4739,17 +4879,17 @@ describe("skill-first Workbench runtime", () => {
       runtimeControlOperation: {
         operations: [{
           label: "host",
-          operation: "engine.run",
+          operation: "grade.run",
           invocation: {
             use: "tests",
-            with: claudeInput.spec.engineRun.with,
+            with: claudeInput.spec.gradeRun.with,
           },
         }],
       },
     })).toEqual([
       { adapterId: "claude", profile: "default" },
     ]);
-    expect(execution?.adapter?.use).toBe("tests");
+    expect(execution?.adapter?.use).toBe("codex");
     expect(execution?.metadata).toMatchObject({
       skillEval: true,
       agentName: "codex",
@@ -4771,7 +4911,7 @@ describe("skill-first Workbench runtime", () => {
         evalSnapshot: evalFixture({
           hash: "eval_hash",
           files: [
-            textFixture("eval.yaml", "version: 1\nname: samples\ndescription: Multi-sample eval.\nscore:\n  adapter: tests\n"),
+            textFixture("eval.yaml", "version: 1\nname: samples\ndescription: Multi-sample eval.\ngrade:\n  adapter: tests\n"),
           ],
         }),
         agent: {
@@ -4808,8 +4948,8 @@ describe("skill-first Workbench runtime", () => {
     const [run] = await evalWorkbenchSkill({ dir: root, samples: 5 });
 
     expect(run?.status).toBe("succeeded");
-    expect(run?.jobIds).toHaveLength(5);
-    expect(run?.traceIds).toHaveLength(5);
+    expect(run?.jobIds).toHaveLength(10);
+    expect(run?.traceIds).toHaveLength(10);
     await expect(listWorkbenchVersions({ dir: root })).resolves.toHaveLength(2);
   }, 15_000);
 
@@ -4862,13 +5002,13 @@ describe("skill-first Workbench runtime", () => {
       evalHash: "eval_hash",
       evalSnapshot: evalFixture({
         hash: "eval_hash",
-        scoreAdapter: "rubric",
+        gradeAdapter: "rubric",
         files: [
           textFixture("eval.yaml", [
             "version: 1",
             "name: provider",
             "description: Provider eval.",
-            "score:",
+            "grade:",
             "  adapter: rubric",
             "",
           ].join("\n")),
@@ -4914,7 +5054,7 @@ describe("skill-first Workbench runtime", () => {
       createdAt: new Date().toISOString(),
     });
 
-    expect(input.spec.engineRun).toMatchObject({
+    expect(input.spec.gradeRun).toMatchObject({
       use: "rubric",
       with: {
         judge: {
@@ -4998,7 +5138,7 @@ function runtimeControlSpec() {
     engine: { use: "command", with: {} },
     engineResolve: { use: "command", with: {} },
     run: { use: "command", with: {} },
-    engineRun: { use: "command", with: {} },
+    gradeRun: { use: "command", with: {} },
   };
 }
 
@@ -5188,7 +5328,6 @@ function runFixture(id: string, versionId: string, agentHash: string): Workbench
     agentName: "patcher",
     agentHash,
     status: "failed",
-    score: 0,
     traceIds: [`trace_${id}`],
     jobIds: [`job_${id}`],
     createdAt: "2026-06-08T00:00:00.000Z",
@@ -5215,7 +5354,8 @@ function jobFixture(
     caseId: "case-001",
     sample: 0,
     status: "failed",
-    score: 0,
+    role: "grade",
+    result: { items: [{ kind: "score", score: 0, value: 0 }] },
     artifactIds: [],
     traceIds: [`trace_${id}`],
     createdAt: "2026-06-08T00:00:00.000Z",
@@ -5238,7 +5378,7 @@ function evalFixture(
     caseCount: 1,
     createdAt: "2026-06-08T00:00:00.000Z",
     updatedAt: "2026-06-08T00:00:00.000Z",
-    scoreAdapter: "tests",
+    gradeAdapter: "tests",
     ...overrides,
   };
 }
@@ -5246,7 +5386,7 @@ function evalFixture(
 function createQueuedEvalState(): WorkbenchProjectState {
   const agentSource = "default: default\nagents:\n  default:\n    adapter: local\n    model: docker\n    with: {}\n";
   const evalFiles = [
-    textFixture("eval.yaml", "version: 1\nname: queued-eval\nscore:\n  adapter: tests\n"),
+    textFixture("eval.yaml", "version: 1\nname: queued-eval\ngrade:\n  adapter: tests\n"),
     textFixture("cases/case-001/case.yaml", "version: 1\nid: case-001\ncommand: sh \"$CASE_DIR/tests/test.sh\"\n"),
     {
       ...textFixture("cases/case-001/tests/test.sh", "#!/bin/sh\nset -eu\nmkdir -p \"$OUTPUT_DIR\"\nprintf '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}\\n' > \"$OUTPUT_DIR/result.json\"\n"),
@@ -5319,7 +5459,6 @@ async function writeFailingCaseTest(root: string, message: string): Promise<void
     "prompt: Exercise a workflow-specific failure path.",
     "rubric:",
     "  - Captures workflow-specific failure evidence.",
-    "command: sh \"$CASE_DIR/tests/test.sh\"",
     "",
   ].join("\n"));
   await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -5342,7 +5481,6 @@ async function writePassingCaseTest(root: string): Promise<void> {
     "prompt: Exercise a workflow-specific success path.",
     "rubric:",
     "  - Captures workflow-specific success evidence.",
-    "command: sh \"$CASE_DIR/tests/test.sh\"",
     "",
   ].join("\n"));
   await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -5353,6 +5491,39 @@ async function writePassingCaseTest(root: string): Promise<void> {
     "",
   ].join("\n"));
   await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+}
+
+async function gradeFromRunnerResult(root: string): Promise<void> {
+  const command = nodeCommand([
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const input = JSON.parse(fs.readFileSync(path.join(process.env.SUBJECT_OUTPUT_DIR, 'result.json'), 'utf8'));",
+    "const rawScore = typeof input.score === 'number' ? input.score : (input.metrics && typeof input.metrics.score === 'number' ? input.metrics.score : 0);",
+    "const score = Number.isFinite(rawScore) ? rawScore : 0;",
+    "const value = {",
+    "  ...input,",
+    "  score,",
+    "  summary: input.summary || input.message || `score ${score}`,",
+    "  metrics: { ...(input.metrics || {}), score },",
+    "};",
+    "delete value.ok;",
+    "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
+    "fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'workbench-result.json'), JSON.stringify({",
+    "  protocol: 'workbench.adapter-result.v1',",
+    "  operation: 'grade.run',",
+    "  ok: true,",
+    "  value,",
+    "}, null, 2) + '\\n');",
+  ]);
+  await fs.writeFile(path.join(root, ".workbench", "eval.yaml"), [
+    "version: 1",
+    "name: runner-result-grade",
+    "grade:",
+    "  adapter: command",
+    "  with:",
+    `    command: ${JSON.stringify(command)}`,
+    "",
+  ].join("\n"));
 }
 
 function shellQuote(value: string): string {
@@ -5370,6 +5541,36 @@ function scoreCommand(score: number): string {
     "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
     `fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'result.json'), ${JSON.stringify(JSON.stringify({ ok: true, score }) + "\n")});`,
   ]);
+}
+
+function scoredGradeJob(
+  id: string,
+  runId: string,
+  agentHash: string,
+  score: number,
+  overrides: Partial<WorkbenchJob> = {},
+): WorkbenchJob {
+  return {
+    id,
+    runId,
+    kind: "eval",
+    role: "grade",
+    versionId: overrides.versionId ?? "v001",
+    skillName: "current",
+    skillBundleHash: "bundle_hash",
+    evalHash: "eval_hash",
+    agentName: overrides.agentName ?? "default",
+    agentHash,
+    caseId: "case-001",
+    sample: 0,
+    status: overrides.status ?? "succeeded",
+    result: { items: [{ kind: "score", score, value: score }] },
+    artifactIds: [],
+    traceIds: [],
+    createdAt: "2026-06-09T00:01:00.000Z",
+    finishedAt: "2026-06-09T00:01:01.000Z",
+    ...overrides,
+  };
 }
 
 function expectBlockedCodexOperationPreview(

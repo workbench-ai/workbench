@@ -13,7 +13,7 @@ import {
   collectWorkbenchAdapterAuthRequirements,
   defineAdapter,
   defineEngineResolver,
-  defineEngineRunner,
+  defineGradeRunner,
   defineImprover,
   defineSkillRunner,
   normalizeWorkbenchAdapterOperationRequest,
@@ -131,19 +131,19 @@ describe("Workbench adapter protocol", () => {
       `protocol: ${WORKBENCH_ADAPTER_MANIFEST_PROTOCOL}`,
       "operations:",
       "  engine.resolve: {}",
-      "  engine.run:",
+      "  grade.run:",
       "    command: external-engine-adapter",
       "    executor: host",
       "",
     ].join("\n"));
 
     expect(workbenchAdapterOperationExecutor(manifest, "engine.resolve")).toBe("sandbox");
-    expect(workbenchAdapterOperationExecutor(manifest, "engine.run")).toBe("host");
+    expect(workbenchAdapterOperationExecutor(manifest, "grade.run")).toBe("host");
     expect(() => parseWorkbenchAdapterManifest([
       "id: invalid-executor",
       `protocol: ${WORKBENCH_ADAPTER_MANIFEST_PROTOCOL}`,
       "operations:",
-      "  engine.run:",
+      "  grade.run:",
       "    executor: worker",
       "",
     ].join("\n"))).toThrow("executor must be sandbox or host");
@@ -153,7 +153,7 @@ describe("Workbench adapter protocol", () => {
     expect(normalizeWorkbenchAdapterOperationRequest({
       protocol: "workbench.adapter.v3",
       id: "exec_1",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "command",
       },
@@ -172,7 +172,7 @@ describe("Workbench adapter protocol", () => {
       },
     })).toMatchObject({
       id: "exec_1",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "command",
         with: {},
@@ -197,7 +197,7 @@ describe("Workbench adapter protocol", () => {
     expect(() => normalizeWorkbenchAdapterOperationRequest({
       protocol: "workbench.adapter.v3",
       id: "exec_invalid_paths",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "command",
       },
@@ -219,7 +219,7 @@ describe("Workbench adapter protocol", () => {
       id: "adapter",
       engineResolve: defineEngineResolver(),
       skillRun: defineSkillRunner(),
-      engineRun: defineEngineRunner(),
+      gradeRun: defineGradeRunner(),
       improve: defineImprover(),
     }));
 
@@ -228,7 +228,7 @@ describe("Workbench adapter protocol", () => {
       operations: {
         "engine.resolve": { command: "workbench-adapter-adapter" },
         "skill.run": { command: "workbench-adapter-adapter" },
-        "engine.run": { command: "workbench-adapter-adapter" },
+        "grade.run": { command: "workbench-adapter-adapter" },
         "skill.improve": { command: "workbench-adapter-adapter" },
       },
     });
@@ -276,14 +276,14 @@ describe("Workbench adapter protocol", () => {
   test("normalizes adapter operation results", () => {
     expect(normalizeWorkbenchAdapterOperationResult({
       protocol: "workbench.adapter-result.v1",
-      operation: "engine.run",
+      operation: "grade.run",
       value: {
         score: 0.75,
         metrics: { accuracy: 0.75 },
       },
-    }, "engine.run")).toMatchObject({
+    }, "grade.run")).toMatchObject({
       protocol: "workbench.adapter-result.v1",
-      operation: "engine.run",
+      operation: "grade.run",
       value: {
         score: 0.75,
         metrics: { accuracy: 0.75 },
@@ -431,10 +431,10 @@ describe("Workbench adapter protocol", () => {
   test("rejects adapter operation results that explicitly report failure", () => {
     expect(() => assertWorkbenchAdapterOperationResultOk({
       protocol: "workbench.adapter-result.v1",
-      operation: "engine.run",
+      operation: "grade.run",
       ok: false,
       summary: "engine rejected the workspace",
-    }, "Adapter engine.run")).toThrow("Adapter engine.run returned ok false: engine rejected the workspace");
+    }, "Adapter grade.run")).toThrow("Adapter grade.run returned ok false: engine rejected the workspace");
   });
 
   test("collects required operations through adapter slots", () => {
@@ -442,7 +442,7 @@ describe("Workbench adapter protocol", () => {
       "id: orchestrator",
       `protocol: ${WORKBENCH_ADAPTER_MANIFEST_PROTOCOL}`,
       "operations:",
-      "  engine.run: {}",
+      "  grade.run: {}",
       "slots:",
       "  judge:",
       "    path: /judge",
@@ -453,7 +453,7 @@ describe("Workbench adapter protocol", () => {
       "id: engine-only",
       `protocol: ${WORKBENCH_ADAPTER_MANIFEST_PROTOCOL}`,
       "operations:",
-      "  engine.run: {}",
+      "  grade.run: {}",
       "",
     ].join("\n"));
     const roots = [{
@@ -463,7 +463,7 @@ describe("Workbench adapter protocol", () => {
           judge: { use: "engine-only" },
         },
       },
-      operation: "engine.run" as const,
+      operation: "grade.run" as const,
     }];
 
     expect(() => assertWorkbenchAdapterOperationSupport(roots, [orchestrator, engineOnly]))
@@ -472,7 +472,7 @@ describe("Workbench adapter protocol", () => {
       .toThrow("Adapter engine-only is referenced but is not installed.");
     expect(() => assertWorkbenchAdapterOperationSupport([{
       invocation: { use: "engine-only" },
-      operation: "engine.run" as const,
+      operation: "grade.run" as const,
     }], [orchestrator, engineOnly])).not.toThrow();
   });
 

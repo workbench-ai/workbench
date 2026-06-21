@@ -2,7 +2,9 @@ import { describe, expect, test } from "vitest";
 
 import { buildVersionLineageFlow, buildVersionLineageGraph } from "../src/lib/lineage";
 import type {
+  WorkbenchJob,
   WorkbenchLineageEdge,
+  WorkbenchRun,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 
@@ -17,36 +19,20 @@ describe("version lineage", () => {
       ],
       lineage: [edge("v001", "v002", "improve")],
       runs: [
-        {
+        run({
           id: "run_old",
-          kind: "eval",
           versionId: "v002",
-          skillName: "current",
-          skillBundleHash: "bundle",
-          evalHash: "eval",
-          agentName: "patcher",
-          agentHash: "agent",
-          status: "succeeded",
-          score: 0.5,
-          jobIds: [],
-          traceIds: [],
           createdAt: "2026-01-01T00:03:00.000Z",
-        },
-        {
+        }),
+        run({
           id: "run_new",
-          kind: "eval",
           versionId: "v002",
-          skillName: "current",
-          skillBundleHash: "bundle",
-          evalHash: "eval",
-          agentName: "patcher",
-          agentHash: "agent",
-          status: "succeeded",
-          score: 0.9,
-          jobIds: [],
-          traceIds: [],
           createdAt: "2026-01-01T00:04:00.000Z",
-        },
+        }),
+      ],
+      jobs: [
+        gradeJob("job_old", "run_old", 0.5),
+        gradeJob("job_new", "run_new", 0.9),
       ],
     });
 
@@ -128,6 +114,44 @@ function edge(parentId: string, childId: string, reason = "version"): WorkbenchL
     parentId,
     childId,
     reason,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function run(overrides: Partial<WorkbenchRun> & { id: string; versionId: string }): WorkbenchRun {
+  return {
+    kind: "eval",
+    skillName: "current",
+    skillBundleHash: "bundle",
+    evalHash: "eval",
+    agentName: "patcher",
+    agentHash: "agent",
+    status: "succeeded",
+    jobIds: [],
+    traceIds: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function gradeJob(id: string, runId: string, score: number): WorkbenchJob {
+  return {
+    id,
+    runId,
+    kind: "eval",
+    role: "grade",
+    versionId: "v002",
+    skillName: "current",
+    skillBundleHash: "bundle",
+    evalHash: "eval",
+    agentName: "patcher",
+    agentHash: "agent",
+    caseId: "case-001",
+    sample: 0,
+    status: "succeeded",
+    result: { items: [{ kind: "score", score, value: score }] },
+    artifactIds: [],
+    traceIds: [],
     createdAt: "2026-01-01T00:00:00.000Z",
   };
 }

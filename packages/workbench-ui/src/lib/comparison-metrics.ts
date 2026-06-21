@@ -4,6 +4,7 @@ import type {
   WorkbenchAgentVersion,
   WorkbenchEvalSnapshot,
   WorkbenchInspectionSnapshot,
+  WorkbenchJob,
   WorkbenchResultCell,
   WorkbenchResultEvaluation,
   WorkbenchResults,
@@ -17,6 +18,7 @@ import {
   formatDurationMs,
   formatScore,
   formatTimestamp,
+  runScore,
   shortId,
 } from "./format";
 
@@ -76,7 +78,7 @@ export interface ComparisonEvaluationOption {
   createdAt: string;
   updatedAt: string;
   caseCount: number;
-  scoreAdapter: string;
+  gradeAdapter: string;
 }
 
 export interface ComparisonGroup {
@@ -179,7 +181,7 @@ export function evaluationOptionsForScorecard(
     id: string;
     label?: string;
     caseCount?: number;
-    scoreAdapter?: string;
+    gradeAdapter?: string;
     createdAt?: string;
     updatedAt?: string;
     snapshot?: WorkbenchEvalSnapshot;
@@ -189,7 +191,7 @@ export function evaluationOptionsForScorecard(
       id: snapshotEval.hash,
       label: resultEvaluation?.label,
       caseCount: resultEvaluation?.caseCount ?? snapshotEval.caseCount,
-      scoreAdapter: resultEvaluation?.scoreAdapter ?? snapshotEval.scoreAdapter,
+      gradeAdapter: resultEvaluation?.gradeAdapter ?? snapshotEval.gradeAdapter,
       createdAt: resultEvaluation?.createdAt ?? snapshotEval.createdAt,
       updatedAt: resultEvaluation?.updatedAt ?? snapshotEval.updatedAt,
       snapshot: snapshotEval,
@@ -211,10 +213,10 @@ export function evaluationOptionsForScorecard(
 
   const latestEvaluationId = optionRecords.at(-1)?.id ?? null;
   return optionRecords.map((evaluation, index) => {
-    const scoreAdapter = normalizeScoreAdapter(evaluation.scoreAdapter) ?? "tests";
+    const gradeAdapter = normalizeGradeAdapter(evaluation.gradeAdapter) ?? "tests";
     const detail = evaluationDetail({
       caseCount: evaluation.caseCount,
-      scoreAdapter,
+      gradeAdapter,
     });
     const isLatest = evaluation.id === latestEvaluationId;
     const label = evaluation.label?.trim() || `Evaluation ${index + 1}`;
@@ -229,7 +231,7 @@ export function evaluationOptionsForScorecard(
       createdAt,
       updatedAt: evaluation.updatedAt ?? createdAt,
       caseCount: evaluation.caseCount ?? 0,
-      scoreAdapter,
+      gradeAdapter,
     };
   });
 }
@@ -292,11 +294,13 @@ export function buildComparisonGroups(
 export function buildComparisonEvidenceRows({
   agents,
   groups,
+  jobs = [],
   runs,
 }: {
   agents: WorkbenchAgentVersion[];
   context?: ComparisonLabelContext;
   groups: ComparisonGroup[];
+  jobs?: readonly WorkbenchJob[];
   runs: WorkbenchRun[];
 }): ComparisonEvidenceRow[] {
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
@@ -306,7 +310,7 @@ export function buildComparisonEvidenceRows({
     group.cells.map(({ agent: resolvedAgent, cell, version }) => {
       const run = cell.runId ? runsById.get(cell.runId) ?? null : null;
       const agent = resolvedAgent ?? agentsById.get(cell.agentVersionId);
-      const score = finiteNumber(cell.quality ?? run?.score);
+      const score = finiteNumber(cell.quality ?? (run ? runScore(run, jobs) : undefined));
       const latencyMs = finiteNumber(cell.latencyMs ?? run?.latencyMs);
       const costUsd = finiteNumber(cell.costUsd ?? run?.costUsd);
       const samples = finiteNumber(cell.samples);
@@ -389,7 +393,7 @@ export function formatEvaluationDisplayDetail(
 ): string {
   const evalSnapshot = evals.find((entry) => entry.hash === evalHash);
   return evaluationDetail(evalSnapshot
-    ? { caseCount: evalSnapshot.caseCount, scoreAdapter: evalScoreAdapter(evalSnapshot) }
+    ? { caseCount: evalSnapshot.caseCount, gradeAdapter: evalGradeAdapter(evalSnapshot) }
     : undefined);
 }
 
@@ -696,11 +700,11 @@ function orderEvaluationSnapshots(evals: readonly WorkbenchEvalSnapshot[]): Work
 }
 
 function evaluationDetail(
-  evaluation: Pick<WorkbenchResultEvaluation, "caseCount" | "scoreAdapter"> | undefined,
+  evaluation: Pick<WorkbenchResultEvaluation, "caseCount" | "gradeAdapter"> | undefined,
 ): string {
   const parts = [
     evaluation?.caseCount !== undefined ? formatEvalCaseCount(evaluation.caseCount) : null,
-    evaluation?.scoreAdapter ? formatScoreAdapter(evaluation.scoreAdapter) : null,
+    evaluation?.gradeAdapter ? formatGradeAdapter(evaluation.gradeAdapter) : null,
   ].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(" / ") : "Recorded evaluation";
 }
@@ -722,16 +726,16 @@ function formatEvalCaseCount(caseCount: number): string {
   return `${caseCount} ${caseCount === 1 ? "case" : "cases"}`;
 }
 
-function evalScoreAdapter(evalSnapshot: WorkbenchEvalSnapshot): string {
-  return normalizeScoreAdapter(evalSnapshot.scoreAdapter) ?? "tests";
+function evalGradeAdapter(evalSnapshot: WorkbenchEvalSnapshot): string {
+  return normalizeGradeAdapter(evalSnapshot.gradeAdapter) ?? "tests";
 }
 
-function normalizeScoreAdapter(value: string | undefined): string | null {
+function normalizeGradeAdapter(value: string | undefined): string | null {
   const normalized = value?.trim().toLowerCase();
   return normalized || null;
 }
 
-function formatScoreAdapter(adapter: string): string {
+function formatGradeAdapter(adapter: string): string {
   if (adapter === "tests") {
     return "test grader";
   }

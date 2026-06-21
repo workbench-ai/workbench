@@ -123,6 +123,8 @@ import {
   formatRunCost,
   formatScore,
   formatTimestamp,
+  jobScore,
+  runScore,
   shortId,
 } from "./lib/format";
 import {
@@ -1093,6 +1095,7 @@ function VersionHistoryDialog({
               lineage={snapshot.lineage}
               versions={snapshot.versions}
               runs={snapshot.runs}
+              jobs={snapshot.jobs}
               onVersionClick={selectVersion}
             />
           </div>
@@ -1817,7 +1820,7 @@ function RunsSurface({
                   <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</TableCell>
                   <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)}</TableCell>
                   <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{formatEvaluationDisplayName(run.evalHash, snapshot.evals)}</TableCell>
-                  <TableCell>{formatScore(run.score)}</TableCell>
+                  <TableCell>{formatScore(runScore(run, snapshot.jobs))}</TableCell>
                   <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
                 </TableRow>
               );
@@ -1901,7 +1904,7 @@ function RunDetailPage({
           <>
             <MetricStrip
               items={[
-                { label: "Score", value: formatScore(run.score) },
+                { label: "Score", value: formatScore(runScore(run, jobs)) },
                 { label: "Cases", value: formatRunCasePassSummary(jobs) },
                 { label: "Duration", value: formatDurationMs(run.latencyMs) },
                 { label: "Cost", value: formatRunCost(run) },
@@ -1999,7 +2002,7 @@ function RunSummaryCaseTable({
                     ) : null}
                   </TableCell>
                   <TableCell className="align-top"><StatusBadge status={job.status} /></TableCell>
-                  <TableCell className="align-top">{formatScore(job.score)}</TableCell>
+                  <TableCell className="align-top">{formatScore(jobScore(job))}</TableCell>
                   <TableCell className="align-top text-muted-foreground">{formatDurationMs(job.durationMs)}</TableCell>
                 </TableRow>
               );
@@ -2105,7 +2108,7 @@ function JobResult({
       </div>
       <FactGrid>
         <FactItem title="Case status" value={job.status} />
-        <FactItem title="Case score" value={formatScore(job.score)} />
+        <FactItem title="Case score" value={formatScore(jobScore(job))} />
         <FactItem title="Case duration" value={formatDurationMs(job.durationMs)} />
       </FactGrid>
       {job.error ? <ProblemState icon={CircleAlertIcon} title="Case error" message={job.error} align="start" /> : null}
@@ -2224,7 +2227,7 @@ function LinkedRunTable({
                     <TableCell><StatusBadge status={run.status} /></TableCell>
                     <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</TableCell>
                     <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)}</TableCell>
-                    <TableCell>{formatScore(run.score)}</TableCell>
+                    <TableCell>{formatScore(runScore(run, snapshot.jobs))}</TableCell>
                     <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
                   </TableRow>
                 );
@@ -2938,7 +2941,13 @@ function runDisplayTitle(run: WorkbenchRun, snapshot: WorkbenchInspectionSnapsho
 }
 
 function runOperationLabel(run: WorkbenchRun): string {
-  const base = run.kind === "improve" ? "Improve" : "Eval";
+  const base = run.kind === "improve"
+    ? "Improve"
+    : run.kind === "grade"
+      ? "Grade"
+      : run.kind === "run"
+        ? "Run"
+        : "Eval";
   return run.retryOfRunId ? `Retry ${base.toLowerCase()}` : base;
 }
 

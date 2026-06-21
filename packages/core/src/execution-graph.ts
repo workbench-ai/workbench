@@ -61,7 +61,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   const nodes: WorkbenchExecutionGraphNode[] = [];
   const executions: WorkbenchExecutionSpec[] = [];
   const improveExecutionId = executionId(input, "improve", "current", 0);
-  const engineAdapter = input.spec.engineRun;
+  const runAdapter = executionConfig.run;
   if (workflow === "improve") {
     if (!input.spec.skill.improve || !input.spec.improve) {
       throw new Error("Skill improve configuration is required for improve execution graphs.");
@@ -93,7 +93,7 @@ export function compileWorkbenchExecutionGraph(input: CompileExecutionGraphInput
   pushExecution(nodes, executions, createExecution({
     input,
     purpose: "attempt",
-    adapter: engineAdapter,
+    adapter: runAdapter,
     inputs: [
       inputRef("skills", skillRef, "/workspace/input/skills", false),
       inputRef("case", caseRef, "/workspace/input/case", false),

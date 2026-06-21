@@ -617,7 +617,7 @@ describe("remote state lifecycle", () => {
     expect(after.runs.find((run) => run.id === localRun.id)).not.toHaveProperty("remoteName");
   });
 
-  test("run retry trusts the stored operation plan when stale location metadata disagrees", async () => {
+  test("retry trusts the stored operation plan when stale location metadata disagrees", async () => {
     const root = await makeTempRoot("workbench-cloud-retry-plan-location-");
     await createNewWorkbenchSkillProject({ dir: root });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });

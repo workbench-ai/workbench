@@ -101,7 +101,8 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
   const completed = runJobs.filter((job) =>
     job.status === "succeeded" || job.status === "failed" || job.status === "canceled"
   );
-  const scored = runJobs.filter((job) => typeof job.score === "number");
+  const scored = runJobs.filter((job) => jobScore(job) !== undefined);
+  const score = averageScores(scored.map(jobScore));
   return {
     schema: "workbench.run.v1",
     id: run.id,
@@ -130,7 +131,7 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
       scored: scored.length,
       failed: runJobs.filter((job) => job.status === "failed").length,
       canceled: runJobs.filter((job) => job.status === "canceled").length,
-      ...(run.status !== "succeeded" && run.score !== undefined ? { partialScore: run.score } : {}),
+      ...(run.status !== "succeeded" && score !== undefined ? { partialScore: score } : {}),
       evidenceCount: run.traceIds.length + (run.jobIds?.length ?? 0),
       ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
       elapsedMs: 0,
@@ -145,15 +146,15 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
       agentHash: run.agentHash,
       runId: run.id,
       status: run.status,
-      ...(run.score !== undefined ? { score: run.score } : {}),
+      ...(score !== undefined ? { score } : {}),
       ...(run.requestedSamples !== undefined ? { samples: run.requestedSamples } : {}),
       ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
       ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
       ...(run.error ? { error: run.error } : {}),
     }],
-    ...(run.score !== undefined || run.outputVersionId || run.error ? {
+    ...(score !== undefined || run.outputVersionId || run.error ? {
       result: {
-        ...(run.score !== undefined ? { score: run.score } : {}),
+        ...(score !== undefined ? { score } : {}),
         ...(run.outputVersionId ? { improvedVersionId: run.outputVersionId } : {}),
         ...(run.error ? { error: run.error } : {}),
       },
@@ -167,11 +168,26 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
     },
     cliEquivalent: run.kind === "improve" ? "workbench improve --cloud" : "workbench eval --cloud",
     next: run.status === "queued" || run.status === "running"
-      ? `workbench run watch ${run.id}`
+      ? `workbench watch ${run.id}`
       : run.status === "failed" || run.status === "canceled"
         ? `workbench show ${run.id}`
         : run.kind === "improve" ? "workbench eval --rerun -n 5" : "workbench results",
   };
+}
+
+function jobScore(job: WorkbenchJob): number | undefined {
+  const scoreItem = job.result?.items?.find((item) =>
+    item.kind === "score" && typeof item.score === "number" && Number.isFinite(item.score)
+  );
+  return typeof scoreItem?.score === "number" ? scoreItem.score : undefined;
+}
+
+function averageScores(values: readonly (number | undefined)[]): number | undefined {
+  const scores = values.filter((score): score is number => typeof score === "number" && Number.isFinite(score));
+  if (scores.length === 0) {
+    return undefined;
+  }
+  return Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(3));
 }
 
 function requestRunId(body: Record<string, unknown>): string {
@@ -350,9 +366,9 @@ describe("workbench skill-first CLI", () => {
     expect(help.stdout).toContain("Other common commands:");
     expect(help.stdout).toContain("workbench install OWNER/SKILL[@VERSION]|URL");
     expect(help.stdout).toContain("workbench clone OWNER/SKILL[@VERSION]|URL DIR");
-    expect(help.stdout).toContain("workbench run watch RUN_ID");
-    expect(help.stdout).toContain("workbench run cancel RUN_ID");
-    expect(help.stdout).toContain("workbench run retry RUN_ID");
+    expect(help.stdout).toContain("workbench watch RUN_ID");
+    expect(help.stdout).toContain("workbench cancel RUN_ID");
+    expect(help.stdout).toContain("workbench retry RUN_ID");
     expect(help.stdout).toContain("workbench help --all");
     expect(help.stdout).toContain("Examples:");
     expect(help.stdout).toContain("workbench new ./earnings-prep --agent local");
@@ -415,13 +431,13 @@ describe("workbench skill-first CLI", () => {
     });
 
     const allHelp = await invoke(["help", "--all"]);
-    expect(allHelp.stdout).toContain("workbench run watch RUN_ID");
-    expect(allHelp.stdout).toContain("workbench run cancel RUN_ID");
-    expect(allHelp.stdout).toContain("workbench run retry RUN_ID");
+    expect(allHelp.stdout).toContain("workbench watch RUN_ID");
+    expect(allHelp.stdout).toContain("workbench cancel RUN_ID");
+    expect(allHelp.stdout).toContain("workbench retry RUN_ID");
     const runHelp = await invoke(["run", "--help"]);
-    expect(runHelp.stdout).toContain("workbench run watch RUN_ID");
-    expect(runHelp.stdout).toContain("workbench run cancel --run RUN_ID");
-    expect(runHelp.stdout).toContain("workbench run retry --run RUN_ID");
+    expect(runHelp.stdout).not.toContain("workbench watch RUN_ID");
+    expect(runHelp.stdout).not.toContain("workbench cancel --run RUN_ID");
+    expect(runHelp.stdout).not.toContain("workbench retry --run RUN_ID");
   });
 
   test("required command inputs also accept flag aliases", async () => {
@@ -442,7 +458,7 @@ describe("workbench skill-first CLI", () => {
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
     expect(stdoutJson<{ result: { kind: string } }>(shown).result.kind).toBe("version");
 
-    const watched = await invoke(["run", "watch", "--run", run.id, "--dir", root, "--json"]);
+    const watched = await invoke(["watch", "--run", run.id, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
     expect(stdoutJson<{ run: { id: string } }>(watched).run.id).toBe(run.id);
 
@@ -561,7 +577,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(cachedLocalDryRun)).toMatchObject({
       plan: {
         location: "local",
-        cachedRunIds: [evaluatedRunId],
+        cachedRunIds: [],
       },
     });
     const evaluated = await invoke(["eval", "--dir", root, "--json"]);
@@ -655,7 +671,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ entries: unknown[] }>(runs).entries).toEqual([]);
   });
 
-    test("below-perfect evidence with a non-improvement agent teaches improver setup", async () => {
+  test("below-perfect evidence with a non-improvement agent teaches improver setup", async () => {
     const authRoot = await makeTempRoot("workbench-cli-eval-improve-next-auth-");
     vi.stubEnv("WORKBENCH_ADAPTER_AUTH_STORE", authRoot);
     vi.stubEnv("HOME", await makeTempRoot("workbench-cli-eval-improve-next-home-"));
@@ -677,11 +693,11 @@ describe("workbench skill-first CLI", () => {
     const versionBeforeAgentAdd = await currentVersionIdFor(root);
     const added = await invoke(["agent", "add", "improver", "--dir", root, "--adapter", "codex", "--model", "gpt-5.4-mini", "--json"]);
     expect(added.code, added.stdout || added.stderr).toBe(0);
-      expect(stdoutJson(added)).toMatchObject({
-        result: {
-          agent: {
-            name: "improver",
-            adapter: "codex",
+    expect(stdoutJson(added)).toMatchObject({
+      result: {
+        agent: {
+          name: "improver",
+          adapter: "codex",
           model: "gpt-5.4-mini",
         },
         setupCommands: [
@@ -690,9 +706,9 @@ describe("workbench skill-first CLI", () => {
           "workbench eval --agents improver --rerun",
           "workbench improve --agents improver",
         ],
-          next: "codex login --device-auth",
-        },
-      });
+        next: "codex login --device-auth",
+      },
+    });
     const statusAfterAgentAdd = await invoke(["status", "--dir", root, "--json"]);
     expect(statusAfterAgentAdd.code, statusAfterAgentAdd.stdout || statusAfterAgentAdd.stderr).toBe(0);
     expect(stdoutJson<{
@@ -714,7 +730,7 @@ describe("workbench skill-first CLI", () => {
       next: string | null;
     }>(cloudImprovePlan).next).toBe("workbench login");
     expect(JSON.stringify(stdoutJson(cloudImprovePlan))).not.toContain("workbench agent add improver");
-      const humanAddRoot = await makeTempRoot("workbench-cli-eval-improve-human-agent-add-");
+    const humanAddRoot = await makeTempRoot("workbench-cli-eval-improve-human-agent-add-");
     expect((await invoke(["new", humanAddRoot, "--agent", "local", "--json"])).code).toBe(0);
     await seedFailedImproveEvidence(humanAddRoot, "default", { status: "succeeded", score: 0.5 });
     const humanAdd = await invoke(["agent", "add", "improver", "--dir", humanAddRoot, "--adapter", "codex", "--model", "gpt-5.4-mini"]);
@@ -722,7 +738,7 @@ describe("workbench skill-first CLI", () => {
     expect(humanAdd.stdout).toContain("setup:\n  codex login --device-auth\n  workbench login codex --method oauth");
     expect(humanAdd.stdout).toContain("  workbench eval --agents improver --rerun\n  workbench improve --agents improver");
     expect(humanAdd.stdout).toContain("next: codex login --device-auth");
-      const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
+    const statusAfterAdd = await invoke(["status", "--dir", root, "--json"]);
     expect(stdoutJson<{ next: string | null }>(statusAfterAdd).next)
       .toBe("workbench results");
 
@@ -829,7 +845,13 @@ describe("workbench skill-first CLI", () => {
       "prompt: Exercise the workflow happy path.",
       "rubric:",
       "  - Captures workflow-specific success evidence.",
-      "command: sh \"$CASE_DIR/tests/test.sh\"",
+      "",
+    ].join("\n"));
+    await fs.writeFile(path.join(root, ".workbench", "eval.yaml"), [
+      "version: 1",
+      "name: local-tests",
+      "grade:",
+      "  adapter: tests",
       "",
     ].join("\n"));
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -857,7 +879,6 @@ describe("workbench skill-first CLI", () => {
       "id: case-001",
       "smoke: true",
       "prompt: Smoke check.",
-      "command: sh \"$CASE_DIR/tests/test.sh\"",
       "",
     ].join("\n"));
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -909,6 +930,7 @@ describe("workbench skill-first CLI", () => {
       id: "job_active_done",
       runId: "run_active",
       kind: "eval",
+      role: "grade",
       versionId: currentVersionId,
       skillName: "current",
       skillBundleHash: "bundle_hash",
@@ -918,7 +940,7 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: [],
       createdAt: "2026-06-11T00:00:01.000Z",
@@ -953,7 +975,6 @@ describe("workbench skill-first CLI", () => {
       agentHash: "agent_hash",
       status: "succeeded",
       location: "cloud",
-      score: 1,
       jobIds: [],
       traceIds: [],
       createdAt: "2026-06-10T00:00:00.000Z",
@@ -967,7 +988,7 @@ describe("workbench skill-first CLI", () => {
         activeRuns: [
           expect.objectContaining({
             id: "run_active",
-            next: "workbench run watch run_active",
+            next: "workbench watch run_active",
             workDone: 1,
             workTotal: 2,
             scored: 1,
@@ -979,7 +1000,7 @@ describe("workbench skill-first CLI", () => {
           }),
         ],
       },
-      next: "workbench run watch run_active",
+      next: "workbench watch run_active",
     });
 
     const lockRoot = path.join(root, ".workbench", "locks", "project.lock");
@@ -990,7 +1011,7 @@ describe("workbench skill-first CLI", () => {
       hostname: os.hostname(),
       startedAt: new Date().toISOString(),
     }));
-    const cancel = await invoke(["run", "cancel", "run_active", "--dir", root, "--json"]);
+    const cancel = await invoke(["cancel", "run_active", "--dir", root, "--json"]);
     expect(cancel.code, cancel.stdout || cancel.stderr).toBe(0);
     const cancelJson = stdoutJson(cancel);
     expect(cancelJson).toMatchObject({
@@ -1021,7 +1042,7 @@ describe("workbench skill-first CLI", () => {
           }),
         ],
       },
-      next: "workbench run watch run_active",
+      next: "workbench watch run_active",
     });
     expect(cancelJson).not.toHaveProperty("result");
     expect(cancelJson).not.toHaveProperty("progress");
@@ -1034,7 +1055,7 @@ describe("workbench skill-first CLI", () => {
       .toEqual(expect.arrayContaining([expect.objectContaining({ id: "run_active", status: "canceling" })]));
     await fs.rm(lockRoot, { recursive: true, force: true });
 
-    const watch = await invoke(["run", "watch", "run_done", "--dir", root, "--json"]);
+    const watch = await invoke(["watch", "run_done", "--dir", root, "--json"]);
     expect(watch.code, watch.stdout || watch.stderr).toBe(0);
     const watchJson = stdoutJson(watch);
     expect(watchJson).toMatchObject({
@@ -1071,7 +1092,7 @@ describe("workbench skill-first CLI", () => {
     expect(initial.code, initial.stdout || initial.stderr).toBe(0);
     const initialRun = stdoutJson(initial).run as Record<string, unknown>;
     const retryOfRunId = String(initialRun.id);
-    const retry = await invoke(["run", "retry", retryOfRunId, "--dir", retryRoot, "--json"]);
+    const retry = await invoke(["retry", retryOfRunId, "--dir", retryRoot, "--json"]);
     expect(retry.code, retry.stdout || retry.stderr).toBe(0);
     const retryJson = stdoutJson(retry);
     expect(retryJson).toMatchObject({
@@ -1106,7 +1127,7 @@ describe("workbench skill-first CLI", () => {
     expect(retryJson).not.toHaveProperty("jobs");
   });
 
-  test("run watch and retry preserve non-default agent context in results next", async () => {
+  test("watch and retry preserve non-default agent context in results next", async () => {
     const root = await makeTempRoot("workbench-cli-run-context-next-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await writePassingCaseTest(root);
@@ -1116,7 +1137,7 @@ describe("workbench skill-first CLI", () => {
     expect(evaluated.code, evaluated.stdout || evaluated.stderr).toBe(0);
     const evaluatedRunId = stdoutJson<{ run: { id: string } }>(evaluated).run.id;
 
-    const watched = await invoke(["run", "watch", evaluatedRunId, "--dir", root, "--json"]);
+    const watched = await invoke(["watch", evaluatedRunId, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
     expect(stdoutJson<{ next: string }>(watched).next).toBe("workbench results --agents strict");
 
@@ -1128,7 +1149,7 @@ describe("workbench skill-first CLI", () => {
     const shownJson = await invoke(["show", evaluatedRunId, "--dir", root, "--json"]);
     expect(shownJson.code, shownJson.stdout || shownJson.stderr).toBe(0);
     expect(stdoutJson<{ result: { jobs: Array<{ sample: number }> } }>(shownJson).result.jobs.map((job) => job.sample))
-      .toEqual([1, 2]);
+      .toEqual([1, 2, 1, 2]);
 
     const bareResults = await invoke(["results", "--dir", root]);
     expect(bareResults.code, bareResults.stdout || bareResults.stderr).toBe(0);
@@ -1170,7 +1191,7 @@ describe("workbench skill-first CLI", () => {
     expect(shownByRef.code, shownByRef.stdout || shownByRef.stderr).toBe(0);
     expect(stdoutJson<{ result: { content: string } }>(shownByRef).result.content).toContain("#");
 
-    const retried = await invoke(["run", "retry", evaluatedRunId, "--dir", root, "--json"]);
+    const retried = await invoke(["retry", evaluatedRunId, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
     expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench results --agents strict");
   });
@@ -1308,7 +1329,7 @@ describe("workbench skill-first CLI", () => {
     const evaluatedJson = stdoutJson<{ run: { id: string; measurements: Array<{ agentName: string }> }; next: string }>(evaluated);
     expect(evaluatedJson.run.measurements.map((measurement) => measurement.agentName).sort()).toEqual(["default", "strict"]);
 
-    const watched = await invoke(["run", "watch", evaluatedJson.run.id, "--dir", root]);
+    const watched = await invoke(["watch", evaluatedJson.run.id, "--dir", root]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
     expect(watched.stdout).toContain("measurement");
     expect(watched.stdout).toContain("agent=default");
@@ -1325,7 +1346,7 @@ describe("workbench skill-first CLI", () => {
     expect(logRuns.code, logRuns.stdout || logRuns.stderr).toBe(0);
     expect(logRuns.stdout).toMatch(/\bcurrent\s+default,strict\s+1\.000\b/u);
 
-    const retried = await invoke(["run", "retry", evaluatedJson.run.id, "--dir", root, "--json"]);
+    const retried = await invoke(["retry", evaluatedJson.run.id, "--dir", root, "--json"]);
     expect(retried.code, retried.stdout || retried.stderr).toBe(0);
     expect(stdoutJson<{ next: string; run: { measurements: Array<{ agentName: string }> } }>(retried)).toMatchObject({
       next: "workbench results --agents default,strict",
@@ -1336,7 +1357,7 @@ describe("workbench skill-first CLI", () => {
         ]),
       },
     });
-  }, 15_000);
+  }, 60_000);
 
   test("results suppress partial quality when a canceled run has unscored jobs", async () => {
     const root = await makeTempRoot("workbench-cli-results-canceled-status-");
@@ -1362,7 +1383,6 @@ describe("workbench skill-first CLI", () => {
       agentName: agent.agent.name,
       agentHash: agent.hash,
       status: "canceled",
-      score: 1,
       jobIds: ["job_canceled_mixed_succeeded", "job_canceled_mixed_canceled"],
       traceIds: [],
       createdAt,
@@ -1392,7 +1412,8 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: [],
       createdAt,
@@ -1405,7 +1426,7 @@ describe("workbench skill-first CLI", () => {
       id: "job_canceled_mixed_canceled",
       sample: 1,
       status: "canceled",
-      score: undefined,
+      result: undefined,
       finishedAt: "2999-06-19T00:00:02.000Z",
       error: "canceled by user",
     };
@@ -1577,13 +1598,13 @@ describe("workbench skill-first CLI", () => {
       remediation: "workbench show REF",
     });
 
-    const missingRunWatchRef = await invoke(["run", "watch", "--json"]);
+    const missingRunWatchRef = await invoke(["watch", "--json"]);
     expect(missingRunWatchRef.code).toBe(2);
     expect(stdoutJson(missingRunWatchRef)).toMatchObject({
       ok: false,
       code: "usage",
-      message: "workbench run watch requires RUN_ID.",
-      remediation: "workbench run watch RUN_ID",
+      message: "workbench watch requires RUN_ID.",
+      remediation: "workbench watch RUN_ID",
     });
   });
 
@@ -1801,7 +1822,7 @@ describe("workbench skill-first CLI", () => {
           kind: "text",
           encoding: "utf8",
           executable: false,
-          content: "schema: workbench.eval.v1\nscorer:\n  adapter: tests\n",
+          content: "schema: workbench.eval.v1\ngrade:\n  adapter: tests\n",
         },
         {
           path: ".workbench/agents.yaml",
@@ -1960,7 +1981,7 @@ describe("workbench skill-first CLI", () => {
           kind: "text",
           encoding: "utf8",
           executable: false,
-          content: "schema: workbench.eval.v1\nscorer:\n  adapter: tests\n",
+          content: "schema: workbench.eval.v1\ngrade:\n  adapter: tests\n",
         },
         {
           path: ".workbench/agents.yaml",
@@ -2050,7 +2071,7 @@ describe("workbench skill-first CLI", () => {
       next: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml .workbench/cases/case-001/tests/test.sh",
     });
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
-      .resolves.toContain("command: sh \"$CASE_DIR/tests/test.sh\"");
+      .resolves.not.toContain("command:");
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), "utf8"))
       .resolves.toContain("$OUTPUT_DIR/result.json");
     const duplicateCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
@@ -2315,32 +2336,55 @@ describe("workbench skill-first CLI", () => {
     const authorCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
     expect(authorCase.code, authorCase.stdout || authorCase.stderr).toBe(0);
     await expect(fs.readFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), "utf8"))
-      .resolves.toContain("command: sh \"$CASE_DIR/tests/test.sh\"");
+      .resolves.not.toContain("command:");
     const testStat = await fs.stat(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"));
     expect(testStat.mode & 0o111).not.toBe(0);
   });
 
-  dockerTest("draft case placeholders fail until authored", async () => {
+  dockerTest("draft case placeholders block judgment until prompt and rubric are authored", async () => {
     const root = await makeTempRoot("workbench-cli-draft-case-placeholder-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     const authorCase = await invoke(["case", "draft", "case-001", "--dir", root, "--json"]);
     expect(authorCase.code, authorCase.stdout || authorCase.stderr).toBe(0);
 
-    const evalResult = await invoke(["eval", "--dir", root, "--json"]);
-
-    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
-    const body = stdoutJson<{ failedMeasurements: Array<{ runId: string; status: string; score?: number }> }>(evalResult);
-    expect(body).toMatchObject({
+    const untouchedEval = await invoke(["eval", "--dir", root, "--json"]);
+    expect(untouchedEval.code, untouchedEval.stdout || untouchedEval.stderr).toBe(1);
+    expect(stdoutJson(untouchedEval)).toMatchObject({
       ok: false,
-      code: "eval_runs_failed",
-      evidenceSaved: true,
-      failedMeasurements: [{
-        status: "failed",
-        score: 0,
-      }],
+      code: "draft_case_prompt",
+      remediation: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml",
+      subject: { caseId: "case-001", field: "prompt" },
     });
-    const stderr = await invoke(["show", `${body.failedMeasurements[0]!.runId}:stderr.log`, "--dir", root]);
-    expect(stderr.stdout).toContain("Draft case case-001 still contains placeholder assertions.");
+
+    const casePath = path.join(root, ".workbench", "cases", "case-001", "case.yaml");
+    await fs.writeFile(casePath, (await fs.readFile(casePath, "utf8"))
+      .replace("Replace this with a representative workflow prompt.", "Create a concise answer for the draft case."));
+
+    const runResult = await invoke(["run", "--dir", root, "--json"]);
+    expect(runResult.code, runResult.stdout || runResult.stderr).toBe(0);
+    expect(stdoutJson<{ next: string }>(runResult)).toMatchObject({
+      ok: true,
+      next: "workbench grade",
+    });
+
+    const gradeResult = await invoke(["grade", "--dir", root, "--json"]);
+    expect(gradeResult.code, gradeResult.stdout || gradeResult.stderr).toBe(1);
+    expect(stdoutJson(gradeResult)).toMatchObject({
+      ok: false,
+      code: "draft_case_rubric",
+      remediation: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml",
+      subject: { caseId: "case-001", field: "rubric" },
+    });
+
+    const evalDryRun = await invoke(["eval", "--dir", root, "--dry-run", "--json"]);
+    expect(evalDryRun.code, evalDryRun.stdout || evalDryRun.stderr).toBe(0);
+    expect(stdoutJson(evalDryRun)).toMatchObject({
+      readiness: {
+        ready: false,
+        issues: [expect.objectContaining({ code: "draft_case_rubric" })],
+      },
+      next: "${EDITOR:-vi} .workbench/cases/case-001/case.yaml",
+    });
   });
 
   dockerTest("local cases without a command or test script fail with actionable evidence", async () => {
@@ -2364,8 +2408,8 @@ describe("workbench skill-first CLI", () => {
       phase: "complete",
       variant: "local",
       progress: expect.objectContaining({
-        completed: 1,
-        planned: 1,
+        completed: 2,
+        planned: 2,
         failed: 1,
       }),
     }));
@@ -2375,38 +2419,61 @@ describe("workbench skill-first CLI", () => {
       evidenceSaved: true,
       failedMeasurements: [{
         status: "failed",
-        error: "Workbench case must define top-level command or include tests/test.sh.",
+        error: expect.stringContaining("Tests engine requires"),
       }],
     });
   });
 
-  test("zero-score command results are failed evidence", async () => {
+  test("zero-score command results are below-perfect evidence", async () => {
     const root = await makeTempRoot("workbench-cli-zero-score-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await fs.mkdir(path.join(root, ".workbench", "cases", "case-001"), { recursive: true });
+    const gradeCommand = nodeCommand([
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
+      "fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'workbench-result.json'), JSON.stringify({",
+      "  protocol: 'workbench.adapter-result.v1',",
+      "  operation: 'grade.run',",
+      "  ok: true,",
+      "  value: { score: 0, summary: 'known bad', metrics: { score: 0 } },",
+      "}, null, 2) + '\\n');",
+    ]);
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
       "version: 1",
       "id: case-001",
-      "command: node -e \"const fs=require('node:fs'); const path=require('node:path'); fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'result.json'), JSON.stringify({ok:true, score:0, message:'known bad'}) + '\\n')\"",
+      "command: node -e \"const fs=require('node:fs'); const path=require('node:path'); fs.mkdirSync(process.env.OUTPUT_DIR,{recursive:true}); fs.writeFileSync(path.join(process.env.OUTPUT_DIR,'answer.txt'),'answer\\n')\"",
+      "",
+    ].join("\n"));
+    await fs.writeFile(path.join(root, ".workbench", "eval.yaml"), [
+      "version: 1",
+      "name: zero-score-command-grade",
+      "grade:",
+      "  adapter: command",
+      "  with:",
+      `    command: ${JSON.stringify(gradeCommand)}`,
       "",
     ].join("\n"));
 
     const evalResult = await invoke(["eval", "--dir", root, "--json"]);
-    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(1);
+    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
     expect(stdoutJson(evalResult)).toMatchObject({
-      ok: false,
-      code: "eval_runs_failed",
-      failedMeasurements: [expect.objectContaining({
-        status: "failed",
-        score: 0,
-        error: "known bad",
-      })],
+      ok: true,
+      run: {
+        result: { score: 0 },
+        measurements: [expect.objectContaining({
+          status: "succeeded",
+          score: 0,
+        })],
+      },
     });
-    expect(stdoutJson<{ next: string | null }>(evalResult).next).toMatch(/^workbench show /u);
+    expect(stdoutJson<{ next: string | null }>(evalResult).next)
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
 
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(status).next).toMatch(/^workbench show /u);
+    expect(stdoutJson<{ next: string | null }>(status).next)
+      .toBe("workbench agent add improver --adapter codex --model gpt-5.4-mini --with auth=default");
   });
 
   test("provider api-key login refuses to record auth without credentials", async () => {
@@ -3124,11 +3191,11 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson(active)).toMatchObject({
       schema: "workbench.cli.sync.v1",
       ok: true,
-      next: "workbench run watch run_sync_que",
+      next: "workbench watch run_sync_que",
     });
     const activeHuman = await invoke(["sync", "origin", "--dir", root]);
     expect(activeHuman.code, activeHuman.stdout || activeHuman.stderr).toBe(0);
-    expect(activeHuman.stdout).toContain("next: workbench run watch run_sync_que");
+    expect(activeHuman.stdout).toContain("next: workbench watch run_sync_que");
   });
 
   test("diff without a range compares current source to its parent", async () => {
@@ -3506,7 +3573,6 @@ describe("workbench skill-first CLI", () => {
       agentName: "default",
       agentHash: "agent_hash",
       status: "succeeded",
-      score: 1,
       jobIds: [],
       traceIds: [],
       createdAt: "2026-06-11T00:00:00.000Z",
@@ -3586,6 +3652,7 @@ describe("workbench skill-first CLI", () => {
     await writePassingCaseTest(root);
     const currentVersionId = await currentVersionIdFor(root);
     await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench", "objects", "job"), { recursive: true });
     await fs.writeFile(path.join(root, ".workbench", "objects", "run", "run_partial.json"), JSON.stringify({
       id: "run_partial",
       kind: "eval",
@@ -3596,8 +3663,27 @@ describe("workbench skill-first CLI", () => {
       agentName: "default",
       agentHash: "agent_hash",
       status: "succeeded",
-      score: 0.5,
-      jobIds: [],
+      jobIds: ["job_partial_grade"],
+      traceIds: [],
+      createdAt: "2026-06-11T00:00:00.000Z",
+      finishedAt: "2026-06-11T00:00:01.000Z",
+    }));
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", "job_partial_grade.json"), JSON.stringify({
+      id: "job_partial_grade",
+      runId: "run_partial",
+      kind: "eval",
+      role: "grade",
+      versionId: currentVersionId,
+      skillName: "current",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      caseId: "case-001",
+      sample: 0,
+      status: "succeeded",
+      result: { items: [{ kind: "score", score: 0.5, value: 0.5 }] },
+      artifactIds: [],
       traceIds: [],
       createdAt: "2026-06-11T00:00:00.000Z",
       finishedAt: "2026-06-11T00:00:01.000Z",
@@ -3645,7 +3731,8 @@ describe("workbench skill-first CLI", () => {
     expect(added.code, added.stdout || added.stderr).toBe(0);
 
     const failingEval = await invoke(["eval", "--dir", root, "--agents", "patcher", "--json"]);
-    expect(failingEval.code, failingEval.stdout || failingEval.stderr).toBe(1);
+    expect(failingEval.code, failingEval.stdout || failingEval.stderr).toBe(0);
+    expect(stdoutJson<{ run: { result?: { score?: number } } }>(failingEval).run.result?.score).toBe(0);
     const improve = await invoke(["improve", "--dir", root, "--agents", "patcher", "--budget", "1", "-n", "1", "--json"]);
     expect(improve.code, improve.stdout || improve.stderr).toBe(0);
     expect(stdoutJson<{ next: string; switched: boolean }>(improve))
@@ -3664,7 +3751,6 @@ describe("workbench skill-first CLI", () => {
       "version: 1",
       "id: case-001",
       "prompt: Exercise a tied improvement candidate.",
-      "command: sh \"$CASE_DIR/tests/test.sh\"",
       "",
     ].join("\n"));
     await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -3713,6 +3799,26 @@ describe("workbench skill-first CLI", () => {
       "id: case-001",
       "smoke: true",
       "command: \"true\"",
+      "",
+    ].join("\n"));
+    const gradeCommand = nodeCommand([
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "fs.mkdirSync(process.env.OUTPUT_DIR, { recursive: true });",
+      "fs.writeFileSync(path.join(process.env.OUTPUT_DIR, 'workbench-result.json'), JSON.stringify({",
+      "  protocol: 'workbench.adapter-result.v1',",
+      "  operation: 'grade.run',",
+      "  ok: true,",
+      "  value: { score: 1, summary: 'smoke passed', metrics: { score: 1 } },",
+      "}, null, 2) + '\\n');",
+    ]);
+    await fs.writeFile(path.join(root, ".workbench", "eval.yaml"), [
+      "version: 1",
+      "name: smoke-command-grade",
+      "grade:",
+      "  adapter: command",
+      "  with:",
+      `    command: ${JSON.stringify(gradeCommand)}`,
       "",
     ].join("\n"));
 
@@ -3786,7 +3892,7 @@ describe("workbench skill-first CLI", () => {
 
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench run watch run_live");
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench watch run_live");
   });
 
   test("status points at a queued run before generic next steps", async () => {
@@ -3814,7 +3920,7 @@ describe("workbench skill-first CLI", () => {
 
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
-    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench run watch run_queued");
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench watch run_queued");
   });
 
   test("show resolves canonical run evidence before internal or trace duplicates", async () => {
@@ -3839,7 +3945,6 @@ describe("workbench skill-first CLI", () => {
       agentName: "default",
       agentHash: "agent_hash",
       status: "succeeded",
-      score: 1,
       requestedSamples: 5,
       latencyMs: 4219,
       jobIds: ["job_surface"],
@@ -3860,7 +3965,8 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: ["artifact_surface"],
       traceIds: ["trace_job_surface"],
       createdAt,
@@ -3928,7 +4034,8 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: ["trace_long_job"],
       createdAt,
@@ -4071,7 +4178,6 @@ describe("workbench skill-first CLI", () => {
       agentName: "default",
       agentHash: "agent_hash",
       status: "failed",
-      score: 0,
       jobIds: ["job_one", "job_two"],
       traceIds: [],
       createdAt,
@@ -4145,7 +4251,6 @@ describe("workbench skill-first CLI", () => {
       agentName: "default",
       agentHash: "agent_hash",
       status: "succeeded",
-      score: 1,
       jobIds,
       traceIds: [],
       createdAt,
@@ -4166,7 +4271,8 @@ describe("workbench skill-first CLI", () => {
         caseId: `case-${index + 1}`,
         sample: 0,
         status: "succeeded",
-        score: 1,
+        role: "grade",
+        result: { items: [{ kind: "score", score: 1, value: 1 }] },
         artifactIds: [artifactId],
         traceIds: [],
         createdAt,
@@ -4187,8 +4293,8 @@ describe("workbench skill-first CLI", () => {
 
     const human = await invoke(["show", "run_same_prefix", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toContain("job_mqcadtt1aaaa1111\tcase=case-1");
-    expect(human.stdout).toContain("job_mqcadtt1bbbb2222\tcase=case-2");
+    expect(human.stdout).toContain("job_mqcadtt1aaaa1111\trole=grade\tcase=case-1");
+    expect(human.stdout).toContain("job_mqcadtt1bbbb2222\trole=grade\tcase=case-2");
 
     const ambiguous = await invoke(["show", "run_same_prefix:stderr.log", "--dir", root, "--json"]);
     expect(ambiguous.code).toBe(2);
@@ -4724,7 +4830,7 @@ describe("workbench skill-first CLI", () => {
       traceIds: [],
       createdAt,
     };
-    const succeededRun = { ...runningRun, status: "succeeded", score: 1, traceIds: ["trace_cloud"], finishedAt: createdAt };
+    const succeededRun = { ...runningRun, status: "succeeded", traceIds: ["trace_cloud"], finishedAt: createdAt };
     const runningJob = {
       id: "job_cloud",
       runId: "run_cloud",
@@ -4742,7 +4848,14 @@ describe("workbench skill-first CLI", () => {
       traceIds: [],
       createdAt,
     };
-    const succeededJob = { ...runningJob, status: "succeeded", score: 1, traceIds: ["trace_cloud"], finishedAt: createdAt };
+    const succeededJob = {
+      ...runningJob,
+      status: "succeeded",
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
+      traceIds: ["trace_cloud"],
+      finishedAt: createdAt,
+    };
     const trace = {
       id: "trace_cloud",
       runId: "run_cloud",
@@ -4833,7 +4946,7 @@ describe("workbench skill-first CLI", () => {
       expect(queuedIndex).toBeGreaterThanOrEqual(0);
       expect(syncIndex).toBeGreaterThan(queuedIndex);
       expect(result.stderr).not.toContain("waiting for a hosted worker");
-      expect(result.stderr).toContain(`resume with workbench run watch ${hostedRunId}`);
+      expect(result.stderr).toContain(`resume with workbench watch ${hostedRunId}`);
       expect(result.stderr).toContain("workbench eval: sync with Workbench Cloud");
       expect(result.stderr.match(/workbench eval: running, work 0\/1 complete, failed 0, (?:evidence \d+, )?elapsed \d+s\./gu)).toHaveLength(1);
       expect(result.stderr.match(/workbench eval: complete, work 1\/1 complete, scored 1, failed 0, (?:evidence \d+, )?elapsed \d+s\./gu)).toHaveLength(1);
@@ -4910,7 +5023,7 @@ describe("workbench skill-first CLI", () => {
       expect(detached.stderr).toContain("workbench eval: preparing Workbench Cloud run");
       expect(detached.stderr).not.toContain("waiting for a hosted worker");
       expect(detached.stderr).toContain("error[cloud_detached]: Detached from hosted eval before Workbench Cloud confirmed scheduling.");
-      expect(detached.stderr).toContain("next: workbench run watch run_");
+      expect(detached.stderr).toContain("next: workbench watch run_");
       expect(fetchMock).not.toHaveBeenCalledWith(
         expect.stringContaining("/api/workbench/skills/skill_cloud/workbench/operations"),
         expect.anything(),
@@ -4958,7 +5071,7 @@ describe("workbench skill-first CLI", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ message: "unexpected network call" }, 500));
     vi.stubGlobal("fetch", fetchMock);
 
-    const canceled = await invoke(["run", "cancel", run.id, "--dir", root, "--json"]);
+    const canceled = await invoke(["cancel", run.id, "--dir", root, "--json"]);
     expect(canceled.code, canceled.stdout || canceled.stderr).toBe(0);
     expect(stdoutJson(canceled)).toMatchObject({
       schema: "workbench.cli.run-cancel.v1",
@@ -4968,7 +5081,7 @@ describe("workbench skill-first CLI", () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
 
-    const canceledAgain = await invoke(["run", "cancel", run.id, "--dir", root, "--json"]);
+    const canceledAgain = await invoke(["cancel", run.id, "--dir", root, "--json"]);
     expect(canceledAgain.code, canceledAgain.stdout || canceledAgain.stderr).toBe(2);
     expect(stdoutJson(canceledAgain)).toMatchObject({
       ok: false,
@@ -4977,7 +5090,7 @@ describe("workbench skill-first CLI", () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
 
-    const watched = await invoke(["run", "watch", run.id, "--dir", root, "--json"]);
+    const watched = await invoke(["watch", run.id, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
     expect(stdoutJson(watched)).toMatchObject({
       schema: "workbench.cli.run-watch.v1",
@@ -4985,12 +5098,12 @@ describe("workbench skill-first CLI", () => {
       run: { id: run.id, status: "canceled" },
       next: null,
     });
-    const watchedHuman = await invoke(["run", "watch", run.id, "--dir", root]);
+    const watchedHuman = await invoke(["watch", run.id, "--dir", root]);
     expect(watchedHuman.code, watchedHuman.stdout || watchedHuman.stderr).toBe(0);
     expect(watchedHuman.stdout).not.toContain(`next: workbench show ${run.id}`);
   });
 
-  test("hosted pre-accept run retry creates a local watch handle before network work", async () => {
+  test("hosted pre-accept retry creates a local watch handle before network work", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-preaccept-retry-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
@@ -5098,7 +5211,8 @@ describe("workbench skill-first CLI", () => {
           caseId: "case-001",
           sample: 0,
           status: "succeeded",
-          score: 1,
+          role: "grade",
+          result: { items: [{ kind: "score", score: 1, value: 1 }] },
           artifactIds: [],
           traceIds: [],
           createdAt: "2026-06-16T00:00:02.000Z",
@@ -5121,7 +5235,7 @@ describe("workbench skill-first CLI", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      const retried = await invoke(["run", "retry", canceledRun.id, "--dir", root, "--json"]);
+      const retried = await invoke(["retry", canceledRun.id, "--dir", root, "--json"]);
       expect(retried.code, retried.stdout || retried.stderr).toBe(0);
       expect(stdoutJson(retried)).toMatchObject({
         schema: "workbench.cli.run-retry.v1",
@@ -5154,7 +5268,7 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
-  test("hosted pre-accept run retry error JSON exposes only a cleared correlation id", async () => {
+  test("hosted pre-accept retry error JSON exposes only a cleared correlation id", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-preaccept-retry-error-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
@@ -5233,7 +5347,7 @@ describe("workbench skill-first CLI", () => {
       return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
     }));
     try {
-      const retried = await invoke(["run", "retry", retryOfRun.id, "--dir", root, "--json"]);
+      const retried = await invoke(["retry", retryOfRun.id, "--dir", root, "--json"]);
       expect(retried.code, retried.stdout || retried.stderr).toBe(1);
       expect(stderrJsonLines(retried)).toEqual([]);
       const retriedJson = stdoutJson<{ subject: { correlationRunId: string } }>(retried);
@@ -5427,7 +5541,7 @@ describe("workbench skill-first CLI", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      const running = invoke(["run", "retry", canceledRun.id, "--dir", root, "--json"]);
+      const running = invoke(["retry", canceledRun.id, "--dir", root, "--json"]);
       for (let attempt = 0; attempt < 100; attempt += 1) {
         if (operationStarted && retryRunId) {
           break;
@@ -5436,7 +5550,7 @@ describe("workbench skill-first CLI", () => {
       }
       expect(retryRunId).toMatch(/^run_/u);
 
-      const canceled = await invoke(["run", "cancel", retryRunId, "--dir", root, "--json"]);
+      const canceled = await invoke(["cancel", retryRunId, "--dir", root, "--json"]);
       expect(canceled.code, canceled.stdout || canceled.stderr).toBe(0);
       expect(stdoutJson(canceled)).toMatchObject({
         schema: "workbench.cli.run-cancel.v1",
@@ -5454,7 +5568,7 @@ describe("workbench skill-first CLI", () => {
       });
       expect(cloudCancelCalled).toBe(true);
 
-      const watched = await invoke(["run", "watch", retryRunId, "--dir", root, "--json"]);
+      const watched = await invoke(["watch", retryRunId, "--dir", root, "--json"]);
       expect(watched.code, watched.stdout || watched.stderr).toBe(0);
       expect(stdoutJson(watched)).toMatchObject({
         schema: "workbench.cli.run-watch.v1",
@@ -5549,7 +5663,7 @@ describe("workbench skill-first CLI", () => {
       }
       expect(hostedRunId).toMatch(/^run_/u);
       await delay(5_250);
-      const canceled = await invoke(["run", "cancel", hostedRunId!, "--dir", root, "--json"]);
+      const canceled = await invoke(["cancel", hostedRunId!, "--dir", root, "--json"]);
       expect(canceled.code, canceled.stdout || canceled.stderr).toBe(0);
       const stoppedStartedAt = Date.now();
       const stopped = await running;
@@ -6292,7 +6406,7 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
-  test("hosted eval timeout points to run watch for freshness", async () => {
+  test("hosted eval timeout points to watch for freshness", async () => {
     const root = await makeTempRoot("workbench-cli-cloud-timeout-");
     const previousConfig = process.env.WORKBENCH_CONFIG;
     const previousTimeout = process.env.WORKBENCH_CLOUD_RUN_TIMEOUT_MS;
@@ -6404,7 +6518,7 @@ describe("workbench skill-first CLI", () => {
       expect(stdoutJson(result)).toMatchObject({
         ok: false,
         code: "cloud_run_pending",
-        remediation: `workbench run watch ${hostedRunId}`,
+        remediation: `workbench watch ${hostedRunId}`,
         subject: {
           runId: hostedRunId,
           status: "running",
@@ -6466,7 +6580,6 @@ describe("workbench skill-first CLI", () => {
     const succeededRun = {
       ...runningRun,
       status: "succeeded",
-      score: 1,
       traceIds: ["trace_detach"],
       finishedAt: createdAt,
     };
@@ -6490,7 +6603,8 @@ describe("workbench skill-first CLI", () => {
     const succeededJob = {
       ...runningJob,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       traceIds: ["trace_detach"],
       finishedAt: createdAt,
     };
@@ -6570,7 +6684,7 @@ describe("workbench skill-first CLI", () => {
         code: "cloud_detached",
         detached: true,
         run: expect.objectContaining({ id: hostedRunId, status: "running" }),
-        next: `workbench run watch ${hostedRunId.slice(0, 12)}`,
+        next: `workbench watch ${hostedRunId.slice(0, 12)}`,
         cloud: expect.objectContaining({
           detached: true,
           runId: hostedRunId,
@@ -6677,7 +6791,8 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: ["trace_autolink"],
       createdAt,
@@ -7029,7 +7144,6 @@ describe("workbench skill-first CLI", () => {
     const succeededRun = {
       ...runningRun,
       status: "succeeded",
-      score: 1,
       traceIds: ["trace_improve_success"],
       finishedAt: "2026-06-11T00:00:02.000Z",
     };
@@ -7043,10 +7157,11 @@ describe("workbench skill-first CLI", () => {
       evalHash: prepared.evalHash,
       agentName: prepared.agent,
       agentHash: prepared.agentHash,
-      caseId: "current",
+      caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: ["trace_improve_success"],
       createdAt,
@@ -7258,7 +7373,6 @@ describe("workbench skill-first CLI", () => {
       agentName: prepared.agent,
       agentHash: prepared.agentHash,
       status: "succeeded",
-      score: 1,
       jobIds: ["job_detached_eval"],
       traceIds: ["trace_detached_eval"],
       createdAt,
@@ -7277,7 +7391,8 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: ["trace_detached_eval"],
       createdAt,
@@ -7308,7 +7423,6 @@ describe("workbench skill-first CLI", () => {
       agentName: prepared.agent,
       agentHash: prepared.agentHash,
       status: "succeeded",
-      score: 1,
       outputVersionId: improvedVersionId,
       jobIds: ["job_detached_improve"],
       traceIds: ["trace_detached_improve"],
@@ -7325,10 +7439,11 @@ describe("workbench skill-first CLI", () => {
       evalHash: prepared.evalHash,
       agentName: prepared.agent,
       agentHash: prepared.agentHash,
-      caseId: "current",
+      caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: ["trace_detached_improve"],
       createdAt: "2026-06-11T00:00:02.000Z",
@@ -7477,7 +7592,6 @@ describe("workbench skill-first CLI", () => {
     const succeededRun = {
       ...runningRun,
       status: "succeeded",
-      score: 1,
       traceIds: ["trace_improve_conflict"],
       finishedAt: "2026-06-11T00:00:02.000Z",
     };
@@ -7491,10 +7605,11 @@ describe("workbench skill-first CLI", () => {
       evalHash: prepared.evalHash,
       agentName: prepared.agent,
       agentHash: prepared.agentHash,
-      caseId: "current",
+      caseId: "case-001",
       sample: 0,
       status: "succeeded",
-      score: 1,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
       artifactIds: [],
       traceIds: ["trace_improve_conflict"],
       createdAt,
@@ -9167,7 +9282,7 @@ describe("workbench skill-first CLI", () => {
     const evalResult = await invoke(["eval", "-n", "5", "--dir", root]);
 
     expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
-    expect(evalResult.stdout).toContain("coverage cases=1 samples=5 jobs=5");
+    expect(evalResult.stdout).toContain("coverage cases=1 samples=5 jobs=10");
     expect(evalResult.stdout).toContain("next: workbench login");
 
     const status = await invoke(["status", "--dir", root, "--json"]);
@@ -9176,7 +9291,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench login");
   }, 60_000);
 
-  dockerTest("local eval detaches on SIGINT and resumes through run watch", async () => {
+  dockerTest("local eval detaches on SIGINT and resumes through watch", async () => {
     const root = await makeTempRoot("workbench-cli-local-detach-");
     expect((await invoke(["new", root, "--agent", "local"])).code).toBe(0);
     await writeSleepingPassingCaseTest(root, 3);
@@ -9192,7 +9307,7 @@ describe("workbench skill-first CLI", () => {
       ok: false,
       code: "local_detached",
       detached: true,
-      next: `workbench run watch ${detachedJson.run.id}`,
+      next: `workbench watch ${detachedJson.run.id}`,
     });
     const progressLines = detached.stderr.trim().split("\n")
       .filter((line) => line.trim().startsWith("{"))
@@ -9201,14 +9316,14 @@ describe("workbench skill-first CLI", () => {
     expect(progressLines.length).toBeGreaterThan(0);
     expect(detachedJson.run.progress.elapsedMs).toBe(progressLines.at(-1)!.progress.elapsedMs);
 
-    const watched = await invoke(["run", "watch", detachedJson.run.id, "--dir", root, "--json"]);
+    const watched = await invoke(["watch", detachedJson.run.id, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
     expect(stdoutJson<{ run: { id: string; status: string } }>(watched)).toMatchObject({
       run: { id: detachedJson.run.id, status: "succeeded" },
     });
   }, 60_000);
 
-  dockerTest("run cancel interrupts active local sandbox work", async () => {
+  dockerTest("cancel interrupts active local sandbox work", async () => {
     const root = await makeTempRoot("workbench-cli-local-cancel-live-");
     expect((await invoke(["new", root, "--agent", "local"])).code).toBe(0);
     await writeSleepingPassingCaseTest(root, 30);
@@ -9229,7 +9344,7 @@ describe("workbench skill-first CLI", () => {
     expect(runId).toBeTruthy();
 
     const cancelStartedAt = Date.now();
-    const cancel = await invoke(["run", "cancel", runId!, "--dir", root, "--json"]);
+    const cancel = await invoke(["cancel", runId!, "--dir", root, "--json"]);
     expect(cancel.code, cancel.stdout || cancel.stderr).toBe(0);
     expect(Date.now() - cancelStartedAt).toBeLessThan(2_000);
     expect(stdoutJson<{ run: { status: string; progress: { planned?: number } } }>(cancel).run).toMatchObject({
@@ -9240,7 +9355,7 @@ describe("workbench skill-first CLI", () => {
     });
 
     const watchStartedAt = Date.now();
-    const watched = await invoke(["run", "watch", runId!, "--dir", root, "--json"]);
+    const watched = await invoke(["watch", runId!, "--dir", root, "--json"]);
     expect(watched.code, watched.stdout || watched.stderr).toBe(0);
     expect(Date.now() - watchStartedAt).toBeLessThan(12_000);
     expect(stdoutJson<{ run: { id: string; status: string }; ok: boolean }>(watched)).toMatchObject({
@@ -9303,8 +9418,8 @@ describe("workbench skill-first CLI", () => {
       await delay(100);
     }
     expect(humanRunId).toBeTruthy();
-    expect((await invoke(["run", "cancel", humanRunId!, "--dir", humanRoot, "--json"])).code).toBe(0);
-    expect((await invoke(["run", "watch", humanRunId!, "--dir", humanRoot, "--json"])).code).toBe(0);
+    expect((await invoke(["cancel", humanRunId!, "--dir", humanRoot, "--json"])).code).toBe(0);
+    expect((await invoke(["watch", humanRunId!, "--dir", humanRoot, "--json"])).code).toBe(0);
     const humanEvalResult = await runningHumanEval;
     expect(humanEvalResult.code, humanEvalResult.stdout || humanEvalResult.stderr).toBe(1);
     expect(humanEvalResult.stdout).toContain("Eval canceled; evidence was saved.");
@@ -9337,7 +9452,7 @@ describe("workbench skill-first CLI", () => {
     expect(result.stdout).toContain("agent=failer");
     expect(result.stdout).toContain("agent=passer");
     expect(result.stdout).toContain("coverage cases=1 samples=5 jobs=5 failed=5");
-    expect(result.stdout).toContain("coverage cases=1 samples=5 jobs=5 run=");
+    expect(result.stdout).toContain("coverage cases=1 samples=5 jobs=10 run=");
     expect(result.stdout).toContain("measurement\trun=");
     expect(result.stdout).toContain("skill=current\tagent=failer\tfailed");
     expect(result.stdout).toContain("skill=current\tagent=passer\tsucceeded");
@@ -9350,7 +9465,7 @@ describe("workbench skill-first CLI", () => {
     expect(json.code, json.stdout || json.stderr).toBe(1);
     expect(parsed.coverage).toEqual(expect.arrayContaining([
       expect.objectContaining({ agentName: "failer", samples: 5, jobs: 5, failed: 5 }),
-      expect.objectContaining({ agentName: "passer", samples: 5, jobs: 5, failed: 0 }),
+      expect.objectContaining({ agentName: "passer", samples: 5, jobs: 10, failed: 0 }),
     ]));
     expect(parsed.failedMeasurements).toEqual(expect.arrayContaining([
       expect.objectContaining({ agent: "failer", error: "agent failed (5 jobs)" }),
@@ -9614,7 +9729,7 @@ describe("workbench skill-first CLI", () => {
       caseCount: 1,
       createdAt: evidenceCreatedAt,
       updatedAt: evidenceCreatedAt,
-      scoreAdapter: "tests",
+      gradeAdapter: "tests",
     }));
     await fs.writeFile(path.join(root, ".workbench", "objects", "run", "run_evidence.json"), JSON.stringify({
       id: "run_evidence",
@@ -9626,7 +9741,6 @@ describe("workbench skill-first CLI", () => {
       agentName: "default",
       agentHash: "agent_hash",
       status: "failed",
-      score: 0,
       latencyMs: 1000,
       jobIds: ["job_evidence"],
       traceIds: ["trace_evidence"],
@@ -9647,7 +9761,8 @@ describe("workbench skill-first CLI", () => {
       caseId: "case-001",
       sample: 0,
       status: "failed",
-      score: 0,
+      role: "grade",
+      result: { items: [{ kind: "score", score: 0, value: 0 }] },
       artifactIds: [],
       traceIds: ["trace_evidence"],
       createdAt: evidenceCreatedAt,
@@ -9788,7 +9903,7 @@ describe("workbench skill-first CLI", () => {
       expect(stdoutJson<{ runs: { activeRuns?: Array<{ id: string }> } }>(status).runs.activeRuns)
         .toEqual(expect.arrayContaining([expect.objectContaining({ id: started.id })]));
 
-      const watched = await invoke(["run", "watch", started.id, "--dir", root, "--json"]);
+      const watched = await invoke(["watch", started.id, "--dir", root, "--json"]);
       expect(watched.code, watched.stdout || watched.stderr).toBe(0);
       expect(stdoutJson<{ run: { id: string; status: string } }>(watched).run)
         .toMatchObject({ id: started.id, status: "succeeded" });
@@ -10569,13 +10684,14 @@ describe("workbench skill-first CLI", () => {
     expect(run.id).toMatch(/^run_/u);
     expect(run.plan.versionId).toBe(version.id);
     expect(run.result?.score).toBe(1);
-    expect(run.progress.planned).toBe(1);
-    expect(run.progress.completed).toBe(1);
-    expect(run.progress.evidenceCount).toBeGreaterThanOrEqual(1);
+    expect(run.progress.planned).toBe(2);
+    expect(run.progress.completed).toBe(2);
+    expect(run.progress.evidenceCount).toBeGreaterThanOrEqual(2);
     expect(run.measurements).toHaveLength(1);
     expect(run.measurements[0]?.score).toBe(1);
     const inspection = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
-    const runTrace = inspection.traces.find((trace) => trace.runId === run.id);
+    const gradeJob = inspection.jobs.find((job) => job.runId === run.id && job.role === "grade");
+    const runTrace = inspection.traces.find((trace) => trace.jobId === gradeJob?.id);
     const runResult = runTrace?.result as { score?: number; metrics?: { score?: number }; cases?: Array<{ metrics?: { score?: number } }> } | undefined;
     expect(runResult?.score).toBe(1);
     expect(runResult?.metrics?.score).toBe(1);
@@ -10597,7 +10713,15 @@ describe("workbench skill-first CLI", () => {
     });
 
     await writeFailingCaseTest(root, "cli workflow failure");
-    const failingEval = await invoke(["eval", "--dir", root, "--json"]);
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
+      "#!/bin/sh",
+      "set -eu",
+      `printf '%s\\n' ${shellQuote("cli workflow failure")} >&2`,
+      "exit 2",
+      "",
+    ].join("\n"));
+    await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+    const failingEval = await invoke(["eval", "--dir", root, "--rerun", "--json"]);
     expect(failingEval.code).toBe(1);
     const failingEvalJson = stdoutJson<{
       ok: false;
@@ -10609,11 +10733,10 @@ describe("workbench skill-first CLI", () => {
     expect(failingEvalJson.next).toBe(`workbench show ${shortTestRef(failingEvalJson.failedMeasurements[0]!.runId)}`);
     const failedMeasurements = failingEvalJson.failedMeasurements;
     expect(failedMeasurements[0]?.status).toBe("failed");
-    expect(failedMeasurements[0]?.score).toBe(0);
     const failedRun = failedMeasurements[0]!;
-    const failingEvalHuman = await invoke(["eval", "--dir", root]);
+    const failingEvalHuman = await invoke(["eval", "--dir", root, "--rerun"]);
     expect(failingEvalHuman.code).toBe(1);
-    expect(failingEvalHuman.stdout).toContain(`next: workbench show ${shortTestRef(failedRun.runId)}`);
+    expect(failingEvalHuman.stdout).toMatch(/next: workbench show run_/u);
     expect(failingEvalHuman.stdout).not.toContain("workbench case add");
     expect(failingEvalHuman.stdout).not.toContain("workbench improve --agents");
     const failedRunListing = await invoke(["show", failedRun.runId, "--dir", root, "--json"]);
@@ -10625,7 +10748,19 @@ describe("workbench skill-first CLI", () => {
       /cases\/case-001\/jobs\/job_[^/]+\/traces\/trace_[^/]+\/stderr\.log$/u.test(file.path)
     )).toBe(false);
     const failedStderr = await invoke(["show", `${failedRun.runId}:stderr.log`, "--dir", root]);
-    expect(failedStderr.stdout).toContain("cli workflow failure");
+    expect(failedStderr.stdout).toContain("Tests engine did not find result.json");
+
+    await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
+      "#!/bin/sh",
+      "set -eu",
+      "mkdir -p \"$OUTPUT_DIR\"",
+      "printf '{\"ok\":true,\"score\":0,\"metrics\":{\"score\":0},\"message\":\"below perfect\"}\\n' > \"$OUTPUT_DIR/result.json\"",
+      "",
+    ].join("\n"));
+    await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+    const belowPerfectEval = await invoke(["eval", "--dir", root, "--rerun", "--json"]);
+    expect(belowPerfectEval.code, belowPerfectEval.stdout || belowPerfectEval.stderr).toBe(0);
+    expect(stdoutJson<{ run: { result?: { score?: number } } }>(belowPerfectEval).run.result?.score).toBe(0);
 
     const defaultImproveDryRun = await invoke(["improve", "--dry-run", "--dir", root, "--json"]);
     expect(defaultImproveDryRun.code, defaultImproveDryRun.stdout || defaultImproveDryRun.stderr).toBe(0);
@@ -10676,13 +10811,14 @@ describe("workbench skill-first CLI", () => {
     ]);
     expect(agentAdd.code).toBe(0);
     const patcherFailingEval = await invoke(["eval", "--dir", root, "--agents", "patcher", "--json"]);
-    expect(patcherFailingEval.code).toBe(1);
-    const patcherFailedMeasurements = stdoutJson<{ failedMeasurements: Array<{ versionId: string }> }>(patcherFailingEval).failedMeasurements;
-    const patcherBaseVersionId = patcherFailedMeasurements[0]!.versionId;
+    expect(patcherFailingEval.code, patcherFailingEval.stdout || patcherFailingEval.stderr).toBe(0);
+    const patcherMeasurements = stdoutJson<{ run: { measurements: Array<{ versionId: string; score?: number }> } }>(patcherFailingEval).run.measurements;
+    expect(patcherMeasurements[0]?.score).toBe(0);
+    const patcherBaseVersionId = patcherMeasurements[0]!.versionId;
 
     const improve = await invoke(["improve", "--dir", root, "--agents", "patcher", "--json"]);
-    expect(improve.code).toBe(1);
-    const improveError = stdoutJson<{ code: string; message: string; remediation?: string }>(improve);
+    expect(improve.code, improve.stdout || improve.stderr).toBe(0);
+    const improvePayload = stdoutJson<{ promoted: boolean; switched: boolean; outputScore?: number }>(improve);
     const improveProgress = stderrJsonLines(improve);
     expect(improveProgress).toContainEqual(expect.objectContaining({
       schema: "workbench.run.v1",
@@ -10696,10 +10832,12 @@ describe("workbench skill-first CLI", () => {
       phase: "complete",
       variant: "local",
       progress: expect.objectContaining({
-        planned: 1,
-        completed: 1,
+        planned: 2,
+        completed: 2,
+        scored: 1,
         evidenceCount: expect.any(Number),
       }),
+      result: expect.objectContaining({ score: 0 }),
     }));
     if (improveProgress.some((entry) => entry.phase === "proof")) {
       expect(improveProgress).toContainEqual(expect.objectContaining({
@@ -10711,16 +10849,12 @@ describe("workbench skill-first CLI", () => {
         result: expect.objectContaining({ improvedVersionId: expect.stringMatching(/^v_/u) }),
       }));
     }
-    expect(improveError).toMatchObject({
-      ok: false,
-      code: "improve_failed",
-      message: expect.any(String),
-    });
+    expect(improvePayload).toMatchObject({ promoted: false, switched: false, outputScore: 0 });
 
     const results = await invoke(["results", "--dir", root, "--agents", "patcher"]);
     expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+samples\s+cost\s+latency\s+run/mu);
-    expect(results.stdout).toMatch(/\bpatcher\s+failed\b/u);
-    expect(results.stdout).toMatch(/\bfailed\s+0\.000\b/u);
+    expect(results.stdout).toMatch(/\bpatcher\s+succeeded\b/u);
+    expect(results.stdout).toMatch(/\bsucceeded\s+0\.000\b/u);
     const resultsJson = await invoke(["results", "--dir", root, "--agents", "patcher", "--json"]);
     const resultsPayload = stdoutJson<{
       result: {
@@ -10769,9 +10903,9 @@ describe("workbench skill-first CLI", () => {
     const improveRun = [...improveSnapshot.runs].reverse()
       .find((run) => run.kind === "improve" && run.agentName === "patcher");
     if (!improveRun?.outputVersionId) {
-      throw new Error("Expected failed improve run to retain its candidate version.");
+      throw new Error("Expected improve run to retain its candidate version.");
     }
-    expect(improveRun.status).toBe("failed");
+    expect(improveRun.status).toBe("succeeded");
     expect(improveSnapshot.refs.current).not.toBe(improveRun.outputVersionId);
     const candidateVersionId = improveRun.outputVersionId;
 
@@ -10797,12 +10931,21 @@ describe("workbench skill-first CLI", () => {
     }
 
     const trace = await invoke(["show", run.id, "--dir", root, "--json"]);
-    expect(stdoutJson<{ result: { details: unknown[]; files: Array<{ path: string }> } }>(trace).result.details).toHaveLength(1);
-    expect(stdoutJson<{ result: { details: unknown[]; files: Array<{ path: string }> } }>(trace).result.files
+    const tracePayload = stdoutJson<{
+      result: {
+        details: Array<{ executions: Array<{ jobRoles?: string[]; kind?: string; role?: string }> }>;
+        jobs: Array<{ role?: string }>;
+        files: Array<{ path: string }>;
+      };
+    }>(trace).result;
+    expect(tracePayload.jobs.map((job) => job.role).sort()).toEqual(["execute", "grade"]);
+    expect(tracePayload.details.flatMap((detail) => detail.executions.flatMap((execution) => execution.jobRoles ?? [])).sort()).toEqual(["execute", "grade"]);
+    expect(tracePayload.details.flatMap((detail) => detail.executions.map((execution) => execution.role))).toEqual(["engine", "engine"]);
+    expect(tracePayload.files
       .some((file) => /\/result\.json$/u.test(file.path))).toBe(true);
 
     const snapshotJson = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
-    expect(snapshotJson.jobs).toHaveLength(6);
+    expect(snapshotJson.jobs.length).toBeGreaterThanOrEqual(10);
     expect(snapshotJson.jobs).toEqual(expect.arrayContaining([
       expect.objectContaining({
         runId: improveRun.id,
@@ -10924,7 +11067,6 @@ async function writeFailingCaseTest(root: string, message: string): Promise<void
     "prompt: Exercise a workflow-specific failure path.",
     "rubric:",
     "  - Captures workflow-specific failure evidence.",
-    "command: sh \"$CASE_DIR/tests/test.sh\"",
     "",
   ].join("\n"));
   await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -10947,7 +11089,6 @@ async function writeSkillDependentCaseTest(root: string, marker: string): Promis
     "prompt: Exercise an improvement that changes the skill package.",
     "rubric:",
     "  - The skill source contains the expected improvement marker.",
-    "command: sh \"$CASE_DIR/tests/test.sh\"",
     "",
   ].join("\n"));
   await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -11042,7 +11183,6 @@ async function seedFailedImproveEvidence(
     agentName: prepared.agent,
     agentHash: prepared.agentHash,
     status,
-    score,
     jobIds: [jobId],
     traceIds: [traceId],
     createdAt,
@@ -11062,7 +11202,8 @@ async function seedFailedImproveEvidence(
     caseId: "case-001",
     sample: 0,
     status,
-    score,
+    role: "grade",
+    result: { items: [{ kind: "score", score, value: score }] },
     artifactIds: [],
     traceIds: [traceId],
     createdAt,
@@ -11096,7 +11237,6 @@ async function writePassingCaseTest(root: string, caseId = "case-001"): Promise<
     "prompt: Exercise the workflow happy path.",
     "rubric:",
     "  - Captures workflow-specific success evidence.",
-    "command: sh \"$CASE_DIR/tests/test.sh\"",
     "",
   ].join("\n"));
   await fs.writeFile(path.join(root, ".workbench", "cases", caseId, "tests", "test.sh"), [

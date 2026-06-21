@@ -146,7 +146,7 @@ export async function executeWorkbenchBuiltInAdapterCommand(
     return;
   }
   if (adapterId === "rubric") {
-    if (request.operation !== "engine.run") {
+    if (request.operation !== "grade.run") {
       throw new Error(`Rubric adapter cannot handle ${request.operation}.`);
     }
     await writeRubricJudgeResult(
@@ -206,7 +206,7 @@ async function executeWorkbenchEngineRequest(
     await executeWorkbenchEngineResolveRequest(request);
     return;
   }
-  if (request.operation === "engine.run") {
+  if (request.operation === "grade.run") {
     await executeWorkbenchEngineRunRequest(request);
     return;
   }
@@ -240,7 +240,7 @@ async function executeWorkbenchEngineRunRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   void request;
-  throw new Error("Workbench engine.run is no longer an orchestration adapter. Run the selected skill in core and invoke the score adapter directly.");
+  throw new Error("Workbench grade.run is not implemented by the workbench adapter. Run the selected skill in core and invoke a grader adapter directly.");
 }
 
 function workbenchEngineCasesPath(request: WorkbenchAdapterOperationRequest): string {
@@ -278,6 +278,7 @@ async function executeCommandAdapterRequest(
 ): Promise<void> {
   const command = requiredAdapterCommandString(request, "command");
   await ensureRunSkillDirectories(request);
+  await ensureGradeSubjectDirectories(request);
   const before = request.operation === "skill.improve"
     ? await snapshotEditableSkillWorkspace(request)
     : null;
@@ -287,7 +288,7 @@ async function executeCommandAdapterRequest(
       commandAdapterWorkingDirectory(request),
       commandAdapterEnvironment(request),
     );
-    if (request.operation === "engine.run") {
+    if (request.operation === "grade.run") {
       await requireCommandScoreResult(request);
       return;
     }
@@ -301,11 +302,11 @@ async function requireCommandScoreResult(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   if (!await fileExists(workbenchAdapterOperationResultPath(request.paths.output))) {
-    throw new Error("Command engine must write workbench-result.json for engine.run.");
+    throw new Error("Command grader must write workbench-result.json for grade.run.");
   }
-  await readWorkbenchAdapterOperationResult(request.paths.output, "engine.run").catch((error: unknown) => {
+  await readWorkbenchAdapterOperationResult(request.paths.output, "grade.run").catch((error: unknown) => {
     throw new Error(
-      `Command engine wrote an invalid workbench-result.json for engine.run: ${
+      `Command grader wrote an invalid workbench-result.json for grade.run: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -315,10 +316,11 @@ async function requireCommandScoreResult(
 async function executeTestsEngineRequest(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
-  if (request.operation !== "engine.run") {
+  if (request.operation !== "grade.run") {
     throw new Error(`Tests adapter cannot handle ${request.operation}.`);
   }
   await ensureRunSkillDirectories(request);
+  await ensureGradeSubjectDirectories(request);
   const testsRoot = requiredRequestPath(request.paths.enginePrivate, "paths.enginePrivate");
   const script = await firstExistingFile([
     path.join(testsRoot, "test.sh"),
@@ -331,6 +333,9 @@ async function executeTestsEngineRequest(
     SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "current"),
     SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
     CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
+    SUBJECT_WORKSPACE_DIR: path.join(request.paths.workspace, "input", "subject", "workspace"),
+    SUBJECT_OUTPUT_DIR: path.join(request.paths.workspace, "input", "subject", "output"),
+    SUBJECT_TRACE_DIR: path.join(request.paths.workspace, "input", "subject", "traces"),
     OUTPUT_DIR: request.paths.output,
     WORKBENCH_CASE_ID: request.context?.attempt?.caseId ?? "current",
   }).then(() => null, (error: unknown) => error);
@@ -347,7 +352,7 @@ async function executeTestsEngineRequest(
   });
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "engine.run",
+    operation: "grade.run",
     ok: true,
     value: result,
     ...(typeof result.summary === "string" ? { summary: result.summary } : {}),
@@ -398,6 +403,9 @@ function commandAdapterEnvironment(request: WorkbenchAdapterOperationRequest): R
     SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
     CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
     TRACE_DIR: request.paths.traces ?? path.join(request.paths.workspace, "input", "traces"),
+    SUBJECT_WORKSPACE_DIR: path.join(request.paths.workspace, "input", "subject", "workspace"),
+    SUBJECT_OUTPUT_DIR: path.join(request.paths.workspace, "input", "subject", "output"),
+    SUBJECT_TRACE_DIR: path.join(request.paths.workspace, "input", "subject", "traces"),
     OUTPUT_DIR: request.paths.output,
     WORKBENCH_SKILL_PATCH: commandSkillPatchPath(request),
     WORKBENCH_CASE_ID: request.context?.attempt?.caseId ?? "current",
@@ -411,6 +419,18 @@ async function ensureRunSkillDirectories(request: WorkbenchAdapterOperationReque
   await Promise.all([
     request.paths.skills ? fs.mkdir(request.paths.skills, { recursive: true }) : Promise.resolve(),
     request.paths.skill ? fs.mkdir(request.paths.skill, { recursive: true }) : Promise.resolve(),
+  ]);
+}
+
+async function ensureGradeSubjectDirectories(request: WorkbenchAdapterOperationRequest): Promise<void> {
+  if (request.operation !== "grade.run") {
+    return;
+  }
+  await Promise.all([
+    fs.mkdir(path.join(request.paths.workspace, "input", "subject", "output"), { recursive: true }),
+    fs.mkdir(path.join(request.paths.workspace, "input", "subject", "workspace"), { recursive: true }),
+    fs.mkdir(path.join(request.paths.workspace, "input", "subject", "traces"), { recursive: true }),
+    fs.mkdir(request.paths.output, { recursive: true }),
   ]);
 }
 
@@ -1237,7 +1257,7 @@ async function writeRubricJudgeResult(
   });
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
     protocol: "workbench.adapter-result.v1",
-    operation: "engine.run",
+    operation: "grade.run",
     ok: true,
     value: result,
     ...(typeof result.summary === "string" ? { summary: result.summary } : {}),
@@ -1462,11 +1482,13 @@ function buildRubricCriterionJudgePrompt(
     JSON.stringify(criterion, null, 2),
     "",
     "Context:",
-    "- The skill already ran in this same working directory.",
-    "- Skill outputs are available in the current working directory.",
+    "- The skill already ran in a separate execution job.",
+    "- The runner workspace is mounted at /workspace/input/subject/workspace.",
+    "- The runner output directory is mounted at /workspace/input/subject/output.",
+    "- The runner trace is mounted at /workspace/input/subject/traces.",
     "- Public case files are mounted at /workspace/input/case.",
     "- Private case files are mounted at /workspace/private/engine when the case provides them.",
-    "- Score only from the current working directory, public case files, private case files, and the criterion above.",
+    "- Score only from the subject mounts, public case files, private case files, and the criterion above.",
     "",
     "Output:",
     "Return only a JSON object. Do not wrap it in Markdown.",

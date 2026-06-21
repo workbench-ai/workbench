@@ -283,7 +283,7 @@ function normalizeOperationResultValue(
   if (operation === "engine.resolve") {
     return normalizeWorkbenchEngineResolveResult(value);
   }
-  if (operation === "engine.run") {
+  if (operation === "grade.run") {
     return normalizeResult(value, `${WORKBENCH_ADAPTER_RESULT_FILE}.value`);
   }
   if (operation === "skill.improve") {

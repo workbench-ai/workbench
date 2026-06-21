@@ -71,7 +71,7 @@ export interface GenericRunSpec {
   engineResolve: WorkbenchAdapterInvocation;
   improve?: WorkbenchAdapterInvocation;
   run: WorkbenchAdapterInvocation;
-  engineRun: WorkbenchAdapterInvocation;
+  gradeRun: WorkbenchAdapterInvocation;
 }
 
 export type GenericEngineCaseSpec = WorkbenchEngineCaseSpec;

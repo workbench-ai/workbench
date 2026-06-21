@@ -259,9 +259,11 @@ async function createInspectionSnapshotEnvelope(options: {
 
 async function readOperationRequest(request: IncomingMessage): Promise<WorkbenchOperationRequest> {
   const body = await readJsonObject(request);
-  const kind = body.kind === "improve" ? "improve" : body.kind === "eval" ? "eval" : null;
+  const kind = body.kind === "run" || body.kind === "grade" || body.kind === "eval" || body.kind === "improve"
+    ? body.kind
+    : null;
   if (!kind) {
-    throw new WorkbenchUserError("Operation kind must be eval or improve.");
+    throw new WorkbenchUserError("Operation kind must be run, grade, eval, or improve.");
   }
   return {
     kind,
@@ -270,7 +272,11 @@ async function readOperationRequest(request: IncomingMessage): Promise<Workbench
     ...(typeof body.evalHash === "string" && body.evalHash.trim() ? { evalHash: body.evalHash.trim() } : {}),
     ...(typeof body.skill === "string" && body.skill.trim() ? { skill: body.skill.trim() } : {}),
     ...(typeof body.agent === "string" && body.agent.trim() ? { agent: body.agent.trim() } : {}),
+    ...(Array.isArray(body.caseIds)
+      ? { caseIds: body.caseIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) }
+      : {}),
     ...(readPositiveInteger(body.samples) ? { samples: readPositiveInteger(body.samples) } : {}),
+    ...(body.rerun === true && (kind === "run" || kind === "grade" || kind === "eval") ? { rerun: true } : {}),
     ...(kind === "improve" && readPositiveInteger(body.budget) ? { budget: readPositiveInteger(body.budget) } : {}),
     ...(Array.isArray(body.evidenceTraceIds)
       ? { evidenceTraceIds: body.evidenceTraceIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) }

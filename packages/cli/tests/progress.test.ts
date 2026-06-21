@@ -117,7 +117,7 @@ describe("Workbench CLI progress projection", () => {
   test("uses durable finish time for terminal elapsed duration", () => {
     const startedAt = Date.parse("2026-06-15T00:00:00.000Z");
     const snapshot = expectSnapshot(runProgressSnapshotFromRuns({
-      command: "run watch",
+      command: "watch",
       location: "local",
       phase: "running",
       runs: [
@@ -179,7 +179,7 @@ describe("Workbench CLI progress projection", () => {
 
   test("omits empty evidence from human progress", () => {
     const snapshot = expectSnapshot(runProgressSnapshotFromRuns({
-      command: "run watch",
+      command: "watch",
       location: "local",
       phase: "running",
       runs: [run({ id: "run_no_evidence", status: "running" })],
@@ -272,11 +272,11 @@ describe("Workbench CLI progress projection", () => {
 
     expect(stream.value).toBe([
       "workbench eval: queued on Workbench Cloud, work 0/1 complete, failed 0, elapsed 0s.",
-      "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench run watch run_cloud.",
+      "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch run_cloud.",
       "workbench eval: queued on Workbench Cloud, work 0/1 complete, failed 0, elapsed 1m.",
-      "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench run watch run_cloud.",
+      "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch run_cloud.",
       "workbench eval: running, work 0/1 complete, failed 0, active case=case-001 sample=1 job=job_cloud, elapsed 1m 1s.",
-      "workbench eval: press Ctrl-C to detach; resume with workbench run watch run_cloud.",
+      "workbench eval: press Ctrl-C to detach; resume with workbench watch run_cloud.",
       "workbench eval: complete, work 1/1 complete, scored 1, failed 0, elapsed 1m 20s.",
       "",
     ].join("\n"));
@@ -286,7 +286,7 @@ describe("Workbench CLI progress projection", () => {
     const stream = new MemoryStream();
     const renderer = createProgressRenderer({ stderr: stream, json: true, heartbeatMs: 60_000 });
     const snapshot = expectSnapshot(runProgressSnapshotFromRuns({
-      command: "run watch",
+      command: "watch",
       location: "cloud",
       phase: "running",
       runs: [run({ id: "run_cloud", status: "running" })],
@@ -414,11 +414,15 @@ function run(overrides: Partial<WorkbenchRun>): WorkbenchRun {
   };
 }
 
-function job(overrides: Partial<WorkbenchJob>): WorkbenchJob {
+type ProgressJobOverrides = Partial<WorkbenchJob> & { score?: number };
+
+function job(overrides: ProgressJobOverrides): WorkbenchJob {
+  const { score, ...rest } = overrides;
   return {
     id: "job_1",
     runId: "run_1",
     kind: "eval",
+    ...(score !== undefined ? { role: "grade" as const } : {}),
     versionId: "v001",
     skillName: "current",
     skillBundleHash: "bundle_hash",
@@ -431,6 +435,7 @@ function job(overrides: Partial<WorkbenchJob>): WorkbenchJob {
     artifactIds: [],
     traceIds: [],
     createdAt: "2026-06-15T00:00:00.000Z",
-    ...overrides,
+    ...(score !== undefined ? { result: { items: [{ kind: "score" as const, score, value: score }] } } : {}),
+    ...rest,
   };
 }

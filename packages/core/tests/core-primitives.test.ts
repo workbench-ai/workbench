@@ -256,7 +256,6 @@ describe("workbench execution DAG scheduler", () => {
       agentName: "default",
       agentHash: "agent_default",
       status: "succeeded",
-      score: 0.65,
       jobIds: ["job_default", "job_patcher"],
       traceIds: [],
       createdAt: "2026-06-16T00:00:00.000Z",
@@ -395,12 +394,18 @@ describe("workbench execution DAG scheduler", () => {
       evidenceAccess: "full",
     });
 
+    expect(local.run.enabled).toBe(true);
+    expect(local.grade.enabled).toBe(true);
     expect(local.eval.defaultRequest).not.toHaveProperty("versionId");
+    expect(local.run.defaultRequest).not.toHaveProperty("versionId");
+    expect(local.grade.defaultRequest).not.toHaveProperty("versionId");
     expect(local.improve.defaultRequest).not.toHaveProperty("versionId");
+    expect(cloud.run.enabled).toBe(false);
+    expect(cloud.grade.enabled).toBe(false);
     expect(cloud.eval.defaultRequest.versionId).toBe("v_current");
     expect(cloud.improve.defaultRequest.versionId).toBe("v_current");
     expect(local.improve.enabled).toBe(false);
-    expect(local.improve.disabledReason).toMatch(/needs scored below-perfect/u);
+    expect(local.improve.disabledReason).toMatch(/needs graded below-perfect/u);
 
     const evidence = createWorkbenchActionCapabilities({
       ...snapshot,
@@ -455,7 +460,7 @@ describe("workbench execution graph compilation", () => {
     const execution = graph.executions[0]!;
     expect(execution.purpose).toBe("attempt");
     expect(execution.id).toContain("case_case_001");
-    expect(execution.adapter).toMatchObject({ use: "tests" });
+    expect(execution.adapter).toMatchObject({ use: "command" });
     expect(execution.inputs.map((input) => input.name)).toEqual(["skills", "case"]);
     expect(execution.sandbox).toMatchObject({
       kind: "oci",
@@ -651,7 +656,7 @@ function genericSpec(): GenericRunSpec {
     engineResolve: { use: "tests" },
     improve: { use: "improver" },
     run: { use: "command" },
-    engineRun: { use: "tests" },
+    gradeRun: { use: "tests" },
   };
 }
 
@@ -788,7 +793,7 @@ function actionCapabilitySnapshot(): WorkbenchInspectionSnapshot {
       caseCount: 1,
       createdAt: "2026-06-15T00:00:00.000Z",
       updatedAt: "2026-06-15T00:00:00.000Z",
-      scoreAdapter: "tests",
+      gradeAdapter: "tests",
     }],
     agents: [],
     runs: [],
@@ -807,8 +812,9 @@ function retryJob(
   id: string,
   caseId: string,
   sample: number,
-  overrides: Partial<WorkbenchJob> = {},
+  overrides: Partial<WorkbenchJob> & { score?: number } = {},
 ): WorkbenchJob {
+  const { score, ...jobOverrides } = overrides;
   return {
     id,
     runId: run.id,
@@ -827,7 +833,11 @@ function retryJob(
     createdAt: "2026-06-15T00:00:00.000Z",
     finishedAt: "2026-06-15T00:00:01.000Z",
     error: "failed",
-    ...overrides,
+    ...(score !== undefined ? {
+      role: "grade",
+      result: { items: [{ kind: "score", score, value: score }] },
+    } : {}),
+    ...jobOverrides,
   };
 }
 

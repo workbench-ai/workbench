@@ -329,8 +329,8 @@ describe("hub-shaped Workbench UI", () => {
     expect(summaryHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;section=job%3Ajob_001\"");
     expect(summaryHtml).not.toContain("Run commands");
     expect(summaryHtml).not.toContain("workbench show run_eval");
-    expect(summaryHtml).not.toContain("workbench run watch run_eval");
-    expect(summaryHtml).not.toContain("workbench run retry run_eval");
+    expect(summaryHtml).not.toContain("workbench watch run_eval");
+    expect(summaryHtml).not.toContain("workbench retry run_eval");
     expect(summaryHtml).not.toContain("<ul class=\"grid min-w-0 gap-2\">");
     expect(summaryHtml).not.toContain("<a class=\"font-medium text-primary no-underline hover:underline\"");
     expect(summaryHtml).not.toContain("data-testid=\"workbench-detail-pane\"");
@@ -427,6 +427,14 @@ function inspectionEnvelope(snapshot: WorkbenchInspectionSnapshot): WorkbenchIns
     actions: {
       variant: "local",
       evidenceAccess: "full",
+      run: {
+        enabled: true,
+        defaultRequest: { kind: "run", variant: "local", versionId: "v001", samples: 1 },
+      },
+      grade: {
+        enabled: true,
+        defaultRequest: { kind: "grade", variant: "local", versionId: "v001", samples: 1 },
+      },
       eval: {
         enabled: true,
         defaultRequest: { kind: "eval", variant: "local", versionId: "v001", samples: 1 },
@@ -525,14 +533,14 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
     evals: [{
       hash: "eval_hash",
       caseCount: 2,
-      scoreAdapter: "rubric",
+      gradeAdapter: "rubric",
       createdAt: "2026-06-06T00:10:00.000Z",
       updatedAt: "2026-06-06T00:10:00.000Z",
       files: [{
         path: "eval.yaml",
         kind: "text",
         encoding: "utf8",
-        content: "version: 1\nscore:\n  adapter: rubric\n",
+        content: "version: 1\ngrade:\n  adapter: rubric\n",
       }, {
         path: "cases/case_001/case.yaml",
         kind: "text",
@@ -586,7 +594,7 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       evaluations: [{
         id: "eval_hash",
         caseCount: 2,
-        scoreAdapter: "rubric",
+        gradeAdapter: "rubric",
         createdAt: "2026-06-06T00:10:00.000Z",
         updatedAt: "2026-06-06T00:10:00.000Z",
       }],

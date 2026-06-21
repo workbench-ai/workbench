@@ -9,7 +9,7 @@ import {
   createWorkbenchRunSnapshot,
 } from "@workbench-ai/workbench-core";
 
-export type WorkbenchProgressCommand = "eval" | "improve" | "run watch" | "run retry";
+export type WorkbenchProgressCommand = "run" | "grade" | "eval" | "improve" | "watch" | "retry";
 export type WorkbenchProgressPhase =
   | "preflight"
   | "provider_auth"
@@ -176,7 +176,7 @@ export function formatProgressSummary(
 }
 
 export function formatQueuedCloudGuidance(command: WorkbenchProgressCommand, runId: string): string {
-  return `workbench ${command}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench run watch ${runId}.`;
+  return `workbench ${command}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch ${runId}.`;
 }
 
 export function formatInspectableGuidance(
@@ -185,7 +185,7 @@ export function formatInspectableGuidance(
   location: "local" | "cloud",
 ): string {
   if (location === "cloud") {
-    return `workbench ${command}: press Ctrl-C to detach; resume with workbench run watch ${runId}.`;
+    return `workbench ${command}: press Ctrl-C to detach; resume with workbench watch ${runId}.`;
   }
   return `workbench ${command}: inspect current evidence with workbench show ${runId}.`;
 }
@@ -280,14 +280,21 @@ function progressPartialScore(base: WorkbenchRunSnapshot, jobs: readonly Workben
   if (base.status !== "queued" && base.status !== "running" && base.status !== "canceling") {
     return undefined;
   }
-  const scoredJobs = jobs.filter((job) => typeof job.score === "number");
+  const scoredJobs = jobs.filter((job) => jobScore(job) !== undefined);
   if (scoredJobs.length > 0) {
-    return Number((scoredJobs.reduce((sum, job) => sum + (job.score ?? 0), 0) / scoredJobs.length).toFixed(3));
+    return Number((scoredJobs.reduce((sum, job) => sum + (jobScore(job) ?? 0), 0) / scoredJobs.length).toFixed(3));
   }
   if (typeof base.result?.score === "number") {
     return base.result.score;
   }
   return undefined;
+}
+
+function jobScore(job: WorkbenchJob): number | undefined {
+  const scoreItem = job.result?.items?.find((item) =>
+    item.kind === "score" && typeof item.score === "number" && Number.isFinite(item.score)
+  );
+  return typeof scoreItem?.score === "number" ? scoreItem.score : undefined;
 }
 
 function progressEvidenceCount(evidence: ProgressEvidenceCounts | undefined): number | undefined {
@@ -339,7 +346,7 @@ function progressSignature(snapshot: WorkbenchRunSnapshot): string {
 }
 
 function progressCommandForSnapshot(snapshot: WorkbenchRunSnapshot): WorkbenchProgressCommand {
-  return snapshot.kind === "improve" ? "improve" : "eval";
+  return snapshot.kind === "improve" ? "improve" : snapshot.kind === "grade" ? "grade" : snapshot.kind === "run" ? "run" : "eval";
 }
 
 function isInspectablePhase(phase: WorkbenchRunPhase): boolean {

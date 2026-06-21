@@ -66,7 +66,7 @@ export {
   defineAdapter,
   defineEngineResolver,
   defineSkillRunner,
-  defineEngineRunner,
+  defineGradeRunner,
   defineImprover,
   operationDefinitionForRequest,
   workbenchAdapterManifestFromDefinition,

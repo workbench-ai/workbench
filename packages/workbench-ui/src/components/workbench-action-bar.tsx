@@ -44,6 +44,22 @@ export function WorkbenchActionBar({
     <div className="flex shrink-0 flex-wrap items-center gap-2">
       {!sourceOnly ? (
         <>
+          {actions.run.enabled ? (
+            <OperationPopover
+              apiBasePath={apiBasePath}
+              capability={actions.run}
+              onOperationStarted={onOperationStarted}
+              title="Run"
+            />
+          ) : null}
+          {actions.grade.enabled ? (
+            <OperationPopover
+              apiBasePath={apiBasePath}
+              capability={actions.grade}
+              onOperationStarted={onOperationStarted}
+              title="Grade"
+            />
+          ) : null}
           <OperationPopover
             apiBasePath={apiBasePath}
             capability={actions.improve}

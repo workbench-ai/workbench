@@ -90,6 +90,14 @@ describe("workbench contract", () => {
       actions: {
         variant: "local",
         evidenceAccess: "full",
+        run: {
+          enabled: true,
+          defaultRequest: { kind: "run", variant: "local", samples: 1 },
+        },
+        grade: {
+          enabled: true,
+          defaultRequest: { kind: "grade", variant: "local", samples: 1 },
+        },
         eval: {
           enabled: true,
           defaultRequest: { kind: "eval", variant: "local", samples: 1 },
@@ -115,6 +123,8 @@ describe("workbench contract", () => {
       envelope: {
         actions: {
           variant: "local",
+          run: { enabled: true, defaultRequest: { kind: "run", variant: "local" } },
+          grade: { enabled: true, defaultRequest: { kind: "grade", variant: "local" } },
           eval: { enabled: true, defaultRequest: { kind: "eval", variant: "local" } },
           improve: { enabled: false, defaultRequest: { kind: "improve", variant: "local" } },
           acquisition: [{ label: "Open local project" }],
@@ -177,7 +187,7 @@ describe("workbench contract", () => {
         evaluationId: "eval_hash",
       },
       cliEquivalent: "workbench eval --versions all -n 2",
-      next: "workbench run watch run_matrix",
+      next: "workbench watch run_matrix",
     } satisfies WorkbenchRunSnapshot;
 
     expect(JSON.parse(JSON.stringify({ snapshot }))).toMatchObject({
@@ -187,7 +197,7 @@ describe("workbench contract", () => {
         progress: { planned: 4, partialScore: 1 },
         route: { runId: "run_matrix" },
         plan: { rerun: true },
-        next: "workbench run watch run_matrix",
+        next: "workbench watch run_matrix",
       },
     });
 

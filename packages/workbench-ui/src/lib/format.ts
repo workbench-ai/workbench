@@ -13,6 +13,27 @@ export function formatScore(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "n/a";
 }
 
+export function jobScore(job: Pick<WorkbenchJob, "result">): number | undefined {
+  const scoreItem = job.result?.items?.find((item) =>
+    item.kind === "score" && typeof item.score === "number" && Number.isFinite(item.score)
+  );
+  return typeof scoreItem?.score === "number" ? scoreItem.score : undefined;
+}
+
+export function runScore(run: Pick<WorkbenchRun, "id" | "status">, jobs: readonly WorkbenchJob[]): number | undefined {
+  if (run.status === "canceled") {
+    return undefined;
+  }
+  const scores = jobs
+    .filter((job) => job.runId === run.id && job.role === "grade")
+    .map(jobScore)
+    .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
+  if (scores.length === 0) {
+    return undefined;
+  }
+  return Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(3));
+}
+
 export function formatCost(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value)
     ? new Intl.NumberFormat("en-US", {
@@ -113,7 +134,6 @@ export function runDisplayLabel(run: WorkbenchRun): string {
   return [
     run.kind,
     run.status,
-    typeof run.score === "number" ? `score ${formatScore(run.score)}` : null,
   ].filter(Boolean).join(" / ");
 }
 

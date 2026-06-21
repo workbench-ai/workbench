@@ -11,6 +11,7 @@ import { memo, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent 
 
 import type {
   WorkbenchLineageEdge,
+  WorkbenchJob,
   WorkbenchRun,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
@@ -59,6 +60,7 @@ interface LineageGraphProps {
   currentVersionId?: string | null;
   publishedVersionId?: string | null;
   lineage: readonly WorkbenchLineageEdge[];
+  jobs?: readonly WorkbenchJob[];
   onVersionClick: (versionId: string) => void;
   runs?: readonly WorkbenchRun[];
   versions: readonly WorkbenchVersion[];
@@ -77,6 +79,7 @@ function LineageGraphCanvas({
   currentVersionId,
   publishedVersionId,
   lineage,
+  jobs,
   onVersionClick,
   runs,
   versions,
@@ -108,7 +111,7 @@ function LineageGraphCanvas({
       return;
     }
     setFlowState((current) => ({ ...current, loading: true }));
-    void buildVersionLineageFlow({ versions, lineage, currentVersionId, publishedVersionId, runs }).then((flow) => {
+    void buildVersionLineageFlow({ versions, lineage, currentVersionId, publishedVersionId, runs, jobs }).then((flow) => {
       if (!cancelled) {
         setFlowState({ loading: false, nodes: flow.nodes, edges: flow.edges });
       }
@@ -116,7 +119,7 @@ function LineageGraphCanvas({
     return () => {
       cancelled = true;
     };
-  }, [currentVersionId, lineage, publishedVersionId, runs, versions]);
+  }, [currentVersionId, jobs, lineage, publishedVersionId, runs, versions]);
 
   useEffect(() => {
     if (flowState.nodes.length === 0) {

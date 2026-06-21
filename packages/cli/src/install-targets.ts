@@ -131,8 +131,8 @@ export function resolveSkillAccessTargets(options: {
   if (options.dir && requestedScope === "global") {
     throw new WorkbenchCodedError("usage", "workbench skills/install --dir is only valid with folder scope.", {
       remediation: options.write
-        ? `workbench install ${options.sourceForRemediation ?? "OWNER/SKILL"} --scope folder --dir ${commandArg(path.resolve(options.dir))}`
-        : `workbench skills --scope folder --dir ${commandArg(path.resolve(options.dir))}`,
+        ? `workbench install ${options.sourceForRemediation ?? "OWNER/SKILL"} --scope folder --dir ${quoteShellArg(path.resolve(options.dir))}`
+        : `workbench skills --scope folder --dir ${quoteShellArg(path.resolve(options.dir))}`,
       subject: { scope: requestedScope, dir: path.resolve(options.dir) },
       exitCode: 2,
     });
@@ -411,16 +411,12 @@ function installOverwriteRemediation(input: {
   return [
     "workbench",
     "install",
-    commandArg(input.handle),
+    quoteShellArg(input.handle),
     ...(input.target ? ["--target", input.target] : []),
     ...(input.scope !== "folder" ? ["--scope", input.scope] : []),
-    ...(input.dir ? ["--dir", commandArg(input.dir)] : []),
+    ...(input.dir ? ["--dir", quoteShellArg(input.dir)] : []),
     "--yes",
   ].join(" ");
-}
-
-function commandArg(value: string): string {
-  return /^[A-Za-z0-9_./:@+-]+$/u.test(value) ? value : quoteShellArg(value);
 }
 
 export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventory): Record<string, Json> {

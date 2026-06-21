@@ -13,7 +13,7 @@ export interface WorkbenchAdapterManifest {
 
 export type WorkbenchPrimitiveAdapterOperation =
   | "engine.resolve"
-  | "engine.run"
+  | "grade.run"
   | "skill.run"
   | "skill.improve";
 
@@ -624,13 +624,13 @@ export function normalizeWorkbenchAdapterOperation(
 ): WorkbenchAdapterOperation {
   if (
     value === "engine.resolve" ||
-    value === "engine.run" ||
+    value === "grade.run" ||
     value === "skill.run" ||
     value === "skill.improve"
   ) {
     return value;
   }
-  throw new Error(`${label} must be engine.resolve, engine.run, skill.run, or skill.improve.`);
+  throw new Error(`${label} must be engine.resolve, grade.run, skill.run, or skill.improve.`);
 }
 
 function readJsonPointer(value: unknown, label: string): string {

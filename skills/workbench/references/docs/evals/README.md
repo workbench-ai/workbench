@@ -15,7 +15,7 @@ SKILL.md
 .workbench/sync/
 ```
 
-The runtime directories are ignored by Git. Authored Workbench source files such as `.workbench/eval.yaml`, cases, agents, optional skill composition, and optional custom environments are part of Workbench source versions. `.agents/` and `.workbench/remotes.yaml` are local machine metadata, not source.
+The runtime directories are ignored by Git. Authored Workbench source-version files include `.workbench/eval.yaml`, cases, optional skill composition, and optional custom environments. `.workbench/agents.yaml` is authored project configuration that travels with editable published and cloned source, but agent configuration is its own result axis and does not change skill-source version identity by itself. `.agents/` and `.workbench/remotes.yaml` are local machine metadata, not source.
 
 ## `SKILL.md`
 
@@ -75,7 +75,7 @@ agents:
       auth: default
 ```
 
-Skill eval jobs support Docker-style command tests through `local` or `command` agents. Codex and Claude agents run the provider as the skill executor and score the same cases through the configured score adapter, such as `tests` or `rubric`, using adapter auth locally and in Workbench Cloud.
+Skill eval jobs support Docker-style command tests through `local` or `command` agents. Codex and Claude agents run the provider as the skill executor and grade the same cases through the configured grade adapter, such as `tests` or `rubric`, using adapter auth locally and in Workbench Cloud.
 
 ## Loop
 

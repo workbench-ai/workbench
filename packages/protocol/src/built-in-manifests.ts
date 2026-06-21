@@ -9,7 +9,7 @@ import {
   defineAdapter,
   defineSkillRunner,
   defineEngineResolver,
-  defineEngineRunner,
+  defineGradeRunner,
   defineImprover,
   workbenchAdapterManifestFromDefinition,
 } from "./adapter-definition.ts";
@@ -83,19 +83,19 @@ const BUILT_IN_ADAPTER_MANIFESTS: Record<WorkbenchBuiltInAdapterId, WorkbenchAda
     command: defineAdapter({
       id: "command",
       skillRun: defineSkillRunner(),
-      engineRun: defineEngineRunner(),
+      gradeRun: defineGradeRunner(),
       improve: defineImprover(),
     }),
     rubric: defineAdapter({
       id: "rubric",
-      engineRun: defineEngineRunner(),
+      gradeRun: defineGradeRunner(),
       slots: {
         judge: adapterSlot("/judge", "skill.run"),
       },
     }),
     tests: defineAdapter({
       id: "tests",
-      engineRun: defineEngineRunner(),
+      gradeRun: defineGradeRunner(),
     }),
   }).map(([id, definition]) => [id, workbenchAdapterManifestFromDefinition(definition)])
 ) as Record<WorkbenchBuiltInAdapterId, WorkbenchAdapterManifest>;

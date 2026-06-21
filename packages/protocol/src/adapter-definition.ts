@@ -28,7 +28,7 @@ export interface WorkbenchAdapterDefinition<TContext = unknown> {
   install?: string[];
   auth?: WorkbenchAdapterAuthManifest;
   engineResolve?: WorkbenchAdapterOperationDefinition<TContext>;
-  engineRun?: WorkbenchAdapterOperationDefinition<TContext>;
+  gradeRun?: WorkbenchAdapterOperationDefinition<TContext>;
   skillRun?: WorkbenchAdapterOperationDefinition<TContext>;
   improve?: WorkbenchAdapterOperationDefinition<TContext>;
   slots?: Record<string, WorkbenchAdapterSlotManifest>;
@@ -82,7 +82,7 @@ export function defineSkillRunner<TContext = unknown>(
   return definition;
 }
 
-export function defineEngineRunner<TContext = unknown>(
+export function defineGradeRunner<TContext = unknown>(
   definition: WorkbenchAdapterOperationDefinition<TContext> = {},
 ): WorkbenchAdapterOperationDefinition<TContext> {
   return definition;
@@ -106,7 +106,7 @@ export function workbenchAdapterManifestFromDefinition(
 ): WorkbenchAdapterManifest {
   const operations: WorkbenchAdapterManifest["operations"] = {};
   addOperation(operations, definition.id, "engine.resolve", definition.engineResolve);
-  addOperation(operations, definition.id, "engine.run", definition.engineRun);
+  addOperation(operations, definition.id, "grade.run", definition.gradeRun);
   addOperation(operations, definition.id, "skill.run", definition.skillRun);
   addOperation(operations, definition.id, "skill.improve", definition.improve);
   if (Object.keys(operations).length === 0) {
@@ -129,8 +129,8 @@ export function operationDefinitionForRequest<TContext = unknown>(
   if (operation === "engine.resolve") {
     return definition.engineResolve;
   }
-  if (operation === "engine.run") {
-    return definition.engineRun;
+  if (operation === "grade.run") {
+    return definition.gradeRun;
   }
   if (operation === "skill.run") {
     return definition.skillRun;

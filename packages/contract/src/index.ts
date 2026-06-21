@@ -230,7 +230,7 @@ export interface WorkbenchEvalSnapshot {
   caseCount: number;
   createdAt: string;
   updatedAt: string;
-  scoreAdapter: string;
+  gradeAdapter: string;
 }
 
 export interface WorkbenchEvalCaseSnapshot {
@@ -242,13 +242,14 @@ export interface WorkbenchEvalCaseSnapshot {
   files: SurfaceSnapshotFile[];
 }
 
-export type WorkbenchRunKind = "eval" | "improve";
+export type WorkbenchRunKind = "run" | "grade" | "eval" | "improve";
 export type WorkbenchRunLocation = "local" | "cloud";
 export type WorkbenchRunStatus = "queued" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
-export type WorkbenchArtifactKind = "file" | "directory" | "log" | "scorecard";
-export type WorkbenchOperationKind = "eval" | "improve";
+export type WorkbenchArtifactKind = "file" | "directory" | "log" | "result";
+export type WorkbenchOperationKind = "run" | "grade" | "eval" | "improve";
 export type WorkbenchOperationVariant = WorkbenchRunLocation;
+export type WorkbenchJobRole = "execute" | "grade" | "improve" | string;
 
 export interface WorkbenchOperationRequest {
   kind: WorkbenchOperationKind;
@@ -258,6 +259,7 @@ export interface WorkbenchOperationRequest {
   evalHash?: string;
   skill?: string;
   agent?: string;
+  caseIds?: readonly string[];
   samples?: number;
   rerun?: boolean;
   budget?: number;
@@ -336,6 +338,7 @@ export interface WorkbenchOperationPlanSummary {
   evalHash?: string;
   skills: readonly string[];
   agents: readonly string[];
+  caseIds?: readonly string[];
   samples?: number;
   rerun?: boolean;
   budget?: number;
@@ -398,6 +401,8 @@ export interface WorkbenchAcquisitionOption {
 export interface WorkbenchActionCapabilities {
   variant: WorkbenchOperationVariant;
   evidenceAccess: "full" | "source";
+  run: WorkbenchOperationCapability;
+  grade: WorkbenchOperationCapability;
   eval: WorkbenchOperationCapability;
   improve: WorkbenchOperationCapability;
   acquisition: readonly WorkbenchAcquisitionOption[];
@@ -414,7 +419,6 @@ export interface WorkbenchRun {
   agentHash: string;
   status: WorkbenchRunStatus;
   operationPlan?: WorkbenchOperationPlanSummary;
-  score?: number;
   costUsd?: number;
   latencyMs?: number;
   jobIds?: string[];
@@ -438,6 +442,7 @@ export interface WorkbenchJob {
   id: string;
   runId: string;
   kind: WorkbenchRunKind;
+  role?: WorkbenchJobRole;
   versionId: string;
   skillName: string;
   skillBundleHash: string;
@@ -447,7 +452,9 @@ export interface WorkbenchJob {
   caseId: string;
   sample: number;
   status: WorkbenchJobStatus;
-  score?: number;
+  adapter?: WorkbenchJobAdapterSummary;
+  dependencies?: readonly WorkbenchJobDependency[];
+  result?: WorkbenchJobResult;
   command?: string;
   dockerImage?: string;
   exitCode?: number;
@@ -458,6 +465,41 @@ export interface WorkbenchJob {
   finishedAt?: string;
   durationMs?: number;
   error?: string;
+}
+
+export interface WorkbenchJobAdapterSummary {
+  use: string;
+  hash?: string;
+}
+
+export interface WorkbenchJobDependency {
+  name: string;
+  jobId?: string;
+  artifactId?: string;
+  traceIds?: readonly string[];
+  mount: string;
+  mode: "readonly" | "copy";
+}
+
+export interface WorkbenchResultItem {
+  kind: "score" | "criterion" | "patch" | "metric" | "text" | "artifact" | string;
+  id?: string;
+  label?: string;
+  value?: Json;
+  score?: number;
+  pass?: boolean;
+  summary?: string;
+  body?: string;
+  path?: string;
+  data?: Json;
+}
+
+export interface WorkbenchJobResult {
+  summary?: string;
+  error?: string;
+  usage?: UsageSummary;
+  items?: readonly WorkbenchResultItem[];
+  payload?: Json;
 }
 
 export interface WorkbenchArtifact {
@@ -674,7 +716,7 @@ export interface WorkbenchResultEvaluation {
   id: string;
   label?: string;
   caseCount?: number;
-  scoreAdapter?: string;
+  gradeAdapter?: string;
   createdAt?: string;
   updatedAt?: string;
 }

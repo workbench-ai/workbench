@@ -1,11 +1,13 @@
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
 import type {
+  WorkbenchJob,
   WorkbenchLineageEdge,
   WorkbenchRun,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 
 import { formatVersionDisplayName } from "./comparison-metrics";
+import { runScore } from "./format";
 
 export const VERSION_LINEAGE_NODE_WIDTH = 224;
 const VERSION_LINEAGE_NODE_INITIAL_HEIGHT = 116;
@@ -74,6 +76,7 @@ export function buildVersionLineageGraph(args: {
   lineage: readonly WorkbenchLineageEdge[];
   currentVersionId?: string | null;
   publishedVersionId?: string | null;
+  jobs?: readonly WorkbenchJob[];
   runs?: readonly WorkbenchRun[];
 }): VersionLineageGraph {
   const versions = [...args.versions].sort(compareVersions);
@@ -108,10 +111,14 @@ export function buildVersionLineageGraph(args: {
   const roots = (rootVersions.length > 0 ? rootVersions : versions).map((version) => version.id);
   const incomingEdgeByChild = new Map(validEdges.map((edge) => [edge.childId, edge]));
   const latestScoredRunByVersion = new Map<string, WorkbenchRun>();
+  const scoreByRunId = new Map<string, number>();
+  const jobs = args.jobs ?? [];
   for (const run of args.runs ?? []) {
-    if (typeof run.score !== "number") {
+    const score = runScore(run, jobs);
+    if (score === undefined) {
       continue;
     }
+    scoreByRunId.set(run.id, score);
     const latest = latestScoredRunByVersion.get(run.versionId);
     if (!latest || run.createdAt > latest.createdAt) {
       latestScoredRunByVersion.set(run.versionId, run);
@@ -127,7 +134,7 @@ export function buildVersionLineageGraph(args: {
       label: formatVersionDisplayName(version.id, versions),
       active: args.currentVersionId === version.id,
       published: args.publishedVersionId === version.id,
-      score: latestScoredRunByVersion.get(version.id)?.score ?? null,
+      score: scoreByRunId.get(latestScoredRunByVersion.get(version.id)?.id ?? "") ?? null,
       improvedFromLabel: improvedFromParent
         ? formatVersionDisplayName(improvedFromParent.id, versions)
         : null,
@@ -142,6 +149,7 @@ export async function buildVersionLineageFlow(args: {
   lineage: readonly WorkbenchLineageEdge[];
   currentVersionId?: string | null;
   publishedVersionId?: string | null;
+  jobs?: readonly WorkbenchJob[];
   runs?: readonly WorkbenchRun[];
 }): Promise<{
   nodes: VersionLineageNode[];

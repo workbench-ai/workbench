@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import type {
   WorkbenchEvalSnapshot,
   WorkbenchInspectionSnapshot,
+  WorkbenchJob,
   WorkbenchResultCell,
   WorkbenchResults,
   WorkbenchRun,
@@ -114,8 +115,8 @@ describe("comparison metric helpers", () => {
         resultCell({ evaluationId: "eval_two", quality: 0.9 }),
       ], {
         evaluations: [
-          { id: "eval_one", caseCount: 2, scoreAdapter: "tests", createdAt: "2026-06-06T00:00:00.000Z", updatedAt: "2026-06-06T00:00:00.000Z" },
-          { id: "eval_two", caseCount: 3, scoreAdapter: "rubric", createdAt: "2026-06-06T00:05:00.000Z", updatedAt: "2026-06-06T00:05:00.000Z" },
+          { id: "eval_one", caseCount: 2, gradeAdapter: "tests", createdAt: "2026-06-06T00:00:00.000Z", updatedAt: "2026-06-06T00:00:00.000Z" },
+          { id: "eval_two", caseCount: 3, gradeAdapter: "rubric", createdAt: "2026-06-06T00:05:00.000Z", updatedAt: "2026-06-06T00:05:00.000Z" },
         ],
       }),
     });
@@ -142,11 +143,17 @@ describe("comparison metric helpers", () => {
     const rows = buildComparisonEvidenceRows({
       agents: results.agents,
       groups,
+      jobs: [
+        gradeJob({
+          id: "job_grade",
+          runId: "run_eval",
+          score: 0.88,
+        }),
+      ],
       runs: [
         run({
           id: "run_eval",
           versionId: "v002",
-          score: 0.88,
           latencyMs: 1200,
           costUsd: 0.034,
         }),
@@ -171,7 +178,6 @@ describe("comparison metric helpers", () => {
           id: "run_eval",
           versionId: "v002",
           status: "canceled",
-          score: 0,
         }),
       ],
     });
@@ -260,7 +266,7 @@ function resultsFixture(
       skillVersion({ id: "v002", label: "earnings-prep v2", projectVersionId: "v002", current: true }),
     ],
     evaluations: options.evaluations ?? [
-      { id: "eval_hash", caseCount: 2, scoreAdapter: "tests", createdAt: "2026-06-06T00:00:00.000Z", updatedAt: "2026-06-06T00:00:00.000Z" },
+      { id: "eval_hash", caseCount: 2, gradeAdapter: "tests", createdAt: "2026-06-06T00:00:00.000Z", updatedAt: "2026-06-06T00:00:00.000Z" },
     ],
     agents: options.agents ?? [
       { id: "agent_codex", name: "codex", label: "codex / gpt-5.5", adapter: "codex", model: "gpt-5.5" },
@@ -312,6 +318,28 @@ function run(overrides: Partial<WorkbenchRun> & { id: string; versionId: string 
   };
 }
 
+function gradeJob(overrides: Partial<WorkbenchJob> & { id: string; runId: string; score: number }): WorkbenchJob {
+  const { score, ...rest } = overrides;
+  return {
+    kind: "eval",
+    role: "grade",
+    versionId: "v001",
+    skillName: "current",
+    skillBundleHash: "skill_bundle_hash",
+    evalHash: "eval_hash",
+    agentName: "codex",
+    agentHash: "agent_codex",
+    caseId: "case-001",
+    sample: 0,
+    status: "succeeded",
+    artifactIds: [],
+    traceIds: [],
+    createdAt: "2026-06-06T00:10:01.000Z",
+    result: { items: [{ kind: "score", score, value: score }] },
+    ...rest,
+  };
+}
+
 function version(id: string): WorkbenchVersion {
   return {
     id,
@@ -326,7 +354,7 @@ function version(id: string): WorkbenchVersion {
 function evalSnapshot(
   hash = "eval_hash",
   caseCount = 1,
-  scoreAdapter = "tests",
+  gradeAdapter = "tests",
   createdAt = "2026-06-06T00:00:00.000Z",
 ): WorkbenchEvalSnapshot {
   return {
@@ -334,12 +362,12 @@ function evalSnapshot(
     caseCount,
     createdAt,
     updatedAt: createdAt,
-    scoreAdapter,
+    gradeAdapter,
     files: [{
       path: "eval.yaml",
       kind: "text",
       encoding: "utf8",
-      content: `version: 1\nscore:\n  adapter: ${scoreAdapter}\n`,
+      content: `version: 1\ngrade:\n  adapter: ${gradeAdapter}\n`,
     }],
     cases: [],
   };

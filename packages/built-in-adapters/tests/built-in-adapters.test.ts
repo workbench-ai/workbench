@@ -37,7 +37,7 @@ describe("built-in Workbench adapters", () => {
     expect(workbench?.operations).toMatchObject({
       "engine.resolve": { command: "workbench-adapter-workbench" },
     });
-    expect(workbench?.operations["engine.run"]).toBeUndefined();
+    expect(workbench?.operations["grade.run"]).toBeUndefined();
   });
 
   test("executes Codex-shaped agent adapters through an operation request", async () => {
@@ -365,7 +365,7 @@ describe("built-in Workbench adapters", () => {
     expect(seenRequests.map((request) => singleCriterionFromPrompt(request.prompt, criteria).id).sort())
       .toEqual(["accuracy", "completeness", "style"]);
     expect(seenRequests.every((request) => request.prompt.includes("Score only the runner output."))).toBe(true);
-    const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
     const engineResult = adapterResult.value;
     expect(engineResult.score).toBe(0.5);
     expect(engineResult.metrics).toEqual({ score: 0.5 });
@@ -466,7 +466,7 @@ describe("built-in Workbench adapters", () => {
     expect(repairRequests).toHaveLength(1);
     expect(repairRequests[0]!.prompt).toContain(criteria[0]!.description);
     expect(repairRequests[0]!.prompt).not.toContain(criteria[1]!.description);
-    const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
     expect(adapterResult.value.score).toBe(0.75);
     expect(adapterResult.value.metrics).toEqual({ score: 0.75 });
   });
@@ -571,7 +571,7 @@ describe("built-in Workbench adapters", () => {
     })).rejects.toThrow("Workbench engine cases root must contain case directories");
   });
 
-  test("rejects Workbench engine-run orchestration", async () => {
+  test("rejects Workbench grade-run orchestration", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-engine-run-removed-"));
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
@@ -579,7 +579,7 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_workbench_engine_removed",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "workbench",
         with: {
@@ -594,10 +594,10 @@ describe("built-in Workbench adapters", () => {
     await expect(executeWorkbenchBuiltInAdapterCommand({
       adapterId: "workbench",
       requestPath,
-    })).rejects.toThrow("Workbench engine.run is no longer an orchestration adapter");
+    })).rejects.toThrow("Workbench grade.run is not implemented by the workbench adapter");
   });
 
-  test("requires command engines to publish an engine.run result", async () => {
+  test("requires command graders to publish a grade.run result", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-command-engine-"));
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
@@ -605,7 +605,7 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_command_score",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "command",
         with: {
@@ -618,7 +618,7 @@ describe("built-in Workbench adapters", () => {
     await expect(executeWorkbenchBuiltInAdapterCommand({
       adapterId: "command",
       requestPath,
-    })).rejects.toThrow("Command engine must write workbench-result.json for engine.run.");
+    })).rejects.toThrow("Command grader must write workbench-result.json for grade.run.");
   });
 
   test("reads tests engine results from OUTPUT_DIR/result.json", async () => {
@@ -635,7 +635,7 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_tests_result",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "tests",
       },
@@ -647,7 +647,7 @@ describe("built-in Workbench adapters", () => {
       requestPath,
     });
 
-    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
     expect(result.ok).toBe(true);
     expect(result.value).toMatchObject({ score: 0.5, summary: "half credit", metrics: { score: 0.5, coverage: 0.75 } });
   });
@@ -666,7 +666,7 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_tests_failed_result",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "tests",
       },
@@ -683,7 +683,7 @@ describe("built-in Workbench adapters", () => {
       requestPath,
     });
 
-    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "engine.run");
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
     expect(result.ok).toBe(true);
     expect(result.value).toMatchObject({
       score: 0,
@@ -709,7 +709,7 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_tests_missing_score",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "tests",
       },
@@ -736,7 +736,7 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_tests_progress",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "tests",
       },
@@ -774,14 +774,14 @@ describe("built-in Workbench adapters", () => {
       expect.objectContaining({
         role: "engine",
         payload: expect.objectContaining({
-          step: "tests.engine.run",
+          step: "tests.grade.run",
           status: "started",
         }),
       }),
       expect.objectContaining({
         role: "engine",
         payload: expect.objectContaining({
-          step: "tests.engine.run",
+          step: "tests.grade.run",
           status: "succeeded",
         }),
       }),
@@ -799,7 +799,7 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_tests_no_result",
-      operation: "engine.run",
+      operation: "grade.run",
       invocation: {
         use: "tests",
       },
@@ -931,7 +931,7 @@ async function writeRubricRequest(
     protocol: "workbench.adapter.v3",
     id: "exec_rubric_grade",
     jobId: "job_rubric_grade",
-    operation: "engine.run",
+    operation: "grade.run",
     invocation: {
       use: "rubric",
       with: {
