@@ -3887,6 +3887,39 @@ describe("workbench skill-first CLI", () => {
     expect(gradeResult.code, gradeResult.stdout || gradeResult.stderr).toBe(0);
     const gradeId = stdoutJson<{ run: { id: string; result?: { score?: number } } }>(gradeResult).run.id;
     expect(stdoutJson<{ run: { result?: { score?: number } } }>(gradeResult).run.result?.score).toBe(1);
+    const splitSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    const splitJobs = splitSnapshot.jobs.filter((job) => job.runId === runId || job.runId === gradeId);
+    const executeJob = splitJobs.find((job) => job.role !== "grade");
+    const gradeJob = splitJobs.find((job) => job.role === "grade");
+    if (!executeJob || !gradeJob) {
+      throw new Error("Expected split execute and grade jobs.");
+    }
+
+    const gradeHuman = await invoke(["grade", "--dir", root, "--agents", "default", "--cases", "investor-focus"]);
+    expect(gradeHuman.code, gradeHuman.stdout || gradeHuman.stderr).toBe(0);
+    expect(gradeHuman.stdout).toContain(`grade job: ${gradeJob.id}`);
+    expect(gradeHuman.stdout).toContain(`show=workbench show ${gradeJob.id}`);
+
+    const beforeEvalJobIds = new Set(splitSnapshot.jobs.map((job) => job.id));
+    const evalResult = await invoke(["eval", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
+    expect(evalResult.code, evalResult.stdout || evalResult.stderr).toBe(0);
+    const evalId = stdoutJson<{ run: { id: string; result?: { score?: number } }; coverage: Array<{ jobs: number }> }>(evalResult).run.id;
+    expect(evalId).not.toBe(runId);
+    expect(evalId).not.toBe(gradeId);
+    expect(stdoutJson<{ run: { result?: { score?: number } }; coverage: Array<{ jobs: number }> }>(evalResult).run.result?.score).toBe(1);
+    expect(stdoutJson<{ coverage: Array<{ jobs: number }> }>(evalResult).coverage[0]?.jobs).toBe(2);
+    const afterEvalSnapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    expect(afterEvalSnapshot.jobs.filter((job) => !beforeEvalJobIds.has(job.id))).toEqual([]);
+    const evalRun = afterEvalSnapshot.runs.find((run) => run.id === evalId);
+    expect(evalRun?.jobIds).toEqual(expect.arrayContaining([executeJob.id, gradeJob.id]));
+    const shownEvalJson = await invoke(["show", evalId, "--dir", root, "--json"]);
+    expect(shownEvalJson.code, shownEvalJson.stdout || shownEvalJson.stderr).toBe(0);
+    expect(stdoutJson<{ result?: { jobs?: Array<{ id: string }> } }>(shownEvalJson).result?.jobs?.map((job) => job.id))
+      .toEqual(expect.arrayContaining([executeJob.id, gradeJob.id]));
+
+    const repeatEval = await invoke(["eval", "--dir", root, "--agents", "default", "--cases", "investor-focus", "--json"]);
+    expect(repeatEval.code, repeatEval.stdout || repeatEval.stderr).toBe(0);
+    expect(stdoutJson<{ run: { id: string } }>(repeatEval).run.id).toBe(evalId);
 
     const shownGrade = await invoke(["show", gradeId, "--dir", root]);
     expect(shownGrade.code, shownGrade.stdout || shownGrade.stderr).toBe(0);
@@ -3899,7 +3932,7 @@ describe("workbench skill-first CLI", () => {
         progress: { result: { score: 1 } },
       },
     });
-  });
+  }, 60_000);
 
   test("status points at a running run before generic next steps", async () => {
     const root = await makeTempRoot("workbench-cli-status-running-");

@@ -114,6 +114,47 @@ describe("Workbench CLI progress projection", () => {
     })).toContain("usage cost=$0");
   });
 
+  test("keeps eval progress planned totals stable before grade jobs exist", () => {
+    const evalRun = run({
+      id: "run_eval_plan",
+      requestedSamples: 5,
+      operationPlan: {
+        kind: "eval",
+        variant: "local",
+        versionId: "v001",
+        evalHash: "eval_hash",
+        skills: ["current"],
+        agents: ["default"],
+        caseIds: ["case-001"],
+        samples: 5,
+      },
+    });
+    const snapshot = expectSnapshot(runProgressSnapshotFromRuns({
+      command: "eval",
+      location: "local",
+      phase: "running",
+      runs: [evalRun],
+      jobs: Array.from({ length: 5 }, (_, sample) =>
+        job({
+          id: `job_exec_${sample}`,
+          runId: evalRun.id,
+          sample,
+          status: sample === 0 ? "running" : "queued",
+        })
+      ),
+      startedAtMs: 0,
+      nowMs: 1_000,
+    }));
+
+    expect(snapshot.progress).toMatchObject({
+      planned: 10,
+      completed: 0,
+      scored: 0,
+      failed: 0,
+    });
+    expect(formatProgressSnapshot(snapshot)).toContain("work 0/10 complete");
+  });
+
   test("uses durable finish time for terminal elapsed duration", () => {
     const startedAt = Date.parse("2026-06-15T00:00:00.000Z");
     const snapshot = expectSnapshot(runProgressSnapshotFromRuns({

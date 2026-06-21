@@ -4235,6 +4235,84 @@ describe("skill-first Workbench runtime", () => {
     expect(`${runnerStdout}${scoreStdout}`).not.toContain("progress-token");
   });
 
+  test("synthesizes a result for skill-only runtime-control execution", async () => {
+    const createdAt = new Date().toISOString();
+    const skillCommand = nodeCommand([
+      "const fs = require('node:fs');",
+      "fs.writeFileSync(`${process.env.WORKBENCH_OUTPUT}/agent-note.md`, 'agent evidence\\n');",
+      "fs.writeFileSync(process.env.WORKBENCH_RESULT, JSON.stringify({",
+      "  protocol: 'workbench.adapter-result.v1',",
+      "  operation: 'skill.run',",
+      "  ok: true,",
+      "  summary: 'agent completed the case',",
+      "  usage: { total: { provider: 'test', totalTokens: 2, costUsd: 0.02, costSource: 'provider' } }",
+      "}, null, 2) + '\\n');",
+    ]);
+    const execution = {
+      id: "exec_runtime_control_skill_only",
+      projectId: "local",
+      runId: "run_runtime_control_skill_only",
+      versionId: "v001",
+      purpose: "attempt" as const,
+      adapter: { use: "command", with: {} },
+      sandbox: { kind: "oci" as const, ref: "docker://workbench/workbench-node-22:envv_node_22" },
+      inputs: [],
+      outputs: [{ name: "result", schema: "workbench.result.v1" as const, required: true }],
+      policy: {
+        tenantId: "local",
+        resources: { cpu: 1, memoryGb: 1, diskGb: 1, timeoutMinutes: 1 },
+        network: { egress: "none" as const },
+      },
+      metadata: { caseId: "case-001" },
+    };
+    const completed = await executeRuntimeControlOperationSequenceInCurrentRuntime({
+      job: {
+        id: "job_runtime_control_skill_only",
+        projectId: "local",
+        runId: "run_runtime_control_skill_only",
+        kind: "execute",
+        status: "queued",
+        attempt: 0,
+        createdAt,
+        updatedAt: createdAt,
+        input: {
+          execution,
+          versionId: "v001",
+          attemptIndex: 0,
+          sampleIndex: 0,
+          caseId: "case-001",
+        },
+      },
+      spec: runtimeControlSpec(),
+      baseFiles: [textFixture("current/SKILL.md", "# Runtime Control Skill\n")],
+      engineResolveFiles: [textFixture("prompt.md", "Public case.\n")],
+      engineCases: [runtimeControlCase()],
+      runtimeControlOperation: {
+        prepare: true,
+        operations: [
+          { label: "runner", operation: "skill.run", invocation: { use: "command", command: skillCommand } },
+        ],
+      },
+    }, execution, createdAt);
+    const output = completed.output as {
+      ok?: boolean;
+      files?: Array<{ path: string; content: string }>;
+      result?: { score?: number; summary?: string; cases?: Array<{ id?: string }> };
+    };
+
+    expect(completed.status).toBe("succeeded");
+    expect(output.ok).toBe(true);
+    expect(output.result).toMatchObject({
+      score: 1,
+      summary: "agent completed the case",
+      cases: [expect.objectContaining({ id: "case-001" })],
+    });
+    expect(output.files?.map((file) => file.path)).toEqual(expect.arrayContaining([
+      "agent-note.md",
+      ".workbench/traces/job_runtime_control_skill_only/runner/result.json",
+    ]));
+  });
+
   test("records contextual evidence for failed runtime-control steps", async () => {
     const createdAt = new Date().toISOString();
     const failingCommand = nodeCommand([

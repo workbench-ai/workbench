@@ -1933,19 +1933,54 @@ async function runRuntimeControlOperationSequence(args: {
     : undefined;
   const gradeResult = [...operationResults].reverse().find((result) => result.operation === "grade.run");
   const usage = mergeUsageSummaries(operationResults.map(adapterOperationUsageSummary));
+  const executionResult = !gradeResult && sequenceError === undefined
+    ? runtimeControlSkillRunResult({
+        execution: args.execution,
+        operationResults,
+        usage,
+      })
+    : undefined;
+  const result = gradeResult?.value && typeof gradeResult.value === "object" && !Array.isArray(gradeResult.value)
+    ? gradeResult.value as WorkbenchResult
+    : executionResult;
   return {
     ok: sequenceError === undefined,
     files,
     fileChanges: files.map((file) => file.path),
     operationResults,
     ...(workspaceFiles ? { workspaceFiles } : {}),
-    ...(gradeResult?.value && typeof gradeResult.value === "object" && !Array.isArray(gradeResult.value)
-      ? { result: gradeResult.value as WorkbenchResult }
-      : {}),
+    ...(result ? { result } : {}),
     ...(usage ? { usage } : {}),
-    ...(gradeResult?.summary ? { summary: gradeResult.summary } : {}),
+    ...(gradeResult?.summary ? { summary: gradeResult.summary } : executionResult?.summary ? { summary: executionResult.summary } : {}),
     ...(gradeResult?.feedback !== undefined ? { feedback: gradeResult.feedback } : {}),
     ...(sequenceError ? { error: sequenceError } : {}),
+  };
+}
+
+function runtimeControlSkillRunResult(args: {
+  execution: WorkbenchExecutionSpec;
+  operationResults: readonly WorkbenchAdapterOperationResult[];
+  usage?: UsageSummary;
+}): WorkbenchResult | undefined {
+  const skillResult = [...args.operationResults].reverse().find((result) => result.operation === "skill.run");
+  if (!skillResult) {
+    return undefined;
+  }
+  const summary = skillResult.summary?.trim() ||
+    textFromJson(asRuntimeRecord(skillResult.value).summary) ||
+    "Skill run completed.";
+  const caseId = textFromJson(asRuntimeRecord(args.execution.metadata).caseId) ?? "current";
+  return {
+    score: 1,
+    metrics: { score: 1 },
+    cases: [{
+      id: caseId,
+      status: "completed",
+      metrics: { score: 1 },
+    }],
+    summary,
+    ...(args.usage ? { usage: args.usage } : {}),
+    ...(skillResult.feedback !== undefined ? { feedback: skillResult.feedback } : {}),
   };
 }
 
@@ -4195,9 +4230,25 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
           targets,
           samples,
           caseCount: reusableCaseCount ?? 0,
-        });
+    });
     if (reusable) {
       return [copyRun(reusable)];
+    }
+    const reusableSplitEvidence = options.rerun === true || reusableCaseCount === undefined || (options.kind ?? "eval") !== "eval"
+      ? undefined
+      : materializeReusableSplitEvalMatrixRun({
+          state,
+          version,
+          evalSnapshot,
+          targets,
+          cases: selectedCases,
+          samples,
+          location: options.location ?? "local",
+          remoteName: options.remoteName,
+        });
+    if (reusableSplitEvidence) {
+      await saveState(root, state);
+      return [copyRun(reusableSplitEvidence)];
     }
     const run = await executeWorkbenchEvaluationRun({
       root,
@@ -4466,6 +4517,197 @@ function latestReusableGradeRun(args: {
       ));
       return [...eligibleSubjectJobIds].every((jobId) => gradedSubjectIds.has(jobId));
     });
+}
+
+function materializeReusableSplitEvalMatrixRun(args: {
+  state: WorkbenchProjectState;
+  version: WorkbenchVersion;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  targets: readonly WorkbenchEvaluationRunTarget[];
+  cases: readonly WorkbenchEvalCaseRuntime[];
+  samples: number;
+  location: WorkbenchRunLocation;
+  remoteName?: string;
+}): WorkbenchRun | undefined {
+  const primaryTarget = args.targets[0];
+  if (!primaryTarget) {
+    return undefined;
+  }
+  const evidence = reusableSplitEvalMatrixEvidence(args);
+  if (!evidence) {
+    return undefined;
+  }
+  const createdAt = now();
+  const run: WorkbenchRun = {
+    id: nextRunId(),
+    kind: "eval",
+    versionId: args.version.id,
+    skillName: primaryTarget.skillBundle.skillName,
+    skillBundleHash: primaryTarget.skillBundle.hash,
+    evalHash: args.evalSnapshot.hash,
+    agentName: primaryTarget.agent.name,
+    agentHash: hashJson(primaryTarget.agent),
+    status: "succeeded",
+    jobIds: evidence.jobs.map((job) => job.id),
+    traceIds: uniqueStrings(evidence.jobs.flatMap((job) => job.traceIds)),
+    createdAt,
+    finishedAt: createdAt,
+    lastProgressAt: createdAt,
+    location: args.location,
+    ...(args.remoteName ? { remoteName: args.remoteName } : {}),
+    requestedSamples: Math.max(1, Math.floor(args.samples)),
+    operationPlan: operationPlanSummaryForRun({
+      kind: "eval",
+      variant: args.location,
+      versionId: args.version.id,
+      evalHash: args.evalSnapshot.hash,
+      skillNames: args.targets.map((target) => target.skillBundle.skillName),
+      agentNames: args.targets.map((target) => target.agent.name),
+      caseIds: args.cases.map((runtimeCase) => runtimeCase.id),
+      samples: Math.max(1, Math.floor(args.samples)),
+    }),
+  };
+  upsertRunObject(args.state.runs, run);
+  return run;
+}
+
+function reusableSplitEvalMatrixEvidence(args: {
+  state: WorkbenchProjectState;
+  version: WorkbenchVersion;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  targets: readonly WorkbenchEvaluationRunTarget[];
+  cases: readonly WorkbenchEvalCaseRuntime[];
+  samples: number;
+}): { jobs: WorkbenchJob[] } | undefined {
+  const samples = Math.max(1, Math.floor(args.samples));
+  const targetsByKey = new Map(args.targets.map((target) => [
+    splitEvalTargetKey({
+      versionId: args.version.id,
+      skillName: target.skillBundle.skillName,
+      skillBundleHash: target.skillBundle.hash,
+      agentName: target.agent.name,
+      agentHash: hashJson(target.agent),
+    }),
+    target,
+  ]));
+  if (targetsByKey.size === 0 || args.cases.length === 0) {
+    return undefined;
+  }
+  const expectedKeys: string[] = [];
+  for (const targetKey of targetsByKey.keys()) {
+    for (const runtimeCase of args.cases) {
+      for (const sample of sampleIndexesForRun(runtimeCase, samples, undefined)) {
+        expectedKeys.push(splitEvalEvidenceKey(targetKey, runtimeCase.id, sample));
+      }
+    }
+  }
+  const executeJobsByKey = new Map<string, WorkbenchJob[]>();
+  const casesById = new Map(args.cases.flatMap((runtimeCase) => [
+    [runtimeCase.id, runtimeCase],
+    [runtimeCase.path, runtimeCase],
+  ]));
+  const expectedKeySet = new Set(expectedKeys);
+  for (const job of args.state.jobs) {
+    if ((job.role ?? "execute") !== "execute" || job.status !== "succeeded" || job.versionId !== args.version.id) {
+      continue;
+    }
+    const runtimeCase = casesById.get(job.caseId);
+    const targetKey = splitEvalTargetKey(job);
+    const key = splitEvalEvidenceKey(targetKey, job.caseId, job.sample);
+    if (
+      !runtimeCase ||
+      !targetsByKey.has(targetKey) ||
+      !expectedKeySet.has(key) ||
+      !executionJobMatchesCurrentEvalCase(args.state, job, args.evalSnapshot, runtimeCase)
+    ) {
+      continue;
+    }
+    const current = executeJobsByKey.get(key) ?? [];
+    current.push(job);
+    executeJobsByKey.set(key, current);
+  }
+  for (const jobs of executeJobsByKey.values()) {
+    jobs.sort(compareJobsNewestFirst);
+  }
+  const gradeJobsByExecuteJobId = new Map<string, WorkbenchJob[]>();
+  for (const job of args.state.jobs) {
+    if (
+      job.role !== "grade" ||
+      job.status !== "succeeded" ||
+      job.versionId !== args.version.id ||
+      job.evalHash !== args.evalSnapshot.hash ||
+      jobQualityScore(job) === undefined
+    ) {
+      continue;
+    }
+    const targetKey = splitEvalTargetKey(job);
+    const key = splitEvalEvidenceKey(targetKey, job.caseId, job.sample);
+    if (!targetsByKey.has(targetKey) || !expectedKeySet.has(key)) {
+      continue;
+    }
+    for (const dependency of job.dependencies ?? []) {
+      if (!dependency.jobId) {
+        continue;
+      }
+      const current = gradeJobsByExecuteJobId.get(dependency.jobId) ?? [];
+      current.push(job);
+      gradeJobsByExecuteJobId.set(dependency.jobId, current);
+    }
+  }
+  for (const jobs of gradeJobsByExecuteJobId.values()) {
+    jobs.sort(compareJobsNewestFirst);
+  }
+  const reusableJobs: WorkbenchJob[] = [];
+  for (const key of expectedKeys.sort()) {
+    const executeJob = executeJobsByKey.get(key)?.[0];
+    if (!executeJob) {
+      return undefined;
+    }
+    const gradeJob = gradeJobsByExecuteJobId.get(executeJob.id)?.find((candidate) =>
+      splitEvalEvidenceKey(splitEvalTargetKey(candidate), candidate.caseId, candidate.sample) === key
+    );
+    if (!gradeJob) {
+      return undefined;
+    }
+    reusableJobs.push(executeJob, gradeJob);
+  }
+  return { jobs: dedupeJobs(reusableJobs) };
+}
+
+function splitEvalTargetKey(args: {
+  versionId: string;
+  skillName: string;
+  skillBundleHash: string;
+  agentName: string;
+  agentHash: string;
+}): string {
+  return [
+    args.versionId,
+    args.skillName,
+    args.skillBundleHash,
+    args.agentName,
+    args.agentHash,
+  ].join("\0");
+}
+
+function splitEvalEvidenceKey(targetKey: string, caseId: string, sample: number): string {
+  return [targetKey, caseId, String(sample)].join("\0");
+}
+
+function compareJobsNewestFirst(left: WorkbenchJob, right: WorkbenchJob): number {
+  return jobObservedAt(right).localeCompare(jobObservedAt(left)) || right.id.localeCompare(left.id);
+}
+
+function jobObservedAt(job: WorkbenchJob): string {
+  return job.finishedAt ?? job.startedAt ?? job.createdAt;
+}
+
+function dedupeJobs(jobs: readonly WorkbenchJob[]): WorkbenchJob[] {
+  const byId = new Map<string, WorkbenchJob>();
+  for (const job of jobs) {
+    byId.set(job.id, job);
+  }
+  return [...byId.values()];
 }
 
 function executionJobMatchesCurrentEvalCase(
@@ -6794,8 +7036,7 @@ function runProgressSummary(
   runs: readonly WorkbenchRun[],
   jobs: readonly WorkbenchJob[],
 ): WorkbenchRunSnapshot["progress"] {
-  const runIds = new Set(runs.map((run) => run.id));
-  const runJobs = jobs.filter((job) => runIds.has(job.runId));
+  const runJobs = jobsForSnapshotRuns(runs, jobs);
   const caseJobs = runJobs.filter((job) => job.caseId !== "current");
   const selectedJobs = caseJobs.length > 0 ? caseJobs : runJobs;
   const completedJobs = selectedJobs.filter(isTerminalJob);
@@ -6813,10 +7054,11 @@ function runProgressSummary(
   const observedAtMs = timestampMs(observedAt ?? now()) ?? Date.now();
   const startedAtMs = timestampMs(startedAt) ?? observedAtMs;
   const lastProgressAt = latestRunProgressAt(runs, selectedJobs);
+  const observedPlanned = selectedJobs.length > 0
+    ? selectedJobs.length
+    : runs.reduce((sum, run) => sum + (run.jobIds?.length ?? 0), 0);
   return {
-    planned: selectedJobs.length > 0
-      ? selectedJobs.length
-      : runs.reduce((sum, run) => sum + (run.jobIds?.length ?? 0), 0),
+    planned: Math.max(observedPlanned, plannedJobCountForRuns(runs) ?? 0),
     completed: completedJobs.length,
     scored: scoredJobs.length,
     failed: failedJobs.length,
@@ -6839,11 +7081,55 @@ function runProgressSummary(
   };
 }
 
+function jobsForSnapshotRuns(
+  runs: readonly WorkbenchRun[],
+  jobs: readonly WorkbenchJob[],
+): WorkbenchJob[] {
+  const runIds = new Set(runs.map((run) => run.id));
+  const jobIds = new Set(runs.flatMap((run) => run.jobIds ?? []));
+  return jobs.filter((job) => runIds.has(job.runId) || jobIds.has(job.id));
+}
+
+function runOwnsJob(run: WorkbenchRun, job: WorkbenchJob): boolean {
+  return job.runId === run.id || (run.jobIds ?? []).includes(job.id);
+}
+
+function plannedJobCountForRuns(runs: readonly WorkbenchRun[]): number | undefined {
+  let planned = 0;
+  for (const run of runs) {
+    const count = plannedJobCountForRun(run);
+    if (count === undefined) {
+      return undefined;
+    }
+    planned += count;
+  }
+  return planned;
+}
+
+function plannedJobCountForRun(run: WorkbenchRun): number | undefined {
+  if (run.status === "canceling") {
+    return undefined;
+  }
+  const plan = run.operationPlan;
+  if (!plan || (plan.kind !== "run" && plan.kind !== "grade" && plan.kind !== "eval")) {
+    return undefined;
+  }
+  const caseCount = plan.caseIds?.length ?? 0;
+  if (caseCount === 0) {
+    return undefined;
+  }
+  const samples = Math.max(1, Math.floor(plan.samples ?? run.requestedSamples ?? 1));
+  const skillCount = Math.max(1, plan.skills.length);
+  const agentCount = Math.max(1, plan.agents.length);
+  const phaseCount = plan.kind === "eval" ? 2 : 1;
+  return caseCount * samples * skillCount * agentCount * phaseCount;
+}
+
 function runMeasurementSummary(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
 ): WorkbenchMeasurementSummary {
-  const runJobs = jobs.filter((job) => job.runId === run.id && job.caseId !== "current");
+  const runJobs = jobs.filter((job) => runOwnsJob(run, job) && job.caseId !== "current");
   const samples = runJobs.length > 0
     ? new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size
     : run.jobIds?.length;
@@ -6870,17 +7156,25 @@ function runMeasurementSummaries(
   jobs: readonly WorkbenchJob[],
 ): WorkbenchMeasurementSummary[] {
   const runsById = new Map(runs.map((run) => [run.id, run]));
+  const runsByReferencedJobId = new Map<string, WorkbenchRun[]>();
+  for (const run of runs) {
+    for (const jobId of run.jobIds ?? []) {
+      const current = runsByReferencedJobId.get(jobId) ?? [];
+      current.push(run);
+      runsByReferencedJobId.set(jobId, current);
+    }
+  }
   const jobsByMeasurement = new Map<string, { run: WorkbenchRun; jobs: WorkbenchJob[] }>();
   for (const job of jobs) {
     if (job.caseId === "current") {
       continue;
     }
-    const run = runsById.get(job.runId);
+    const run = runsById.get(job.runId) ?? runsByReferencedJobId.get(job.id)?.[0];
     if (!run) {
       continue;
     }
     const key = [
-      job.runId,
+      run.id,
       job.versionId,
       job.skillName,
       job.skillBundleHash,
@@ -6943,8 +7237,7 @@ function runSnapshotResultSummary(
   runs: readonly WorkbenchRun[],
   jobs: readonly WorkbenchJob[],
 ): WorkbenchRunSnapshot["result"] | undefined {
-  const runIds = new Set(runs.map((run) => run.id));
-  const score = aggregateJobScore(jobs.filter((job) => runIds.has(job.runId)));
+  const score = aggregateJobScore(jobsForSnapshotRuns(runs, jobs));
   const outputVersionId = runs.find((run) => run.outputVersionId)?.outputVersionId ?? improveProofVersionId(runs, jobs);
   const error = runs.find((run) => run.error)?.error;
   if (score === undefined && !outputVersionId && !error) {
@@ -15130,7 +15423,8 @@ function latestReusableEvalRun(args: {
       completedEvalEvidenceForRun(run, args.state.jobs, expectedJobs) &&
       run.jobIds?.every((jobId) => {
         const job = args.state.jobs.find((entry) => entry.id === jobId);
-        return job?.runId === run.id &&
+        return job !== undefined &&
+          runOwnsJob(run, job) &&
           job.versionId === args.versionId &&
           job.skillName === args.skillName &&
           job.skillBundleHash === args.skillBundleHash &&
@@ -15193,7 +15487,7 @@ function latestReusableEvalMatrixRun(args: {
       }
       return run.jobIds?.every((jobId) => {
         const job = args.state.jobs.find((entry) => entry.id === jobId);
-        return job?.runId === run.id && targetKeys.has(comparisonTargetKey(job));
+        return job !== undefined && runOwnsJob(run, job) && targetKeys.has(comparisonTargetKey(job));
       }) === true;
     })
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
@@ -15205,7 +15499,7 @@ function completedEvalEvidenceForRun(
   expectedSamples: number,
 ): boolean {
   const runJobIds = new Set(run.jobIds ?? []);
-  const runJobs = jobs.filter((job) => job.runId === run.id && runJobIds.has(job.id) && job.caseId !== "current");
+  const runJobs = jobs.filter((job) => runOwnsJob(run, job) && runJobIds.has(job.id) && job.caseId !== "current");
   const executeJobs = runJobs.filter((job) => job.role !== "grade");
   const gradeJobs = runJobs.filter((job) => job.role === "grade");
   return executeJobs.length === expectedSamples &&

@@ -787,6 +787,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         formatRunSnapshot(snapshot, completed.run),
         ...formatEvalCoverageLines(coverage),
         ...formatEvalDeltaLines(deltas),
+        ...formatCompletedJobReferenceLines(command, completed.jobs),
         ...(next ? [`next: ${next}`] : []),
       ].filter(Boolean).join("\n"));
     }
@@ -4498,7 +4499,10 @@ function runForCloudInspectionEnvelope(
 
 function jobsForRuns(snapshot: WorkbenchInspectionSnapshot, runIds: readonly string[]): WorkbenchJob[] {
   const selected = new Set(runIds);
-  return snapshot.jobs.filter((job) => selected.has(job.runId));
+  const selectedJobIds = new Set(snapshot.runs
+    .filter((run) => selected.has(run.id))
+    .flatMap((run) => run.jobIds ?? []));
+  return snapshot.jobs.filter((job) => selected.has(job.runId) || selectedJobIds.has(job.id));
 }
 
 function runProgressSnapshotForInspection(input: {
@@ -8153,9 +8157,10 @@ function runOrJobEvidenceSelection(snapshot: InspectionSnapshot, ref: string): {
     });
   }
   if (run) {
+    const runJobIds = new Set(run.jobIds ?? []);
     return {
       run,
-      jobs: snapshot.jobs.filter((entry) => entry.runId === run.id),
+      jobs: snapshot.jobs.filter((entry) => entry.runId === run.id || runJobIds.has(entry.id)),
     };
   }
   return job ? { jobs: [job] } : { jobs: [] };
@@ -8823,46 +8828,50 @@ async function evalCoverageSummaries(
   runs: readonly WorkbenchRun[],
 ): Promise<EvalCoverage[]> {
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
-  const runIds = new Set(runs.map((run) => run.id));
   const coverageByKey = new Map<string, EvalCoverage & { sampleKeys: Set<string>; caseIds: Set<string> }>();
-  for (const job of snapshot.jobs) {
-    if (!runIds.has(job.runId) || job.caseId === "current") {
-      continue;
+  for (const run of runs) {
+    const runJobIds = new Set(run.jobIds ?? []);
+    const seenJobIds = new Set<string>();
+    for (const job of snapshot.jobs) {
+      if ((job.runId !== run.id && !runJobIds.has(job.id)) || job.caseId === "current" || seenJobIds.has(job.id)) {
+        continue;
+      }
+      seenJobIds.add(job.id);
+      const key = [
+        run.id,
+        job.skillName,
+        job.skillBundleHash,
+        run.evalHash,
+        job.agentName,
+        job.agentHash,
+      ].join("\0");
+      const current = coverageByKey.get(key) ?? {
+        runId: run.id,
+        skillName: job.skillName,
+        agentName: job.agentName,
+        cases: 0,
+        samples: 0,
+        jobs: 0,
+        succeeded: 0,
+        failed: 0,
+        canceled: 0,
+        sampleKeys: new Set<string>(),
+        caseIds: new Set<string>(),
+      };
+      current.caseIds.add(job.caseId);
+      current.sampleKeys.add(`${job.caseId}\0${job.sample}`);
+      current.jobs += 1;
+      if (job.status === "succeeded") {
+        current.succeeded += 1;
+      }
+      if (job.status === "failed") {
+        current.failed += 1;
+      }
+      if (job.status === "canceled") {
+        current.canceled += 1;
+      }
+      coverageByKey.set(key, current);
     }
-    const key = [
-      job.runId,
-      job.skillName,
-      job.skillBundleHash,
-      job.evalHash,
-      job.agentName,
-      job.agentHash,
-    ].join("\0");
-    const current = coverageByKey.get(key) ?? {
-      runId: job.runId,
-      skillName: job.skillName,
-      agentName: job.agentName,
-      cases: 0,
-      samples: 0,
-      jobs: 0,
-      succeeded: 0,
-      failed: 0,
-      canceled: 0,
-      sampleKeys: new Set<string>(),
-      caseIds: new Set<string>(),
-    };
-    current.caseIds.add(job.caseId);
-    current.sampleKeys.add(`${job.caseId}\0${job.sample}`);
-    current.jobs += 1;
-    if (job.status === "succeeded") {
-      current.succeeded += 1;
-    }
-    if (job.status === "failed") {
-      current.failed += 1;
-    }
-    if (job.status === "canceled") {
-      current.canceled += 1;
-    }
-    coverageByKey.set(key, current);
   }
   return [...coverageByKey.values()].map((entry) => {
     const { sampleKeys, caseIds, ...coverage } = entry;
@@ -8877,6 +8886,23 @@ async function evalCoverageSummaries(
 function formatEvalCoverageLines(coverage: readonly EvalCoverage[]): string[] {
   const includeRunLabels = coverage.length > 1;
   return coverage.map((entry) => formatEvalCoverage(entry, includeRunLabels));
+}
+
+function formatCompletedJobReferenceLines(
+  command: WorkbenchProgressCommand,
+  jobs: readonly WorkbenchJob[],
+): string[] {
+  if (command !== "grade") {
+    return [];
+  }
+  return jobs
+    .filter((job) => job.role === "grade")
+    .sort((left, right) =>
+      left.caseId.localeCompare(right.caseId) ||
+      left.sample - right.sample ||
+      left.id.localeCompare(right.id)
+    )
+    .map((job) => `grade job: ${job.id}\tcase=${job.caseId}\tshow=workbench show ${job.id}`);
 }
 
 function formatEvalCoverage(coverage: EvalCoverage, includeRunLabels = false): string {
