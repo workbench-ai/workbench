@@ -20,12 +20,30 @@ export function jobScore(job: Pick<WorkbenchJob, "result">): number | undefined 
   return typeof scoreItem?.score === "number" ? scoreItem.score : undefined;
 }
 
-export function runScore(run: Pick<WorkbenchRun, "id" | "status">, jobs: readonly WorkbenchJob[]): number | undefined {
+export function runOwnsJob(
+  run: Pick<WorkbenchRun, "id" | "jobIds">,
+  job: Pick<WorkbenchJob, "id" | "runId">,
+): boolean {
+  return job.runId === run.id || (run.jobIds ?? []).includes(job.id);
+}
+
+export function jobsForRun(
+  run: Pick<WorkbenchRun, "id" | "jobIds">,
+  jobs: readonly WorkbenchJob[],
+): WorkbenchJob[] {
+  const referencedJobIds = new Set(run.jobIds ?? []);
+  return jobs.filter((job) => job.runId === run.id || referencedJobIds.has(job.id));
+}
+
+export function runScore(
+  run: Pick<WorkbenchRun, "id" | "status" | "jobIds">,
+  jobs: readonly WorkbenchJob[],
+): number | undefined {
   if (run.status === "canceled") {
     return undefined;
   }
-  const scores = jobs
-    .filter((job) => job.runId === run.id && job.role === "grade")
+  const scores = jobsForRun(run, jobs)
+    .filter((job) => job.role === "grade")
     .map(jobScore)
     .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
   if (scores.length === 0) {
@@ -73,7 +91,10 @@ export function formatDurationMs(value: number | null | undefined): string {
   return `${minutes}m ${remainingSeconds}s`;
 }
 
-export function formatTimestamp(value: string | null | undefined): string {
+export function formatTimestamp(
+  value: string | null | undefined,
+  options: { locale?: string | string[]; timeZone?: string } = {},
+): string {
   if (!value) {
     return "n/a";
   }
@@ -81,12 +102,12 @@ export function formatTimestamp(value: string | null | undefined): string {
   if (Number.isNaN(date.valueOf())) {
     return value;
   }
-  return new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat(options.locale, {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "UTC",
+    ...(options.timeZone ? { timeZone: options.timeZone } : {}),
   }).format(date);
 }
 

@@ -5,13 +5,24 @@ import {
 import type { WorkbenchInspectionFileOwnerKind } from "@workbench-ai/workbench-contract";
 
 export type WorkbenchPrimaryTab = "files" | "evaluation" | "runs";
-export type WorkbenchEvaluationView = "results" | "cases";
+export type WorkbenchEvaluationView = "results" | "cases" | "source";
 export type WorkbenchRunRouteSource = "evaluation" | "runs";
 export type WorkbenchCaseSection = "definition" | "runs";
-export type WorkbenchJobEvidenceView = "trace" | "output";
+export type WorkbenchRunCasePhase = "execute" | "grade";
+export type WorkbenchRunCaseEvidenceView = "trace" | "output";
 export type WorkbenchRunSection =
   | { kind: "summary" }
-  | { kind: "job"; jobId: string; view: WorkbenchJobEvidenceView };
+  | {
+    kind: "case";
+    caseId: string;
+    agentHash: string;
+    skillName: string;
+    skillBundleHash: string;
+    versionId: string;
+    sample: number;
+    phase: WorkbenchRunCasePhase;
+    view: WorkbenchRunCaseEvidenceView;
+  };
 export type WorkbenchFileOwnerKind = WorkbenchInspectionFileOwnerKind;
 
 export interface WorkbenchFileRouteState {
@@ -23,7 +34,7 @@ export interface WorkbenchFileRouteState {
 
 export type WorkbenchRoute =
   | { kind: "files"; file: WorkbenchFileRouteState }
-  | { kind: "evaluation"; view: WorkbenchEvaluationView; evaluationId: string | null }
+  | { kind: "evaluation"; view: WorkbenchEvaluationView; evaluationId: string | null; file: WorkbenchFileRouteState }
   | { kind: "case"; caseId: string; evaluationId: string | null; section: WorkbenchCaseSection; file: WorkbenchFileRouteState }
   | { kind: "run"; runId: string; source: WorkbenchRunRouteSource; evaluationId: string | null; section: WorkbenchRunSection }
   | { kind: "runs" }
@@ -51,6 +62,9 @@ export function parseWorkbenchRoute(
     if (!subsection || subsection === "results") {
       return createEvaluationRoute({ view: "results", evaluationId });
     }
+    if (subsection === "source") {
+      return createEvaluationRoute({ view: "source", evaluationId, file: parseEvaluationFileRouteState(searchParams) });
+    }
     if (subsection === "cases" && !id) {
       return createEvaluationRoute({ view: "cases", evaluationId });
     }
@@ -58,7 +72,7 @@ export function parseWorkbenchRoute(
       return createCaseRoute({ caseId: id, evaluationId, section: parseCaseSection(sectionParam), file: parseCaseFileRouteState(searchParams) });
     }
     if (subsection === "runs" && id && rest.length === 0) {
-      return createRunRoute({ runId: id, source: "evaluation", evaluationId, section: parseRunSection(sectionParam) });
+      return createRunRoute({ runId: id, source: "evaluation", evaluationId, section: parseRunSection(searchParams) });
     }
     return createNotFoundRoute(segments);
   }
@@ -67,7 +81,7 @@ export function parseWorkbenchRoute(
       return createRunsRoute();
     }
     if (subsection && !id && rest.length === 0) {
-      return createRunRoute({ runId: subsection, source: "runs", evaluationId: null, section: parseRunSection(sectionParam) });
+      return createRunRoute({ runId: subsection, source: "runs", evaluationId: null, section: parseRunSection(searchParams) });
     }
     return createNotFoundRoute(segments);
   }
@@ -104,11 +118,13 @@ export function createFilesRoute(args: {
 export function createEvaluationRoute(args: {
   view?: WorkbenchEvaluationView;
   evaluationId?: string | null;
+  file?: Partial<WorkbenchFileRouteState>;
 } = {}): WorkbenchRoute {
   return {
     kind: "evaluation",
     view: args.view ?? "results",
     evaluationId: normalizedQueryValue(args.evaluationId ?? null),
+    file: normalizeEvaluationFileRouteState(args.file),
   };
 }
 
@@ -179,13 +195,20 @@ export function withFileRouteState(route: WorkbenchRoute, file: Partial<Workbenc
       file: { ...route.file, ...file },
     });
   }
+  if (route.kind === "evaluation") {
+    return createEvaluationRoute({
+      view: route.view,
+      evaluationId: route.evaluationId,
+      file: { ...route.file, ...file },
+    });
+  }
   return route;
 }
 
 export function withEvaluationId(route: WorkbenchRoute, evaluationId: string | null): WorkbenchRoute {
   switch (route.kind) {
     case "evaluation":
-      return createEvaluationRoute({ view: route.view, evaluationId });
+      return createEvaluationRoute({ view: route.view, evaluationId, file: route.file });
     case "case":
       return createCaseRoute({ caseId: route.caseId, evaluationId, section: route.section, file: route.file });
     case "run":
@@ -209,7 +232,11 @@ function routeParts(route: WorkbenchRoute): string[] {
     case "files":
       return routeHasExplicitFileState(route.file) ? ["files"] : [];
     case "evaluation":
-      return route.view === "cases" ? ["evaluation", "cases"] : ["evaluation", "results"];
+      return route.view === "cases"
+        ? ["evaluation", "cases"]
+        : route.view === "source"
+          ? ["evaluation", "source"]
+          : ["evaluation", "results"];
     case "case":
       return ["evaluation", "cases", route.caseId];
     case "run":
@@ -232,16 +259,26 @@ function routeQuery(route: WorkbenchRoute): URLSearchParams {
   if ((route.kind === "evaluation" || route.kind === "case" || route.kind === "run") && route.evaluationId) {
     params.set("evaluation", route.evaluationId);
   }
+  if (route.kind === "evaluation" && route.view === "source") {
+    sourceFileRouteQuery(route.file, params);
+  }
   if (route.kind === "case" && route.section !== "definition") {
     params.set("section", route.section);
   }
   if (route.kind === "case" && route.section === "definition") {
-    caseFileRouteQuery(route.file, params);
+    sourceFileRouteQuery(route.file, params);
   }
-  if (route.kind === "run" && route.section.kind === "job") {
-    params.set("section", route.section.view === "output"
-      ? `job:${route.section.jobId}:output`
-      : `job:${route.section.jobId}`);
+  if (route.kind === "run" && route.section.kind === "case") {
+    params.set("case", route.section.caseId);
+    params.set("agent", route.section.agentHash);
+    params.set("skill", route.section.skillName);
+    params.set("bundle", route.section.skillBundleHash);
+    params.set("version", route.section.versionId);
+    if (route.section.sample > 0) {
+      params.set("sample", String(route.section.sample + 1));
+    }
+    params.set("phase", route.section.phase);
+    params.set("view", route.section.view);
   }
   return params;
 }
@@ -261,7 +298,7 @@ function fileRouteQuery(file: WorkbenchFileRouteState, params: URLSearchParams):
   }
 }
 
-function caseFileRouteQuery(file: WorkbenchFileRouteState, params: URLSearchParams): void {
+function sourceFileRouteQuery(file: WorkbenchFileRouteState, params: URLSearchParams): void {
   if (file.filePath) {
     params.set("file", file.filePath);
   }
@@ -287,6 +324,10 @@ function parseCaseFileRouteState(searchParams: URLSearchParams): WorkbenchFileRo
   return normalizeCaseFileRouteState(parseFileRouteState(searchParams));
 }
 
+function parseEvaluationFileRouteState(searchParams: URLSearchParams): WorkbenchFileRouteState {
+  return normalizeEvaluationFileRouteState(parseFileRouteState(searchParams));
+}
+
 function normalizeFileRouteState(file: Partial<WorkbenchFileRouteState> | null | undefined): WorkbenchFileRouteState {
   return {
     filePath: normalizedQueryValue(file?.filePath ?? null),
@@ -303,23 +344,38 @@ function normalizeCaseFileRouteState(file: Partial<WorkbenchFileRouteState> | nu
   };
 }
 
+function normalizeEvaluationFileRouteState(file: Partial<WorkbenchFileRouteState> | null | undefined): WorkbenchFileRouteState {
+  return {
+    ...normalizeFileRouteState(file),
+    versionId: null,
+  };
+}
+
 function parseCaseSection(section: string | null): WorkbenchCaseSection {
   return section === "runs" ? "runs" : "definition";
 }
 
-function parseRunSection(section: string | null): WorkbenchRunSection {
-  if (!section?.startsWith("job:")) {
+function parseRunSection(searchParams: URLSearchParams): WorkbenchRunSection {
+  const caseId = normalizedQueryValue(searchParams.get("case"));
+  const agentHash = normalizedQueryValue(searchParams.get("agent"));
+  const skillName = normalizedQueryValue(searchParams.get("skill"));
+  const skillBundleHash = normalizedQueryValue(searchParams.get("bundle"));
+  const versionId = normalizedQueryValue(searchParams.get("version"));
+  if (!caseId || !agentHash || !skillName || !skillBundleHash || !versionId) {
     return { kind: "summary" };
   }
-  const [, rawJobId, rawView] = section.split(":");
-  const jobId = normalizedQueryValue(rawJobId);
-  if (!jobId) {
-    return { kind: "summary" };
-  }
+  const phase = searchParams.get("phase") === "grade" ? "grade" : "execute";
+  const view = searchParams.get("view") === "output" ? "output" : "trace";
   return {
-    kind: "job",
-    jobId,
-    view: rawView === "output" ? "output" : "trace",
+    kind: "case",
+    caseId,
+    agentHash,
+    skillName,
+    skillBundleHash,
+    versionId,
+    sample: parseRunCaseSample(searchParams.get("sample")),
+    phase,
+    view,
   };
 }
 
@@ -328,10 +384,21 @@ function normalizeRunSection(section: WorkbenchRunSection | undefined): Workbenc
     return { kind: "summary" };
   }
   return {
-    kind: "job",
-    jobId: section.jobId,
+    kind: "case",
+    caseId: section.caseId,
+    agentHash: section.agentHash,
+    skillName: section.skillName,
+    skillBundleHash: section.skillBundleHash,
+    versionId: section.versionId,
+    sample: Number.isInteger(section.sample) && section.sample >= 0 ? section.sample : 0,
+    phase: section.phase === "grade" ? "grade" : "execute",
     view: section.view ?? "trace",
   };
+}
+
+function parseRunCaseSample(value: string | null): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 1 ? parsed - 1 : 0;
 }
 
 function routeHasExplicitFileState(file: WorkbenchFileRouteState): boolean {

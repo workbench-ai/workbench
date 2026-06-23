@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CircleAlertIcon, FileTextIcon, FolderOpenIcon } from "lucide-react";
 
 import {
@@ -51,10 +51,7 @@ export function RepositoryFilesView({
   const selectedFilePath = files.some((entry) => entry.path === file.filePath && filePathIsWithinRoot(entry.path, rootPath))
     ? file.filePath
     : null;
-  const directoryPath = normalizeDirectoryPath(
-    file.directoryPath ?? directoryPathForSelectedFile(selectedFilePath, rootPath),
-    rootPath,
-  );
+  const directoryPath = normalizeDirectoryPath(file.directoryPath ?? directoryPathForSelectedFile(selectedFilePath, rootPath), rootPath);
   const normalizedDefaultFilePath = defaultFilePath && files.some((entry) => entry.path === defaultFilePath && filePathIsWithinRoot(entry.path, rootPath))
     ? defaultFilePath
     : null;
@@ -244,13 +241,25 @@ function sourceSpecialNameRank(name: string): number {
   if (normalized === "skill.md") {
     return 0;
   }
-  if (normalized.endsWith(".md")) {
+  if (normalized === "eval.yaml") {
+    return 0;
+  }
+  if (normalized === "agents.yaml") {
     return 1;
   }
-  if (normalized === ".workbench") {
+  if (normalized === "environment" || normalized === "environment/dockerfile") {
     return 2;
   }
-  return 3;
+  if (normalized === "cases" || normalized.startsWith("cases/")) {
+    return 3;
+  }
+  if (normalized.endsWith(".md")) {
+    return 4;
+  }
+  if (normalized === ".workbench") {
+    return 5;
+  }
+  return 6;
 }
 
 function parentDirectoryPath(directoryPath: string | null, rootPath: string | null): string | null {
@@ -462,44 +471,40 @@ function useInspectionFilePreview({
   error: string | null;
   preview: ReturnType<typeof surfaceFileToPreview> | null;
 } {
-  const [state, setState] = useState<{
-    loading: boolean;
-    error: string | null;
-    preview: ReturnType<typeof surfaceFileToPreview> | null;
-  }>({ loading: false, error: null, preview: null });
-
-  useEffect(() => {
-    const fileEntry = path ? files.find((file) => file.path === path) ?? null : null;
+  const fileEntry = path ? files.find((file) => file.path === path) ?? null : null;
+  const embeddedContent = useMemo(() => {
     if (!path || !fileEntry) {
-      setState({ loading: false, error: null, preview: null });
-      return;
+      return null;
     }
     const unavailableReason = workbenchInspectionFileContentUnavailableReason(fileEntry);
     if (unavailableReason) {
-      setState({
-        loading: false,
-        error: null,
-        preview: surfaceFileToPreview({
-          path: fileEntry.path,
-          kind: fileEntry.kind,
-          encoding: fileEntry.encoding,
-          executable: fileEntry.executable,
-          unavailableReason,
-        }, previewMode),
-      });
-      return;
+      return {
+        path: fileEntry.path,
+        kind: fileEntry.kind,
+        encoding: fileEntry.encoding,
+        executable: fileEntry.executable,
+        unavailableReason,
+      } satisfies WorkbenchInspectionFileContent;
     }
-    if (fileEntry.content) {
-      setState({
-        loading: false,
-        error: null,
-        preview: surfaceFileToPreview(workbenchInspectionFileContent(fileEntry), previewMode),
-      });
+    if ("content" in fileEntry && typeof fileEntry.content === "string" && fileEntry.content.length > 0) {
+      return workbenchInspectionFileContent(fileEntry);
+    }
+    return null;
+  }, [fileEntry, path]);
+  const [state, setState] = useState<{
+    loading: boolean;
+    error: string | null;
+    content: WorkbenchInspectionFileContent | null;
+  }>({ loading: false, error: null, content: null });
+
+  useEffect(() => {
+    if (!path || !fileEntry || embeddedContent) {
+      setState({ loading: false, error: null, content: null });
       return;
     }
     const controller = new AbortController();
     let cancelled = false;
-    setState({ loading: true, error: null, preview: null });
+    setState({ loading: true, error: null, content: null });
     void fetch(fileContentApiPath(apiBasePath, ownerKind, ownerId, path), { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) {
@@ -509,7 +514,7 @@ function useInspectionFilePreview({
       })
       .then((content) => {
         if (!cancelled) {
-          setState({ loading: false, error: null, preview: surfaceFileToPreview(content, previewMode) });
+          setState({ loading: false, error: null, content });
         }
       })
       .catch((error: unknown) => {
@@ -517,7 +522,7 @@ function useInspectionFilePreview({
           setState({
             loading: false,
             error: error instanceof Error ? error.message : String(error),
-            preview: null,
+            content: null,
           });
         }
       });
@@ -525,7 +530,15 @@ function useInspectionFilePreview({
       cancelled = true;
       controller.abort();
     };
-  }, [apiBasePath, files, ownerId, ownerKind, path, previewMode]);
+  }, [apiBasePath, embeddedContent, fileEntry, ownerId, ownerKind, path]);
 
-  return state;
+  const content = embeddedContent ?? state.content;
+  const preview = useMemo(
+    () => content ? surfaceFileToPreview(content, previewMode) : null,
+    [content, previewMode],
+  );
+
+  return embeddedContent
+    ? { loading: false, error: null, preview }
+    : { loading: state.loading, error: state.error, preview };
 }

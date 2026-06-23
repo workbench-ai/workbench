@@ -135,7 +135,7 @@ describe("comparison metric helpers", () => {
     expect(defaultEvaluationIdForScorecard(options)).toBe("eval_two");
   });
 
-  test("uses run evidence as fallback for visible row metrics", () => {
+  test("uses run evidence as score fallback without copying aggregate row metrics", () => {
     const results = resultsFixture([
       resultCell({ skillVersionId: "v002", runId: "run_eval", quality: undefined, latencyMs: undefined }),
     ]);
@@ -161,9 +161,42 @@ describe("comparison metric helpers", () => {
     });
 
     expect(rows[0]?.score).toBe(0.88);
-    expect(rows[0]?.latencyMs).toBe(1200);
-    expect(rows[0]?.costUsd).toBe(0.034);
+    expect(rows[0]?.latencyMs).toBeUndefined();
+    expect(rows[0]?.costUsd).toBeUndefined();
     expect(rows[0]?.statusLabel).toBe("Succeeded");
+  });
+
+  test("does not copy aggregate run cost into agent result rows", () => {
+    const results = resultsFixture([
+      resultCell({
+        skillVersionId: "v002",
+        agentVersionId: "agent_codex",
+        runId: "run_eval",
+        costUsd: 0.12,
+      }),
+      resultCell({
+        skillVersionId: "v002",
+        agentVersionId: "agent_claude",
+        runId: "run_eval",
+        costUsd: undefined,
+      }),
+    ]);
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups: buildComparisonGroups(results),
+      runs: [
+        run({
+          id: "run_eval",
+          versionId: "v002",
+          costUsd: 0.34,
+        }),
+      ],
+    });
+
+    expect(rows.map((row) => ({ agent: row.agentHash, cost: row.costUsd }))).toEqual([
+      { agent: "agent_claude", cost: undefined },
+      { agent: "agent_codex", cost: 0.12 },
+    ]);
   });
 
   test("keeps canceled result evidence labeled as canceled", () => {
@@ -201,7 +234,7 @@ describe("comparison metric helpers", () => {
       row: datum.rowLabel,
       value: datum.value,
     }))).toEqual([
-      { group: "earnings-prep v2", row: "earnings-prep v2 / claude / opus-4.8", value: 0.9 },
+      { group: "earnings-prep v2", row: "earnings-prep v2 / claude / opus", value: 0.9 },
       { group: "earnings-prep v1", row: "earnings-prep v1 / codex / gpt-5.5", value: 0.7 },
     ]);
   });
@@ -235,7 +268,7 @@ describe("comparison metric helpers", () => {
     expect(missingCostLabelForStatus("Not tested", false)).toBe("Not tested");
   });
 
-  test("keeps legacy run display helpers for non-results views", () => {
+  test("formats run display helpers for non-results views", () => {
     const evals = [
       evalSnapshot("eval_one", 1, "tests", "2026-06-06T00:00:00.000Z"),
       evalSnapshot("eval_two", 3, "rubric", "2026-06-06T00:05:00.000Z"),
@@ -270,7 +303,7 @@ function resultsFixture(
     ],
     agents: options.agents ?? [
       { id: "agent_codex", name: "codex", label: "codex / gpt-5.5", adapter: "codex", model: "gpt-5.5" },
-      { id: "agent_claude", name: "claude", label: "claude / opus-4.8", adapter: "claude", model: "opus-4.8" },
+      { id: "agent_claude", name: "claude", label: "claude / opus", adapter: "claude", model: "opus" },
     ],
     cells,
   };

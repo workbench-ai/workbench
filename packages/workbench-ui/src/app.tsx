@@ -29,7 +29,10 @@ import {
   WorkflowIcon,
 } from "lucide-react";
 
-import { isWorkbenchLocalMetadataPath } from "@workbench-ai/workbench-contract";
+import {
+  buildWorkbenchRunEvidenceView,
+  isWorkbenchPackageSourcePath,
+} from "@workbench-ai/workbench-contract";
 import type {
   SurfaceSnapshotFile,
   WorkbenchActionCapabilities,
@@ -37,16 +40,20 @@ import type {
   WorkbenchEvalCaseSnapshot,
   WorkbenchEvalSnapshot,
   WorkbenchExecutionTraceDetail,
+  WorkbenchGradePlanDisplayBlock,
   WorkbenchInspectionFileContent,
   WorkbenchInspectionSnapshot,
   WorkbenchInspectionSnapshotEnvelope,
   WorkbenchJob,
   WorkbenchRun,
+  WorkbenchRunEvidenceCaseResult,
+  WorkbenchRunEvidenceJobPhase,
+  WorkbenchRunEvidenceTraceJob,
+  WorkbenchRunEvidenceView,
   WorkbenchRunSnapshot,
   WorkbenchSkillSource,
   WorkbenchStateNotice,
   WorkbenchTrace,
-  WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 import { EmptyState } from "@workbench-ai/cli-web-ui/components/shared/empty-state";
 import { ExecutionTraceTimeline } from "@workbench-ai/cli-web-ui/components/shared/execution-trace-timeline";
@@ -123,6 +130,7 @@ import {
   formatRunCost,
   formatScore,
   formatTimestamp,
+  jobsForRun,
   jobScore,
   runScore,
   shortId,
@@ -142,13 +150,19 @@ import {
   type WorkbenchEvaluationView,
   type WorkbenchFileOwnerKind,
   type WorkbenchFileRouteState,
-  type WorkbenchJobEvidenceView,
   type WorkbenchPrimaryTab,
+  type WorkbenchRunCaseEvidenceView,
+  type WorkbenchRunCasePhase,
   type WorkbenchRoute,
 } from "./lib/routes";
 import {
   routeForWorkbenchRunSnapshot,
 } from "./lib/operations";
+import {
+  defaultSourceVersion,
+  orderedVersions,
+  publishedVersionId,
+} from "./lib/version-selection";
 import {
   buildComparisonEvidenceRows,
   buildComparisonGroups,
@@ -219,6 +233,7 @@ const EVALUATION_VIEW_ITEMS: Array<{
   icon: typeof WorkflowIcon;
 }> = [
   { value: "results", label: "Results", icon: WorkflowIcon },
+  { value: "source", label: "Source", icon: FolderOpenIcon },
   { value: "cases", label: "Cases", icon: FileTextIcon },
 ];
 
@@ -243,6 +258,7 @@ function useWorkbenchInspection({
   cursor: string | null;
   error: string | null;
   loading: boolean;
+  progressCursor: string | null;
   refresh: () => void;
   refreshing: boolean;
   actions: WorkbenchActionCapabilities | null;
@@ -252,18 +268,22 @@ function useWorkbenchInspection({
   const [loading, setLoading] = useState(!initialEnvelope);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const refresh = useCallback(() => setRefreshKey((current) => current + 1), []);
+  const [progressCursor, setProgressCursor] = useState<string | null>(null);
+  const [refreshRequest, setRefreshRequest] = useState({ key: 0, visible: false });
+  const refresh = useCallback(() => setRefreshRequest((current) => ({
+    key: current.key + 1,
+    visible: true,
+  })), []);
 
   useEffect(() => {
-    if (initialEnvelope && refreshKey === 0) {
+    if (initialEnvelope && refreshRequest.key === 0) {
       return;
     }
     const controller = new AbortController();
     let cancelled = false;
     const hasExistingSnapshot = envelope !== null;
     setLoading(!hasExistingSnapshot);
-    setRefreshing(hasExistingSnapshot);
+    setRefreshing(hasExistingSnapshot && refreshRequest.visible);
     setError(null);
 
     async function loadSnapshot() {
@@ -290,7 +310,7 @@ function useWorkbenchInspection({
       cancelled = true;
       controller.abort();
     };
-  }, [apiBasePath, initialEnvelope, refreshKey]);
+  }, [apiBasePath, initialEnvelope, refreshRequest.key, refreshRequest.visible]);
 
   useEffect(() => {
     if (!envelope?.cursor) {
@@ -302,9 +322,24 @@ function useWorkbenchInspection({
     let retryTimer: number | null = null;
     let currentCursor = envelope.cursor;
 
-    const triggerRefresh = (notice: WorkbenchStateNotice) => {
+    const triggerSnapshotRefresh = (notice: WorkbenchStateNotice) => {
       currentCursor = notice.cursor;
-      setRefreshKey((current) => current + 1);
+      setRefreshRequest((current) => ({
+        key: current.key + 1,
+        visible: false,
+      }));
+    };
+
+    const handleNotice = (notice: WorkbenchStateNotice) => {
+      currentCursor = notice.cursor;
+      if (notice.type === "changed" || notice.type === "reset") {
+        triggerSnapshotRefresh(notice);
+        return true;
+      }
+      if (notice.type === "progress") {
+        setProgressCursor(notice.cursor);
+      }
+      return false;
     };
 
     const scheduleWaitLoop = (delayMs = 0) => {
@@ -326,11 +361,9 @@ function useWorkbenchInspection({
           if (cancelled) {
             return;
           }
-          if (notice.type === "changed" || notice.type === "reset" || notice.cursor !== currentCursor) {
-            triggerRefresh(notice);
+          if (handleNotice(notice)) {
             return;
           }
-          currentCursor = notice.cursor;
         } catch {
           waitController = null;
           if (!cancelled) {
@@ -346,11 +379,7 @@ function useWorkbenchInspection({
       eventSource.onmessage = (event) => {
         try {
           const notice = JSON.parse(event.data) as WorkbenchStateNotice;
-          if (notice.type === "changed" || notice.type === "reset" || notice.cursor !== currentCursor) {
-            triggerRefresh(notice);
-          } else {
-            currentCursor = notice.cursor;
-          }
+          handleNotice(notice);
         } catch {
           // Ignore malformed live notices; the next valid notice or manual refresh recovers.
         }
@@ -378,6 +407,7 @@ function useWorkbenchInspection({
     cursor: envelope?.cursor ?? null,
     error,
     loading,
+    progressCursor,
     refresh,
     refreshing,
     actions: envelope?.actions ?? null,
@@ -420,6 +450,39 @@ function stateStreamUrl(apiBasePath: string, cursor: string): string {
   return `${apiBasePath}/state/stream?cursor=${encodeURIComponent(cursor)}`;
 }
 
+export function workbenchRouteRequiresEvidence(route: WorkbenchRoute): boolean {
+  switch (route.kind) {
+    case "evaluation":
+      return route.view === "results";
+    case "case":
+      return route.section === "runs";
+    case "runs":
+    case "run":
+      return true;
+    case "files":
+    case "not-found":
+      return false;
+  }
+}
+
+export function workbenchSnapshotNeedsEvidenceRefresh(snapshot: WorkbenchInspectionSnapshot): boolean {
+  return workbenchSnapshotReportsEvidence(snapshot) && !workbenchSnapshotHasEvidence(snapshot);
+}
+
+function workbenchSnapshotReportsEvidence(snapshot: WorkbenchInspectionSnapshot): boolean {
+  return snapshot.status.runCount > 0 || (snapshot.results?.cells.length ?? 0) > 0;
+}
+
+function workbenchSnapshotHasEvidence(snapshot: WorkbenchInspectionSnapshot): boolean {
+  return snapshot.runs.length > 0 ||
+    snapshot.jobs.length > 0 ||
+    snapshot.traces.length > 0 ||
+    snapshot.executionEvents.length > 0 ||
+    snapshot.artifacts.length > 0 ||
+    snapshot.lineage.length > 0 ||
+    (snapshot.results?.cells.length ?? 0) > 0;
+}
+
 export function WorkbenchWorkspace({
   apiBasePath = "/api",
   routeBasePath = "/",
@@ -434,6 +497,7 @@ export function WorkbenchWorkspace({
     cursor: inspectionCursor,
     error,
     loading,
+    progressCursor,
     refresh: refreshSnapshot,
     refreshing,
     actions,
@@ -498,6 +562,35 @@ export function WorkbenchWorkspace({
     refreshSnapshot();
     navigate(routeForWorkbenchRunSnapshot(started));
   }, [navigate, refreshSnapshot]);
+  const routeNeedsEvidenceRefresh = Boolean(
+    snapshot &&
+    workbenchRouteRequiresEvidence(route) &&
+    workbenchSnapshotNeedsEvidenceRefresh(snapshot),
+  );
+  const evidenceRefreshSignature = useMemo(() => {
+    if (!routeNeedsEvidenceRefresh) {
+      return null;
+    }
+    return `${inspectionCursor ?? "no-cursor"}:${route.kind}`;
+  }, [inspectionCursor, route.kind, routeNeedsEvidenceRefresh]);
+  const [requestedEvidenceRefresh, setRequestedEvidenceRefresh] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!evidenceRefreshSignature || loading || refreshing) {
+      return;
+    }
+    if (requestedEvidenceRefresh === evidenceRefreshSignature) {
+      return;
+    }
+    setRequestedEvidenceRefresh(evidenceRefreshSignature);
+    refreshSnapshot();
+  }, [
+    evidenceRefreshSignature,
+    loading,
+    refreshSnapshot,
+    refreshing,
+    requestedEvidenceRefresh,
+  ]);
 
   const header = (
     <WorkbenchShellHeader
@@ -510,7 +603,7 @@ export function WorkbenchWorkspace({
       snapshot={snapshot}
     />
   );
-  const routeFeedbackActive = loading || routePending || routeLoadingIds.size > 0;
+  const routeFeedbackActive = loading || refreshing || routePending || routeLoadingIds.size > 0 || routeNeedsEvidenceRefresh;
   const renderWorkspace = (children: ReactNode) => (
     <RouteLoadingContext.Provider value={reportRouteLoading}>
       <TopLoadingBar active={routeFeedbackActive} />
@@ -571,15 +664,25 @@ export function WorkbenchWorkspace({
         />
         <div className="grid min-w-0 gap-6 pt-6 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start xl:gap-8">
           <main className="min-w-0" data-testid="workbench-primary-content">
-            <RouteBody
-              apiBasePath={apiBasePath}
-              hrefFor={hrefFor}
-              inspectionCursor={inspectionCursor}
-              navigate={navigate}
-              onRouteClick={onRouteClick}
-              route={route}
-              snapshot={snapshot}
-            />
+            {routeNeedsEvidenceRefresh ? (
+              <ProblemState
+                icon={WorkbenchLoadingIcon}
+                title="Loading evidence"
+                message="Reading evaluation and run details."
+                scope="pane"
+              />
+            ) : (
+              <RouteBody
+                apiBasePath={apiBasePath}
+                hrefFor={hrefFor}
+                inspectionCursor={inspectionCursor}
+                navigate={navigate}
+                onRouteClick={onRouteClick}
+                progressCursor={progressCursor}
+                route={route}
+                snapshot={snapshot}
+              />
+            )}
           </main>
           <RouteSidebar
             hostContext={hostContext}
@@ -666,7 +769,7 @@ function useSkillIdentity({
       description: null,
       handle: hostContext?.handle ?? null,
     }, [hostContext, snapshot]);
-  const owner = snapshot ? currentVersion(snapshot) : null;
+  const owner = snapshot ? defaultSourceVersion(snapshot) : null;
   const [hydrated, setHydrated] = useState<SkillIdentity | null>(null);
 
   useEffect(() => {
@@ -705,7 +808,7 @@ function useSkillIdentity({
 }
 
 function skillIdentity(snapshot: WorkbenchInspectionSnapshot, hostContext?: WorkbenchHostContext): SkillIdentity {
-  const owner = currentVersion(snapshot);
+  const owner = defaultSourceVersion(snapshot);
   const skillFile = owner?.files.find((file) => file.path === "SKILL.md");
   const content = skillFile?.content && skillFile.encoding !== "base64" ? skillFile.content : null;
   return skillIdentityFromContent(content, snapshot, hostContext);
@@ -735,6 +838,21 @@ function readFrontmatterScalar(frontmatter: string | null, key: string): string 
   return unquoted || null;
 }
 
+function splitSkillHandle(handle: string | null | undefined): { owner: string; name: string } | null {
+  const value = handle?.trim();
+  if (!value) {
+    return null;
+  }
+  const separator = value.indexOf("/");
+  if (separator <= 0 || separator === value.length - 1) {
+    return null;
+  }
+  return {
+    owner: value.slice(0, separator),
+    name: value.slice(separator + 1),
+  };
+}
+
 function SkillIdentityHeader({
   actions,
   apiBasePath,
@@ -756,7 +874,9 @@ function SkillIdentityHeader({
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const ownerLabel = identity.handle?.split("/", 1)[0] ?? hostContext?.ownerSlug ?? null;
+  const handleParts = splitSkillHandle(identity.handle);
+  const ownerLabel = handleParts?.owner ?? hostContext?.ownerSlug ?? null;
+  const skillLabel = handleParts?.name ?? identity.name;
   const homeRoute = createFilesRoute();
   return (
     <section className="grid min-w-0 gap-4 border-b border-border/70 pb-5">
@@ -785,7 +905,7 @@ function SkillIdentityHeader({
                   href={hrefFor(homeRoute)}
                   onClick={onRouteClick(homeRoute)}
                 >
-                  {identity.name}
+                  {skillLabel}
                 </a>
               </h1>
               {identity.handle ? (
@@ -865,6 +985,7 @@ function RouteBody({
   inspectionCursor,
   navigate,
   onRouteClick,
+  progressCursor,
   route,
   snapshot,
 }: {
@@ -873,6 +994,7 @@ function RouteBody({
   inspectionCursor: string | null;
   navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  progressCursor: string | null;
   route: WorkbenchRoute;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
@@ -889,6 +1011,7 @@ function RouteBody({
     case "evaluation":
       return (
         <EvaluationSurface
+          apiBasePath={apiBasePath}
           hrefFor={hrefFor}
           navigate={navigate}
           onRouteClick={onRouteClick}
@@ -916,6 +1039,7 @@ function RouteBody({
           hrefFor={hrefFor}
           inspectionCursor={inspectionCursor}
           onRouteClick={onRouteClick}
+          progressCursor={progressCursor}
           route={route}
           snapshot={snapshot}
         />
@@ -945,7 +1069,7 @@ function FilesSurface({
   route: Extract<WorkbenchRoute, { kind: "files" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const owner = selectedFilesVersion(snapshot, route.file.versionId);
+  const owner = defaultSourceVersion(snapshot, route.file.versionId);
   if (!owner) {
     return (
       <EmptyState
@@ -976,7 +1100,7 @@ function authoredSourceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnap
   return files
     .filter((file) => {
       try {
-        return !isWorkbenchLocalMetadataPath(file.path);
+        return isWorkbenchPackageSourcePath(file.path);
       } catch {
         return true;
       }
@@ -1202,12 +1326,14 @@ function VersionHistory({
 }
 
 function EvaluationSurface({
+  apiBasePath,
   hrefFor,
   navigate,
   onRouteClick,
   route,
   snapshot,
 }: {
+  apiBasePath: string;
   hrefFor: (route: WorkbenchRoute) => string;
   navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
@@ -1243,8 +1369,8 @@ function EvaluationSurface({
           value={route.view}
           items={EVALUATION_VIEW_ITEMS}
           onValueChange={(value) => {
-            if (value === "results" || value === "cases") {
-              navigate(createEvaluationRoute({ view: value, evaluationId: activeEvaluationId ?? route.evaluationId }));
+            if (value === "results" || value === "cases" || value === "source") {
+              navigate(createEvaluationRoute({ view: value, evaluationId: activeEvaluationId ?? route.evaluationId, file: route.file }));
             }
           }}
         />
@@ -1256,7 +1382,15 @@ function EvaluationSurface({
           />
         ) : null}
       </div>
-      {route.view === "cases" ? (
+      {route.view === "source" ? (
+        <EvaluationSourceFiles
+          apiBasePath={apiBasePath}
+          evaluationId={activeEvaluationId}
+          file={route.file}
+          snapshot={snapshot}
+          onFileChange={(nextFile, options) => navigate(withFileRouteState(route, nextFile), options)}
+        />
+      ) : route.view === "cases" ? (
         <EvaluationCases route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />
       ) : (
         <EvaluationResults
@@ -1270,6 +1404,46 @@ function EvaluationSurface({
         />
       )}
     </div>
+  );
+}
+
+function EvaluationSourceFiles({
+  apiBasePath,
+  evaluationId,
+  file,
+  onFileChange,
+  snapshot,
+}: {
+  apiBasePath: string;
+  evaluationId: string | null;
+  file: WorkbenchFileRouteState;
+  onFileChange: (file: WorkbenchFileRouteState, options?: { replace?: boolean }) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const reportRouteLoading = useRouteLoadingReporter();
+  const selectedEvaluation = selectedEvalSnapshot(snapshot, evaluationId);
+  const files = snapshot.evaluationFiles ?? selectedEvaluation?.files ?? [];
+  if (files.length === 0) {
+    return <EmptyState icon={FileTextIcon} title="No evaluation source" message="Evaluation source appears after Workbench observes .workbench authored files." variant="hero" size="sm" />;
+  }
+  const defaultFilePath = files.some((entry) => entry.path === "eval.yaml")
+    ? "eval.yaml"
+    : files.find((entry) => entry.path === "environment/Dockerfile")?.path ?? files[0]?.path ?? null;
+  const ownerId = snapshot.evaluationFiles ? "current" : selectedEvaluation?.hash ?? "current";
+  return (
+    <section className="grid min-w-0 gap-4" aria-label="Evaluation source">
+      <RepositoryFilesView
+        apiBasePath={apiBasePath}
+        defaultFilePath={defaultFilePath}
+        file={file}
+        files={files}
+        ownerId={ownerId}
+        ownerKind="evaluation"
+        repositoryLabel="Evaluation source"
+        onFileChange={onFileChange}
+        onLoadingChange={reportRouteLoading}
+      />
+    </section>
   );
 }
 
@@ -1371,7 +1545,10 @@ export function EvaluationLeaderboard({
     () => new Map(snapshot.runs.map((run) => [run.id, run])),
     [snapshot.runs],
   );
-  const jobsByRunId = useMemo(() => groupJobsByRunId(snapshot.jobs), [snapshot.jobs]);
+  const jobsByRunId = useMemo(
+    () => new Map(snapshot.runs.map((run) => [run.id, jobsForRun(run, snapshot.jobs)])),
+    [snapshot.jobs, snapshot.runs],
+  );
   return (
     <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
       <Table data-testid="evaluation-results-leaderboard" className="min-w-[49rem]">
@@ -1516,28 +1693,13 @@ function sortLeaderboardRows(rows: readonly ComparisonEvidenceRow[]): Comparison
   );
 }
 
-function groupJobsByRunId(jobs: readonly WorkbenchJob[]): Map<string, WorkbenchJob[]> {
-  const grouped = new Map<string, WorkbenchJob[]>();
-  for (const job of jobs) {
-    const runJobs = grouped.get(job.runId);
-    if (runJobs) {
-      runJobs.push(job);
-    } else {
-      grouped.set(job.runId, [job]);
-    }
-  }
-  for (const runJobs of grouped.values()) {
-    runJobs.sort((left, right) => compareText(left.caseId, right.caseId) || left.sample - right.sample || compareText(left.id, right.id));
-  }
-  return grouped;
-}
-
 function formatLeaderboardCases(row: ComparisonEvidenceRow, jobs: readonly WorkbenchJob[]): string {
-  if (jobs.length > 0) {
-    return `${jobs.filter((job) => job.status === "succeeded").length}/${jobs.length}`;
+  const coverage = caseSampleCoverage(jobs);
+  if (coverage.total > 0) {
+    return `${coverage.completed}/${coverage.total}`;
   }
   if (typeof row.samples === "number" && Number.isFinite(row.samples)) {
-    return formatCount(row.samples, "case");
+    return `${row.samples}/${row.samples}`;
   }
   return "n/a";
 }
@@ -1597,7 +1759,7 @@ function EvaluationCases({
           <TableHeader>
             <TableRow>
               <TableHead>Case</TableHead>
-              <TableHead>Command</TableHead>
+              <TableHead>Grading</TableHead>
               <TableHead>Runs</TableHead>
               <TableHead>Latest</TableHead>
             </TableRow>
@@ -1617,7 +1779,9 @@ function EvaluationCases({
                       <div className="text-xs text-muted-foreground">{evalCase.id}</div>
                     ) : null}
                   </TableCell>
-                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{evalCase.command ?? "Not specified"}</TableCell>
+                  <TableCell>
+                    <GradePlanCompact evalCase={evalCase} />
+                  </TableCell>
                   <TableCell>{formatCount(jobs.length, "job")}</TableCell>
                   <TableCell>{latest ? <StatusBadge status={latest.status} /> : <span className="text-muted-foreground">Not run</span>}</TableCell>
                 </TableRow>
@@ -1681,13 +1845,16 @@ function CaseDetail({
           description={evalCase.description ?? evalCase.command ?? "Authored evaluation case."}
         />
         {route.section === "definition" ? (
-          <CaseDefinitionFiles
-            apiBasePath={apiBasePath}
-            evalCase={evalCase}
-            evalSnapshot={evalSnapshot}
-            file={route.file}
-            onFileChange={(nextFile, options) => navigate(withFileRouteState(route, nextFile), options)}
-          />
+          <>
+            <CaseGradePlan evalCase={evalCase} />
+            <CaseDefinitionFiles
+              apiBasePath={apiBasePath}
+              evalCase={evalCase}
+              evalSnapshot={evalSnapshot}
+              file={route.file}
+              onFileChange={(nextFile, options) => navigate(withFileRouteState(route, nextFile), options)}
+            />
+          </>
         ) : (
           <LinkedRunTable
             title="Runs"
@@ -1701,6 +1868,111 @@ function CaseDetail({
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function GradePlanCompact({ evalCase }: { evalCase: WorkbenchEvalCaseSnapshot }) {
+  return (
+    <div className="grid min-w-0 gap-1">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <Badge variant="outline">{evalCase.grade.label}</Badge>
+        <span className="min-w-0 break-words text-sm text-foreground [overflow-wrap:anywhere]">{evalCase.grade.summary}</span>
+      </div>
+      {evalCase.grade.sources.length > 0 ? (
+        <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+          {evalCase.grade.sources.map((source) => source.role).join(" + ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CaseGradePlan({ evalCase }: { evalCase: WorkbenchEvalCaseSnapshot }) {
+  return (
+    <section className="grid min-w-0 gap-3 rounded-lg border border-border/70 bg-background p-4" aria-label="Grading">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-foreground">Grading</h2>
+          <p className="break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
+            {evalCase.grade.label}: {evalCase.grade.summary}
+          </p>
+        </div>
+        <Badge variant="outline">{evalCase.grade.adapter}</Badge>
+      </div>
+      {evalCase.grade.sources.length > 0 ? (
+        <div className="flex min-w-0 flex-wrap gap-2">
+          {evalCase.grade.sources.map((source) => (
+            <Badge key={`${source.role}:${source.path}`} variant="secondary" className="max-w-full break-words [overflow-wrap:anywhere]">
+              {source.role}: {source.path}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+      <div className="grid min-w-0 gap-3">
+        {evalCase.grade.display.map((block, index) => (
+          <GradePlanDisplayBlockView block={block} key={`${block.kind}:${block.title ?? index}`} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function GradePlanDisplayBlockView({ block }: { block: WorkbenchGradePlanDisplayBlock }) {
+  if (block.kind === "text") {
+    return (
+      <div className="grid min-w-0 gap-1 text-sm">
+        {block.title ? <h3 className="font-medium text-foreground">{block.title}</h3> : null}
+        <p className="break-words text-muted-foreground [overflow-wrap:anywhere]">{block.text}</p>
+      </div>
+    );
+  }
+  if (block.kind === "key_value") {
+    return (
+      <div className="grid min-w-0 gap-2">
+        {block.title ? <h3 className="text-sm font-medium text-foreground">{block.title}</h3> : null}
+        <dl className="grid min-w-0 gap-2 sm:grid-cols-2">
+          {block.items.map((item) => (
+            <div key={item.label} className="min-w-0 rounded-md border border-border/60 px-3 py-2">
+              <dt className="text-xs font-medium uppercase text-muted-foreground">{item.label}</dt>
+              <dd className="break-words text-sm text-foreground [overflow-wrap:anywhere]">{item.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    );
+  }
+  if (block.kind === "list") {
+    return (
+      <div className="grid min-w-0 gap-2">
+        {block.title ? <h3 className="text-sm font-medium text-foreground">{block.title}</h3> : null}
+        <ul className="grid min-w-0 gap-2">
+          {block.items.map((item) => (
+            <li key={item.label} className="min-w-0 rounded-md border border-border/60 px-3 py-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">{item.label}</span>
+                {item.meta ? <Badge variant="outline">{item.meta}</Badge> : null}
+              </div>
+              {item.description ? (
+                <p className="mt-1 break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">{item.description}</p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  return (
+    <div className="grid min-w-0 gap-2">
+      {block.title ? <h3 className="text-sm font-medium text-foreground">{block.title}</h3> : null}
+      <ul className="grid min-w-0 gap-2">
+        {block.files.map((file) => (
+          <li key={file.path} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-sm">
+            <span className="break-words font-medium text-foreground [overflow-wrap:anywhere]">{file.path}</span>
+            {file.role ? <Badge variant="secondary">{file.role}</Badge> : null}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -1837,6 +2109,7 @@ function RunDetailPage({
   hrefFor,
   inspectionCursor,
   onRouteClick,
+  progressCursor,
   route,
   snapshot,
 }: {
@@ -1844,6 +2117,7 @@ function RunDetailPage({
   hrefFor: (route: WorkbenchRoute) => string;
   inspectionCursor: string | null;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  progressCursor: string | null;
   route: Extract<WorkbenchRoute, { kind: "run" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
@@ -1851,16 +2125,34 @@ function RunDetailPage({
   if (!run) {
     return <MissingObject label={`Run ${route.runId}`} />;
   }
-  const jobs = snapshot.jobs.filter((job) => job.runId === run.id);
+  const jobs = jobsForRun(run, snapshot.jobs);
+  const evidence = buildWorkbenchRunEvidenceView(snapshot, run) ?? {
+    runId: run.id,
+    agents: [],
+    cases: [],
+    traceJobs: [],
+  };
   const summaryRoute = createRunRoute({
     runId: run.id,
     source: route.source,
     evaluationId: route.evaluationId,
     section: { kind: "summary" },
   });
-  const selectedJobId = route.section.kind === "job" ? route.section.jobId : null;
-  const selectedJob = selectedJobId
-    ? jobs.find((job) => job.id === selectedJobId) ?? null
+  const selectedCaseRoute = route.section.kind === "case" ? route.section : null;
+  const selectedCaseResult = selectedCaseRoute
+    ? evidence.cases.find((caseResult) => runCaseRouteMatches(caseResult, selectedCaseRoute)) ?? null
+    : null;
+  const selectedPhaseName = selectedCaseResult
+    ? availableRunCasePhase(selectedCaseResult, selectedCaseRoute?.phase ?? null)
+    : null;
+  const selectedPhase = selectedCaseResult && selectedPhaseName
+    ? phaseForCaseResult(selectedCaseResult, selectedPhaseName)
+    : null;
+  const selectedJob = selectedPhase
+    ? jobs.find((job) => job.id === selectedPhase.jobId) ?? null
+    : null;
+  const selectedTraceJob = selectedPhase
+    ? evidence.traceJobs.find((job) => job.jobId === selectedPhase.jobId) ?? null
     : null;
   return (
     <div className="grid min-w-0 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
@@ -1873,23 +2165,24 @@ function RunDetailPage({
         >
           Summary
         </a>
-        {jobs.map((job) => {
-          const jobRoute = createRunRoute({
+        {evidence.cases.map((caseResult) => {
+          const caseRoute = createRunCaseRoute({
+            caseResult,
+            evaluationId: route.evaluationId,
+            phase: defaultRunCasePhase(caseResult),
             runId: run.id,
             source: route.source,
-            evaluationId: route.evaluationId,
-            section: { kind: "job", jobId: job.id, view: "trace" },
           });
-          const active = route.section.kind === "job" && route.section.jobId === job.id;
+          const active = selectedCaseRoute ? runCaseRouteMatches(caseResult, selectedCaseRoute) : false;
           return (
             <a
               aria-current={active ? "page" : undefined}
               className={sectionNavItemClass(active, "truncate")}
-              href={hrefFor(jobRoute)}
-              key={job.id}
-              onClick={onRouteClick(jobRoute)}
+              href={hrefFor(caseRoute)}
+              key={runCaseResultKey(caseResult)}
+              onClick={onRouteClick(caseRoute)}
             >
-              {job.caseId}
+              {runCaseNavLabel(caseResult)}
             </a>
           );
         })}
@@ -1898,23 +2191,25 @@ function RunDetailPage({
         <DetailPageHeader
           eyebrow={runOperationLabel(run)}
           title={runDisplayTitle(run, snapshot)}
-          description={`${runOperationLabel(run)} from ${formatTimestamp(run.createdAt)} with ${formatCount(jobs.length, "case result")}.`}
+          description={`${runOperationLabel(run)} from ${formatTimestamp(run.createdAt)} with ${formatRunEvidenceSummary(jobs)}.`}
         />
         {route.section.kind === "summary" ? (
           <>
             <MetricStrip
               items={[
                 { label: "Score", value: formatScore(runScore(run, jobs)) },
-                { label: "Cases", value: formatRunCasePassSummary(jobs) },
+                { label: "Cases", value: formatRunCaseCoverageSummary(jobs) },
+                { label: "Jobs", value: formatRunJobSummary(jobs) },
                 { label: "Duration", value: formatDurationMs(run.latencyMs) },
                 { label: "Cost", value: formatRunCost(run) },
               ]}
             />
             {run.error ? <ProblemState icon={CircleAlertIcon} title="Run error" message={run.error} align="start" /> : null}
+            <RunSummaryAgentTable evidence={evidence} />
             <RunSummaryCaseTable
+              evidence={evidence}
               evaluationId={route.evaluationId}
               hrefFor={hrefFor}
-              jobs={jobs}
               onRouteClick={onRouteClick}
               run={run}
               snapshot={snapshot}
@@ -1922,13 +2217,17 @@ function RunDetailPage({
             />
             <RunTimelineSummary jobs={jobs} run={run} snapshot={snapshot} />
           </>
-        ) : selectedJob ? (
-          <JobResult
+        ) : selectedCaseResult && selectedJob && selectedPhase && selectedPhaseName ? (
+          <CaseResultDetail
             apiBasePath={apiBasePath}
+            caseResult={selectedCaseResult}
             evaluationId={route.evaluationId}
             hrefFor={hrefFor}
             inspectionCursor={inspectionCursor}
             job={selectedJob}
+            phase={selectedPhaseName}
+            progressCursor={progressCursor}
+            traceJob={selectedTraceJob}
             onRouteClick={onRouteClick}
             run={run}
             snapshot={snapshot}
@@ -1936,25 +2235,71 @@ function RunDetailPage({
             view={route.section.view}
           />
         ) : (
-          <MissingObject label={`Case result ${selectedJobId ?? "unknown"}`} />
+          <MissingObject label={`Case result ${selectedCaseRoute?.caseId ?? "unknown"}`} />
         )}
       </div>
     </div>
   );
 }
 
+function RunSummaryAgentTable({
+  evidence,
+}: {
+  evidence: WorkbenchRunEvidenceView;
+}) {
+  if (evidence.agents.length === 0) {
+    return null;
+  }
+  return (
+    <SurfaceSection title="Agent results" icon={WorkflowIcon} headingLevel={3} description={formatAgentResultsSummary(evidence)}>
+      <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Skill</TableHead>
+              <TableHead>Agent</TableHead>
+              <TableHead>Model</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Cases</TableHead>
+              <TableHead>Jobs</TableHead>
+              <TableHead>Score</TableHead>
+              <TableHead>Cost</TableHead>
+              <TableHead>Duration</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {evidence.agents.map((agent) => (
+              <TableRow key={runAgentResultKey(agent)}>
+                <TableCell className="align-top font-medium">{formatSkillLabel(agent)}</TableCell>
+                <TableCell className="align-top font-medium">{agent.agentLabel}</TableCell>
+                <TableCell className="align-top text-muted-foreground">{formatAdapterModel(agent)}</TableCell>
+                <TableCell className="align-top"><StatusBadge status={agent.status} /></TableCell>
+                <TableCell className="align-top text-muted-foreground">{agent.completedCases} / {agent.totalCases}</TableCell>
+                <TableCell className="align-top text-muted-foreground">{agent.succeededJobs} / {agent.totalJobs}</TableCell>
+                <TableCell className="align-top">{formatScore(agent.score)}</TableCell>
+                <TableCell className="align-top text-muted-foreground">{formatCost(agent.costUsd)}</TableCell>
+                <TableCell className="align-top text-muted-foreground">{formatDurationMs(agent.durationMs)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </SurfaceSection>
+  );
+}
+
 function RunSummaryCaseTable({
+  evidence,
   evaluationId,
   hrefFor,
-  jobs,
   onRouteClick,
   run,
   snapshot,
   source,
 }: {
+  evidence: WorkbenchRunEvidenceView;
   evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
-  jobs: WorkbenchJob[];
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
@@ -1962,7 +2307,7 @@ function RunSummaryCaseTable({
 }) {
   const evalSnapshot = selectedEvalSnapshot(snapshot, run.evalHash);
   const casesById = new Map((evalSnapshot?.cases ?? []).map((evalCase) => [evalCase.id, evalCase]));
-  if (jobs.length === 0) {
+  if (evidence.cases.length === 0) {
     return (
       <SurfaceSection title="Case results" icon={FileTextIcon} headingLevel={3}>
         <p className="text-sm text-muted-foreground">No case results are recorded for this run.</p>
@@ -1970,40 +2315,53 @@ function RunSummaryCaseTable({
     );
   }
   return (
-    <SurfaceSection title="Case results" icon={FileTextIcon} headingLevel={3} description={formatRunCasePassSummary(jobs)}>
+    <SurfaceSection title="Case results" icon={FileTextIcon} headingLevel={3} description={formatEvidenceCaseSummary(evidence)}>
       <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Case</TableHead>
-              <TableHead>Status</TableHead>
+              <TableHead>Skill</TableHead>
+              <TableHead>Agent</TableHead>
+              <TableHead>Execute</TableHead>
+              <TableHead>Grade</TableHead>
               <TableHead>Score</TableHead>
               <TableHead>Duration</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {jobs.map((job) => {
-              const jobRoute = createRunRoute({
+            {evidence.cases.map((caseResult) => {
+              const caseRoute = createRunCaseRoute({
+                caseResult,
+                evaluationId,
+                phase: defaultRunCasePhase(caseResult),
                 runId: run.id,
                 source,
-                evaluationId,
-                section: { kind: "job", jobId: job.id, view: "trace" },
               });
-              const evalCase = casesById.get(job.caseId);
-              const title = evalCase ? caseDisplayTitle(evalCase) : job.caseId;
+              const evalCase = casesById.get(caseResult.caseId);
+              const title = evalCase ? caseDisplayTitle(evalCase) : caseResult.caseId;
               return (
-                <TableRow key={job.id} className="cursor-pointer" onClick={onRouteClick(jobRoute)}>
+                <TableRow key={runCaseResultKey(caseResult)} className="cursor-pointer" onClick={onRouteClick(caseRoute)}>
                   <TableCell className="align-top">
-                    <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(jobRoute)} onClick={onRouteClick(jobRoute)}>
+                    <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(caseRoute)} onClick={onRouteClick(caseRoute)}>
                       {title}
                     </a>
                     {evalCase && showCaseSecondaryId(evalCase) ? (
-                      <div className="text-xs text-muted-foreground">{job.caseId}</div>
+                      <div className="text-xs text-muted-foreground">{caseResult.caseId}</div>
+                    ) : null}
+                    {caseResult.sample > 0 ? (
+                      <div className="text-xs text-muted-foreground">Sample {formatSampleNumber(caseResult.sample)}</div>
                     ) : null}
                   </TableCell>
-                  <TableCell className="align-top"><StatusBadge status={job.status} /></TableCell>
-                  <TableCell className="align-top">{formatScore(jobScore(job))}</TableCell>
-                  <TableCell className="align-top text-muted-foreground">{formatDurationMs(job.durationMs)}</TableCell>
+                  <TableCell className="align-top font-medium">{formatSkillLabel(caseResult)}</TableCell>
+                  <TableCell className="align-top">
+                    <div className="font-medium">{caseResult.agentLabel}</div>
+                    <div className="text-xs text-muted-foreground">{formatAdapterModel(caseResult)}</div>
+                  </TableCell>
+                  <TableCell className="align-top">{formatPhaseBadge(caseResult.execute)}</TableCell>
+                  <TableCell className="align-top">{formatPhaseBadge(caseResult.grade)}</TableCell>
+                  <TableCell className="align-top">{formatScore(caseResult.score)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatDurationMs(caseResult.durationMs)}</TableCell>
                 </TableRow>
               );
             })}
@@ -2023,7 +2381,8 @@ function RunTimelineSummary({
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const traces = snapshot.traces.filter((trace) => trace.runId === run.id || run.traceIds.includes(trace.id));
+  const traceIds = new Set([...run.traceIds, ...jobs.flatMap((job) => job.traceIds)]);
+  const traces = snapshot.traces.filter((trace) => trace.runId === run.id || traceIds.has(trace.id));
   const eventBatches = snapshot.executionEvents.filter((batch) => batch.runId === run.id);
   const eventCount = eventBatches.reduce((count, batch) => count + batch.events.length, 0);
   const startedAt = jobs
@@ -2054,20 +2413,208 @@ function RunTimelineSummary({
   );
 }
 
-function formatRunCasePassSummary(jobs: readonly WorkbenchJob[]): string {
-  if (jobs.length === 0) {
-    return "No cases";
-  }
-  const passed = jobs.filter((job) => job.status === "succeeded").length;
-  return `${passed} / ${jobs.length} passed`;
+function formatRunEvidenceSummary(jobs: readonly WorkbenchJob[]): string {
+  return `${formatRunCaseCoverageSummary(jobs)}; ${formatRunJobSummary(jobs)}`;
 }
 
-function JobResult({
+function formatAgentResultsSummary(evidence: WorkbenchRunEvidenceView): string {
+  const succeeded = evidence.agents.filter((agent) => agent.status === "succeeded").length;
+  return `${succeeded} / ${evidence.agents.length} measurements succeeded`;
+}
+
+function formatEvidenceCaseSummary(evidence: WorkbenchRunEvidenceView): string {
+  const completed = evidence.cases.filter((entry) => entry.status === "succeeded" || entry.score !== undefined).length;
+  return `${completed} / ${evidence.cases.length} covered`;
+}
+
+function formatAdapterModel(entry: Pick<WorkbenchRunEvidenceTraceJob, "adapter" | "model">): string {
+  return entry.model ? `${entry.adapter} / ${entry.model}` : entry.adapter;
+}
+
+function formatSkillLabel(entry: Pick<WorkbenchRunEvidenceTraceJob, "skillLabel" | "skillName">): string {
+  return entry.skillLabel || entry.skillName;
+}
+
+function formatSampleNumber(sample: number): number {
+  return sample + 1;
+}
+
+function formatRunCasePhase(phase: WorkbenchRunCasePhase): string {
+  return phase === "grade" ? "Grade" : "Execute";
+}
+
+function formatPhaseBadge(phase: WorkbenchRunEvidenceJobPhase | undefined): ReactNode {
+  if (!phase) {
+    return <span className="text-muted-foreground">n/a</span>;
+  }
+  return (
+    <div className="grid gap-1">
+      <StatusBadge status={phase.status} />
+      {phase.dependencyReason ? (
+        <span className="max-w-[16rem] text-xs text-muted-foreground">{phase.dependencyReason}</span>
+      ) : null}
+    </div>
+  );
+}
+
+function formatTraceJobDependencies(job: WorkbenchRunEvidenceTraceJob): string {
+  return job.dependencies
+    .map((dependency) => dependency.jobId ? `${dependency.name}: ${dependency.jobId}` : dependency.name)
+    .join(", ");
+}
+
+function formatRunCaseCoverageSummary(jobs: readonly WorkbenchJob[]): string {
+  const coverage = caseSampleCoverage(jobs);
+  if (coverage.total === 0) {
+    return "no cases";
+  }
+  return `${coverage.completed} / ${coverage.total} covered`;
+}
+
+function formatRunJobSummary(jobs: readonly WorkbenchJob[]): string {
+  if (jobs.length === 0) {
+    return "no jobs";
+  }
+  const succeeded = jobs.filter((job) => job.status === "succeeded").length;
+  return `${succeeded} / ${jobs.length} succeeded`;
+}
+
+function caseSampleCoverage(jobs: readonly WorkbenchJob[]): { completed: number; total: number } {
+  const caseJobs = jobs.filter(isEvalCaseJob);
+  const resultJobs = preferredCaseResultJobs(caseJobs);
+  return {
+    completed: uniqueCaseSampleCount(resultJobs.filter(jobHasCaseResult)),
+    total: uniqueCaseSampleCount(caseJobs),
+  };
+}
+
+function preferredCaseResultJobs(jobs: readonly WorkbenchJob[]): WorkbenchJob[] {
+  const gradeJobs = jobs.filter((job) => job.role === "grade");
+  return gradeJobs.length > 0 ? gradeJobs : [...jobs];
+}
+
+function isEvalCaseJob(job: WorkbenchJob): boolean {
+  return job.caseId !== "current";
+}
+
+function jobHasCaseResult(job: WorkbenchJob): boolean {
+  return job.status === "succeeded" || jobScore(job) !== undefined;
+}
+
+function uniqueCaseSampleCount(jobs: readonly WorkbenchJob[]): number {
+  return new Set(jobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
+}
+
+function runCaseNavLabel(caseResult: WorkbenchRunEvidenceCaseResult): string {
+  const sample = caseResult.sample > 0 ? ` #${formatSampleNumber(caseResult.sample)}` : "";
+  return `${caseResult.caseId}${sample} · ${formatSkillLabel(caseResult)} · ${caseResult.agentLabel}`;
+}
+
+type SelectedRunCaseSection = Extract<Extract<WorkbenchRoute, { kind: "run" }>["section"], { kind: "case" }>;
+
+function createRunCaseRoute({
+  caseResult,
+  evaluationId,
+  phase,
+  runId,
+  source,
+  view = "trace",
+}: {
+  caseResult: WorkbenchRunEvidenceCaseResult;
+  evaluationId: string | null;
+  phase: WorkbenchRunCasePhase;
+  runId: string;
+  source: "evaluation" | "runs";
+  view?: WorkbenchRunCaseEvidenceView;
+}): WorkbenchRoute {
+  return createRunRoute({
+    runId,
+    source,
+    evaluationId,
+    section: {
+      kind: "case",
+      caseId: caseResult.caseId,
+      agentHash: caseResult.agentHash,
+      skillName: caseResult.skillName,
+      skillBundleHash: caseResult.skillBundleHash,
+      versionId: caseResult.versionId,
+      sample: caseResult.sample,
+      phase,
+      view,
+    },
+  });
+}
+
+function runCaseRouteMatches(
+  caseResult: WorkbenchRunEvidenceCaseResult,
+  section: SelectedRunCaseSection,
+): boolean {
+  return caseResult.caseId === section.caseId &&
+    caseResult.agentHash === section.agentHash &&
+    caseResult.skillName === section.skillName &&
+    caseResult.skillBundleHash === section.skillBundleHash &&
+    caseResult.versionId === section.versionId &&
+    caseResult.sample === section.sample;
+}
+
+function runAgentResultKey(
+  agent: Pick<WorkbenchRunEvidenceTraceJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentHash" | "agentName">,
+): string {
+  return [
+    agent.versionId,
+    agent.skillName,
+    agent.skillBundleHash,
+    agent.evalHash,
+    agent.agentHash,
+    agent.agentName,
+  ].join(":");
+}
+
+function runCaseResultKey(caseResult: WorkbenchRunEvidenceCaseResult): string {
+  return [
+    runAgentResultKey(caseResult),
+    caseResult.caseId,
+    caseResult.sample,
+  ].join(":");
+}
+
+function defaultRunCasePhase(caseResult: WorkbenchRunEvidenceCaseResult): WorkbenchRunCasePhase {
+  return caseResult.execute ? "execute" : "grade";
+}
+
+function availableRunCasePhase(
+  caseResult: WorkbenchRunEvidenceCaseResult,
+  requested: WorkbenchRunCasePhase | null,
+): WorkbenchRunCasePhase {
+  if (requested === "grade" && caseResult.grade) {
+    return "grade";
+  }
+  if (requested === "execute" && caseResult.execute) {
+    return "execute";
+  }
+  return defaultRunCasePhase(caseResult);
+}
+
+function phaseForCaseResult(
+  caseResult: WorkbenchRunEvidenceCaseResult,
+  phase: WorkbenchRunCasePhase,
+): WorkbenchRunEvidenceJobPhase | null {
+  if (phase === "grade") {
+    return caseResult.grade ?? caseResult.execute ?? null;
+  }
+  return caseResult.execute ?? caseResult.grade ?? null;
+}
+
+function CaseResultDetail({
   apiBasePath,
+  caseResult,
   evaluationId,
   hrefFor,
   inspectionCursor,
   job,
+  phase,
+  progressCursor,
+  traceJob,
   onRouteClick,
   run,
   snapshot,
@@ -2075,87 +2622,205 @@ function JobResult({
   view,
 }: {
   apiBasePath: string;
+  caseResult: WorkbenchRunEvidenceCaseResult;
   evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
   inspectionCursor: string | null;
   job: WorkbenchJob;
+  phase: WorkbenchRunCasePhase;
+  progressCursor: string | null;
+  traceJob: WorkbenchRunEvidenceTraceJob | null;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
   source: "evaluation" | "runs";
-  view: WorkbenchJobEvidenceView;
+  view: WorkbenchRunCaseEvidenceView;
 }) {
   const traces = snapshot.traces.filter((trace) => job.traceIds.includes(trace.id) || trace.jobId === job.id);
   const artifacts = snapshot.artifacts.filter((artifact) => job.artifactIds.includes(artifact.id));
-  const caseTitle = job.caseId ?? job.id;
+  const caseTitle = caseResult.caseId;
+  const phaseLabel = formatRunCasePhase(phase);
+  const agentLabel = caseResult.agentLabel;
+  const skillLabel = formatSkillLabel(caseResult);
+  const adapterModel = formatAdapterModel(caseResult);
+  const selectedPhase = phaseForCaseResult(caseResult, phase) ?? {
+    jobId: job.id,
+    ...(job.role ? { role: job.role } : {}),
+    status: job.status,
+    ...(jobScore(job) !== undefined ? { score: jobScore(job) } : {}),
+    ...(job.durationMs !== undefined ? { durationMs: job.durationMs } : {}),
+    ...(job.error ? { error: job.error } : {}),
+  };
+  const dependencies = traceJob?.dependencies.length ? formatTraceJobDependencies(traceJob) : selectedPhase.dependencyReason;
+  const phaseError = selectedPhase.error && selectedPhase.error !== caseResult.error ? selectedPhase.error : null;
   return (
     <section className="grid min-w-0 gap-4" aria-label={`${caseTitle} evidence`}>
-      <div className="flex min-w-0 flex-col gap-3 border-b border-border/70 pb-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="grid min-w-0 gap-3">
         <div className="grid min-w-0 gap-1">
           <div className="text-xs font-medium text-muted-foreground">Case result</div>
           <h2 className="break-words text-xl font-semibold leading-tight text-foreground [overflow-wrap:anywhere]">{caseTitle}</h2>
-          <p className="break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">{job.id}</p>
+          <p className="break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
+            {skillLabel} · {agentLabel}
+          </p>
         </div>
-        <JobEvidenceViewNav
+        <CasePhaseNav
+          caseResult={caseResult}
           evaluationId={evaluationId}
           hrefFor={hrefFor}
-          job={job}
           onRouteClick={onRouteClick}
+          phase={phase}
           run={run}
           source={source}
           view={view}
         />
       </div>
       <FactGrid>
-        <FactItem title="Case status" value={job.status} />
-        <FactItem title="Case score" value={formatScore(jobScore(job))} />
-        <FactItem title="Case duration" value={formatDurationMs(job.durationMs)} />
+        <FactItem title="Skill" value={skillLabel} />
+        <FactItem title="Agent" value={agentLabel} />
+        <FactItem title="Model" value={adapterModel} />
+        <FactItem title="Sample" value={formatSampleNumber(caseResult.sample)} />
+        <FactItem title="Case status" value={<StatusBadge status={caseResult.status} />} />
+        <FactItem title="Case score" value={formatScore(caseResult.score)} />
+        <FactItem title="Case duration" value={formatDurationMs(caseResult.durationMs)} />
       </FactGrid>
-      {job.error ? <ProblemState icon={CircleAlertIcon} title="Case error" message={job.error} align="start" /> : null}
-      {view === "trace" ? (
-        <JobEvidencePanel
-          apiBasePath={apiBasePath}
-          jobStatus={job.status}
-          refreshToken={job.status === "queued" || job.status === "running" ? inspectionCursor : null}
-          runId={job.runId}
-          jobId={job.id}
-        />
-      ) : (
-        <CaseOutputView apiBasePath={apiBasePath} artifacts={artifacts} job={job} traces={traces} />
-      )}
+      {caseResult.error ? <ProblemState icon={CircleAlertIcon} title="Case error" message={caseResult.error} align="start" /> : null}
+      <div className="grid min-w-0 gap-4">
+        <FactGrid>
+          <FactItem title="Phase" value={phaseLabel} />
+          <FactItem title="Phase status" value={<StatusBadge status={selectedPhase.status} />} />
+          <FactItem title="Phase score" value={formatScore(selectedPhase.score)} />
+          <FactItem title="Phase duration" value={formatDurationMs(selectedPhase.durationMs)} />
+          {dependencies ? <FactItem title="Dependencies" value={dependencies} /> : null}
+        </FactGrid>
+        {phaseError ? <ProblemState icon={CircleAlertIcon} title={`${phaseLabel} error`} message={phaseError} align="start" /> : null}
+        <div className="flex min-w-0 justify-end">
+          <CaseEvidenceViewNav
+            caseResult={caseResult}
+            evaluationId={evaluationId}
+            hrefFor={hrefFor}
+            onRouteClick={onRouteClick}
+            phase={phase}
+            run={run}
+            source={source}
+            view={view}
+          />
+        </div>
+        {view === "trace" ? (
+          <JobEvidencePanel
+            apiBasePath={apiBasePath}
+            description={phase === "grade" ? "Judgment evidence for this case sample." : "Skill run evidence for this case sample."}
+            jobId={job.id}
+            jobStatus={job.status}
+            refreshToken={job.status === "queued" || job.status === "running" ? progressCursor ?? inspectionCursor : null}
+            runId={job.runId}
+            title={`${phaseLabel} trace`}
+          />
+        ) : (
+          <CaseOutputView apiBasePath={apiBasePath} artifacts={artifacts} job={job} traces={traces} />
+        )}
+      </div>
     </section>
   );
 }
 
-function JobEvidenceViewNav({
+function CasePhaseNav({
+  caseResult,
   evaluationId,
   hrefFor,
-  job,
   onRouteClick,
+  phase,
   run,
   source,
   view,
 }: {
+  caseResult: WorkbenchRunEvidenceCaseResult;
   evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
-  job: WorkbenchJob;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  phase: WorkbenchRunCasePhase;
   run: WorkbenchRun;
   source: "evaluation" | "runs";
-  view: WorkbenchJobEvidenceView;
+  view: WorkbenchRunCaseEvidenceView;
 }) {
-  const views: Array<{ value: WorkbenchJobEvidenceView; label: string; icon: typeof ActivityIcon }> = [
+  const phases = [
+    caseResult.execute ? { value: "execute" as const, label: "Execute" } : null,
+    caseResult.grade ? { value: "grade" as const, label: "Grade" } : null,
+  ].filter((entry): entry is { value: WorkbenchRunCasePhase; label: string } => entry !== null);
+  if (phases.length <= 1) {
+    return null;
+  }
+  return (
+    <nav className="flex min-w-0 flex-wrap items-center gap-4 border-b border-border/70 text-sm" aria-label="Case result phases">
+      {phases.map((item) => {
+        const route = createRunCaseRoute({
+          caseResult,
+          evaluationId,
+          phase: item.value,
+          runId: run.id,
+          source,
+          view,
+        });
+        const active = item.value === phase;
+        return (
+          <a
+            aria-current={active ? "page" : undefined}
+            className={cn(
+              "inline-flex h-10 items-center border-b-2 px-0.5 font-medium text-muted-foreground no-underline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              active ? "border-primary text-foreground" : "border-transparent hover:text-foreground",
+            )}
+            href={hrefFor(route)}
+            key={item.value}
+            onClick={onRouteClick(route)}
+          >
+            {item.label}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
+function CaseEvidenceViewNav({
+  caseResult,
+  evaluationId,
+  hrefFor,
+  onRouteClick,
+  phase,
+  run,
+  source,
+  view,
+}: {
+  caseResult: WorkbenchRunEvidenceCaseResult;
+  evaluationId: string | null;
+  hrefFor: (route: WorkbenchRoute) => string;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  phase: WorkbenchRunCasePhase;
+  run: WorkbenchRun;
+  source: "evaluation" | "runs";
+  view: WorkbenchRunCaseEvidenceView;
+}) {
+  const views: Array<{ value: WorkbenchRunCaseEvidenceView; label: string; icon: typeof ActivityIcon }> = [
     { value: "trace", label: "Trace", icon: ActivityIcon },
     { value: "output", label: "Output", icon: ArchiveIcon },
   ];
   return (
-    <nav className="flex shrink-0 flex-wrap items-center gap-1 rounded-lg border border-border/70 bg-background p-1 text-sm" aria-label="Case result evidence">
+    <nav className="flex w-fit max-w-full shrink-0 flex-wrap items-center gap-1 rounded-lg border border-border/70 bg-background p-1 text-sm" aria-label="Case result evidence">
       {views.map((item) => {
         const route = createRunRoute({
           runId: run.id,
           source,
           evaluationId,
-          section: { kind: "job", jobId: job.id, view: item.value },
+          section: {
+            kind: "case",
+            caseId: caseResult.caseId,
+            agentHash: caseResult.agentHash,
+            skillName: caseResult.skillName,
+            skillBundleHash: caseResult.skillBundleHash,
+            versionId: caseResult.versionId,
+            sample: caseResult.sample,
+            phase,
+            view: item.value,
+          },
         });
         const active = item.value === view;
         const Icon = item.icon;
@@ -2350,9 +3015,8 @@ function AboutSidebar({
       <FactGrid>
         <FactItem title="Current" value={snapshot.status.currentVersionId ? versionNameFor(snapshot, snapshot.status.currentVersionId) : "none"} />
         <FactItem title="Published" value={publishedVersionId(snapshot) ? versionNameFor(snapshot, publishedVersionId(snapshot)) : "none"} />
-        <FactItem title="Evaluations" value={formatCount(snapshot.evals.length, "evaluation")} />
         <FactItem title="Cases" value={formatCount(casesCount, "case")} />
-        <FactItem title="Runs" value={formatCount(snapshot.runs.length, "run")} />
+        <FactItem title="Runs" value={formatCount(snapshot.status.runCount, "run")} />
         {hostContext?.ownerSlug ? <FactItem title="Owner" value={hostContext.ownerSlug} /> : null}
         {hostContext?.sourceVisibility ? <FactItem title="Visibility" value={hostContext.sourceVisibility} /> : null}
         {hostContext?.evidenceAccess ? <FactItem title="Access" value={hostContext.evidenceAccess === "full" ? "full evidence" : "source only"} /> : null}
@@ -2396,16 +3060,20 @@ function CaseOutputView({
 
 function JobEvidencePanel({
   apiBasePath,
+  description,
   jobId,
   jobStatus,
   refreshToken,
   runId,
+  title,
 }: {
   apiBasePath: string;
+  description?: string;
   jobId: string;
   jobStatus: WorkbenchJob["status"];
   refreshToken: string | null;
   runId: string;
+  title?: string;
 }) {
   const evidence = useJobEvidence({ apiBasePath, jobId, runId, refreshToken });
   const execution = evidence.detail?.executions.find((entry) => entry.jobIds.includes(jobId)) ?? null;
@@ -2416,38 +3084,43 @@ function JobEvidencePanel({
   useRouteLoadingSignal(evidence.loading && !execution);
 
   const isActiveJob = jobStatus === "queued" || jobStatus === "running";
+  const panelTitle = title ?? "Trace";
+  const panelDescription = description ?? "Execution timeline and recorded trace events for this case run.";
+  let content: ReactNode;
   if (!execution && isActiveJob) {
-    return (
+    content = (
       <p className="text-sm text-muted-foreground">
         Waiting for trace events. Run and job status update live; this panel refreshes while the job is active.
       </p>
     );
-  }
-  if (evidence.loading && !execution) {
-    return <p className="text-sm text-muted-foreground">Loading job evidence...</p>;
-  }
-  if (evidence.error) {
-    return <ProblemState icon={CircleAlertIcon} title="Couldn't load job evidence" message={evidence.error} align="start" />;
-  }
-  if (!execution) {
-    return <EmptyState icon={ActivityIcon} title="No execution evidence" message="No evidence is recorded for this job." size="sm" />;
-  }
-  if (timeline.groups.length === 0) {
-    return <EmptyState icon={ActivityIcon} title="No timeline evidence" message={isActiveJob ? "Waiting for live trace events." : "No trace events were recorded for this job."} size="sm" />;
+  } else if (evidence.loading && !execution) {
+    content = <p className="text-sm text-muted-foreground">Loading job evidence...</p>;
+  } else if (evidence.error) {
+    content = <ProblemState icon={CircleAlertIcon} title="Couldn't load job evidence" message={evidence.error} align="start" />;
+  } else if (!execution) {
+    content = <EmptyState icon={ActivityIcon} title="No execution evidence" message="No evidence is recorded for this job." size="sm" />;
+  } else if (timeline.groups.length === 0) {
+    content = <EmptyState icon={ActivityIcon} title="No timeline evidence" message={isActiveJob ? "Waiting for live trace events." : "No trace events were recorded for this job."} size="sm" />;
+  } else {
+    content = (
+      <>
+        <FactGrid>
+          <FactItem title="Execution status" value={execution.status} />
+          <FactItem title="Sessions" value={formatCount(execution.sessions.length, "session")} />
+          <FactItem title="Events" value={formatCount(execution.trace.events.length, "event")} />
+          <FactItem title="Spans" value={formatCount(execution.trace.spans.length, "span")} />
+        </FactGrid>
+        <ExecutionTraceTimeline executionTimeline={timeline} layout="content" />
+      </>
+    );
   }
   return (
-    <section className="grid min-w-0 gap-4" aria-label="Trace">
+    <section className="grid min-w-0 gap-4" aria-label={panelTitle}>
       <div className="grid min-w-0 gap-1">
-        <h3 className="text-base font-semibold">Trace</h3>
-        <p className="text-sm text-muted-foreground">Execution timeline and recorded trace events for this case run.</p>
+        <h3 className="text-base font-semibold">{panelTitle}</h3>
+        <p className="text-sm text-muted-foreground">{panelDescription}</p>
       </div>
-      <FactGrid>
-        <FactItem title="Execution status" value={execution.status} />
-        <FactItem title="Sessions" value={formatCount(execution.sessions.length, "session")} />
-        <FactItem title="Events" value={formatCount(execution.trace.events.length, "event")} />
-        <FactItem title="Spans" value={formatCount(execution.trace.spans.length, "span")} />
-      </FactGrid>
-      <ExecutionTraceTimeline executionTimeline={timeline} layout="content" />
+      {content}
     </section>
   );
 }
@@ -2560,7 +3233,13 @@ function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSna
     return [];
   }
   if (route.kind === "evaluation") {
-    return [{ label: route.view === "cases" ? "Cases" : "Results" }];
+    return [{
+      label: route.view === "cases"
+        ? "Cases"
+        : route.view === "source"
+          ? "Source"
+          : "Results",
+    }];
   }
   if (route.kind === "case") {
     return [
@@ -2640,8 +3319,7 @@ interface WorkbenchActiveWork {
 
 function activeWorkbenchWork(snapshot: WorkbenchInspectionSnapshot): WorkbenchActiveWork {
   const activeJobs = snapshot.jobs.filter((job) => job.status === "queued" || job.status === "running");
-  const activeJobRunIds = new Set(activeJobs.map((job) => job.runId));
-  const orphanRunningRuns = snapshot.runs.filter((run) => run.status === "running" && !activeJobRunIds.has(run.id));
+  const orphanRunningRuns = snapshot.runs.filter((run) => run.status === "running" && jobsForRun(run, activeJobs).length === 0);
   const running = activeJobs.filter((job) => job.status === "running").length + orphanRunningRuns.length;
   const queued = activeJobs.filter((job) => job.status === "queued").length;
   return { queued, running, hasActiveWork: queued > 0 || running > 0 };
@@ -2664,7 +3342,7 @@ function isRunActive(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): boolean 
   if (run.status === "queued" || run.status === "running") {
     return true;
   }
-  return jobs.some((job) => job.runId === run.id && (job.status === "queued" || job.status === "running"));
+  return jobsForRun(run, jobs).some((job) => job.status === "queued" || job.status === "running");
 }
 
 function isJobTerminal(job: WorkbenchJob): boolean {
@@ -2926,9 +3604,10 @@ function latestJob(jobs: readonly WorkbenchJob[]): WorkbenchJob | null {
 }
 
 function uniqueRunsForJobs(snapshot: WorkbenchInspectionSnapshot, jobs: readonly WorkbenchJob[]): WorkbenchRun[] {
+  const jobIds = new Set(jobs.map((job) => job.id));
   const runIds = new Set(jobs.map((job) => job.runId));
   return snapshot.runs
-    .filter((run) => runIds.has(run.id))
+    .filter((run) => runIds.has(run.id) || (run.jobIds ?? []).some((jobId) => jobIds.has(jobId)))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
 }
 
@@ -2985,6 +3664,10 @@ function runAgentDisplayName(snapshot: WorkbenchInspectionSnapshot, run: Workben
     return formatCount(resultAgents.length, "agent");
   }
   return snapshot.results?.agents.find((agent) => agent.id === run.agentHash)?.label ?? run.agentName;
+}
+
+function jobAgentDisplayName(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob): string {
+  return snapshot.results?.agents.find((agent) => agent.id === job.agentHash)?.label ?? job.agentName;
 }
 
 function runResultVersions(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): InspectionResults["versions"] {
@@ -3060,28 +3743,6 @@ function runSkillSource(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun
 
 function versionNameFor(snapshot: WorkbenchInspectionSnapshot, versionId: string | null | undefined): string {
   return versionId ? formatVersionDisplayName(versionId, snapshot.versions, comparisonLabelContext(snapshot)) : "none";
-}
-
-function currentVersion(snapshot: WorkbenchInspectionSnapshot): WorkbenchVersion | null {
-  return snapshot.status.currentVersionId
-    ? snapshot.versions.find((version) => version.id === snapshot.status.currentVersionId) ?? null
-    : snapshot.versions[0] ?? null;
-}
-
-function selectedFilesVersion(snapshot: WorkbenchInspectionSnapshot, versionId: string | null | undefined): WorkbenchVersion | null {
-  return versionId
-    ? snapshot.versions.find((version) => version.id === versionId) ?? currentVersion(snapshot)
-    : currentVersion(snapshot);
-}
-
-function orderedVersions(snapshot: WorkbenchInspectionSnapshot): WorkbenchVersion[] {
-  return [...snapshot.versions].sort((left, right) =>
-    right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id)
-  );
-}
-
-function publishedVersionId(snapshot: WorkbenchInspectionSnapshot): string | null {
-  return snapshot.publication?.currentVersionId ?? snapshot.refs["publication/current-version"] ?? null;
 }
 
 function WorkbenchLoadingIcon({ className, ...props }: SVGProps<SVGSVGElement>) {

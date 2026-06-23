@@ -6,6 +6,8 @@ export type Json =
   | Json[]
   | { [key: string]: Json };
 
+export * from "./run-evidence.js";
+
 export interface SurfaceSnapshotFile {
   path: string;
   kind?: "text" | "binary";
@@ -14,7 +16,7 @@ export interface SurfaceSnapshotFile {
   executable?: boolean;
 }
 
-const WORKBENCH_METADATA_DIRS = new Set([
+const WORKBENCH_RUNTIME_METADATA_DIRS = new Set([
   "objects",
   "refs",
   "sync",
@@ -24,9 +26,32 @@ const WORKBENCH_METADATA_DIRS = new Set([
   "locks",
 ]);
 
-const WORKBENCH_METADATA_FILES = new Set([
+const WORKBENCH_RUNTIME_METADATA_FILES = new Set([
   ".gitignore",
   "remotes.yaml",
+]);
+
+const WORKBENCH_AUTHORED_CONTROL_DIRS = new Set([
+  "cases",
+  "environment",
+]);
+
+const WORKBENCH_AUTHORED_CONTROL_FILES = new Set([
+  "eval.yaml",
+  "agents.yaml",
+  "versions.yaml",
+]);
+
+const WORKBENCH_PACKAGE_SOURCE_IGNORED_DIRS = new Set([
+  ".agents",
+  ".git",
+  ".workbench",
+  "node_modules",
+  "__pycache__",
+]);
+
+const WORKBENCH_PACKAGE_SOURCE_IGNORED_FILES = new Set([
+  ".DS_Store",
 ]);
 
 export function normalizeWorkbenchSourcePath(filePath: string): string {
@@ -57,15 +82,33 @@ export function normalizeWorkbenchSkillName(value: string): string {
     .slice(0, 80);
 }
 
-export function isWorkbenchLocalMetadataPath(filePath: string): boolean {
+export function isWorkbenchRuntimeMetadataPath(filePath: string): boolean {
   const parts = normalizeWorkbenchSourcePath(filePath).split("/");
   return parts[0] === ".workbench" && (
-    WORKBENCH_METADATA_DIRS.has(parts[1] ?? "") ||
-    WORKBENCH_METADATA_FILES.has(parts[1] ?? "")
+    WORKBENCH_RUNTIME_METADATA_DIRS.has(parts[1] ?? "") ||
+    WORKBENCH_RUNTIME_METADATA_FILES.has(parts[1] ?? "")
   );
 }
 
-export type WorkbenchInspectionFileOwnerKind = "version" | "trace" | "artifact" | "case";
+export function isWorkbenchAuthoredControlPath(filePath: string): boolean {
+  const parts = normalizeWorkbenchSourcePath(filePath).split("/");
+  return parts[0] === ".workbench" && (
+    WORKBENCH_AUTHORED_CONTROL_DIRS.has(parts[1] ?? "") ||
+    WORKBENCH_AUTHORED_CONTROL_FILES.has(parts[1] ?? "")
+  );
+}
+
+export function isWorkbenchPackageSourcePath(filePath: string): boolean {
+  const parts = normalizeWorkbenchSourcePath(filePath).split("/");
+  return !parts.some((part) => WORKBENCH_PACKAGE_SOURCE_IGNORED_DIRS.has(part)) &&
+    !WORKBENCH_PACKAGE_SOURCE_IGNORED_FILES.has(parts.at(-1) ?? "");
+}
+
+export function isWorkbenchLiveInspectableProjectPath(filePath: string): boolean {
+  return isWorkbenchPackageSourcePath(filePath) || isWorkbenchAuthoredControlPath(filePath);
+}
+
+export type WorkbenchInspectionFileOwnerKind = "version" | "trace" | "artifact" | "case" | "evaluation";
 
 const WORKBENCH_CASE_FILE_OWNER_SEPARATOR = ":";
 
@@ -84,6 +127,9 @@ export function workbenchInspectionFileOwnerKindFromRouteSegment(
   if (value === "cases") {
     return "case";
   }
+  if (value === "evaluation") {
+    return "evaluation";
+  }
   return null;
 }
 
@@ -98,6 +144,9 @@ export function workbenchInspectionFileOwnerRouteSegment(
   }
   if (kind === "artifact") {
     return "artifacts";
+  }
+  if (kind === "evaluation") {
+    return "evaluation";
   }
   return "cases";
 }
@@ -233,12 +282,49 @@ export interface WorkbenchEvalSnapshot {
   gradeAdapter: string;
 }
 
+export interface WorkbenchEvalCaseGradePlan {
+  adapter: string;
+  label: string;
+  summary: string;
+  sources: WorkbenchGradePlanSource[];
+  display: WorkbenchGradePlanDisplayBlock[];
+}
+
+export interface WorkbenchGradePlanSource {
+  path: string;
+  role: "global" | "case" | "derived";
+  note?: string;
+}
+
+export type WorkbenchGradePlanDisplayBlock =
+  | { kind: "text"; title?: string; text: string }
+  | { kind: "key_value"; title?: string; items: WorkbenchGradePlanKeyValue[] }
+  | { kind: "list"; title?: string; items: WorkbenchGradePlanListItem[] }
+  | { kind: "files"; title?: string; files: WorkbenchGradePlanFileRef[] };
+
+export interface WorkbenchGradePlanKeyValue {
+  label: string;
+  value: string;
+}
+
+export interface WorkbenchGradePlanListItem {
+  label: string;
+  description?: string;
+  meta?: string;
+}
+
+export interface WorkbenchGradePlanFileRef {
+  path: string;
+  role?: string;
+}
+
 export interface WorkbenchEvalCaseSnapshot {
   id: string;
   path: string;
   title?: string;
   description?: string;
   command?: string;
+  grade: WorkbenchEvalCaseGradePlan;
   files: SurfaceSnapshotFile[];
 }
 
@@ -584,6 +670,13 @@ export interface WorkbenchStatus {
   remoteCount: number;
   pendingSyncCount?: number;
   lastScore?: number;
+  environment?: WorkbenchEnvironmentStatus;
+}
+
+export interface WorkbenchEnvironmentStatus {
+  path: string;
+  state: "ready" | "missing" | "invalid";
+  message?: string;
 }
 
 export interface WorkbenchDefaultAgentSelection {
@@ -603,20 +696,31 @@ export interface WorkbenchDefaultAgentSelection {
   };
 }
 
-export interface WorkbenchRemoteSyncState {
+interface WorkbenchRemoteSyncStateBase {
   schema: "workbench.remote-sync-state.v1";
   remote: string;
   url: string;
-  status: "synced" | "error";
-  localHash?: string;
-  lastSyncedAt?: string;
   lastAttemptAt: string;
-  lastError?: {
+  pushed?: number;
+  pulled?: number;
+}
+
+export type WorkbenchRemoteSyncState = WorkbenchRemoteSyncedState | WorkbenchRemoteSyncErrorState;
+
+export interface WorkbenchRemoteSyncedState extends WorkbenchRemoteSyncStateBase {
+  status: "synced";
+  localHash: string;
+  lastSyncedAt: string;
+  lastError: null;
+}
+
+export interface WorkbenchRemoteSyncErrorState extends WorkbenchRemoteSyncStateBase {
+  status: "error";
+  lastSyncedAt?: string;
+  lastError: {
     code: string;
     message: string;
   } | null;
-  pushed?: number;
-  pulled?: number;
 }
 
 export interface WorkbenchStatusSnapshot {
@@ -631,9 +735,9 @@ export interface WorkbenchStatusSnapshot {
   };
   worktree: {
     latestVersionId?: string;
-    sourceState?: "committed" | "would_create";
-    wouldCreateVersionId?: string;
+    sourceState?: "clean" | "edited" | "no_snapshot";
   };
+  environment?: WorkbenchEnvironmentStatus;
   runs: {
     total: number;
     lastRunId?: string;
@@ -748,6 +852,7 @@ export interface WorkbenchInspectionSnapshot {
   skillSources: WorkbenchSkillSource[];
   skillBundles: WorkbenchSkillBundleSnapshot[];
   evals: WorkbenchEvalSnapshot[];
+  evaluationFiles?: SurfaceSnapshotFile[];
   agents: WorkbenchAgentSnapshot[];
   results?: WorkbenchResults;
   runs: WorkbenchRun[];
@@ -778,6 +883,13 @@ export type WorkbenchStateNotice =
       schema: "workbench.state.notice.v1";
       type: "reset";
       cursor: string;
+    }
+  | {
+      schema: "workbench.state.notice.v1";
+      type: "progress";
+      cursor: string;
+      runIds?: string[];
+      jobIds?: string[];
     }
   | {
       schema: "workbench.state.notice.v1";

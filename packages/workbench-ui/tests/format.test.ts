@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 
-import type { WorkbenchAgent } from "@workbench-ai/workbench-contract";
+import type {
+  WorkbenchAgent,
+  WorkbenchJob,
+  WorkbenchRun,
+} from "@workbench-ai/workbench-contract";
 
 import {
   agentConfigString,
@@ -16,6 +20,9 @@ import {
   formatScore,
   formatStatus,
   formatTimestamp,
+  jobsForRun,
+  runOwnsJob,
+  runScore,
   shortId,
 } from "../src/lib/format";
 
@@ -50,6 +57,28 @@ describe("format helpers", () => {
     expect(formatRunCost(null)).toBe("Not tested");
   });
 
+  test("treats run.jobIds as run-owned evidence", () => {
+    const reusedGradeJob = gradeJob({
+      id: "job_reused_grade",
+      runId: "run_original",
+      score: 0.82,
+    });
+    const unrelatedGradeJob = gradeJob({
+      id: "job_unrelated_grade",
+      runId: "run_unrelated",
+      score: 0.2,
+    });
+    const cachedRun = run({
+      id: "run_cached",
+      jobIds: [reusedGradeJob.id],
+    });
+
+    expect(runOwnsJob(cachedRun, reusedGradeJob)).toBe(true);
+    expect(jobsForRun(cachedRun, [reusedGradeJob, unrelatedGradeJob]).map((job) => job.id))
+      .toEqual([reusedGradeJob.id]);
+    expect(runScore(cachedRun, [reusedGradeJob, unrelatedGradeJob])).toBe(0.82);
+  });
+
   test("formatDurationMs scales from milliseconds to minutes", () => {
     expect(formatDurationMs(undefined)).toBe("n/a");
     expect(formatDurationMs(Number.NaN)).toBe("n/a");
@@ -64,6 +93,12 @@ describe("format helpers", () => {
     expect(formatTimestamp("")).toBe("n/a");
     expect(formatTimestamp("not-a-date")).toBe("not-a-date");
     expect(formatTimestamp("2026-06-06T00:10:00.000Z")).not.toBe("n/a");
+  });
+
+  test("formatTimestamp can format in the browser timezone instead of forcing UTC", () => {
+    const value = "2026-06-06T00:10:00.000Z";
+    expect(formatTimestamp(value, { locale: "en-US", timeZone: "UTC" })).toBe("Jun 6, 12:10 AM");
+    expect(formatTimestamp(value, { locale: "en-US", timeZone: "America/Los_Angeles" })).toBe("Jun 5, 5:10 PM");
   });
 
   test("formatStatus humanizes snake and kebab case", () => {
@@ -125,5 +160,43 @@ function agent(config: WorkbenchAgent["config"]): WorkbenchAgent {
     adapter: "command",
     model: "deterministic",
     config,
+  };
+}
+
+function run(overrides: Partial<WorkbenchRun> & { id: string }): WorkbenchRun {
+  return {
+    kind: "eval",
+    versionId: "v001",
+    skillName: "current",
+    skillBundleHash: "bundle",
+    evalHash: "eval",
+    agentName: "default",
+    agentHash: "agent",
+    status: "succeeded",
+    traceIds: [],
+    createdAt: "2026-06-06T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function gradeJob(overrides: Partial<WorkbenchJob> & { id: string; runId: string; score: number }): WorkbenchJob {
+  const { score, ...rest } = overrides;
+  return {
+    kind: "eval",
+    role: "grade",
+    versionId: "v001",
+    skillName: "current",
+    skillBundleHash: "bundle",
+    evalHash: "eval",
+    agentName: "default",
+    agentHash: "agent",
+    caseId: "case-001",
+    sample: 0,
+    status: "succeeded",
+    artifactIds: [],
+    traceIds: [],
+    createdAt: "2026-06-06T00:00:00.000Z",
+    result: { items: [{ kind: "score", score, value: score }] },
+    ...rest,
   };
 }

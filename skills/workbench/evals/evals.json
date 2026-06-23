@@ -5,14 +5,14 @@
   "submission_schema_version": 1,
   "suite_latency_expectation": {
     "minimum_significant_improvement_ratio": 0.2,
-    "notes": "Eval cases measure whether an agent uses Workbench as a skill management runtime with the hard-cut CLI and source vocabulary."
+    "notes": "Eval cases evaluate whether an agent uses Workbench as a skill management runtime with the hard-cut CLI and source vocabulary."
   },
   "evals": [
     {
       "id": "author-minimal-skill-eval",
       "title": "Author a minimal skill eval",
       "category": "skill_authoring",
-      "prompt": "Create a Workbench-managed skill for earnings prep, add a representative eval case, run the default eval loop, and explain how source versions are created.",
+      "prompt": "Create a Workbench-managed skill for earnings prep, add a representative eval case, run the default eval loop, and explain how package versions are created.",
       "expected_output": "The response uses the Workbench skill, creates SKILL.md, .workbench/eval.yaml, .workbench/agents.yaml, and at least one .workbench/cases/*/case.yaml file, runs or proposes workbench eval --agents default -n 1 after the case exists, and explains that Workbench versions are automatic.",
       "files": [],
       "required_skills": [
@@ -41,20 +41,14 @@
           "kind": "matches",
           "path": "tool_commands",
           "value": "(?:^|\\s)workbench\\s+eval\\b"
-        },
-        {
-          "text": "runs eval",
-          "kind": "matches",
-          "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+eval\\b"
         }
       ]
     },
     {
       "id": "agent-comparison-loop",
-      "title": "Compare eval runtime configurations",
+      "title": "Evaluate runtime configurations",
       "category": "agent_comparison",
-      "prompt": "Evaluate a skill across two runtime configurations and explain how to compare performance, cost, and latency.",
+      "prompt": "Evaluate a skill across two runtime configurations and explain how to review performance, cost, and latency.",
       "expected_output": "The response uses workbench agent add for named agents, workbench eval --agents all --samples 1, and workbench results --versions all --agents all. It explains that local/command agents run Docker-style tests and Codex/Claude agents require adapter auth for provider-backed execution.",
       "files": [],
       "required_skills": [
@@ -79,10 +73,10 @@
           "value": "(?:^|\\s)workbench\\s+eval\\b[^\\n]*--agents\\s+all\\b"
         },
         {
-          "text": "compares agents",
+          "text": "reviews agent results",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+compare\\b[^\\n]*--agents\\s+all\\b"
+          "value": "(?:^|\\s)workbench\\s+results\\b(?=[^\\n]*--versions\\s+all\\b)(?=[^\\n]*--agents\\s+all\\b)"
         }
       ]
     },
@@ -133,7 +127,7 @@
       "title": "Publish and install a Workbench skill",
       "category": "sharing",
       "prompt": "Share a Workbench-managed skill through Workbench Cloud and explain what gets published.",
-      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench clone OWNER/SKILL DIR. It explains that publish exposes an installable agent skill package for use and editable Workbench source for evaluation or improvement, while object sync stores versions, evidence, refs, traces, and artifacts.",
+      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench clone OWNER/SKILL DIR. It explains that publish exposes an installable Workbench agent skill package for use and editable Workbench source for evaluation or improvement, while object sync stores versions, evidence, refs, traces, and artifacts. It distinguishes this from external Agent Skill fallback installs, which are not Workbench-versioned and do not support clone, eval evidence, improve lineage, or Workbench Cloud visibility.",
       "files": [],
       "required_skills": [
         "workbench"

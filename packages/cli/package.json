@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench",
-  "version": "0.0.217",
+  "version": "0.0.220",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/workbench-ai/workbench.git",
@@ -30,6 +30,7 @@
     "@workbench-ai/workbench-contract": "workspace:*",
     "@workbench-ai/workbench-core": "workspace:*",
     "@workbench-ai/workbench-protocol": "workspace:*",
+    "skills": "1.5.12",
     "yaml": "^2.8.2"
   },
   "devDependencies": {

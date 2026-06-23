@@ -12,6 +12,7 @@ import {
   createNewWorkbenchSkillProject,
   listWorkbenchRemotes,
   publishWorkbenchVersion,
+  reconcileCurrentWorkbenchVersion,
   clearWorkbenchLocalHostedRunHandle,
   recordWorkbenchLocalHostedRunHandle,
   removeWorkbenchRemote,
@@ -34,6 +35,10 @@ async function makeTempRoot(prefix: string): Promise<string> {
 
 async function exists(filePath: string): Promise<boolean> {
   return fs.stat(filePath).then(() => true, () => false);
+}
+
+async function durableVersionFor(root: string) {
+  return reconcileCurrentWorkbenchVersion({ dir: root });
 }
 
 function syncStateFile(root: string, remoteName: string): string {
@@ -65,7 +70,7 @@ describe("remote state lifecycle", () => {
   test("local hosted run handles are read-only live state and never durable run objects", async () => {
     const root = await makeTempRoot("workbench-local-hosted-handle-");
     await createNewWorkbenchSkillProject({ dir: root });
-    const versionId = (await createWorkbenchInspectionSnapshot({ dir: root })).refs.current;
+    const versionId = (await durableVersionFor(root)).id;
     expect(versionId).toBeTruthy();
     const run: WorkbenchRun = {
       id: "run_cloud_handle",
@@ -194,6 +199,7 @@ describe("remote state lifecycle", () => {
     const root = await makeTempRoot("workbench-sync-local-changes-");
     const remote = await makeTempRoot("workbench-sync-local-changes-remote-");
     await createNewWorkbenchSkillProject({ dir: root });
+    await durableVersionFor(root);
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
     await syncWorkbenchRemote({ dir: root });
 
@@ -201,6 +207,7 @@ describe("remote state lifecycle", () => {
     expect(synced.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("up_to_date");
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nUnsynced local edit.\n");
+    await durableVersionFor(root);
 
     const changed = await workbenchStatusSnapshot({ dir: root });
     expect(changed.remotes.find((entry) => entry.name === "origin")?.sync.status).toBe("local_changes");
@@ -217,13 +224,13 @@ describe("remote state lifecycle", () => {
     const remote = await makeTempRoot("workbench-sync-switch-clean-remote-");
     await createNewWorkbenchSkillProject({ dir: root });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    const firstVersionId = (await durableVersionFor(root)).id;
     await syncWorkbenchRemote({ dir: root });
-    const firstVersionId = (await workbenchStatusSnapshot({ dir: root })).project.currentVersionId;
     expect(firstVersionId).toBeTruthy();
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nSecond synced version.\n");
+    const secondVersionId = (await durableVersionFor(root)).id;
     await syncWorkbenchRemote({ dir: root });
-    const secondVersionId = (await workbenchStatusSnapshot({ dir: root })).project.currentVersionId;
     expect(secondVersionId).toBeTruthy();
     expect(secondVersionId).not.toBe(firstVersionId);
 
@@ -355,28 +362,21 @@ describe("remote state lifecycle", () => {
     expect(snapshot.next).toBeNull();
   });
 
-  test("status snapshot reports edited source as a would-create version without stale dirty flags", async () => {
+  test("status snapshot reports live source state read-only", async () => {
     const root = await makeTempRoot("workbench-status-worktree-");
     await createNewWorkbenchSkillProject({ dir: root });
 
     const clean = await workbenchStatusSnapshot({ dir: root });
-    expect(clean.worktree).not.toHaveProperty("hasUnversionedChanges");
-    expect(clean.worktree.sourceState).toBe("committed");
+    expect(clean.worktree.sourceState).toBe("no_snapshot");
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual snapshot edit.\n");
     const dirty = await workbenchStatusSnapshot({ dir: root });
-    expect(dirty.worktree).not.toHaveProperty("hasUnversionedChanges");
-    expect(dirty.worktree.sourceState).toBe("would_create");
-    expect(typeof dirty.worktree.wouldCreateVersionId).toBe("string");
-    expect(dirty.worktree.latestVersionId).toBe(dirty.worktree.wouldCreateVersionId);
+    expect(dirty.worktree.sourceState).toBe("no_snapshot");
     expect(dirty.project.currentVersionId).toBe(clean.project.currentVersionId);
-    expect(dirty.project.currentVersionId).not.toBe(dirty.worktree.latestVersionId);
 
     const settled = await workbenchStatusSnapshot({ dir: root });
-    expect(settled.worktree).not.toHaveProperty("hasUnversionedChanges");
     expect(settled.project.currentVersionId).toBe(clean.project.currentVersionId);
-    expect(settled.worktree.sourceState).toBe("would_create");
-    expect(settled.worktree.wouldCreateVersionId).toBe(dirty.worktree.wouldCreateVersionId);
+    expect(settled.worktree.sourceState).toBe("no_snapshot");
   });
 
   test("invalid remote names are rejected with remote_invalid_name", async () => {
@@ -412,11 +412,7 @@ describe("remote state lifecycle", () => {
   test("cloud sync does not push lifecycle objects already owned by the remote", async () => {
     const root = await makeTempRoot("workbench-cloud-lifecycle-owner-");
     await createNewWorkbenchSkillProject({ dir: root });
-    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
-    if (!versionId) {
-      throw new Error("Expected initialized project to have a current version.");
-    }
+    const versionId = (await durableVersionFor(root)).id;
 
     const createdAt = "2026-06-12T23:00:00.000Z";
     const localCloudRun = fakeRun("run_cloud_owned", versionId, "queued", createdAt);
@@ -493,8 +489,7 @@ describe("remote state lifecycle", () => {
   test("cloud-owned lifecycle snapshots do not dirty sync status", async () => {
     const root = await makeTempRoot("workbench-cloud-lifecycle-clean-status-");
     await createNewWorkbenchSkillProject({ dir: root });
-    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+    const versionId = (await durableVersionFor(root)).id;
     expect(versionId).toBeTruthy();
 
     const createdAt = "2026-06-17T00:00:00.000Z";
@@ -565,8 +560,7 @@ describe("remote state lifecycle", () => {
   test("cloud sync preserves local run location when portable evidence round-trips through Cloud", async () => {
     const root = await makeTempRoot("workbench-cloud-preserve-local-run-");
     await createNewWorkbenchSkillProject({ dir: root });
-    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+    const versionId = (await durableVersionFor(root)).id;
     expect(versionId).toBeTruthy();
 
     const createdAt = "2026-06-19T00:00:00.000Z";
@@ -620,8 +614,7 @@ describe("remote state lifecycle", () => {
   test("retry trusts the stored operation plan when stale location metadata disagrees", async () => {
     const root = await makeTempRoot("workbench-cloud-retry-plan-location-");
     await createNewWorkbenchSkillProject({ dir: root });
-    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const versionId = snapshot.status.currentVersionId ?? snapshot.refs.current;
+    const versionId = (await durableVersionFor(root)).id;
     expect(versionId).toBeTruthy();
 
     const run: WorkbenchRun = {
@@ -639,6 +632,7 @@ describe("remote state lifecycle", () => {
         samples: 1,
       },
     };
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
 
     expect(resolveWorkbenchRunRetryPlan(snapshot, run)).toMatchObject({
       kind: "eval",

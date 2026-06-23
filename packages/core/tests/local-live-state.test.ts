@@ -31,7 +31,7 @@ afterEach(async () => {
 });
 
 describe("local live inspection state", () => {
-  test("execution-event-only object writes can invalidate read-only inspection", async () => {
+  test("execution-event-only object writes emit progress without invalidating snapshots", async () => {
     const root = await makeTempRoot("workbench-local-live-state-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const cursor = await readWorkbenchReadOnlyInspectionCursor({ dir: root });
@@ -61,6 +61,36 @@ describe("local live inspection state", () => {
       `${JSON.stringify(batch, null, 2)}\n`,
       "utf8",
     );
+    await advanceLocalWorkbenchLiveState(root, {
+      kind: "progress",
+      runId: batch.runId,
+      jobId: batch.jobId,
+    });
+
+    await expect(waitForWorkbenchReadOnlyInspectionNotice({
+      dir: root,
+      cursor,
+      timeoutMs: 1_000,
+    })).resolves.toMatchObject({
+      schema: "workbench.state.notice.v1",
+      type: "progress",
+      runIds: ["run_live"],
+      jobIds: ["job_live"],
+    });
+    await expect(createWorkbenchReadOnlyInspectionSnapshot({ dir: root }))
+      .resolves.toMatchObject({
+        executionEvents: [expect.objectContaining({
+          jobId: "job_live",
+          executionId: "exec_live",
+        })],
+      });
+  });
+
+  test("durable local state advances still emit changed", async () => {
+    const root = await makeTempRoot("workbench-local-live-state-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    const cursor = await readWorkbenchReadOnlyInspectionCursor({ dir: root });
+
     await advanceLocalWorkbenchLiveState(root);
 
     await expect(waitForWorkbenchReadOnlyInspectionNotice({
@@ -71,12 +101,5 @@ describe("local live inspection state", () => {
       schema: "workbench.state.notice.v1",
       type: "changed",
     });
-    await expect(createWorkbenchReadOnlyInspectionSnapshot({ dir: root }))
-      .resolves.toMatchObject({
-        executionEvents: [expect.objectContaining({
-          jobId: "job_live",
-          executionId: "exec_live",
-        })],
-      });
   });
 });

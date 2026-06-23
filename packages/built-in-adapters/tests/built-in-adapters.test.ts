@@ -652,6 +652,43 @@ describe("built-in Workbench adapters", () => {
     expect(result.value).toMatchObject({ score: 0.5, summary: "half credit", metrics: { score: 0.5, coverage: 0.75 } });
   });
 
+  test("runs tests engine scripts through their shebang interpreter", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-shebang-"));
+    const enginePrivate = path.join(root, "private", "engine");
+    await fs.mkdir(enginePrivate, { recursive: true });
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    await fs.writeFile(
+      path.join(enginePrivate, "test.sh"),
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "mkdir -p \"$OUTPUT_DIR\"",
+        "printf '{\"ok\":true,\"score\":1,\"summary\":\"bash shebang honored\"}\\n' > \"$OUTPUT_DIR/result.json\"",
+        "",
+      ].join("\n"),
+    );
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_tests_shebang",
+      operation: "grade.run",
+      invocation: {
+        use: "tests",
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    await executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "tests",
+      requestPath,
+    });
+
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
+    expect(result.ok).toBe(true);
+    expect(result.value).toMatchObject({ score: 1, summary: "bash shebang honored" });
+  });
+
   test("turns failed test result files into scored improvement evidence", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-tests-engine-failed-result-"));
     const enginePrivate = path.join(root, "private", "engine");

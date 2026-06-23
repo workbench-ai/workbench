@@ -3,10 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 
 import type {
+  WorkbenchEvalCaseSnapshot,
   WorkbenchInspectionSnapshot,
   WorkbenchInspectionSnapshotEnvelope,
 } from "@workbench-ai/workbench-contract";
-import { WorkbenchWorkspace } from "../src/app";
+import {
+  WorkbenchWorkspace,
+  workbenchRouteRequiresEvidence,
+  workbenchSnapshotNeedsEvidenceRefresh,
+} from "../src/app";
 import {
   buildWorkbenchLocationHref,
   createCaseRoute,
@@ -29,12 +34,18 @@ describe("hub-shaped Workbench UI", () => {
       .toEqual(createFilesRoute({ file: { filePath: "SKILL.md", directoryPath: null, previewMode: "raw" } }));
     expect(parseWorkbenchLocation(`${base}/files?version=v001&file=SKILL.md`, base))
       .toEqual(createFilesRoute({ file: { versionId: "v001", filePath: "SKILL.md" } }));
-    expect(parseWorkbenchLocation(`${base}/files?dir=.workbench`, base))
-      .toEqual(createFilesRoute({ file: { filePath: null, directoryPath: ".workbench", previewMode: "rendered" } }));
+    expect(parseWorkbenchLocation(`${base}/files?dir=references`, base))
+      .toEqual(createFilesRoute({ file: { filePath: null, directoryPath: "references", previewMode: "rendered" } }));
     expect(parseWorkbenchLocation(`${base}/evaluation`, base))
       .toEqual(createEvaluationRoute({ view: "results" }));
     expect(parseWorkbenchLocation(`${base}/evaluation/cases?evaluation=eval_hash`, base))
       .toEqual(createEvaluationRoute({ view: "cases", evaluationId: "eval_hash" }));
+    expect(parseWorkbenchLocation(`${base}/evaluation/source?evaluation=eval_hash&file=environment%2FDockerfile&view=raw`, base))
+      .toEqual(createEvaluationRoute({
+        view: "source",
+        evaluationId: "eval_hash",
+        file: { filePath: "environment/Dockerfile", previewMode: "raw" },
+      }));
     expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?evaluation=eval_hash`, base))
       .toEqual(createCaseRoute({ caseId: "case_001", evaluationId: "eval_hash" }));
     expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?evaluation=eval_hash&file=cases%2Fcase_001%2Fnotes.md&view=raw`, base))
@@ -47,20 +58,24 @@ describe("hub-shaped Workbench UI", () => {
       .toEqual(createCaseRoute({ caseId: "case_001", evaluationId: "eval_hash", section: "runs" }));
     expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?evaluation=eval_hash`, base))
       .toEqual(createRunRoute({ runId: "run_eval", source: "evaluation", evaluationId: "eval_hash" }));
-    expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?evaluation=eval_hash&section=job%3Ajob_001`, base))
+    expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?evaluation=eval_hash&case=case_001&agent=agent_hash&skill=current&bundle=skill_bundle_hash&version=v002&phase=execute&view=trace`, base))
       .toEqual(createRunRoute({
         runId: "run_eval",
         source: "evaluation",
         evaluationId: "eval_hash",
-        section: { kind: "job", jobId: "job_001", view: "trace" },
+        section: { kind: "case", caseId: "case_001", agentHash: "agent_hash", skillName: "current", skillBundleHash: "skill_bundle_hash", versionId: "v002", sample: 0, phase: "execute", view: "trace" },
       }));
+    expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?evaluation=eval_hash&case=case_001&agent=agent_hash&skill=current&bundle=skill_bundle_hash&version=v002&sample=2&phase=grade&view=output`, base))
+      .toEqual(createRunRoute({
+        runId: "run_eval",
+        source: "evaluation",
+        evaluationId: "eval_hash",
+        section: { kind: "case", caseId: "case_001", agentHash: "agent_hash", skillName: "current", skillBundleHash: "skill_bundle_hash", versionId: "v002", sample: 1, phase: "grade", view: "output" },
+      }));
+    expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?evaluation=eval_hash&case=case_001&agent=agent_hash&phase=execute&view=trace`, base))
+      .toEqual(createRunRoute({ runId: "run_eval", source: "evaluation", evaluationId: "eval_hash" }));
     expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?evaluation=eval_hash&section=job%3Ajob_001%3Aoutput`, base))
-      .toEqual(createRunRoute({
-        runId: "run_eval",
-        source: "evaluation",
-        evaluationId: "eval_hash",
-        section: { kind: "job", jobId: "job_001", view: "output" },
-      }));
+      .toEqual(createRunRoute({ runId: "run_eval", source: "evaluation", evaluationId: "eval_hash" }));
     expect(parseWorkbenchLocation(`${base}/runs`, base)).toEqual(createRunsRoute());
     expect(parseWorkbenchLocation(`${base}/runs/run_eval`, base))
       .toEqual(createRunRoute({ runId: "run_eval", source: "runs" }));
@@ -72,10 +87,15 @@ describe("hub-shaped Workbench UI", () => {
       file: { versionId: "v001", filePath: "SKILL.md" },
     }), base)).toBe(`${base}/files?version=v001&file=SKILL.md`);
     expect(buildWorkbenchLocationHref(createFilesRoute({
-      file: { filePath: null, directoryPath: ".workbench", previewMode: "rendered" },
-    }), base)).toBe(`${base}/files?dir=.workbench`);
+      file: { filePath: null, directoryPath: "references", previewMode: "rendered" },
+    }), base)).toBe(`${base}/files?dir=references`);
     expect(buildWorkbenchLocationHref(createEvaluationRoute({ view: "cases", evaluationId: "eval_hash" }), base))
       .toBe(`${base}/evaluation/cases?evaluation=eval_hash`);
+    expect(buildWorkbenchLocationHref(createEvaluationRoute({
+      view: "source",
+      evaluationId: "eval_hash",
+      file: { filePath: "environment/Dockerfile", previewMode: "raw", versionId: "ignored-for-evaluation" },
+    }), base)).toBe(`${base}/evaluation/source?evaluation=eval_hash&file=environment%2FDockerfile&view=raw`);
     expect(buildWorkbenchLocationHref(createCaseRoute({
       caseId: "case_001",
       evaluationId: "eval_hash",
@@ -97,13 +117,13 @@ describe("hub-shaped Workbench UI", () => {
     expect(buildWorkbenchLocationHref(createRunRoute({
       runId: "run_eval",
       source: "runs",
-      section: { kind: "job", jobId: "job_001", view: "trace" },
-    }), base)).toBe(`${base}/runs/run_eval?section=job%3Ajob_001`);
+      section: { kind: "case", caseId: "case_001", agentHash: "agent_hash", skillName: "current", skillBundleHash: "skill_bundle_hash", versionId: "v002", sample: 0, phase: "execute", view: "trace" },
+    }), base)).toBe(`${base}/runs/run_eval?case=case_001&agent=agent_hash&skill=current&bundle=skill_bundle_hash&version=v002&phase=execute&view=trace`);
     expect(buildWorkbenchLocationHref(createRunRoute({
       runId: "run_eval",
       source: "runs",
-      section: { kind: "job", jobId: "job_001", view: "output" },
-    }), base)).toBe(`${base}/runs/run_eval?section=job%3Ajob_001%3Aoutput`);
+      section: { kind: "case", caseId: "case_001", agentHash: "agent_hash", skillName: "current", skillBundleHash: "skill_bundle_hash", versionId: "v002", sample: 1, phase: "grade", view: "output" },
+    }), base)).toBe(`${base}/runs/run_eval?case=case_001&agent=agent_hash&skill=current&bundle=skill_bundle_hash&version=v002&sample=2&phase=grade&view=output`);
   });
 
   test("does not preserve old web route compatibility", () => {
@@ -114,6 +134,36 @@ describe("hub-shaped Workbench UI", () => {
     expect(parseWorkbenchLocation(`${base}/activity/runs/run_eval`, base).kind).toBe("not-found");
     expect(parseWorkbenchLocation(`${base}/jobs/job_001`, base).kind).toBe("not-found");
     expect(parseWorkbenchLocation(`${base}/skills/primary`, base).kind).toBe("not-found");
+  });
+
+  test("requires full evidence only for evidence routes with compact run data", () => {
+    const full = inspectionSnapshot();
+    const fullWithoutResults = { ...full };
+    delete fullWithoutResults.results;
+    const compact = {
+      ...fullWithoutResults,
+      runs: [],
+      jobs: [],
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+    expect(workbenchSnapshotNeedsEvidenceRefresh(full)).toBe(false);
+    expect(workbenchSnapshotNeedsEvidenceRefresh(compact)).toBe(true);
+    expect(workbenchSnapshotNeedsEvidenceRefresh({
+      ...compact,
+      status: { ...compact.status, runCount: 0 },
+    })).toBe(false);
+
+    expect(workbenchRouteRequiresEvidence(createFilesRoute())).toBe(false);
+    expect(workbenchRouteRequiresEvidence(createEvaluationRoute({ view: "source" }))).toBe(false);
+    expect(workbenchRouteRequiresEvidence(createEvaluationRoute({ view: "cases" }))).toBe(false);
+    expect(workbenchRouteRequiresEvidence(createEvaluationRoute({ view: "results" }))).toBe(true);
+    expect(workbenchRouteRequiresEvidence(createCaseRoute({ caseId: "case_001" }))).toBe(false);
+    expect(workbenchRouteRequiresEvidence(createCaseRoute({ caseId: "case_001", section: "runs" }))).toBe(true);
+    expect(workbenchRouteRequiresEvidence(createRunsRoute())).toBe(true);
+    expect(workbenchRouteRequiresEvidence(createRunRoute({ runId: "run_eval" }))).toBe(true);
   });
 
   test("renders Files as the default skill page", () => {
@@ -142,6 +192,8 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).toContain("data-testid=\"version-select\"");
     expect(html).toContain("Reads earnings documents.");
     expect(html).toContain("Use skill");
+    expect(html).not.toContain("Eval setup");
+    expect(html).not.toContain("1 evaluation");
     expect(html).not.toContain("Authored source for the current skill version.");
     expect(html).not.toContain("aria-current=\"true\"");
     expect(html).not.toContain("Repository overview.");
@@ -149,6 +201,23 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).not.toContain("Workbench views");
     expect(html).not.toContain("Compare</");
     expect(html).not.toContain("data-testid=\"workbench-detail-pane\"");
+  });
+
+  test("renders the canonical handle slug instead of the frontmatter name", () => {
+    const snapshot = inspectionSnapshot();
+    const html = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(snapshot),
+      routeBasePath: "/skills/acme/earnings-recap-live-1782117954",
+      hostContext: {
+        handle: "acme/earnings-recap-live-1782117954",
+        ownerSlug: "acme",
+        skillName: "earnings-recap-live-1782117954",
+      },
+    }));
+
+    expect(html).toContain(">acme</");
+    expect(html).toContain(">earnings-recap-live-1782117954</a>");
+    expect(html).not.toContain(">Earnings Skill</a>");
   });
 
   test("counts About cases from the latest authored evaluation", () => {
@@ -183,13 +252,13 @@ describe("hub-shaped Workbench UI", () => {
   test("does not auto-select a file when opening a folder", () => {
     const html = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
       initialEnvelope: inspectionEnvelope(inspectionSnapshot()),
-      initialRoute: createFilesRoute({ file: { directoryPath: ".workbench", filePath: null } }),
+      initialRoute: createFilesRoute({ file: { directoryPath: "references", filePath: null } }),
       routeBasePath: "/skills/alice/earnings",
     }));
 
     expect(html).toContain("root");
-    expect(html).toContain(".workbench");
-    expect(html).toContain("cases/");
+    expect(html).toContain("references");
+    expect(html).toContain("guide.md");
     expect(html).not.toContain("No file selected");
     expect(html).not.toContain("Select a source file from the repository list.");
     expect(html).not.toContain("Select a source file to preview.");
@@ -240,6 +309,7 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).not.toContain("$0.1234");
     expect(html).toContain("750ms");
     expect(html).toContain("1.5s");
+    expect(html).toContain("2/2");
     expect(html).toContain("1/1");
     expect(html).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash\"");
     expect(html).not.toContain("Skill version");
@@ -256,7 +326,9 @@ describe("hub-shaped Workbench UI", () => {
       routeBasePath: "/skills/alice/earnings",
     }));
     expect(listHtml).toContain("Case one");
-    expect(listHtml).toContain("npm test -- case-one");
+    expect(listHtml).toContain("Grading");
+    expect(listHtml).toContain("Rubric");
+    expect(listHtml).toContain("2 criteria");
     expect(listHtml).toContain("href=\"/skills/alice/earnings/evaluation/cases/case_001?evaluation=eval_hash\"");
 
     const definitionHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
@@ -265,6 +337,9 @@ describe("hub-shaped Workbench UI", () => {
       routeBasePath: "/skills/alice/earnings",
     }));
     expect(definitionHtml).toContain("Case one");
+    expect(definitionHtml).toContain("aria-label=\"Grading\"");
+    expect(definitionHtml).toContain("Uses supported facts.");
+    expect(definitionHtml).toContain("Covers the case-specific detail.");
     expect(definitionHtml).toContain("case.yaml");
     expect(definitionHtml).toContain("aria-label=\"Case files\"");
     expect(definitionHtml).toContain("aria-label=\"case.yaml preview\"");
@@ -291,6 +366,46 @@ describe("hub-shaped Workbench UI", () => {
     expect(runsHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash\"");
     expect(runsHtml).not.toContain("Case ID");
     expect(runsHtml).not.toContain(">Command</span>");
+  });
+
+  test("renders authored evaluation source files in the shared folder navigator", () => {
+    const html = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(inspectionSnapshot()),
+      initialRoute: createEvaluationRoute({
+        view: "source",
+        evaluationId: "eval_hash",
+      }),
+      routeBasePath: "/skills/alice/earnings",
+    }));
+
+    expect(html).toContain("aria-label=\"Evaluation source\"");
+    expect(html).toContain("eval.yaml");
+    expect(html).toContain("agents.yaml");
+    expect(html).toContain("environment/");
+    expect(html).toContain("cases/");
+    expect(html).toContain("1 file");
+    expect(html).toContain("aria-label=\"eval.yaml preview\"");
+    expect(html).toContain("application/yaml");
+    expect(html).toContain("rubric");
+    expect(html).not.toContain(">environment/Dockerfile</span>");
+    expect(html).not.toContain(">cases/case_001/case.yaml</span>");
+    expect(html).not.toContain("FROM workbench/workbench-node-22:envv_node_22");
+    expect(html).toContain("Raw");
+    expect(html).not.toContain("No evaluation source");
+
+    const environmentHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(inspectionSnapshot()),
+      initialRoute: createEvaluationRoute({
+        view: "source",
+        evaluationId: "eval_hash",
+        file: { directoryPath: "environment" },
+      }),
+      routeBasePath: "/skills/alice/earnings",
+    }));
+
+    expect(environmentHtml).toContain("Parent directory");
+    expect(environmentHtml).toContain(">Dockerfile</span>");
+    expect(environmentHtml).toContain("environment/Dockerfile");
   });
 
   test("renders Runs and full run detail pages", () => {
@@ -322,11 +437,23 @@ describe("hub-shaped Workbench UI", () => {
     }));
     expect(summaryHtml).toContain("Eval: earnings-prep v2 on Evaluation 1");
     expect(summaryHtml).toContain("aria-label=\"Run sections\"");
-    expect(summaryHtml).toContain("1 / 1 passed");
+    expect(summaryHtml).toContain("2 / 2 covered");
+    expect(summaryHtml).toContain("4 / 4 succeeded");
+    expect(summaryHtml).toContain("Agent results");
+    expect(summaryHtml).toContain(">Model</th>");
+    expect(summaryHtml).toContain(">Jobs</th>");
     expect(summaryHtml).toContain("Case results");
+    expect(summaryHtml).toContain(">Skill</th>");
+    expect(summaryHtml).toContain(">Agent</th>");
+    expect(summaryHtml).toContain(">Execute</th>");
+    expect(summaryHtml).toContain(">Grade</th>");
+    expect(summaryHtml).toContain("command / deterministic");
+    expect(summaryHtml).toContain("case_001 · earnings-prep v2 · command / deterministic");
+    expect(summaryHtml).not.toContain("case_001 execute");
+    expect(summaryHtml).not.toContain("case_001 grade");
     expect(summaryHtml).toContain("Timeline");
     expect(summaryHtml).toContain("Execution trace");
-    expect(summaryHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;section=job%3Ajob_001\"");
+    expect(summaryHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;case=case_001&amp;agent=agent_hash&amp;skill=current&amp;bundle=skill_bundle_hash&amp;version=v002&amp;phase=execute&amp;view=trace\"");
     expect(summaryHtml).not.toContain("Run commands");
     expect(summaryHtml).not.toContain("workbench show run_eval");
     expect(summaryHtml).not.toContain("workbench watch run_eval");
@@ -335,26 +462,89 @@ describe("hub-shaped Workbench UI", () => {
     expect(summaryHtml).not.toContain("<a class=\"font-medium text-primary no-underline hover:underline\"");
     expect(summaryHtml).not.toContain("data-testid=\"workbench-detail-pane\"");
 
-    const jobHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+    const executeTraceHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
       initialEnvelope: inspectionEnvelope(inspectionSnapshot()),
       initialRoute: createRunRoute({
         runId: "run_eval",
         source: "evaluation",
         evaluationId: "eval_hash",
-        section: { kind: "job", jobId: "job_001", view: "trace" },
+        section: { kind: "case", caseId: "case_001", agentHash: "agent_hash", skillName: "current", skillBundleHash: "skill_bundle_hash", versionId: "v002", sample: 0, phase: "execute", view: "trace" },
       }),
       routeBasePath: "/skills/alice/earnings",
     }));
-    expect(jobHtml).toContain("case_001");
-    expect(jobHtml).toContain("Trace");
-    expect(jobHtml).toContain("Output");
-    expect(jobHtml).toContain("Loading job evidence...");
-    expect(jobHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;section=job%3Ajob_001%3Aoutput\"");
-    expect(jobHtml).not.toContain("Captured files produced by this case run.");
-    expect(jobHtml).not.toContain("report.md");
-    expect(jobHtml).not.toContain("# Report");
-    expect(jobHtml).not.toContain("Run commands");
-    expect(jobHtml).not.toContain("workbench show run_eval");
+    expect(executeTraceHtml).toContain("case_001");
+    expect(executeTraceHtml).toContain("Case result");
+    expect(executeTraceHtml).not.toContain("Case result / grade");
+    expect(executeTraceHtml).toContain("Skill");
+    expect(executeTraceHtml).toContain("Agent");
+    expect(executeTraceHtml).toContain("Model");
+    expect(executeTraceHtml).toContain("Phase");
+    expect(executeTraceHtml).toContain("Case status");
+    expect(executeTraceHtml).toContain("Phase status");
+    expect(executeTraceHtml).toContain("Case score");
+    expect(executeTraceHtml).toContain("Phase score");
+    expect(executeTraceHtml).toContain("Case duration");
+    expect(executeTraceHtml).toContain("Phase duration");
+    expect(executeTraceHtml).toContain("command / deterministic");
+    expect(executeTraceHtml).toContain("Execute");
+    expect(executeTraceHtml).toContain("Grade");
+    expect(executeTraceHtml).toContain("Trace");
+    expect(executeTraceHtml).toContain("Output");
+    expect(executeTraceHtml).toContain("aria-label=\"Case result phases\"");
+    expect(executeTraceHtml).toContain("class=\"flex min-w-0 flex-wrap items-center gap-4 border-b border-border/70 text-sm\"");
+    expect(executeTraceHtml).toContain("class=\"flex min-w-0 justify-end\"");
+    expect(executeTraceHtml).toContain("aria-label=\"Case result evidence\"");
+    expect(executeTraceHtml).toContain("Execute trace");
+    expect(executeTraceHtml).not.toContain("Grade trace");
+    expect(executeTraceHtml).toContain("Skill run evidence for this case sample.");
+    expect(executeTraceHtml).not.toContain("Judgment evidence for this case sample.");
+    expect(executeTraceHtml).toContain("Loading job evidence...");
+    expect(executeTraceHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;case=case_001&amp;agent=agent_hash&amp;skill=current&amp;bundle=skill_bundle_hash&amp;version=v002&amp;phase=grade&amp;view=trace\"");
+    expect(executeTraceHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;case=case_001&amp;agent=agent_hash&amp;skill=current&amp;bundle=skill_bundle_hash&amp;version=v002&amp;phase=execute&amp;view=output\"");
+    expect(executeTraceHtml).not.toContain("Captured files produced by this case run.");
+    expect(executeTraceHtml).not.toContain("report.md");
+    expect(executeTraceHtml).not.toContain("# Report");
+    expect(executeTraceHtml).not.toContain("Run commands");
+    expect(executeTraceHtml).not.toContain("workbench show run_eval");
+    const caseResultHeadingIndex = executeTraceHtml.indexOf(">Case result</div>");
+    const phaseNavIndex = executeTraceHtml.indexOf("aria-label=\"Case result phases\"");
+    const factGridIndex = executeTraceHtml.indexOf(">Phase</div>");
+    const evidenceNavIndex = executeTraceHtml.indexOf("aria-label=\"Case result evidence\"");
+    const tracePanelIndex = executeTraceHtml.indexOf("Execute trace");
+    expect(caseResultHeadingIndex).toBeGreaterThan(-1);
+    expect(phaseNavIndex).toBeGreaterThan(caseResultHeadingIndex);
+    expect(evidenceNavIndex).toBeGreaterThan(factGridIndex);
+    expect(tracePanelIndex).toBeGreaterThan(evidenceNavIndex);
+
+    const gradeFailedSnapshot = inspectionSnapshot();
+    gradeFailedSnapshot.runs = gradeFailedSnapshot.runs.map((run) => run.id === "run_eval"
+      ? { ...run, status: "failed" as const }
+      : run);
+    gradeFailedSnapshot.jobs = gradeFailedSnapshot.jobs.map((job) => job.id === "job_001"
+      ? { ...job, status: "failed" as const, error: "Rubric mismatch.", durationMs: 3000 }
+      : job);
+    const executeWithFailedGradeHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(gradeFailedSnapshot),
+      initialRoute: createRunRoute({
+        runId: "run_eval",
+        source: "evaluation",
+        evaluationId: "eval_hash",
+        section: { kind: "case", caseId: "case_001", agentHash: "agent_hash", skillName: "current", skillBundleHash: "skill_bundle_hash", versionId: "v002", sample: 0, phase: "execute", view: "trace" },
+      }),
+      routeBasePath: "/skills/alice/earnings",
+    }));
+    const failedCaseStatusIndex = executeWithFailedGradeHtml.indexOf(">Case status</div>");
+    const succeededPhaseStatusIndex = executeWithFailedGradeHtml.indexOf(">Phase status</div>");
+    const failedStatusIndex = executeWithFailedGradeHtml.indexOf(">failed</", failedCaseStatusIndex);
+    const succeededStatusIndex = executeWithFailedGradeHtml.indexOf(">succeeded</", succeededPhaseStatusIndex);
+    expect(failedCaseStatusIndex).toBeGreaterThan(-1);
+    expect(succeededPhaseStatusIndex).toBeGreaterThan(failedCaseStatusIndex);
+    expect(failedStatusIndex).toBeGreaterThan(failedCaseStatusIndex);
+    expect(failedStatusIndex).toBeLessThan(succeededPhaseStatusIndex);
+    expect(succeededStatusIndex).toBeGreaterThan(succeededPhaseStatusIndex);
+    expect(executeWithFailedGradeHtml).toContain("Case error");
+    expect(executeWithFailedGradeHtml).toContain("Rubric mismatch.");
+    expect(executeWithFailedGradeHtml).not.toContain("Execute error");
 
     const outputHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
       initialEnvelope: inspectionEnvelope(inspectionSnapshot()),
@@ -362,19 +552,137 @@ describe("hub-shaped Workbench UI", () => {
         runId: "run_eval",
         source: "evaluation",
         evaluationId: "eval_hash",
-        section: { kind: "job", jobId: "job_001", view: "output" },
+        section: { kind: "case", caseId: "case_001", agentHash: "agent_hash", skillName: "current", skillBundleHash: "skill_bundle_hash", versionId: "v002", sample: 0, phase: "grade", view: "output" },
       }),
       routeBasePath: "/skills/alice/earnings",
     }));
     expect(outputHtml).toContain("case_001");
+    expect(outputHtml).toContain("Execute");
+    expect(outputHtml).toContain("Grade");
     expect(outputHtml).toContain("Trace");
     expect(outputHtml).toContain("Output");
     expect(outputHtml).toContain("Captured files produced by this case run.");
     expect(outputHtml).toContain("report.md");
-    expect(outputHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;section=job%3Ajob_001\"");
+    expect(outputHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_eval?evaluation=eval_hash&amp;case=case_001&amp;agent=agent_hash&amp;skill=current&amp;bundle=skill_bundle_hash&amp;version=v002&amp;phase=grade&amp;view=trace\"");
     expect(outputHtml).not.toContain("Loading job evidence...");
+    expect(outputHtml).not.toContain("Execute trace");
+    expect(outputHtml).not.toContain("Grade trace");
     expect(outputHtml).not.toContain("Timeline");
     expect(outputHtml).not.toContain("Run commands");
+  });
+
+  test("keeps multi-agent canceled case results distinguishable", () => {
+    const snapshot = inspectionSnapshot();
+    const baseJob = snapshot.jobs.find((job) => job.id === "job_001");
+    if (!baseJob || !snapshot.results) {
+      throw new Error("Expected run fixture evidence.");
+    }
+    const canceledCodex = {
+      ...baseJob,
+      id: "job_cancel_codex",
+      status: "canceled" as const,
+      score: undefined,
+      result: undefined,
+      error: "Dependency failed.",
+      artifactIds: [],
+      traceIds: [],
+    };
+    const canceledClaude = {
+      ...baseJob,
+      id: "job_cancel_claude",
+      agentName: "claude",
+      agentHash: "agent_claude",
+      status: "canceled" as const,
+      score: undefined,
+      result: undefined,
+      error: "Dependency failed.",
+      artifactIds: [],
+      traceIds: [],
+    };
+    const canceledSnapshot: WorkbenchInspectionSnapshot = {
+      ...snapshot,
+      results: {
+        ...snapshot.results,
+        agents: [
+          ...snapshot.results.agents,
+          {
+            id: "agent_claude",
+            name: "claude",
+            label: "claude / opus",
+            adapter: "claude",
+            model: "opus",
+          },
+        ],
+      },
+      runs: snapshot.runs.map((run) => run.id === "run_eval"
+        ? {
+          ...run,
+          status: "failed" as const,
+          jobIds: [canceledCodex.id, canceledClaude.id],
+          traceIds: [],
+          score: undefined,
+          costUsd: undefined,
+        }
+        : run),
+      jobs: [
+        ...snapshot.jobs.filter((job) => job.runId !== "run_eval"),
+        canceledCodex,
+        canceledClaude,
+      ],
+    };
+
+    const summaryHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(canceledSnapshot),
+      initialRoute: createRunRoute({ runId: "run_eval", source: "evaluation", evaluationId: "eval_hash" }),
+      routeBasePath: "/skills/alice/earnings",
+    }));
+
+    expect(summaryHtml).toContain("Case results");
+    expect(summaryHtml).toContain(">Agent</th>");
+    expect(summaryHtml).toContain("command / deterministic");
+    expect(summaryHtml).toContain("claude / opus");
+    expect(summaryHtml).toContain("canceled");
+  });
+
+  test("renders cached run envelopes over reused job evidence", () => {
+    const snapshot = inspectionSnapshot();
+    const reusedJob = snapshot.jobs.find((job) => job.id === "job_001");
+    const sourceRun = snapshot.runs.find((run) => run.id === "run_eval");
+    if (!reusedJob || !sourceRun) {
+      throw new Error("Expected run fixture evidence.");
+    }
+    Object.assign(reusedJob, {
+      role: "grade",
+      result: { items: [{ kind: "score", score: 0.92, value: 0.92 }] },
+    });
+    snapshot.runs.push({
+      ...sourceRun,
+      id: "run_cached",
+      jobIds: [reusedJob.id],
+      traceIds: [],
+      createdAt: "2026-06-06T00:14:00.000Z",
+      finishedAt: "2026-06-06T00:14:01.000Z",
+    });
+
+    const summaryHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(snapshot),
+      initialRoute: createRunRoute({ runId: "run_cached", source: "evaluation", evaluationId: "eval_hash" }),
+      routeBasePath: "/skills/alice/earnings",
+    }));
+
+    expect(summaryHtml).toContain("0.920");
+    expect(summaryHtml).toContain("1 / 1 covered");
+    expect(summaryHtml).toContain("1 / 1 succeeded");
+    expect(summaryHtml).toContain("Execution trace / 1 trace");
+    expect(summaryHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_cached?evaluation=eval_hash&amp;case=case_001&amp;agent=agent_hash&amp;skill=current&amp;bundle=skill_bundle_hash&amp;version=v002&amp;phase=grade&amp;view=trace\"");
+    expect(summaryHtml).not.toContain("No case results are recorded for this run.");
+
+    const caseRunsHtml = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(snapshot),
+      initialRoute: createCaseRoute({ caseId: "case_001", evaluationId: "eval_hash", section: "runs" }),
+      routeBasePath: "/skills/alice/earnings",
+    }));
+    expect(caseRunsHtml).toContain("href=\"/skills/alice/earnings/evaluation/runs/run_cached?evaluation=eval_hash\"");
   });
 
   test("summarizes active execution from queued and running jobs", () => {
@@ -454,6 +762,28 @@ function inspectionEnvelope(snapshot: WorkbenchInspectionSnapshot): WorkbenchIns
   };
 }
 
+function gradePlanFixture(
+  adapter: string,
+  summary: string,
+  items: Array<{ label: string; description: string; meta?: string }> = [],
+  casePath = "cases/case_001/case.yaml",
+): WorkbenchEvalCaseSnapshot["grade"] {
+  return {
+    adapter,
+    label: adapter === "rubric" ? "Rubric" : adapter,
+    summary,
+    sources: [
+      { path: "eval.yaml", role: "global" },
+      { path: casePath, role: "case" },
+    ],
+    display: [{
+      kind: "list",
+      title: "Criteria",
+      items,
+    }],
+  };
+}
+
 function inspectionSnapshot(): WorkbenchInspectionSnapshot {
   const versions = [{
     id: "v001",
@@ -476,10 +806,10 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
         content: "---\nname: Earnings Skill\ndescription: Reads earnings documents.\n---\n",
       },
       {
-        path: ".workbench/cases/case_001/case.yaml",
+        path: "references/guide.md",
         kind: "text" as const,
         encoding: "utf8" as const,
-        content: "id: case_001\ntitle: Case one\ncommand: npm test -- case-one\n",
+        content: "Use current filings and cite source documents.\n",
       },
     ],
   }];
@@ -552,6 +882,10 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
         path: "cases/case_001/case.yaml",
         title: "Case one",
         command: "npm test -- case-one",
+        grade: gradePlanFixture("rubric", "2 criteria", [
+          { label: "accuracy", description: "Uses supported facts.", meta: "global" },
+          { label: "case-detail", description: "Covers the case-specific detail.", meta: "case" },
+        ]),
         files: [{
           path: "cases/case_001/case.yaml",
           kind: "text",
@@ -562,6 +896,9 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
         id: "case_002",
         path: "cases/case_002/case.yaml",
         title: "Case two",
+        grade: gradePlanFixture("rubric", "1 criterion", [
+          { label: "accuracy", description: "Uses supported facts.", meta: "global" },
+        ], "cases/case_002/case.yaml"),
         files: [{
           path: "cases/case_002/case.yaml",
           kind: "text",
@@ -569,6 +906,27 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
           content: "id: case_002\ntitle: Case two\n",
         }],
       }],
+    }],
+    evaluationFiles: [{
+      path: "agents.yaml",
+      kind: "text",
+      encoding: "utf8",
+      content: "schema: workbench.agents.v1\ndefault: patcher\n",
+    }, {
+      path: "environment/Dockerfile",
+      kind: "text",
+      encoding: "utf8",
+      content: "FROM workbench/workbench-node-22:envv_node_22\n",
+    }, {
+      path: "eval.yaml",
+      kind: "text",
+      encoding: "utf8",
+      content: "version: 1\ngrade:\n  adapter: rubric\n",
+    }, {
+      path: "cases/case_001/case.yaml",
+      kind: "text",
+      encoding: "utf8",
+      content: "id: case_001\ntitle: Case one\ncommand: npm test -- case-one\n",
     }],
     agents,
     results: {
@@ -655,7 +1013,7 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       score: 0.92,
       latencyMs: 1500,
       costUsd: 0.1234,
-      jobIds: ["job_001"],
+      jobIds: ["job_execute_001", "job_001", "job_execute_002", "job_grade_002"],
       traceIds: ["trace_eval"],
       createdAt: "2026-06-06T00:10:00.000Z",
       finishedAt: "2026-06-06T00:11:00.000Z",
@@ -703,16 +1061,39 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       evalHash: "eval_hash",
       agentName: "patcher",
       agentHash: "agent_hash",
+      role: "grade",
       caseId: "case_001",
       sample: 0,
       status: "succeeded",
       score: 0.7,
+      result: { items: [{ kind: "score", score: 0.7, value: 0.7 }] },
       dockerImage: "node:22",
       artifactIds: [],
       traceIds: [],
       createdAt: "2026-06-06T00:08:00.000Z",
       startedAt: "2026-06-06T00:08:01.000Z",
       finishedAt: "2026-06-06T00:08:02.000Z",
+      durationMs: 1000,
+    }, {
+      id: "job_execute_001",
+      runId: "run_eval",
+      kind: "eval",
+      versionId: "v002",
+      skillName: "current",
+      skillBundleHash: "skill_bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "patcher",
+      agentHash: "agent_hash",
+      role: "execute",
+      caseId: "case_001",
+      sample: 0,
+      status: "succeeded",
+      dockerImage: "node:22",
+      artifactIds: [],
+      traceIds: [],
+      createdAt: "2026-06-06T00:10:00.000Z",
+      startedAt: "2026-06-06T00:10:01.000Z",
+      finishedAt: "2026-06-06T00:10:02.000Z",
       durationMs: 1000,
     }, {
       id: "job_001",
@@ -724,13 +1105,59 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
       evalHash: "eval_hash",
       agentName: "patcher",
       agentHash: "agent_hash",
+      role: "grade",
       caseId: "case_001",
       sample: 0,
       status: "succeeded",
       score: 0.92,
+      result: { items: [{ kind: "score", score: 0.92, value: 0.92 }] },
       dockerImage: "node:22",
       artifactIds: ["artifact_001"],
       traceIds: ["trace_eval"],
+      createdAt: "2026-06-06T00:10:00.000Z",
+      startedAt: "2026-06-06T00:10:01.000Z",
+      finishedAt: "2026-06-06T00:10:02.000Z",
+      durationMs: 1000,
+    }, {
+      id: "job_execute_002",
+      runId: "run_eval",
+      kind: "eval",
+      versionId: "v002",
+      skillName: "current",
+      skillBundleHash: "skill_bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "patcher",
+      agentHash: "agent_hash",
+      role: "execute",
+      caseId: "case_002",
+      sample: 0,
+      status: "succeeded",
+      dockerImage: "node:22",
+      artifactIds: [],
+      traceIds: [],
+      createdAt: "2026-06-06T00:10:00.000Z",
+      startedAt: "2026-06-06T00:10:01.000Z",
+      finishedAt: "2026-06-06T00:10:02.000Z",
+      durationMs: 1000,
+    }, {
+      id: "job_grade_002",
+      runId: "run_eval",
+      kind: "eval",
+      versionId: "v002",
+      skillName: "current",
+      skillBundleHash: "skill_bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "patcher",
+      agentHash: "agent_hash",
+      role: "grade",
+      caseId: "case_002",
+      sample: 0,
+      status: "succeeded",
+      score: 0.92,
+      result: { items: [{ kind: "score", score: 0.92, value: 0.92 }] },
+      dockerImage: "node:22",
+      artifactIds: [],
+      traceIds: [],
       createdAt: "2026-06-06T00:10:00.000Z",
       startedAt: "2026-06-06T00:10:01.000Z",
       finishedAt: "2026-06-06T00:10:02.000Z",
@@ -770,7 +1197,7 @@ function inspectionSnapshot(): WorkbenchInspectionSnapshot {
     }],
     remotes: [{
       name: "origin",
-      url: "https://v2.workbench.ai/skills/acme/skill",
+      url: "https://workbench.ai/skills/acme/skill",
       kind: "workbench-cloud",
     }],
     refs: {

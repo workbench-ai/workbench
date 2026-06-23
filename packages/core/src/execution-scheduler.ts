@@ -223,7 +223,7 @@ export async function runWorkbenchExecutionDag(
       status: "cancelled",
       updatedAt: finishedAt,
       finishedAt,
-      error: reason ?? `Dependency ${dependencyStatus}.`,
+      error: reason ?? `Dependency ${formatDependencyStatus(dependencyStatus)}.`,
     };
     cancelledJobCount += 1;
     terminal.set(job.id, cancelled);
@@ -301,6 +301,10 @@ export async function runWorkbenchExecutionDag(
       clearInterval(timer);
     };
   }
+}
+
+function formatDependencyStatus(status: "failed" | "cancelled"): string {
+  return status === "cancelled" ? "canceled" : status;
 }
 
 async function runJobHook(

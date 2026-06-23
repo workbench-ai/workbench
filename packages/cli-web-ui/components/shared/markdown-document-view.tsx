@@ -1,4 +1,4 @@
-import { Streamdown } from "streamdown";
+import { Streamdown, type Components, type LinkSafetyConfig } from "streamdown";
 import { type SVGProps, useMemo } from "react";
 
 import { parseMarkdownDocument } from "../../lib/markdown-document";
@@ -9,12 +9,18 @@ import { EmptyState } from "./empty-state";
 export interface MarkdownDocumentViewProps {
   content: string;
   className?: string;
+  components?: Components;
+  linkSafety?: LinkSafetyConfig;
   testId?: string;
 }
+
+const defaultLinkSafety: LinkSafetyConfig = { enabled: true };
 
 export function MarkdownDocumentView({
   content,
   className,
+  components,
+  linkSafety = defaultLinkSafety,
   testId,
 }: MarkdownDocumentViewProps) {
   const document = useMemo(() => parseMarkdownDocument(content), [content]);
@@ -41,9 +47,10 @@ export function MarkdownDocumentView({
           <Streamdown
             animated={false}
             className="text-sm leading-7"
+            components={components}
             controls={false}
             isAnimating={false}
-            linkSafety={{ enabled: true }}
+            linkSafety={linkSafety}
             mode="static"
           >
             {trimmedBody}

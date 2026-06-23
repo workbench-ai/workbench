@@ -15,7 +15,6 @@ import {
   resultsWorkbench,
   createWorkbenchExecutionCapability,
   createWorkbenchInspectionSnapshotFromState,
-  createWorkbenchEvalSnapshotFromVersionFiles,
   createWorkbenchSandboxAllocation,
   createWorkbenchSkillEvalRuntimeInput,
   createWorkbenchSkillImproveRuntimeInput,
@@ -42,10 +41,12 @@ import {
   previewWorkbenchImprove,
   recordWorkbenchCloudRunSnapshot,
   readWorkbenchSkillTraceResultsCostUsd,
+  readWorkbenchSkillTraceResultsRunnerCostUsd,
   requiredWorkbenchAdapterAuthTargetsForRuntimeInput,
   listWorkbenchVersions,
   previewWorkbenchEval,
   publishWorkbenchVersion,
+  reconcileCurrentWorkbenchVersion,
   removeWorkbenchAgent,
   setDefaultWorkbenchAgent,
   showWorkbenchRef,
@@ -72,6 +73,7 @@ import {
 const hasDocker = spawnSync("docker", ["info"], { encoding: "utf8" }).status === 0;
 const dockerTest = hasDocker ? test : test.skip;
 const tempRoots: string[] = [];
+const TEST_ENVIRONMENT_DOCKERFILE = "FROM workbench/workbench-node-22:envv_node_22\n";
 
 async function makeTempRoot(prefix: string): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -83,6 +85,10 @@ async function exists(filePath: string): Promise<boolean> {
   return fs.stat(filePath).then(() => true, () => false);
 }
 
+async function durableVersionFor(root: string) {
+  return reconcileCurrentWorkbenchVersion({ dir: root });
+}
+
 async function writeWorkbenchRef(root: string, name: string, value: string): Promise<void> {
   const refPath = path.join(root, ".workbench", "refs", ...name.split("/"));
   await fs.mkdir(path.dirname(refPath), { recursive: true });
@@ -91,11 +97,7 @@ async function writeWorkbenchRef(root: string, name: string, value: string): Pro
 
 function publicationRefNames(refs: Record<string, unknown>): string[] {
   return Object.keys(refs)
-    .filter((name) =>
-      name === "published" ||
-      name.startsWith("releases/") ||
-      name.startsWith("publication/")
-    )
+    .filter((name) => name.startsWith("publication/"))
     .sort();
 }
 
@@ -240,7 +242,7 @@ describe("skill-first Workbench runtime", () => {
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     expect(failingRun).toMatchObject({ agentName: "default", status: "succeeded" });
     expect(snapshot.runs.some((run) => run.kind === "improve")).toBe(false);
-    expect(snapshot.status.currentVersionId).toBe(failingRun?.versionId);
+    expect(snapshot.refs.current).toBe(failingRun?.versionId);
   }, 60_000);
 
   dockerTest("preserves command-provided Workbench result payloads in sandbox evals", async () => {
@@ -415,7 +417,7 @@ describe("skill-first Workbench runtime", () => {
           : null;
       }, 10_000);
       observed = true;
-      expect(observedState.run.jobIds).toHaveLength(1);
+      expect(observedState.run.jobIds).toHaveLength(2);
       expect(observedState.run.operationPlan).toMatchObject({
         kind: "eval",
         variant: "local",
@@ -425,7 +427,8 @@ describe("skill-first Workbench runtime", () => {
         agents: ["slow-command"],
         samples: 1,
       });
-      expect(observedState.jobs[0]?.status).toMatch(/queued|running/u);
+      expect(observedState.jobs.map((job) => job.role).sort()).toEqual(["execute", "grade"]);
+      expect(observedState.jobs.some((job) => job.status === "queued" || job.status === "running")).toBe(true);
       expect(observedState.snapshot.status.runCount).toBeGreaterThan(0);
     } finally {
       if (!observed) {
@@ -570,10 +573,14 @@ describe("skill-first Workbench runtime", () => {
 
     expect(executeJob?.status).toBe("succeeded");
     expect(firstGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
-    expect(reusedGradeRun?.id).toBe(gradeRun?.id);
+    expect(reusedGradeRun?.id).not.toBe(gradeRun?.id);
+    expect(reusedGradeRun?.jobIds?.sort()).toEqual([executeJob!.id, firstGradeJob!.id].sort());
     const splitCachePreview = await previewWorkbenchEval({ dir: root });
     expect(splitCachePreview.cachedRunIds.sort()).toEqual([executeRun!.id, gradeRun!.id].sort());
     expect(splitCachePreview.cachedJobIds).toEqual(expect.arrayContaining([executeJob!.id, firstGradeJob!.id]));
+    const hostedCachePreview = await previewWorkbenchEval({ dir: root, cloud: true });
+    expect(hostedCachePreview.cachedRunIds).toEqual([]);
+    expect(hostedCachePreview.cachedJobIds).toEqual([]);
     const runCachePreview = await previewWorkbenchEval({ dir: root, kind: "run" });
     expect(runCachePreview.cachedRunIds).toEqual([executeRun!.id]);
     expect(runCachePreview.cachedJobIds).toEqual([executeJob!.id]);
@@ -584,16 +591,20 @@ describe("skill-first Workbench runtime", () => {
     expect(reusedExecuteSnapshot.jobs.filter((job) => job.role === "execute")).toHaveLength(1);
 
     await fs.appendFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
-      "  - Added rubric criterion after inspecting the existing output.",
+      "      - id: inspected-output",
+      "        description: Added rubric criterion after inspecting the existing output.",
       "",
     ].join("\n"));
     const [rubricRegradeRun] = await gradeWorkbenchSkill({ dir: root });
+    const rubricSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const rubricGradeJob = rubricSnapshot.jobs.find((job) => job.runId === rubricRegradeRun?.id && job.role === "grade");
+    const [reusedRubricRegradeRun] = await gradeWorkbenchSkill({ dir: root });
     const [forcedRegradeRun] = await gradeWorkbenchSkill({ dir: root, rerun: true });
     const regradeSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const rubricGradeJob = regradeSnapshot.jobs.find((job) => job.runId === rubricRegradeRun?.id && job.role === "grade");
     const forcedGradeJob = regradeSnapshot.jobs.find((job) => job.runId === forcedRegradeRun?.id && job.role === "grade");
 
     expect(rubricRegradeRun?.id).not.toBe(gradeRun?.id);
+    expect(reusedRubricRegradeRun?.jobIds?.sort()).toEqual([executeJob!.id, rubricGradeJob!.id].sort());
     expect(forcedRegradeRun?.id).not.toBe(rubricRegradeRun?.id);
     expect(rubricGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
     expect(forcedGradeJob?.dependencies?.[0]?.jobId).toBe(executeJob?.id);
@@ -602,11 +613,14 @@ describe("skill-first Workbench runtime", () => {
       "version: 1",
       "id: case-001",
       "prompt: A changed prompt must require a fresh execution.",
-      "rubric:",
-      "  - Captures workflow-specific success evidence.",
+      "grade:",
+      "  with:",
+      "    criteria:",
+      "      - id: success",
+      "        description: Captures workflow-specific success evidence.",
       "",
     ].join("\n"));
-    await expect(gradeWorkbenchSkill({ dir: root, rerun: true })).rejects.toThrow(/No ungraded execution jobs/u);
+    await expect(gradeWorkbenchSkill({ dir: root, rerun: true })).rejects.toThrow(/No execution jobs/u);
   }, 60_000);
 
   dockerTest("eval grades reusable execution evidence after rubric-only edits", async () => {
@@ -620,7 +634,8 @@ describe("skill-first Workbench runtime", () => {
     expect(executeJob?.status).toBe("succeeded");
 
     await fs.appendFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
-      "  - Added rubric criterion after inspecting the existing output.",
+      "      - id: inspected-output",
+      "        description: Added rubric criterion after inspecting the existing output.",
       "",
     ].join("\n"));
     const [evalRun] = await evalWorkbenchSkill({ dir: root });
@@ -640,6 +655,10 @@ describe("skill-first Workbench runtime", () => {
       runId: evalRun?.id,
       score: 1,
     });
+    expect(evalRun?.versionId).toBe(executeRun?.versionId);
+    const results = await resultsWorkbench({ dir: root });
+    expect(results.evaluations.map((evaluation) => evaluation.id)).toEqual([evalRun?.evalHash]);
+    expect(results.versions.map((version) => version.projectVersionId ?? version.id)).toEqual([executeRun?.versionId]);
   }, 60_000);
 
   dockerTest("grade reuses failed terminal grade evidence until rerun", async () => {
@@ -660,14 +679,50 @@ describe("skill-first Workbench runtime", () => {
       "",
     ].join("\n"));
 
-    await evalWorkbenchSkill({ dir: root, kind: "run" });
+    const [executeRun] = await evalWorkbenchSkill({ dir: root, kind: "run", rerun: true });
     const [failedGradeRun] = await gradeWorkbenchSkill({ dir: root });
     const [reusedFailedGradeRun] = await gradeWorkbenchSkill({ dir: root });
     const [rerunGradeRun] = await gradeWorkbenchSkill({ dir: root, rerun: true });
 
+    expect(executeRun?.operationPlan?.rerun).toBe(true);
     expect(failedGradeRun?.status).toBe("failed");
-    expect(reusedFailedGradeRun?.id).toBe(failedGradeRun?.id);
+    expect(reusedFailedGradeRun?.id).not.toBe(failedGradeRun?.id);
+    expect(reusedFailedGradeRun?.jobIds?.sort()).toEqual(failedGradeRun?.jobIds?.sort());
     expect(rerunGradeRun?.id).not.toBe(failedGradeRun?.id);
+    expect(rerunGradeRun?.operationPlan?.rerun).toBe(true);
+  }, 60_000);
+
+  dockerTest("grade rerun grades only the latest selected execute matrix", async () => {
+    const root = await makeTempRoot("workbench-grade-rerun-current-matrix-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await writePassingCaseTest(root);
+
+    const [firstExecuteRun] = await evalWorkbenchSkill({ dir: root, kind: "run", rerun: true });
+    const firstSnapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    const firstExecuteJob = firstSnapshot.jobs.find((job) =>
+      job.runId === firstExecuteRun?.id && job.role === "execute"
+    );
+    expect(firstExecuteJob?.status).toBe("succeeded");
+
+    const [firstGradeRun] = await gradeWorkbenchSkill({ dir: root, rerun: true });
+    expect(firstGradeRun?.status).toBe("succeeded");
+
+    const [secondExecuteRun] = await evalWorkbenchSkill({ dir: root, kind: "run", rerun: true });
+    const [secondGradeRun] = await gradeWorkbenchSkill({ dir: root, rerun: true });
+    const after = await createWorkbenchInspectionSnapshot({ dir: root });
+    const secondExecuteJob = after.jobs.find((job) =>
+      job.runId === secondExecuteRun?.id && job.role === "execute"
+    );
+    const secondGradeJobs = after.jobs.filter((job) =>
+      job.runId === secondGradeRun?.id && job.role === "grade"
+    );
+
+    expect(secondExecuteJob?.status).toBe("succeeded");
+    expect(secondGradeRun?.status).toBe("succeeded");
+    expect(secondGradeJobs).toHaveLength(1);
+    expect(secondGradeJobs[0]?.dependencies?.map((dependency) => dependency.jobId)).toContain(secondExecuteJob?.id);
+    expect(secondGradeJobs[0]?.dependencies?.map((dependency) => dependency.jobId)).not.toContain(firstExecuteJob?.id);
+    expect(createWorkbenchRunSnapshotForRun(secondGradeRun!, after.jobs).measurements).toHaveLength(1);
   }, 60_000);
 
   dockerTest("bare compare uses the current version and manifest default agent", async () => {
@@ -798,8 +853,8 @@ describe("skill-first Workbench runtime", () => {
       quality: 0.8,
       samples: 5,
     });
-    if (fiveSampleRun?.latencyMs !== undefined) {
-      expect(cell?.latencyMs).toBe(Math.round(fiveSampleRun.latencyMs / 5));
+    if (fiveSampleRun?.latencyMs !== undefined && cell?.latencyMs !== undefined) {
+      expect(cell.latencyMs).toBeLessThanOrEqual(Math.round(fiveSampleRun.latencyMs / 5));
     }
   }, 60_000);
 
@@ -1047,8 +1102,7 @@ describe("skill-first Workbench runtime", () => {
     }
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nCurrent source edit without an eval run.\n");
-    const status = await workbenchStatus({ dir: root });
-    const committedCurrentVersionId = status.currentVersionId;
+    const committedCurrentVersionId = (await durableVersionFor(root)).id;
     const comparison = await resultsWorkbench({ dir: root, projectVersions: `${initialVersionId}..current` });
     if (!committedCurrentVersionId || committedCurrentVersionId === initialVersionId) {
       throw new Error("Expected status to commit a second selected version.");
@@ -1069,7 +1123,7 @@ describe("skill-first Workbench runtime", () => {
     expect(currentCell?.status).toBeUndefined();
   }, 60_000);
 
-  dockerTest("runs explicit version evals from the selected version source snapshot", async () => {
+  dockerTest("runs explicit version evals from the selected package version", async () => {
     const root = await makeTempRoot("workbench-selected-version-eval-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await writePassingCaseTest(root);
@@ -1097,12 +1151,13 @@ describe("skill-first Workbench runtime", () => {
       ));
     expect(dirtySelectedRuns[0]).toMatchObject({ versionId: initial.id, status: "succeeded" });
     expect(uncommittedDirtyVersion).toBeUndefined();
-    await workbenchStatus({ dir: root });
-    const dirtyCurrentVersion = (await listWorkbenchVersions({ dir: root }))
+    const dirtyCurrentVersion = await durableVersionFor(root);
+    expect((await listWorkbenchVersions({ dir: root })).map((version) => version.id)).toContain(dirtyCurrentVersion.id);
+    const dirtyCurrentSourceVersion = (await listWorkbenchVersions({ dir: root }))
       .find((version) => version.files.some((file) =>
         file.path === "SKILL.md" && file.content.includes("Dirty edit before explicit-version eval.")
       ));
-    expect(dirtyCurrentVersion?.files.find((file) => file.path === "SKILL.md")?.content).toContain("Dirty edit before explicit-version eval.");
+    expect(dirtyCurrentSourceVersion?.files.find((file) => file.path === "SKILL.md")?.content).toContain("Dirty edit before explicit-version eval.");
   }, 60_000);
 
   dockerTest("does not reuse eval runs when the same-name agent hash differs", async () => {
@@ -1124,7 +1179,7 @@ describe("skill-first Workbench runtime", () => {
   test("fails on corrupt Workbench objects instead of starting from empty history", async () => {
     const root = await makeTempRoot("workbench-corrupt-state-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
-    const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
+    const initial = await durableVersionFor(root);
     const versionPath = path.join(root, ".workbench", "objects", "version", `${initial.id}.json`);
     const validVersion = await fs.readFile(versionPath, "utf8");
 
@@ -1158,33 +1213,63 @@ describe("skill-first Workbench runtime", () => {
     await expect(workbenchStatus({ dir: root })).rejects.toThrow(/schema workbench\.remotes\.v1/u);
   });
 
-  test("show and files reconcile manual edits before resolving current", async () => {
+  test("show and files read live current source without reconciling", async () => {
     const root = await makeTempRoot("workbench-show-files-current-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     const initial = await workbenchStatus({ dir: root });
-    expect(initial.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
+    expect(initial.currentVersionId).toBeUndefined();
+    expect(initial.versionCount).toBe(0);
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual command-boundary edit.\n");
 
-    const shown = await showWorkbenchRef("current:SKILL.md", { dir: root }) as { path?: string; content?: string };
+    const shown = await showWorkbenchRef("SKILL.md", { dir: root }) as { path?: string; content?: string };
+    const evalShown = await showWorkbenchRef(".workbench/eval.yaml", { dir: root }) as { path?: string; content?: string };
+    const environmentShown = await showWorkbenchRef(".workbench/environment/Dockerfile", { dir: root }) as { path?: string; content?: string };
     const files = await filesForWorkbenchRef("current", { dir: root });
     const status = await workbenchStatus({ dir: root });
 
-    expect(status.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
-    expect(status.currentVersionId).not.toBe(initial.currentVersionId);
+    expect(status.currentVersionId).toBeUndefined();
+    expect(status.versionCount).toBe(0);
     expect(shown.path).toBe("SKILL.md");
     expect(shown.content).toContain("Manual command-boundary edit.");
+    expect(evalShown.path).toBe(".workbench/eval.yaml");
+    expect(evalShown.content).toContain("version: 1");
+    expect(environmentShown.path).toBe(".workbench/environment/Dockerfile");
+    expect(environmentShown.content).toContain("FROM workbench/workbench-node-22:envv_node_22");
+    expect(environmentShown.content).toContain("ca-certificates");
     expect(files.find((file) => file.path === "SKILL.md")?.content).toContain("Manual command-boundary edit.");
+    await expect(showWorkbenchRef(".workbench/objects/not-inspectable.json", { dir: root })).rejects.toMatchObject({
+      code: "runtime_metadata_not_inspectable",
+    });
+  });
+
+  test("compiled support files are package source", async () => {
+    const root = await makeTempRoot("workbench-dist-package-source-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await fs.mkdir(path.join(root, "dist"), { recursive: true });
+    await fs.writeFile(path.join(root, "dist", "runner.js"), "export const runner = true;\n");
+
+    const shown = await showWorkbenchRef("dist/runner.js", { dir: root }) as { path?: string; content?: string };
+    const liveFiles = await filesForWorkbenchRef("current", { dir: root });
+    const durableVersion = await durableVersionFor(root);
+
+    expect(shown).toMatchObject({
+      path: "dist/runner.js",
+      content: "export const runner = true;\n",
+    });
+    expect(liveFiles.map((file) => file.path)).toContain("dist/runner.js");
+    expect(durableVersion.files.map((file) => file.path)).toContain("dist/runner.js");
   });
 
   test("remote configuration is local metadata, not versioned skill source", async () => {
     const root = await makeTempRoot("workbench-remote-config-source-");
     const remote = await makeTempRoot("workbench-remote-config-source-remote-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await durableVersionFor(root);
     const workbenchGitignore = await fs.readFile(path.join(root, ".workbench", ".gitignore"), "utf8");
     expect(workbenchGitignore).toContain("/.gitignore");
     expect(workbenchGitignore).toContain("/remotes.yaml");
-    await expect(fs.stat(path.join(root, ".workbench", "environment", "Dockerfile"))).rejects.toThrow(/ENOENT/u);
+    await expect(fs.stat(path.join(root, ".workbench", "environment", "Dockerfile"))).resolves.toBeDefined();
     const before = await workbenchStatus({ dir: root });
 
     await fs.mkdir(path.join(root, ".agents", "skills", "local-dummy"), { recursive: true });
@@ -1207,23 +1292,45 @@ describe("skill-first Workbench runtime", () => {
     expect(versions[0]?.files.map((file) => file.path)).not.toContain(".workbench/remotes.yaml");
   });
 
+  test("eval controls change evaluation identity without creating package versions", async () => {
+    const root = await makeTempRoot("workbench-eval-controls-not-package-version-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await durableVersionFor(root);
+    const before = await workbenchStatus({ dir: root });
+    const beforeEvalHash = (await previewWorkbenchEval({ dir: root })).evalHash;
+
+    await writePassingCaseTest(root, "investor-focus");
+    const after = await workbenchStatus({ dir: root });
+    const afterEvalHash = (await previewWorkbenchEval({ dir: root })).evalHash;
+    const versions = await listWorkbenchVersions({ dir: root });
+
+    expect(after.currentVersionId).toBe(before.currentVersionId);
+    expect(after.currentSkillHash).toBe(before.currentSkillHash);
+    expect(after.versionCount).toBe(before.versionCount);
+    expect(afterEvalHash).not.toBe(beforeEvalHash);
+    expect(versions).toHaveLength(1);
+    expect(versions[0]?.files.map((file) => file.path)).not.toEqual(
+      expect.arrayContaining([
+        ".workbench/eval.yaml",
+        ".workbench/cases/investor-focus/case.yaml",
+      ]),
+    );
+  });
+
   test("switching versions preserves local remote configuration", async () => {
     const root = await makeTempRoot("workbench-switch-remotes-");
     const remote = await makeTempRoot("workbench-switch-remotes-remote-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    const initialVersion = await durableVersionFor(root);
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual branch edit.\n");
+    const editedVersion = await durableVersionFor(root);
     const edited = await workbenchStatus({ dir: root });
-    expect(edited.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
-    const initialVersion = (await listWorkbenchVersions({ dir: root }))[0]!;
+    expect(edited.currentVersionId).toBe(editedVersion.id);
     expect(edited.currentVersionId).not.toBe(initialVersion.id);
-    const versionPath = path.join(root, ".workbench", "objects", "version", `${initialVersion.id}.json`);
-    const version = JSON.parse(await fs.readFile(versionPath, "utf8")) as { files: Array<{ path: string; content: string }> };
-    version.files.push(
-      { path: ".workbench/remotes.yaml", content: "stale: file:///tmp/stale\n" },
-      { path: ".workbench/locks/project.lock", content: "{\"pid\":1}\n" },
+    expect(initialVersion.files.map((file) => file.path)).not.toEqual(
+      expect.arrayContaining([".workbench/remotes.yaml", ".workbench/locks/project.lock"]),
     );
-    await fs.writeFile(versionPath, `${JSON.stringify(version, null, 2)}\n`);
 
     await switchWorkbenchVersion(initialVersion.id, { dir: root });
 
@@ -1271,6 +1378,7 @@ describe("skill-first Workbench runtime", () => {
   test("serializes concurrent project commands and keeps object state intact", async () => {
     const root = await makeTempRoot("workbench-project-lock-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await durableVersionFor(root);
     await fs.appendFile(path.join(root, "SKILL.md"), "\nManual concurrent edit.\n");
 
     let active = 0;
@@ -1284,18 +1392,19 @@ describe("skill-first Workbench runtime", () => {
       })
     ));
 
+    await durableVersionFor(root);
     const status = await workbenchStatus({ dir: root });
     const [versions, snapshot, shown] = await Promise.all([
       listWorkbenchVersions({ dir: root }),
       createWorkbenchInspectionSnapshot({ dir: root }),
-      showWorkbenchRef("current:SKILL.md", { dir: root }) as Promise<{ content?: string }>,
+      showWorkbenchRef("SKILL.md", { dir: root }) as Promise<{ content?: string }>,
     ]);
 
     expect(maxActive).toBe(1);
     expect(status.currentVersionId).toMatch(/^v_[a-f0-9]{64}$/u);
     expect(status.versionCount).toBe(2);
     expect(versions.map((version) => version.id)).toHaveLength(2);
-    expect(snapshot.versions.map((version) => version.id)).toHaveLength(2);
+    expect(snapshot.versions.filter((version) => version.id !== "current").map((version) => version.id)).toHaveLength(2);
     expect(shown.content).toContain("Manual concurrent edit.");
     expect(await exists(path.join(root, ".workbench", "locks", "project.lock"))).toBe(false);
   });
@@ -1303,6 +1412,7 @@ describe("skill-first Workbench runtime", () => {
   test("recovers previous object state after an interrupted directory swap", async () => {
     const root = await makeTempRoot("workbench-object-recover-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await durableVersionFor(root);
     const objects = path.join(root, ".workbench", "objects");
     const previous = path.join(root, ".workbench", "tmp", "objects.previous");
     await fs.rm(previous, { recursive: true, force: true });
@@ -1318,7 +1428,7 @@ describe("skill-first Workbench runtime", () => {
   test("discards stale previous refs when current refs already exist", async () => {
     const root = await makeTempRoot("workbench-refs-recover-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
-    const currentRef = (await listWorkbenchVersions({ dir: root }))[0]!.id;
+    const currentRef = (await durableVersionFor(root)).id;
     const previous = path.join(root, ".workbench", "tmp", "refs.previous");
     await fs.rm(previous, { recursive: true, force: true });
     await fs.mkdir(previous, { recursive: true });
@@ -1334,7 +1444,7 @@ describe("skill-first Workbench runtime", () => {
   test("explicit-version improve reconciles manual edits before resolving the base version", async () => {
     const root = await makeTempRoot("workbench-improve-explicit-dirty-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
-    const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
+    const initial = await durableVersionFor(root);
 
     await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty edit before explicit-version improve.\n");
     await expect(improveWorkbenchSkill({ dir: root, version: initial.id })).rejects.toThrow(/No eval cases found/u);
@@ -1344,7 +1454,7 @@ describe("skill-first Workbench runtime", () => {
         file.path === "SKILL.md" && file.content.includes("Dirty edit before explicit-version improve.")
       ));
     expect(uncommittedDirtyVersion).toBeUndefined();
-    await workbenchStatus({ dir: root });
+    await durableVersionFor(root);
     const dirtyCurrentVersion = (await listWorkbenchVersions({ dir: root }))
       .find((version) => version.files.some((file) =>
         file.path === "SKILL.md" && file.content.includes("Dirty edit before explicit-version improve.")
@@ -1357,6 +1467,7 @@ describe("skill-first Workbench runtime", () => {
     const remote = await makeTempRoot("workbench-ref-sync-remote-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    await durableVersionFor(root);
     await syncWorkbenchRemote({ dir: root });
     const before = await workbenchStatus({ dir: root });
     expect(before.currentVersionId).toBeDefined();
@@ -1520,6 +1631,161 @@ describe("skill-first Workbench runtime", () => {
       runId: "run_new",
       quality: 0.9,
     });
+  });
+
+  test("builds result cost and latency from runner jobs instead of grader or aggregate run metrics", () => {
+    const agent = { name: "default", adapter: "command", config: { command: "run" } };
+    const agentHash = hashJson(agent);
+    const source = { name: "current", kind: "local" as const, path: "." };
+    const state: WorkbenchProjectState = {
+      schema: "workbench.skill.state.v1",
+      root: "/tmp/comparison-runner-latency",
+      refs: { current: "v001" },
+      remotes: {},
+      versions: [{
+        id: "v001",
+        hash: "version_hash",
+        message: "Initial",
+        parentIds: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+        files: [],
+      }],
+      skillSources: [source],
+      skillBundles: [{
+        hash: "bundle_hash",
+        skillName: "current",
+        entryName: "current",
+        source,
+        files: [],
+        includedSkills: [],
+        createdAt: "2026-06-09T00:00:00.000Z",
+      }],
+      evals: [evalFixture()],
+      agents: [agent],
+      runs: [{
+        id: "run_result_latency",
+        kind: "eval",
+        versionId: "v001",
+        skillName: "current",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash,
+        status: "succeeded",
+        latencyMs: 2000,
+        costUsd: 1.11,
+        jobIds: ["job_execute", "job_grade", "job_execute_trace_only", "job_grade_trace_only"],
+        traceIds: ["trace_execute_trace_only"],
+        createdAt: "2026-06-09T00:01:00.000Z",
+        finishedAt: "2026-06-09T00:01:02.000Z",
+      }],
+      jobs: [{
+        id: "job_execute",
+        runId: "run_result_latency",
+        kind: "eval",
+        role: "execute",
+        versionId: "v001",
+        skillName: "current",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash,
+        caseId: "case-001",
+        sample: 0,
+        status: "succeeded",
+        result: { usage: { total: { costUsd: 0.12 } } },
+        artifactIds: [],
+        traceIds: [],
+        createdAt: "2026-06-09T00:01:00.000Z",
+        durationMs: 400,
+      }, {
+        id: "job_execute_trace_only",
+        runId: "run_result_latency",
+        kind: "eval",
+        role: "execute",
+        versionId: "v001",
+        skillName: "current",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash,
+        caseId: "case-002",
+        sample: 0,
+        status: "succeeded",
+        artifactIds: [],
+        traceIds: ["trace_execute_trace_only"],
+        createdAt: "2026-06-09T00:01:00.000Z",
+        durationMs: 600,
+      }, scoredGradeJob("job_grade", "run_result_latency", agentHash, 1, {
+        durationMs: 1600,
+        result: {
+          usage: { total: { costUsd: 0.99 } },
+          items: [{ kind: "score", score: 1, value: 1 }],
+        },
+      }), scoredGradeJob("job_grade_trace_only", "run_result_latency", agentHash, 1, {
+        caseId: "case-002",
+        durationMs: 2600,
+        result: {
+          usage: { total: { costUsd: 0.88 } },
+          items: [{ kind: "score", score: 1, value: 1 }],
+        },
+      })],
+      traces: [{
+        id: "trace_execute_trace_only",
+        runId: "run_result_latency",
+        jobId: "job_execute_trace_only",
+        versionId: "v001",
+        skillName: "current",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash,
+        createdAt: "2026-06-09T00:01:00.000Z",
+        request: { caseId: "case-002" },
+        result: {
+          status: "succeeded",
+          usage: { runner: { costUsd: 0.34 }, total: { costUsd: 0.34 } },
+        },
+        files: [],
+      }],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+    };
+
+    const comparison = buildWorkbenchResultsFromState(state);
+    const [cell] = comparison.cells;
+
+    expect(cell).toMatchObject({
+      runId: "run_result_latency",
+      quality: 1,
+      costUsd: 0.46,
+      latencyMs: 500,
+    });
+
+    const [aggregateOnlyRun] = state.runs;
+    if (!aggregateOnlyRun) {
+      throw new Error("expected comparison fixture run");
+    }
+    const aggregateOnlyComparison = buildWorkbenchResultsFromState({
+      ...state,
+      root: "/tmp/comparison-aggregate-latency",
+      runs: [{
+        ...aggregateOnlyRun,
+        id: "run_aggregate_latency",
+        latencyMs: 2000,
+        costUsd: 1.11,
+        jobIds: [],
+      }],
+      jobs: [],
+    });
+    const [aggregateOnlyCell] = aggregateOnlyComparison.cells;
+    expect(aggregateOnlyCell).toMatchObject({
+      runId: "run_aggregate_latency",
+      status: "succeeded",
+    });
+    expect(aggregateOnlyCell?.latencyMs).toBeUndefined();
+    expect(aggregateOnlyCell?.costUsd).toBeUndefined();
   });
 
   test("labels local result versions from the measured skill frontmatter", () => {
@@ -1798,7 +2064,7 @@ describe("skill-first Workbench runtime", () => {
     });
   });
 
-  test("comparison ignores invalid historical manifests that have no recorded evidence", () => {
+  test("comparison ignores unrun package-only historical versions in recorded cells", () => {
     const agent = { name: "patcher", adapter: "command", config: { command: "true" } };
     const agentHash = hashJson(agent);
     const source = { name: "current", kind: "local" as const, path: "." };
@@ -1810,37 +2076,17 @@ describe("skill-first Workbench runtime", () => {
       versions: [{
         id: "v001",
         hash: "version_hash_bad",
-        message: "Broken agent edit",
+        message: "Initial package",
         parentIds: [],
         createdAt: "2026-06-09T00:00:00.000Z",
-        files: [textFixture(".workbench/agents.yaml", [
-          "default: patcher",
-          "agents:",
-          "  patcher:",
-          "    adapter: command",
-          "    with:",
-          "      command: true",
-          "  patcher:",
-          "    adapter: command",
-          "    with:",
-          "      command: true",
-          "",
-        ].join("\n"))],
+        files: [textFixture("SKILL.md", "# Runtime source v1\n")],
       }, {
         id: "v002",
         hash: "version_hash_good",
         message: "Fixed",
         parentIds: ["v001"],
         createdAt: "2026-06-09T00:10:00.000Z",
-        files: [textFixture(".workbench/agents.yaml", [
-          "default: patcher",
-          "agents:",
-          "  patcher:",
-          "    adapter: command",
-          "    with:",
-          "      command: true",
-          "",
-        ].join("\n"))],
+        files: [textFixture("SKILL.md", "# Runtime source v2\n")],
       }],
       skillSources: [source],
       skillBundles: [{
@@ -1885,7 +2131,7 @@ describe("skill-first Workbench runtime", () => {
     })]));
   });
 
-  test("scopes persisted comparison agents to the selected version source", () => {
+  test("comparison resolves explicit agents from state-level agent snapshots", () => {
     const oldAgent = { name: "old-agent", adapter: "codex", model: "old-model", config: { auth: "default" } };
     const sparkAgent = { name: "gpt-5.4-mini", adapter: "codex", model: "gpt-5.4-mini", config: { auth: "default" } };
     const oldAgentHash = hashJson(oldAgent);
@@ -1902,32 +2148,14 @@ describe("skill-first Workbench runtime", () => {
         message: "Initial",
         parentIds: [],
         createdAt: "2026-06-09T00:00:00.000Z",
-        files: [textFixture(".workbench/agents.yaml", [
-          "default: old-agent",
-          "agents:",
-          "  old-agent:",
-          "    adapter: codex",
-          "    model: old-model",
-          "    with:",
-          "      auth: default",
-          "",
-        ].join("\n"))],
+        files: [textFixture("SKILL.md", "# Runtime source v1\n")],
       }, {
         id: "v002",
         hash: "version_hash_002",
         message: "Spark",
         parentIds: ["v001"],
         createdAt: "2026-06-09T00:10:00.000Z",
-        files: [textFixture(".workbench/agents.yaml", [
-          "default: gpt-5.4-mini",
-          "agents:",
-          "  gpt-5.4-mini:",
-          "    adapter: codex",
-          "    model: gpt-5.4-mini",
-          "    with:",
-          "      auth: default",
-          "",
-        ].join("\n"))],
+        files: [textFixture("SKILL.md", "# Runtime source v2\n")],
       }],
       skillSources: [source],
       skillBundles: [{
@@ -1964,7 +2192,7 @@ describe("skill-first Workbench runtime", () => {
       lineage: [],
     };
 
-    const comparison = buildWorkbenchResultsFromState(state, { versions: "v002" });
+    const comparison = buildWorkbenchResultsFromState(state, { versions: "v002", agents: "gpt-5.4-mini" });
 
     expect(comparison.agents.map((agent) => agent.id)).toEqual([sparkAgentHash]);
     expect(comparison.cells).toHaveLength(1);
@@ -1974,8 +2202,8 @@ describe("skill-first Workbench runtime", () => {
     });
   });
 
-  test("live comparison agents override legacy version agent files", () => {
-    const legacyAgent = { name: "old-agent", adapter: "codex", model: "old-model", config: { auth: "default" } };
+  test("available comparison agents override stored state agents", () => {
+    const storedAgent = { name: "stored-agent", adapter: "codex", model: "stored-model", config: { auth: "default" } };
     const liveAgent = { name: "patcher", adapter: "command", config: { command: "true" } };
     const liveAgentHash = hashJson(liveAgent);
     const source = { name: "current", kind: "local" as const, path: "." };
@@ -1986,23 +2214,11 @@ describe("skill-first Workbench runtime", () => {
       remotes: {},
       versions: [{
         id: "v001",
-        hash: "version_hash_legacy_agents",
-        message: "Legacy source snapshot",
+        hash: "version_hash_stored_agents",
+        message: "Package snapshot",
         parentIds: [],
         createdAt: "2026-06-09T00:00:00.000Z",
-        files: [
-          textFixture("SKILL.md", "# Runtime source\n"),
-          textFixture(".workbench/agents.yaml", [
-            "default: old-agent",
-            "agents:",
-            "  old-agent:",
-            "    adapter: codex",
-            "    model: old-model",
-            "    with:",
-            "      auth: default",
-            "",
-          ].join("\n")),
-        ],
+        files: [textFixture("SKILL.md", "# Runtime source\n")],
       }],
       skillSources: [source],
       skillBundles: [{
@@ -2015,7 +2231,7 @@ describe("skill-first Workbench runtime", () => {
         createdAt: "2026-06-09T00:00:00.000Z",
       }],
       evals: [evalFixture()],
-      agents: [legacyAgent, liveAgent],
+      agents: [storedAgent, liveAgent],
       runs: [],
       jobs: [],
       traces: [],
@@ -2039,10 +2255,10 @@ describe("skill-first Workbench runtime", () => {
     });
   });
 
-  test("agent manifest changes do not create source versions but define current compare axes", async () => {
+  test("agent manifest changes do not create package versions but define current compare axes", async () => {
     const root = await makeTempRoot("workbench-compare-axis-history-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
-    const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
+    const initial = await durableVersionFor(root);
     await addWorkbenchAgent({
       dir: root,
       name: "patcher",
@@ -2066,38 +2282,25 @@ describe("skill-first Workbench runtime", () => {
     expect(comparison.cells[0]?.runId).toBeUndefined();
   });
 
-  test("live runtime agents override legacy version agent files", async () => {
-    const legacyAgent = { name: "old-agent", adapter: "codex", model: "old-model", config: { auth: "default" } };
+  test("live runtime agents come from explicit controls, not package files", async () => {
     const liveAgent = { name: "patcher", adapter: "command", config: { command: "true" } };
     const files = [
       textFixture("SKILL.md", "# Runtime source\n"),
-      textFixture(".workbench/eval.yaml", [
-        "version: 1",
-        "name: runtime",
-        "grade:",
-        "  adapter: tests",
-        "",
-      ].join("\n")),
-      textFixture(".workbench/agents.yaml", [
-        "default: old-agent",
-        "agents:",
-        "  old-agent:",
-        "    adapter: codex",
-        "    model: old-model",
-        "    with:",
-        "      auth: default",
-        "",
-      ].join("\n")),
     ];
     const hash = hashFiles(files);
     const runtime = await createWorkbenchVersionRuntimeSnapshot({
       id: `v_${hash}`,
       hash,
-      message: "legacy source snapshot",
+      message: "package snapshot",
       parentIds: [],
       createdAt: "2026-06-20T00:00:00.000Z",
       files,
     }, {
+      evalSnapshot: evalFixture({
+        files: [
+          textFixture("eval.yaml", "version: 1\nname: runtime-controls\ngrade:\n  adapter: tests\n"),
+        ],
+      }),
       agent: liveAgent.name,
       agents: [liveAgent],
       defaultAgent: liveAgent.name,
@@ -2106,10 +2309,9 @@ describe("skill-first Workbench runtime", () => {
     expect(runtime.defaultAgent).toBe(liveAgent.name);
     expect(runtime.agents).toEqual([liveAgent]);
     expect(runtime.selectedAgents).toEqual([liveAgent]);
-    expect(runtime.agents).not.toContainEqual(legacyAgent);
   });
 
-  test("status records automatic versions locally without syncing them", async () => {
+  test("durable source versions stay local until explicit sync", async () => {
     const root = await makeTempRoot("workbench-status-sync-");
     const remote = await makeTempRoot("workbench-status-sync-remote-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
@@ -2117,12 +2319,11 @@ describe("skill-first Workbench runtime", () => {
     await syncWorkbenchRemote({ dir: root });
 
     await fs.writeFile(path.join(root, "SKILL.md"), "# Skill\n\nEdited from status.\n");
-    const status = await workbenchStatus({ dir: root });
+    const version = await durableVersionFor(root);
 
-    expect(status.currentVersionId).toBeTruthy();
-    await expect(fs.stat(path.join(remote, "objects", "version", `${status.currentVersionId}.json`))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(path.join(remote, "objects", "version", `${version.id}.json`))).rejects.toMatchObject({ code: "ENOENT" });
     await syncWorkbenchRemote({ dir: root });
-    await expect(fs.stat(path.join(remote, "objects", "version", `${status.currentVersionId}.json`))).resolves.toBeTruthy();
+    await expect(fs.stat(path.join(remote, "objects", "version", `${version.id}.json`))).resolves.toBeTruthy();
   });
 
   test("rejects unpinned remote skill sources", async () => {
@@ -2174,16 +2375,6 @@ describe("skill-first Workbench runtime", () => {
   test("accepts only source none for no-skill comparisons", async () => {
     const root = await makeTempRoot("workbench-none-baseline-source-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
-    await fs.writeFile(path.join(root, ".workbench", "versions.yaml"), [
-      "default: no-skill",
-      "versions:",
-      "  no-skill:",
-      "    baseline: none",
-      "",
-    ].join("\n"));
-
-    await expect(checkWorkbenchSkill({ dir: root })).rejects.toThrow(/baseline is no longer supported/u);
-
     await fs.writeFile(path.join(root, ".workbench", "versions.yaml"), [
       "default: no-skill",
       "versions:",
@@ -2311,12 +2502,12 @@ describe("skill-first Workbench runtime", () => {
     expect(checked.ok).toBe(true);
     expect(checked.plan.skills[0]?.fileCount).toBe(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL("https://v2.workbench.ai/api/workbench/source/skills/alice/cloud-skill/versions/v003/source"),
+      new URL("https://workbench.ai/api/workbench/source/skills/alice/cloud-skill/versions/v003/source"),
       expect.any(Object),
     );
   });
 
-  test("rejects unsafe Workbench source snapshot file paths", async () => {
+  test("rejects unsafe Workbench remote package file paths", async () => {
     const root = await makeTempRoot("workbench-unsafe-cloud-source-skill-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, ".workbench", "versions.yaml"), [
@@ -2450,30 +2641,24 @@ describe("skill-first Workbench runtime", () => {
     expect(evalSnapshot?.cases[0]?.files.map((file) => file.path)).toEqual(["cases/case-custom/case.yaml"]);
   });
 
-  test("version files derive eval snapshots only from authored Workbench eval source", () => {
-    const authored = createWorkbenchEvalSnapshotFromVersionFiles([
-      { path: ".workbench/eval.yaml", kind: "text", encoding: "utf8", content: "cases:\n  - case-001\n" },
-      { path: ".workbench/cases/case-001/case.yaml", kind: "text", encoding: "utf8", content: "id: case-001\ncommand: npm test\n" },
-      { path: ".workbench/environment/Dockerfile", kind: "text", encoding: "utf8", content: "FROM node:22\n" },
-      { path: "cases/example.md", kind: "text", encoding: "utf8", content: "# ordinary skill source\n" },
-    ]);
+  test("package versions reject authored Workbench controls", async () => {
+    const files = [
+      textFixture("SKILL.md", "# Runtime source\n"),
+      textFixture(".workbench/eval.yaml", "version: 1\nname: runtime\n"),
+    ];
+    const hash = hashFiles(files);
 
-    expect(authored?.files.map((file) => file.path)).toEqual([
-      "cases/case-001/case.yaml",
-      "environment/Dockerfile",
-      "eval.yaml",
-    ]);
-    expect(authored?.cases).toEqual([expect.objectContaining({
-      id: "case-001",
-      path: "cases/case-001/case.yaml",
-      command: "npm test",
-    })]);
-
-    expect(createWorkbenchEvalSnapshotFromVersionFiles([
-      { path: "eval.yaml", kind: "text", encoding: "utf8", content: "cases: []\n" },
-      { path: "cases/case-001/case.yaml", kind: "text", encoding: "utf8", content: "id: case-001\n" },
-      { path: "environment/Dockerfile", kind: "text", encoding: "utf8", content: "FROM node:22\n" },
-    ])).toBeNull();
+    await expect(createWorkbenchVersionRuntimeSnapshot({
+      id: `v_${hash}`,
+      hash,
+      message: "invalid package snapshot",
+      parentIds: [],
+      createdAt: "2026-06-20T00:00:00.000Z",
+      files,
+    }, {
+      agents: [{ name: "patcher", adapter: "command", config: { command: "true" } }],
+      defaultAgent: "patcher",
+    })).rejects.toThrow(/Package version files cannot include \.workbench\/eval\.yaml/u);
   });
 
   test("bounds skill improve trace inputs to structured and small text evidence", () => {
@@ -2546,6 +2731,7 @@ describe("skill-first Workbench runtime", () => {
         } satisfies WorkbenchTrace,
       ],
       createdAt: "2026-06-08T00:00:00.000Z",
+      environmentDockerfile: TEST_ENVIRONMENT_DOCKERFILE,
     });
 
     const traceFiles = input.traceFiles ?? [];
@@ -2595,6 +2781,7 @@ describe("skill-first Workbench runtime", () => {
       }],
       traces: qualified,
       createdAt: "2026-06-08T00:00:00.000Z",
+      environmentDockerfile: TEST_ENVIRONMENT_DOCKERFILE,
     });
     const traceIndex = input.traceFiles?.find((file) => file.path === "index.json");
 
@@ -2651,6 +2838,7 @@ describe("skill-first Workbench runtime", () => {
       }],
       traces: qualified,
       createdAt: "2026-06-08T00:00:00.000Z",
+      environmentDockerfile: TEST_ENVIRONMENT_DOCKERFILE,
     });
     const traceIndex = JSON.parse(input.traceFiles?.find((file) => file.path === "index.json")?.content ?? "{}") as {
       traces?: Array<{ id: string }>;
@@ -2838,7 +3026,7 @@ describe("skill-first Workbench runtime", () => {
 
     expect(snapshot.status.currentVersionId).toBe("current");
     expect(snapshot.versions).toHaveLength(1);
-    expect(snapshot.results).toBeUndefined();
+    expect(snapshot.results?.versions.map((version) => version.id)).toEqual(["v001"]);
   });
 
   dockerTest("rejects queued eval execution when same-name agent hash has changed", async () => {
@@ -2951,6 +3139,7 @@ describe("skill-first Workbench runtime", () => {
       engine: { costUsd: 0.03 },
     });
     expect(readWorkbenchSkillTraceResultsCostUsd([{ usage }])).toBe(0.05);
+    expect(readWorkbenchSkillTraceResultsRunnerCostUsd([{ usage }])).toBe(0.02);
   });
 
   test("keeps sandbox capabilities valid across agent plus execution time", () => {
@@ -3001,8 +3190,11 @@ describe("skill-first Workbench runtime", () => {
         "version: 1",
         "id: case-002",
         "prompt: Create an earnings prep note for GOOGL.",
-        "rubric:",
-        "  - Cites the key evidence.",
+        "grade:",
+        "  with:",
+        "    criteria:",
+        "      - id: evidence",
+        "        description: Cites the key evidence.",
         "",
       ].join("\n"),
     );
@@ -3022,7 +3214,7 @@ describe("skill-first Workbench runtime", () => {
       model: "gpt-5.4-mini",
     });
     await setDefaultWorkbenchAgent("default", { dir: root });
-    const initial = (await listWorkbenchVersions({ dir: root }))[0]!;
+    const initial = await durableVersionFor(root);
     await evalWorkbenchSkill({ dir: root });
     await fs.appendFile(path.join(root, "SKILL.md"), "\nCommand-backed sync improvement.\n");
     await writeFailingCaseTest(root, "sync workflow failure");
@@ -3067,7 +3259,8 @@ describe("skill-first Workbench runtime", () => {
     const portableSkill = await fs.readFile(portableSkillPath, "utf8");
     await fs.writeFile(portableSkillPath, `${portableSkill}\nLocal manual edit.\n`);
     const manualStatus = await workbenchStatus({ dir: portableRoot });
-    expect(manualStatus.currentVersionId).not.toBe(candidateVersionId);
+    expect(manualStatus.currentVersionId).toBe(candidateVersionId);
+    expect((await workbenchStatusSnapshot({ dir: portableRoot })).worktree.sourceState).toBe("edited");
     expect(await fs.readFile(portableSkillPath, "utf8")).toContain("Local manual edit.");
     await switchWorkbenchVersion(candidateVersionId, { dir: portableRoot });
     expect(await fs.readFile(portableSkillPath, "utf8")).not.toContain("Local manual edit.");
@@ -3079,22 +3272,18 @@ describe("skill-first Workbench runtime", () => {
     const root = path.join(temp, "source");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
+    const currentVersionId = (await durableVersionFor(root)).id;
     await syncWorkbenchRemote({ dir: root });
-    const currentVersionId = (await workbenchStatus({ dir: root })).currentVersionId!;
 
     await fs.writeFile(path.join(remote, "refs.json"), JSON.stringify({
       current: currentVersionId,
       "publication/current-version": currentVersionId,
-      published: currentVersionId,
-      [`releases/${currentVersionId}`]: currentVersionId,
     }, null, 2));
     await syncWorkbenchRemote({ dir: root });
 
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     expect(snapshot.refs["publication/current-version"]).toBeUndefined();
     expect(snapshot.refs[`publication/versions/${currentVersionId}`]).toBeUndefined();
-    expect(snapshot.refs.published).toBeUndefined();
-    expect(snapshot.refs[`releases/${currentVersionId}`]).toBeUndefined();
     expect(snapshot.publication).toBeUndefined();
   });
 
@@ -3104,9 +3293,7 @@ describe("skill-first Workbench runtime", () => {
     const root = path.join(temp, "source");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await addWorkbenchRemote("origin", pathToFileURL(remote).toString(), { dir: root });
-    const currentVersionId = (await workbenchStatus({ dir: root })).currentVersionId!;
-    await writeWorkbenchRef(root, "published", currentVersionId);
-    await writeWorkbenchRef(root, `releases/${currentVersionId}`, currentVersionId);
+    const currentVersionId = (await durableVersionFor(root)).id;
     await writeWorkbenchRef(root, "publication/current-version", currentVersionId);
     await writeWorkbenchRef(root, `publication/versions/${currentVersionId}`, currentVersionId);
     await writeWorkbenchRef(root, "publication/visibility", "public");
@@ -3715,11 +3902,9 @@ describe("skill-first Workbench runtime", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const legacyPublishedVersionId = (await workbenchStatus({ dir: root })).currentVersionId!;
-    await writeWorkbenchRef(root, "published", legacyPublishedVersionId);
-    await writeWorkbenchRef(root, `releases/${legacyPublishedVersionId}`, legacyPublishedVersionId);
-    await writeWorkbenchRef(root, "publication/current-version", legacyPublishedVersionId);
-    await writeWorkbenchRef(root, `publication/versions/${legacyPublishedVersionId}`, legacyPublishedVersionId);
+    const publishedVersionId = (await durableVersionFor(root)).id;
+    await writeWorkbenchRef(root, "publication/current-version", publishedVersionId);
+    await writeWorkbenchRef(root, `publication/versions/${publishedVersionId}`, publishedVersionId);
     await writeWorkbenchRef(root, "publication/visibility", "public");
 
     const synced = await syncWorkbenchRemote({ dir: root, authToken: "test-token" });
@@ -3732,10 +3917,8 @@ describe("skill-first Workbench runtime", () => {
     expect(storedState?.refs.current).toBeUndefined();
     expect(storedState?.refs["remotes/origin/current"]).toBeUndefined();
     expect(publicationRefNames(storedState?.refs ?? {})).toEqual([]);
-    expect(syncedSnapshot.refs.published).toBeUndefined();
-    expect(syncedSnapshot.refs[`releases/${legacyPublishedVersionId}`]).toBeUndefined();
     expect(syncedSnapshot.refs["publication/current-version"]).toBeUndefined();
-    expect(syncedSnapshot.refs[`publication/versions/${legacyPublishedVersionId}`]).toBeUndefined();
+    expect(syncedSnapshot.refs[`publication/versions/${publishedVersionId}`]).toBeUndefined();
     const statusAfterSync = await workbenchStatusSnapshot({ dir: root, authToken: "test-token" });
     expect(statusAfterSync.next).toBeNull();
 
@@ -3855,6 +4038,7 @@ describe("skill-first Workbench runtime", () => {
   test("retries retryable HTTP Workbench object writes", async () => {
     const root = await makeTempRoot("workbench-http-retry-put-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+    await durableVersionFor(root);
     await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/http-skill", { dir: root });
     let putCalls = 0;
     let storedState: WorkbenchProjectState = {
@@ -3980,6 +4164,7 @@ describe("skill-first Workbench runtime", () => {
     const root = await makeTempRoot("workbench-http-remote-gzip-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
     await fs.writeFile(path.join(root, "large-source.txt"), "x".repeat(1024 * 1024 + 1));
+    await durableVersionFor(root);
     await addWorkbenchRemote("origin", "https://cloud.test/skills/alice/large-http-skill", { dir: root });
     const encodings: string[] = [];
     let putObjectPackVersionCount = 0;
@@ -4415,6 +4600,119 @@ describe("skill-first Workbench runtime", () => {
     expect(output.feedback?.authSeen).toBe(true);
     expect(output.feedback?.filesRoot).toEqual(expect.stringContaining("/codex/_/default"));
     expect(output.feedback?.files).toEqual([{ path: ".codex/auth.json", encoding: "utf8" }]);
+  });
+
+  test("dispatches built-in runtime-control adapters without PATH command lookup", async () => {
+    const createdAt = new Date().toISOString();
+    const moduleRoot = await makeTempRoot("workbench-direct-built-in-adapter-");
+    const modulePath = path.join(moduleRoot, "adapter.mjs");
+    await fs.writeFile(modulePath, [
+      "import { promises as fs } from 'node:fs';",
+      "import path from 'node:path';",
+      "export async function executeWorkbenchBuiltInAdapterCommand(args = {}) {",
+      "  const request = JSON.parse(await fs.readFile(args.requestPath, 'utf8'));",
+      "  if (args.adapterId !== 'codex' || request.invocation.use !== 'codex') throw new Error('wrong adapter');",
+      "  await fs.mkdir(args.outputRoot, { recursive: true });",
+      "  await fs.writeFile(path.join(args.outputRoot, 'direct-dispatch.txt'), 'direct built-in dispatch\\n');",
+      "  await fs.writeFile(path.join(args.outputRoot, 'workbench-result.json'), JSON.stringify({",
+      "    protocol: 'workbench.adapter-result.v1',",
+      "    operation: request.operation,",
+      "    ok: true,",
+      "    summary: 'direct built-in adapter completed',",
+      "    usage: { total: { provider: 'test', totalTokens: 5, costUsd: 0.05, costSource: 'provider' } }",
+      "  }, null, 2) + '\\n');",
+      "}",
+      "",
+    ].join("\n"));
+    const previousImport = process.env.WORKBENCH_BUILT_IN_ADAPTERS_IMPORT;
+    const previousPath = process.env.PATH;
+    process.env.WORKBENCH_BUILT_IN_ADAPTERS_IMPORT = pathToFileURL(modulePath).href;
+    process.env.PATH = path.dirname(process.execPath);
+    try {
+      const execution = {
+        id: "exec_direct_built_in",
+        projectId: "local",
+        runId: "run_direct_built_in",
+        versionId: "v001",
+        purpose: "attempt" as const,
+        adapter: { use: "codex", with: {} },
+        sandbox: { kind: "oci" as const, ref: "docker://workbench/workbench-node-22:envv_node_22" },
+        inputs: [],
+        outputs: [{ name: "result", schema: "workbench.result.v1" as const, required: true }],
+        policy: {
+          tenantId: "local",
+          resources: { cpu: 1, memoryGb: 1, diskGb: 1, timeoutMinutes: 1 },
+          network: { egress: "none" as const },
+        },
+        metadata: { caseId: "case-001" },
+      };
+      const completed = await executeRuntimeControlOperationSequenceInCurrentRuntime({
+        job: {
+          id: "job_direct_built_in",
+          projectId: "local",
+          runId: "run_direct_built_in",
+          kind: "execute",
+          status: "queued",
+          attempt: 0,
+          createdAt,
+          updatedAt: createdAt,
+          input: {
+            execution,
+            versionId: "v001",
+            attemptIndex: 0,
+            sampleIndex: 0,
+            caseId: "case-001",
+          },
+        },
+        spec: {
+          ...runtimeControlSpec(),
+          skill: {
+            ...runtimeControlSpec().skill,
+            agents: {
+              default: { name: "default", use: "codex", with: {} },
+            },
+          },
+          adapters: ["codex"],
+          run: { use: "codex", with: {} },
+        },
+        baseFiles: [textFixture("current/SKILL.md", "# Runtime Control Skill\n")],
+        engineResolveFiles: [textFixture("prompt.md", "Public case.\n")],
+        engineCases: [runtimeControlCase()],
+        runtimeControlOperation: {
+          prepare: true,
+          operations: [
+            { label: "runner", operation: "skill.run", invocation: { use: "codex", with: {} } },
+          ],
+        },
+      }, execution, createdAt);
+      const output = completed.output as {
+        ok?: boolean;
+        files?: Array<{ path: string; content: string }>;
+        result?: { score?: number; summary?: string };
+        usage?: { runner?: { costUsd?: number } };
+      };
+
+      expect(completed.status).toBe("succeeded");
+      expect(output.ok).toBe(true);
+      expect(output.result).toMatchObject({
+        score: 1,
+        summary: "direct built-in adapter completed",
+      });
+      expect(output.usage?.runner?.costUsd).toBe(0.05);
+      expect(output.files?.find((file) => file.path === "direct-dispatch.txt")?.content)
+        .toBe("direct built-in dispatch\n");
+    } finally {
+      if (previousImport === undefined) {
+        delete process.env.WORKBENCH_BUILT_IN_ADAPTERS_IMPORT;
+      } else {
+        process.env.WORKBENCH_BUILT_IN_ADAPTERS_IMPORT = previousImport;
+      }
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+    }
   });
 
   test("synthesizes a result for skill-only runtime-control execution", async () => {
@@ -5059,7 +5357,7 @@ describe("skill-first Workbench runtime", () => {
       evalSnapshot: evalFixture({
         hash: "eval_hash",
         files: [
-          textFixture("eval.yaml", "version: 1\nname: provider\ndescription: Provider eval.\n"),
+          textFixture("eval.yaml", "version: 1\nname: provider\ndescription: Provider eval.\ngrade:\n  adapter: tests\n"),
         ],
       }),
       agent: {
@@ -5146,7 +5444,7 @@ describe("skill-first Workbench runtime", () => {
       evalSnapshot: evalFixture({
         hash: "eval_hash",
         files: [
-          textFixture("eval.yaml", "version: 1\nname: provider\ndescription: Provider eval.\n"),
+          textFixture("eval.yaml", "version: 1\nname: provider\ndescription: Provider eval.\ngrade:\n  adapter: tests\n"),
         ],
       }),
       agent: {
@@ -5236,6 +5534,7 @@ describe("skill-first Workbench runtime", () => {
         },
         sample,
         createdAt,
+        environmentDockerfile: TEST_ENVIRONMENT_DOCKERFILE,
       });
       const execution = (input.job.input as { execution?: { metadata?: { sampleIndex?: number } } }).execution;
       expect(execution?.metadata?.sampleIndex).toBe(sample);
@@ -5253,7 +5552,7 @@ describe("skill-first Workbench runtime", () => {
     expect(run?.status).toBe("succeeded");
     expect(run?.jobIds).toHaveLength(10);
     expect(run?.traceIds).toHaveLength(10);
-    await expect(listWorkbenchVersions({ dir: root })).resolves.toHaveLength(2);
+    await expect(listWorkbenchVersions({ dir: root })).resolves.toHaveLength(1);
   }, 15_000);
 
   test("rejects provider-backed skill eval agents with explicit isolated network", () => {
@@ -5267,7 +5566,7 @@ describe("skill-first Workbench runtime", () => {
       evalSnapshot: evalFixture({
         hash: "eval_hash",
         files: [
-          textFixture("eval.yaml", "version: 1\nname: provider\ndescription: Provider eval.\n"),
+          textFixture("eval.yaml", "version: 1\nname: provider\ndescription: Provider eval.\ngrade:\n  adapter: tests\n"),
         ],
       }),
       agent: {
@@ -5292,6 +5591,7 @@ describe("skill-first Workbench runtime", () => {
       },
       sample: 0,
       createdAt: new Date().toISOString(),
+      environmentDockerfile: TEST_ENVIRONMENT_DOCKERFILE,
     })).toThrow("requires network egress");
   });
 
@@ -5313,6 +5613,12 @@ describe("skill-first Workbench runtime", () => {
             "description: Provider eval.",
             "grade:",
             "  adapter: rubric",
+            "  with:",
+            "    criteria:",
+            "      - id: evidence",
+            "        description: Uses global evidence.",
+            "      - id: usefulness",
+            "        description: Produces a useful answer.",
             "",
           ].join("\n")),
         ],
@@ -5335,9 +5641,13 @@ describe("skill-first Workbench runtime", () => {
           "version: 1",
           "id: case-001",
           "prompt: Produce a concise result.",
-          "rubric:",
-          "  - Uses the case evidence.",
-          "  - Writes a reviewable output.",
+          "grade:",
+          "  with:",
+          "    criteria:",
+          "      - id: evidence",
+          "        description: Uses the case evidence.",
+          "      - id: case-detail",
+          "        description: Writes a reviewable output.",
           "",
         ].join("\n"),
         files: [
@@ -5345,9 +5655,13 @@ describe("skill-first Workbench runtime", () => {
             "version: 1",
             "id: case-001",
             "prompt: Produce a concise result.",
-            "rubric:",
-            "  - Uses the case evidence.",
-            "  - Writes a reviewable output.",
+            "grade:",
+            "  with:",
+            "    criteria:",
+            "      - id: evidence",
+            "        description: Uses the case evidence.",
+            "      - id: case-detail",
+            "        description: Writes a reviewable output.",
             "",
           ].join("\n")),
           textFixture("fixture.txt", "public fixture\n"),
@@ -5355,6 +5669,7 @@ describe("skill-first Workbench runtime", () => {
       },
       sample: 0,
       createdAt: new Date().toISOString(),
+      environmentDockerfile: TEST_ENVIRONMENT_DOCKERFILE,
     });
 
     expect(input.spec.gradeRun).toMatchObject({
@@ -5368,14 +5683,14 @@ describe("skill-first Workbench runtime", () => {
           },
         },
         criteria: [
-          { id: "criterion-001", description: "Uses the case evidence." },
-          { id: "criterion-002", description: "Writes a reviewable output." },
+          { id: "evidence", description: "Uses the case evidence." },
+          { id: "usefulness", description: "Produces a useful answer." },
+          { id: "case-detail", description: "Writes a reviewable output." },
         ],
       },
     });
     expect(input.adapterManifests?.map((manifest) => manifest.id).sort()).toEqual(["claude", "rubric"]);
     expect(input.environmentDockerfile).toContain("FROM workbench/workbench-node-22:envv_node_22");
-    expect(input.environmentDockerfile).toContain("ca-certificates");
     expect(input.environmentDockerfile).toContain("npm install --global @anthropic-ai/claude-code@2.1.119");
     expect(input.environmentVersion?.sourceHash).toBeDefined();
     expect(input.spec.environment.dockerfile).toMatch(/^dockerfile:\/\//u);
@@ -5383,6 +5698,73 @@ describe("skill-first Workbench runtime", () => {
     expect(input.engineCases[0]?.case.prompt).not.toContain("rubric");
     expect(input.engineCases[0]?.case.prompt).not.toContain("Writes a reviewable output");
     expect(input.engineCases[0]?.files.private?.map((file) => file.path)).toEqual([]);
+  });
+
+  test("rejects grade config without an explicit adapter", () => {
+    const commonInput = {
+      ownerUserId: "local",
+      projectId: "local",
+      versionId: "v001",
+      evalHash: "eval_hash",
+      agent: {
+        name: "default",
+        adapter: "local",
+        model: "docker",
+        config: {},
+      },
+      skillName: "current",
+      skillBundleHash: "skill_bundle_hash",
+      versionFiles: [textFixture("current/SKILL.md", "# Local Skill\n")],
+      runtimeCase: {
+        id: "case-001",
+        path: "case-001",
+        content: "version: 1\nid: case-001\ncommand: sh \"$CASE_DIR/tests/test.sh\"\n",
+        files: [
+          textFixture("case.yaml", "version: 1\nid: case-001\ncommand: sh \"$CASE_DIR/tests/test.sh\"\n"),
+          textFixture("tests/test.sh", "test -f \"$SKILL_DIR/SKILL.md\"\n"),
+        ],
+      },
+      sample: 0,
+      createdAt: new Date().toISOString(),
+      environmentDockerfile: TEST_ENVIRONMENT_DOCKERFILE,
+    } as const;
+
+    expect(() => createWorkbenchSkillEvalRuntimeInput({
+      ...commonInput,
+      runId: "run_missing_grade",
+      jobId: "job_missing_grade",
+      evalSnapshot: evalFixture({
+        hash: "eval_hash",
+        files: [
+          textFixture("eval.yaml", [
+            "version: 1",
+            "name: missing-grade",
+            "",
+          ].join("\n")),
+        ],
+      }),
+    })).toThrow("eval.yaml grade.adapter must be rubric, tests, or command.");
+
+    expect(() => createWorkbenchSkillEvalRuntimeInput({
+      ...commonInput,
+      runId: "run_missing_grade_adapter",
+      jobId: "job_missing_grade_adapter",
+      evalSnapshot: evalFixture({
+        hash: "eval_hash",
+        files: [
+          textFixture("eval.yaml", [
+            "version: 1",
+            "name: missing-grade-adapter",
+            "grade:",
+            "  with:",
+            "    criteria:",
+            "      - id: useful",
+            "        description: Produces a useful answer.",
+            "",
+          ].join("\n")),
+        ],
+      }),
+    })).toThrow("eval.yaml grade.adapter must be rubric, tests, or command.");
   });
 
   test("blocks provider-backed skill evals before source or evidence writes when auth is disconnected", async () => {
@@ -5397,7 +5779,7 @@ describe("skill-first Workbench runtime", () => {
       config: { auth: `missing-${Date.now()}` },
     });
     await setDefaultWorkbenchAgent("codex", { dir: root });
-    const before = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
+    const beforeDurableVersions = await listWorkbenchVersions({ dir: root });
     await fs.appendFile(path.join(root, "SKILL.md"), "\nDirty edit before disconnected provider eval.\n");
 
     await expect(evalWorkbenchSkill({ dir: root })).rejects.toMatchObject({
@@ -5405,8 +5787,9 @@ describe("skill-first Workbench runtime", () => {
     });
 
     const after = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
-    expect(after.versions.map((version) => version.id)).toEqual(before.versions.map((version) => version.id));
-    expect(after.versions.some((version) =>
+    const afterDurableVersions = await listWorkbenchVersions({ dir: root });
+    expect(afterDurableVersions.map((version) => version.id)).toEqual(beforeDurableVersions.map((version) => version.id));
+    expect(afterDurableVersions.some((version) =>
       version.files.some((file) => file.path === "SKILL.md" && file.content.includes("Dirty edit before disconnected provider eval."))
     )).toBe(false);
     expect(after.runs).toEqual([]);
@@ -5672,6 +6055,13 @@ function evalFixture(
   const cases = overrides.cases ?? (overrides.caseCount === 0 ? [] : [{
     id: "case-001",
     path: "cases/case-001/case.yaml",
+    grade: {
+      adapter: "tests",
+      label: "Tests",
+      summary: "Case test harness",
+      sources: [{ path: "eval.yaml", role: "global" as const }],
+      display: [{ kind: "text" as const, text: "No adapter-specific grading details are configured." }],
+    },
     files: [],
   }]);
   return {
@@ -5687,9 +6077,9 @@ function evalFixture(
 }
 
 function createQueuedEvalState(): WorkbenchProjectState {
-  const agentSource = "default: default\nagents:\n  default:\n    adapter: local\n    model: docker\n    with: {}\n";
   const evalFiles = [
     textFixture("eval.yaml", "version: 1\nname: queued-eval\ngrade:\n  adapter: tests\n"),
+    textFixture("environment/Dockerfile", TEST_ENVIRONMENT_DOCKERFILE),
     textFixture("cases/case-001/case.yaml", "version: 1\nid: case-001\ncommand: sh \"$CASE_DIR/tests/test.sh\"\n"),
     {
       ...textFixture("cases/case-001/tests/test.sh", "#!/bin/sh\nset -eu\nmkdir -p \"$OUTPUT_DIR\"\nprintf '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}\\n' > \"$OUTPUT_DIR/result.json\"\n"),
@@ -5698,11 +6088,6 @@ function createQueuedEvalState(): WorkbenchProjectState {
   ];
   const versionFiles = [
     textFixture("SKILL.md", "# Skill\n"),
-    textFixture(".workbench/agents.yaml", agentSource),
-    ...evalFiles.map((file) => ({
-      ...file,
-      path: `.workbench/${file.path}`,
-    })),
   ];
   const bundleFiles = [textFixture("SKILL.md", "# Skill\n")];
   const source = {
@@ -5760,8 +6145,11 @@ async function writeFailingCaseTest(root: string, message: string): Promise<void
     "version: 1",
     "id: case-001",
     "prompt: Exercise a workflow-specific failure path.",
-    "rubric:",
-    "  - Captures workflow-specific failure evidence.",
+    "grade:",
+    "  with:",
+    "    criteria:",
+    "      - id: failure-evidence",
+    "        description: Captures workflow-specific failure evidence.",
     "",
   ].join("\n"));
   await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
@@ -5782,8 +6170,11 @@ async function writePassingCaseTest(root: string): Promise<void> {
     "version: 1",
     "id: case-001",
     "prompt: Exercise a workflow-specific success path.",
-    "rubric:",
-    "  - Captures workflow-specific success evidence.",
+    "grade:",
+    "  with:",
+    "    criteria:",
+    "      - id: success-evidence",
+    "        description: Captures workflow-specific success evidence.",
     "",
   ].join("\n"));
   await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [

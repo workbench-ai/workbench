@@ -2,7 +2,10 @@ import { describe, expect, test } from "vitest";
 
 import {
   assertWorkbenchAdapterAuthEnvNameAllowed,
-  isWorkbenchLocalMetadataPath,
+  buildWorkbenchRunEvidenceView,
+  isWorkbenchAuthoredControlPath,
+  isWorkbenchPackageSourcePath,
+  isWorkbenchRuntimeMetadataPath,
   isReservedWorkbenchAdapterAuthEnvName,
   normalizeWorkbenchSourcePath,
   normalizeWorkbenchSourceRequestPath,
@@ -19,6 +22,7 @@ import {
   type WorkbenchProjectState,
   type WorkbenchRun,
   type WorkbenchRunSnapshot,
+  type WorkbenchStateNotice,
 } from "../src/index";
 
 describe("workbench contract", () => {
@@ -133,6 +137,30 @@ describe("workbench contract", () => {
     });
   });
 
+  test("keeps live inspection notices adapter-neutral", () => {
+    const notices = [
+      { schema: "workbench.state.notice.v1", type: "changed", cursor: "local:2:0:now" },
+      { schema: "workbench.state.notice.v1", type: "reset", cursor: "local:2:0:now" },
+      {
+        schema: "workbench.state.notice.v1",
+        type: "progress",
+        cursor: "local:2:1:now",
+        runIds: ["run_001"],
+        jobIds: ["job_001"],
+      },
+      { schema: "workbench.state.notice.v1", type: "heartbeat", cursor: "local:2:1:now" },
+    ] satisfies WorkbenchStateNotice[];
+
+    expect(JSON.parse(JSON.stringify({ notices }))).toMatchObject({
+      notices: [
+        { type: "changed" },
+        { type: "reset" },
+        { type: "progress", runIds: ["run_001"], jobIds: ["job_001"] },
+        { type: "heartbeat" },
+      ],
+    });
+  });
+
   test("keeps dangerous adapter auth env names reserved", () => {
     expect(isReservedWorkbenchAdapterAuthEnvName("WORKBENCH_TOKEN")).toBe(true);
     expect(() => assertWorkbenchAdapterAuthEnvNameAllowed("PATH")).toThrow("reserved");
@@ -229,6 +257,434 @@ describe("workbench contract", () => {
     });
   });
 
+  test("builds adapter-neutral run evidence from jobs, agents, and result cells", () => {
+    const createdAt = "2026-06-22T12:00:00.000Z";
+    const snapshot = {
+      root: "/tmp/skill",
+      status: {
+        root: "/tmp/skill",
+        initialized: true,
+        currentVersionId: "v001",
+        defaultSkill: "current",
+        defaultAgent: "codex",
+        versionCount: 1,
+        skillCount: 1,
+        agentCount: 2,
+        runCount: 1,
+        remoteCount: 0,
+      },
+      versions: [{
+        id: "v001",
+        hash: "version_hash",
+        message: "initial",
+        parentIds: [],
+        createdAt,
+        files: [{ path: "SKILL.md", content: "# Skill\n" }],
+      }],
+      skillSources: [{ name: "current", kind: "local", path: "." }],
+      skillBundles: [],
+      evals: [],
+      agents: [
+        { hash: "agent_codex", agent: { name: "codex", adapter: "codex", model: "gpt-5.5", config: {} } },
+        { hash: "agent_claude", agent: { name: "claude", adapter: "claude", model: "haiku-4.5", config: {} } },
+      ],
+      results: {
+        versions: [{
+          id: "skill_current",
+          label: "Current",
+          projectVersionId: "v001",
+          contentHash: "bundle_hash",
+          current: true,
+        }],
+        evaluations: [{ id: "eval_hash", caseCount: 1 }],
+        agents: [
+          { id: "agent_codex", name: "codex", label: "codex / gpt-5.5", adapter: "codex", model: "gpt-5.5" },
+          { id: "agent_claude", name: "claude", label: "claude / haiku-4.5", adapter: "claude", model: "haiku-4.5" },
+        ],
+        cells: [
+          {
+            skillVersionId: "skill_current",
+            evaluationId: "eval_hash",
+            agentVersionId: "agent_codex",
+            runId: "run_matrix",
+            status: "succeeded",
+            quality: 1,
+            samples: 1,
+            costUsd: 0.42,
+            latencyMs: 1000,
+          },
+          {
+            skillVersionId: "skill_current",
+            evaluationId: "eval_hash",
+            agentVersionId: "agent_claude",
+            runId: "run_matrix",
+            status: "failed",
+            samples: 1,
+            error: "Model rejected.",
+          },
+        ],
+      },
+      runs: [{
+        id: "run_matrix",
+        kind: "eval",
+        versionId: "v001",
+        skillName: "current",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "codex,claude",
+        agentHash: "multi_agent_hash",
+        status: "failed",
+        costUsd: 0.42,
+        latencyMs: 5000,
+        jobIds: ["job_codex_execute", "job_codex_grade", "job_claude_execute", "job_claude_grade"],
+        traceIds: [],
+        createdAt,
+        finishedAt: "2026-06-22T12:00:05.000Z",
+      }],
+      jobs: [
+        {
+          id: "job_codex_execute",
+          runId: "run_matrix",
+          kind: "eval",
+          role: "execute",
+          versionId: "v001",
+          skillName: "current",
+          skillBundleHash: "bundle_hash",
+          evalHash: "eval_hash",
+          agentName: "codex",
+          agentHash: "agent_codex",
+          caseId: "googl",
+          sample: 0,
+          status: "succeeded",
+          artifactIds: [],
+          traceIds: [],
+          createdAt,
+          durationMs: 1000,
+          result: { usage: { total: { costUsd: 0.32 } } },
+        },
+        {
+          id: "job_codex_grade",
+          runId: "run_matrix",
+          kind: "eval",
+          role: "grade",
+          versionId: "v001",
+          skillName: "current",
+          skillBundleHash: "bundle_hash",
+          evalHash: "eval_hash",
+          agentName: "codex",
+          agentHash: "agent_codex",
+          caseId: "googl",
+          sample: 0,
+          status: "succeeded",
+          artifactIds: [],
+          traceIds: [],
+          createdAt,
+          durationMs: 2000,
+          dependencies: [{ name: "execute", jobId: "job_codex_execute", mount: "input", mode: "readonly" }],
+          result: {
+            usage: { total: { costUsd: 0.1 } },
+            items: [{ kind: "score", score: 1, value: 1 }],
+          },
+        },
+        {
+          id: "job_claude_execute",
+          runId: "run_matrix",
+          kind: "eval",
+          role: "execute",
+          versionId: "v001",
+          skillName: "current",
+          skillBundleHash: "bundle_hash",
+          evalHash: "eval_hash",
+          agentName: "claude",
+          agentHash: "agent_claude",
+          caseId: "googl",
+          sample: 0,
+          status: "failed",
+          artifactIds: [],
+          traceIds: ["trace_claude_execute"],
+          createdAt,
+          durationMs: 250,
+          error: "Model rejected.",
+        },
+        {
+          id: "job_claude_grade",
+          runId: "run_matrix",
+          kind: "eval",
+          role: "grade",
+          versionId: "v001",
+          skillName: "current",
+          skillBundleHash: "bundle_hash",
+          evalHash: "eval_hash",
+          agentName: "claude",
+          agentHash: "agent_claude",
+          caseId: "googl",
+          sample: 0,
+          status: "canceled",
+          artifactIds: [],
+          traceIds: [],
+          createdAt,
+          durationMs: 10,
+          dependencies: [{ name: "execute", jobId: "job_claude_execute", mount: "input", mode: "readonly" }],
+          error: "Dependency failed.",
+        },
+      ],
+      traces: [{
+        id: "trace_claude_execute",
+        runId: "run_matrix",
+        jobId: "job_claude_execute",
+        versionId: "v001",
+        skillName: "current",
+        skillBundleHash: "bundle_hash",
+        evalHash: "eval_hash",
+        agentName: "claude",
+        agentHash: "agent_claude",
+        createdAt,
+        request: { caseId: "googl" },
+        result: {
+          status: "failed",
+          usage: { runner: { costUsd: 0.23 }, total: { costUsd: 0.23 } },
+        },
+        files: [],
+      }],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+      remotes: [],
+      refs: { current: "v001" },
+    } satisfies WorkbenchInspectionSnapshot;
+
+    const evidence = buildWorkbenchRunEvidenceView(snapshot, "run_matrix");
+
+    expect(evidence?.agents).toMatchObject([
+      {
+        agentLabel: "claude / haiku-4.5",
+        adapter: "claude",
+        model: "haiku-4.5",
+        status: "failed",
+        costUsd: 0.23,
+        durationMs: 250,
+        completedCases: 0,
+        totalCases: 1,
+        failedJobs: 1,
+        canceledJobs: 1,
+      },
+      {
+        agentLabel: "codex / gpt-5.5",
+        adapter: "codex",
+        model: "gpt-5.5",
+        status: "succeeded",
+        score: 1,
+        costUsd: 0.42,
+        durationMs: 1000,
+        completedCases: 1,
+        totalCases: 1,
+      },
+    ]);
+    expect(evidence?.cases).toMatchObject([
+      {
+        agentLabel: "claude / haiku-4.5",
+        caseId: "googl",
+        selectedJobId: "job_claude_grade",
+        status: "failed",
+        execute: { jobId: "job_claude_execute", status: "failed", error: "Model rejected." },
+        grade: {
+          jobId: "job_claude_grade",
+          status: "canceled",
+          dependencyReason: "Dependency failed.; execute failed: Model rejected.",
+        },
+      },
+      {
+        agentLabel: "codex / gpt-5.5",
+        caseId: "googl",
+        selectedJobId: "job_codex_grade",
+        status: "succeeded",
+        score: 1,
+        execute: { jobId: "job_codex_execute", status: "succeeded" },
+        grade: { jobId: "job_codex_grade", status: "succeeded", score: 1 },
+      },
+    ]);
+    expect(evidence?.traceJobs.map((job) => `${job.agentLabel}:${job.role}:${job.status}`)).toEqual([
+      "claude / haiku-4.5:execute:failed",
+      "claude / haiku-4.5:grade:canceled",
+      "codex / gpt-5.5:execute:succeeded",
+      "codex / gpt-5.5:grade:succeeded",
+    ]);
+  });
+
+  test("keeps measured skills distinct in one run matrix", () => {
+    const createdAt = "2026-06-22T13:00:00.000Z";
+    const measuredSkills = [
+      {
+        name: "current",
+        label: "Current",
+        bundleHash: "bundle_current",
+        skillVersionId: "skill_current",
+        score: 0.9,
+        costUsd: 0.11,
+        latencyMs: 111,
+      },
+      {
+        name: "no-skill",
+        label: "No skill",
+        bundleHash: "bundle_none",
+        skillVersionId: "skill_none",
+        score: 0.4,
+        costUsd: 0.22,
+        latencyMs: 222,
+      },
+      {
+        name: "dummy-skill",
+        label: "Dummy skill",
+        bundleHash: "bundle_dummy",
+        skillVersionId: "skill_dummy",
+        score: 0.7,
+        costUsd: 0.33,
+        latencyMs: 333,
+      },
+    ];
+    const jobs = measuredSkills.flatMap((skill) => [
+      {
+        id: `job_${skill.name}_execute`,
+        runId: "run_skills",
+        kind: "eval" as const,
+        role: "execute" as const,
+        versionId: "v002",
+        skillName: skill.name,
+        skillBundleHash: skill.bundleHash,
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash: "agent_hash",
+        caseId: "case_001",
+        sample: 0,
+        status: "succeeded" as const,
+        artifactIds: [],
+        traceIds: [],
+        createdAt,
+        durationMs: 10,
+      },
+      {
+        id: `job_${skill.name}_grade`,
+        runId: "run_skills",
+        kind: "eval" as const,
+        role: "grade" as const,
+        versionId: "v002",
+        skillName: skill.name,
+        skillBundleHash: skill.bundleHash,
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash: "agent_hash",
+        caseId: "case_001",
+        sample: 0,
+        status: "succeeded" as const,
+        artifactIds: [],
+        traceIds: [],
+        dependencies: [{ name: "execute", jobId: `job_${skill.name}_execute`, mount: "input", mode: "readonly" as const }],
+        result: { items: [{ kind: "score", score: skill.score, value: skill.score }] },
+        createdAt,
+        durationMs: 20,
+      },
+    ]);
+    const snapshot = {
+      root: "/tmp/skill",
+      status: {
+        root: "/tmp/skill",
+        initialized: true,
+        currentVersionId: "v002",
+        defaultSkill: "current",
+        defaultAgent: "default",
+        versionCount: 1,
+        skillCount: 3,
+        agentCount: 1,
+        runCount: 1,
+        remoteCount: 0,
+      },
+      versions: [{
+        id: "v002",
+        hash: "version_hash",
+        message: "current",
+        parentIds: [],
+        createdAt,
+        files: [{ path: "SKILL.md", content: "# Skill\n" }],
+      }],
+      skillSources: measuredSkills.map((skill) => ({ name: skill.name, kind: "local" as const, path: "." })),
+      skillBundles: measuredSkills.map((skill) => ({
+        hash: skill.bundleHash,
+        skillName: skill.name,
+        entryName: skill.name,
+        source: { name: skill.name, kind: "local" as const, path: "." },
+        files: [],
+        includedSkills: [],
+        createdAt,
+      })),
+      evals: [],
+      agents: [{ hash: "agent_hash", agent: { name: "default", adapter: "command", model: "deterministic", config: {} } }],
+      results: {
+        versions: measuredSkills.map((skill) => ({
+          id: skill.skillVersionId,
+          label: skill.label,
+          projectVersionId: "v002",
+          contentHash: skill.bundleHash,
+        })),
+        evaluations: [{ id: "eval_hash", caseCount: 1 }],
+        agents: [{ id: "agent_hash", name: "default", label: "default / deterministic", adapter: "command", model: "deterministic" }],
+        cells: measuredSkills.map((skill) => ({
+          skillVersionId: skill.skillVersionId,
+          evaluationId: "eval_hash",
+          agentVersionId: "agent_hash",
+          runId: "run_skills",
+          status: "succeeded" as const,
+          quality: skill.score,
+          costUsd: skill.costUsd,
+          latencyMs: skill.latencyMs,
+          samples: 1,
+        })),
+      },
+      runs: [{
+        id: "run_skills",
+        kind: "eval",
+        versionId: "v002",
+        skillName: "all",
+        skillBundleHash: "bundle_matrix",
+        evalHash: "eval_hash",
+        agentName: "default",
+        agentHash: "agent_hash",
+        status: "succeeded",
+        jobIds: jobs.map((job) => job.id),
+        traceIds: [],
+        createdAt,
+        finishedAt: createdAt,
+      }],
+      jobs,
+      traces: [],
+      executionEvents: [],
+      artifacts: [],
+      lineage: [],
+      remotes: [],
+      refs: { current: "v002" },
+    } satisfies WorkbenchInspectionSnapshot;
+
+    const evidence = buildWorkbenchRunEvidenceView(snapshot, "run_skills");
+
+    expect(evidence?.agents).toMatchObject([
+      { skillLabel: "Current", agentLabel: "default / deterministic", score: 0.9, costUsd: 0.11, durationMs: 111, totalCases: 1 },
+      { skillLabel: "Dummy skill", agentLabel: "default / deterministic", score: 0.7, costUsd: 0.33, durationMs: 333, totalCases: 1 },
+      { skillLabel: "No skill", agentLabel: "default / deterministic", score: 0.4, costUsd: 0.22, durationMs: 222, totalCases: 1 },
+    ]);
+    expect(evidence?.cases.map((entry) => `${entry.skillLabel}:${entry.selectedJobId}:${entry.score}`)).toEqual([
+      "Current:job_current_grade:0.9",
+      "Dummy skill:job_dummy-skill_grade:0.7",
+      "No skill:job_no-skill_grade:0.4",
+    ]);
+    expect(evidence?.traceJobs.map((entry) => `${entry.skillLabel}:${entry.role}`)).toEqual([
+      "Current:execute",
+      "Current:grade",
+      "Dummy skill:execute",
+      "Dummy skill:grade",
+      "No skill:execute",
+      "No skill:grade",
+    ]);
+  });
+
   test("shapes inspection files consistently for manifests and explicit content reads", () => {
     const text = { path: "SKILL.md", kind: "text", encoding: "utf8", content: "# Skill\n" } as const;
     const binary = { path: "asset.bin", kind: "binary", encoding: "base64", content: "QUJD" } as const;
@@ -260,6 +716,7 @@ describe("workbench contract", () => {
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("traces")).toBe("trace");
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("artifacts")).toBe("artifact");
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("cases")).toBe("case");
+    expect(workbenchInspectionFileOwnerKindFromRouteSegment("evaluation")).toBe("evaluation");
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("skills")).toBeNull();
 
     expect(workbenchInspectionFileOwnerRouteSegment("version")).toBe("versions");
@@ -282,17 +739,30 @@ describe("workbench contract", () => {
     expect(parseWorkbenchCaseFileOwnerId(":case-001")).toBeNull();
   });
 
-  test("normalizes source paths and identifies local Workbench metadata", () => {
+  test("normalizes source paths and classifies Workbench file roles explicitly", () => {
     expect(normalizeWorkbenchSourcePath(".workbench/eval.yaml")).toBe(".workbench/eval.yaml");
     expect(normalizeWorkbenchSourceRequestPath("/.workbench/eval.yaml")).toBe(".workbench/eval.yaml");
     expect(() => normalizeWorkbenchSourcePath("/.workbench/eval.yaml")).toThrow(/Unsafe Workbench source path/u);
     expect(() => normalizeWorkbenchSourcePath("../state")).toThrow(/Unsafe Workbench source path/u);
     expect(() => normalizeWorkbenchSourcePath("source//SKILL.md")).toThrow(/Unsafe Workbench source path/u);
 
-    expect(isWorkbenchLocalMetadataPath(".workbench/remotes.yaml")).toBe(true);
-    expect(isWorkbenchLocalMetadataPath(".workbench/locks/project.lock")).toBe(true);
-    expect(isWorkbenchLocalMetadataPath(".workbench/objects/run/run_001.json")).toBe(true);
-    expect(isWorkbenchLocalMetadataPath(".workbench/eval.yaml")).toBe(false);
-    expect(isWorkbenchLocalMetadataPath("SKILL.md")).toBe(false);
+    expect(isWorkbenchRuntimeMetadataPath(".workbench/remotes.yaml")).toBe(true);
+    expect(isWorkbenchRuntimeMetadataPath(".workbench/locks/project.lock")).toBe(true);
+    expect(isWorkbenchRuntimeMetadataPath(".workbench/objects/run/run_001.json")).toBe(true);
+    expect(isWorkbenchRuntimeMetadataPath(".workbench/eval.yaml")).toBe(false);
+
+    expect(isWorkbenchAuthoredControlPath(".workbench/eval.yaml")).toBe(true);
+    expect(isWorkbenchAuthoredControlPath(".workbench/cases/case-001/case.yaml")).toBe(true);
+    expect(isWorkbenchAuthoredControlPath(".workbench/environment/Dockerfile")).toBe(true);
+    expect(isWorkbenchAuthoredControlPath(".workbench/remotes.yaml")).toBe(false);
+
+    expect(isWorkbenchPackageSourcePath("SKILL.md")).toBe(true);
+    expect(isWorkbenchPackageSourcePath("references/guide.md")).toBe(true);
+    expect(isWorkbenchPackageSourcePath("dist/generated.js")).toBe(true);
+    expect(isWorkbenchPackageSourcePath("tools/dist/generated.js")).toBe(true);
+    expect(isWorkbenchPackageSourcePath(".git/config")).toBe(false);
+    expect(isWorkbenchPackageSourcePath("node_modules/pkg/index.js")).toBe(false);
+    expect(isWorkbenchPackageSourcePath(".workbench/eval.yaml")).toBe(false);
+    expect(isWorkbenchPackageSourcePath(".agents/skills/workbench/SKILL.md")).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +25,7 @@ import {
   ensureWorkbenchAdapterOutputDir,
   readWorkbenchAdapterOperationResult,
   readWorkbenchAdapterOperationRequest,
+  WORKBENCH_RUNTIME_CONTROL_TIMEOUT_MS_ENV,
   writeWorkbenchAdapterOperationResult,
   workbenchAdapterOperationResultPath,
   type WorkbenchAdapterOperationRequest,
@@ -329,7 +330,7 @@ async function executeTestsEngineRequest(
   if (!script) {
     throw new Error(`Tests engine requires ${path.join(testsRoot, "test.sh")}.`);
   }
-  const shellFailure = await runAdapterShellCommand(`sh ${shellQuote(script)}`, request.paths.workspace, {
+  const shellFailure = await runTestsEngineScript(script, request.paths.workspace, {
     SKILL_DIR: request.paths.skill ?? path.join(request.paths.workspace, "input", "skills", "current"),
     SKILLS_DIR: request.paths.skills ?? path.join(request.paths.workspace, "input", "skills"),
     CASE_DIR: request.paths.case ?? path.join(request.paths.workspace, "input", "case"),
@@ -362,33 +363,119 @@ async function executeTestsEngineRequest(
   });
 }
 
+async function runTestsEngineScript(
+  script: string,
+  cwd: string,
+  env: Record<string, string> = {},
+): Promise<void> {
+  const command = await testsEngineScriptCommand(script);
+  await runAdapterProcess(command.command, command.args, cwd, env);
+}
+
+async function testsEngineScriptCommand(script: string): Promise<{ command: string; args: string[] }> {
+  const source = await fs.readFile(script, "utf8");
+  const firstLine = source.split(/\r?\n/u, 1)[0] ?? "";
+  if (!firstLine.startsWith("#!")) {
+    return { command: "sh", args: [script] };
+  }
+  const shebang = firstLine.slice(2).trim();
+  if (!shebang) {
+    return { command: "sh", args: [script] };
+  }
+  const [command, ...args] = shebang.split(/\s+/u);
+  return { command: command ?? "sh", args: [...args, script] };
+}
+
 async function runAdapterShellCommand(
   command: string,
   cwd: string,
   env: Record<string, string> = {},
 ): Promise<void> {
+  await runAdapterProcess("sh", ["-c", command], cwd, env);
+}
+
+async function runAdapterProcess(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env: Record<string, string> = {},
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("sh", ["-c", command], {
+    const childEnv = {
+      ...process.env,
+      ...env,
+    };
+    let timedOut = false;
+    let settled = false;
+    const child = spawn(command, args, {
       cwd,
-      env: {
-        ...process.env,
-        ...env,
-      },
-      stdio: "inherit",
+      env: childEnv,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
+    const timeoutMs = adapterProcessTimeoutMs(childEnv);
+    const timer = timeoutMs === null
+      ? null
+      : setTimeout(() => {
+          timedOut = true;
+          killAdapterProcess(child, "SIGKILL");
+        }, timeoutMs);
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      process.stdout.write(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      process.stderr.write(chunk);
+    });
+    const finish = (callback: () => void) => {
+      if (settled) {
         return;
       }
-      reject(new Error(
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      callback();
+    };
+    child.on("error", (error) => {
+      finish(() => reject(error));
+    });
+    child.on("exit", (code, signal) => {
+      if (timedOut) {
+        finish(() => reject(new Error(`Command adapter timed out after ${timeoutMs}ms.`)));
+        return;
+      }
+      if (code === 0) {
+        finish(resolve);
+        return;
+      }
+      finish(() => reject(new Error(
         code === null
           ? `Command adapter exited from signal ${signal ?? "unknown"}.`
           : `Command adapter exited with status ${code}.`,
-      ));
+      )));
     });
   });
+}
+
+function adapterProcessTimeoutMs(env: NodeJS.ProcessEnv): number | null {
+  const raw = env[WORKBENCH_RUNTIME_CONTROL_TIMEOUT_MS_ENV]?.trim();
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
+}
+
+function killAdapterProcess(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid && process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to killing the direct child if process-group termination is unavailable.
+    }
+  }
+  child.kill(signal);
 }
 
 function commandAdapterWorkingDirectory(request: WorkbenchAdapterOperationRequest): string {

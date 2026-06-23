@@ -61,6 +61,7 @@ const BUILT_IN_ENVIRONMENT_IMAGES: Record<string, string> = {
 const DOCKER_RUNTIME_MOUNT = "/workbench-runtime";
 const DOCKER_DEFAULT_WORKSPACE = "/workspace";
 const DEFAULT_DOCKER_AVAILABILITY_TIMEOUT_MS = 5_000;
+const WORKBENCH_BUILT_IN_ADAPTERS_IMPORT_ENV = "WORKBENCH_BUILT_IN_ADAPTERS_IMPORT";
 const mutableDockerTemplateImageBuilds = new Map<string, Promise<string>>();
 let dockerAvailabilityCheck: { timeoutMs: number; pathEnv: string | undefined; promise: Promise<void> } | undefined;
 
@@ -68,6 +69,7 @@ type DockerRuntimePayload = {
   mounts: readonly DockerRuntimeMount[];
   runnerPath: string;
   runtimeImport: string;
+  builtInAdaptersImport: string;
   builtInDockerfileRoot: string;
 };
 
@@ -246,6 +248,7 @@ async function prepareDockerSandboxWorkspace(
     runtimeMounts: runtimePayload.mounts as unknown as Json,
     runnerPath: runtimePayload.runnerPath,
     runtimeImport: runtimePayload.runtimeImport,
+    builtInAdaptersImport: runtimePayload.builtInAdaptersImport,
     sandboxUid: sandboxUser.uid,
     sandboxGid: sandboxUser.gid,
     network: network as unknown as Json,
@@ -331,6 +334,7 @@ async function runDockerSandboxExecution(
   const runtimeMounts = readDockerRuntimeMounts(metadata.runtimeMounts);
   const runnerPath = readRequiredMetadataString(metadata, "runnerPath", DOCKER_SANDBOX_BACKEND);
   const runtimeImport = readRequiredMetadataString(metadata, "runtimeImport", DOCKER_SANDBOX_BACKEND);
+  const builtInAdaptersImport = readRequiredMetadataString(metadata, "builtInAdaptersImport", DOCKER_SANDBOX_BACKEND);
   const sandboxUid = readRequiredMetadataNumber(metadata, "sandboxUid", DOCKER_SANDBOX_BACKEND);
   const sandboxGid = readRequiredMetadataNumber(metadata, "sandboxGid", DOCKER_SANDBOX_BACKEND);
   const progressTarget = args.progress ?? readOptionalProgressTarget(metadata.progressTarget);
@@ -383,6 +387,8 @@ async function runDockerSandboxExecution(
     `WORKBENCH_WORKSPACE_ROOT=${workspaceRoot}`,
     "--env",
     `WORKBENCH_RUNTIME_IMPORT=${runtimeImport}`,
+    "--env",
+    `${WORKBENCH_BUILT_IN_ADAPTERS_IMPORT_ENV}=${builtInAdaptersImport}`,
     image,
     "node",
     runnerPath,
@@ -737,6 +743,7 @@ function monorepoDockerPayload(root: string): DockerRuntimePayload {
     mounts: monorepoDockerRuntimeMounts(root),
     runnerPath: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/worker/sandbox-adapter-runner.cjs`,
     runtimeImport: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/core/dist/index.js`,
+    builtInAdaptersImport: `${DOCKER_RUNTIME_MOUNT}/products/workbench/packages/built-in-adapters/dist/index.js`,
     builtInDockerfileRoot: path.join(root, "products/workbench/environments"),
   };
 }
@@ -773,6 +780,7 @@ function findInstalledPackageDockerPayload(): DockerRuntimePayload | null {
       mounts: [{ source: nodeModulesRoot, target: "node_modules" }],
       runnerPath: `${DOCKER_RUNTIME_MOUNT}/node_modules/@workbench-ai/workbench-core/worker/sandbox-adapter-runner.cjs`,
       runtimeImport: `${DOCKER_RUNTIME_MOUNT}/node_modules/@workbench-ai/workbench-core/dist/index.js`,
+      builtInAdaptersImport: `${DOCKER_RUNTIME_MOUNT}/node_modules/@workbench-ai/workbench-built-in-adapters/dist/index.js`,
       builtInDockerfileRoot: path.join(packageRoot, "environments"),
     };
   }

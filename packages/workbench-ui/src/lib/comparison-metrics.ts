@@ -311,8 +311,8 @@ export function buildComparisonEvidenceRows({
       const run = cell.runId ? runsById.get(cell.runId) ?? null : null;
       const agent = resolvedAgent ?? agentsById.get(cell.agentVersionId);
       const score = finiteNumber(cell.quality ?? (run ? runScore(run, jobs) : undefined));
-      const latencyMs = finiteNumber(cell.latencyMs ?? run?.latencyMs);
-      const costUsd = finiteNumber(cell.costUsd ?? run?.costUsd);
+      const latencyMs = finiteNumber(cell.latencyMs);
+      const costUsd = finiteNumber(cell.costUsd);
       const samples = finiteNumber(cell.samples);
       const status = cell.status ?? run?.status;
       const error = cell.error ?? run?.error;

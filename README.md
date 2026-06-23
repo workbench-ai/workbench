@@ -23,10 +23,13 @@ The skill source lives at `skills/workbench/SKILL.md`. This repository intention
 - `packages/built-in-adapters`: first-party adapter manifests plus command, Codex, and Claude adapter shims
 - `packages/workbench-ui`: reusable Workbench UI surface
 - `packages/cli-web-ui`: shared UI primitives and preview components used by Workbench UI
-- `docs`, `SPEC.md`, and `ARCHITECTURE.md`: Workbench behavior and architecture references
+- `docs`: public docs, starting with `docs/index.md` and `docs/quickstart.md`
+- `ARCHITECTURE.md`: package boundaries and runtime ownership
 - `skills/workbench`: installable Workbench skill for AI coding agents
 
 ## Local Development
+
+Install dependencies, then run the standard build and test loop.
 
 ```bash
 pnpm install

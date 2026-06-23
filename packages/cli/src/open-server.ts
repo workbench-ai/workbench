@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { promises as fs } from "node:fs";
+import { promises as fs, watch, type FSWatcher } from "node:fs";
 import type { Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   createWorkbenchActionCapabilities,
   createWorkbenchReadOnlyInspectionSnapshot,
+  notifyWorkbenchReadOnlyInspectionChanged,
   previewLocalWorkbenchOperation,
   readWorkbenchReadOnlyInspectionCursor,
   waitForWorkbenchReadOnlyInspectionNotice,
@@ -17,6 +18,7 @@ import {
   type SurfaceSnapshotFile,
   type WorkbenchArtifact,
   type WorkbenchEvalCaseSnapshot,
+  type WorkbenchEvalSnapshot,
   type WorkbenchInspectionFileContent,
   type WorkbenchInspectionSnapshot,
   type WorkbenchInspectionSnapshotEnvelope,
@@ -24,6 +26,10 @@ import {
   type WorkbenchVersion,
 } from "@workbench-ai/workbench-core";
 import {
+  isWorkbenchAuthoredControlPath,
+  isWorkbenchPackageSourcePath,
+  isWorkbenchRuntimeMetadataPath,
+  normalizeWorkbenchSourcePath,
   parseWorkbenchCaseFileOwnerId,
   workbenchInspectionFileOwnerKindFromRouteSegment,
   type WorkbenchInspectionFileOwnerKind,
@@ -51,9 +57,15 @@ export async function startWorkbenchOpenServer(
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 0;
   const assetRoot = await resolveDevOpenAssetRoot();
+  const assetVersion = await devOpenAssetVersion(assetRoot);
   const shutdown = new AbortController();
+  const sourceWatcher = await startSourceWatcher({
+    dir: options.dir,
+    authToken: options.authToken,
+    signal: shutdown.signal,
+  });
   const server = createServer((request, response) => {
-    void handleRequest({ request, response, assetRoot, dir: options.dir, authToken: options.authToken, signal: shutdown.signal });
+    void handleRequest({ request, response, assetRoot, assetVersion, dir: options.dir, authToken: options.authToken, signal: shutdown.signal });
   });
   const sockets = new Set<Socket>();
   let closePromise: Promise<void> | undefined;
@@ -78,6 +90,7 @@ export async function startWorkbenchOpenServer(
     close: () => {
       closePromise ??= new Promise((resolve, reject) => {
         shutdown.abort();
+        sourceWatcher?.close();
         for (const socket of sockets) {
           socket.destroy();
         }
@@ -93,6 +106,72 @@ export async function startWorkbenchOpenServer(
       return closePromise;
     },
   };
+}
+
+async function startSourceWatcher(options: {
+  dir?: string;
+  authToken?: string;
+  signal: AbortSignal;
+}): Promise<FSWatcher | null> {
+  const root = path.resolve(options.dir ?? process.cwd());
+  try {
+    await fs.access(path.join(root, ".workbench"));
+  } catch {
+    return null;
+  }
+  let debounce: NodeJS.Timeout | undefined;
+  const notify = () => {
+    if (debounce) {
+      clearTimeout(debounce);
+    }
+    debounce = setTimeout(() => {
+      debounce = undefined;
+      void notifyWorkbenchReadOnlyInspectionChanged({
+        dir: root,
+        authToken: options.authToken,
+      }).catch(() => undefined);
+    }, 120);
+  };
+  let watcher: FSWatcher;
+  try {
+    watcher = watch(root, { recursive: true }, (_eventType, filename) => {
+      if (options.signal.aborted) {
+        return;
+      }
+      if (!filename) {
+        notify();
+        return;
+      }
+      const relativePath = String(filename);
+      if (sourceWatchPathShouldInvalidate(relativePath)) {
+        notify();
+      }
+    });
+  } catch {
+    return null;
+  }
+  const close = () => {
+    if (debounce) {
+      clearTimeout(debounce);
+      debounce = undefined;
+    }
+    watcher.close();
+  };
+  options.signal.addEventListener("abort", close, { once: true });
+  return watcher;
+}
+
+function sourceWatchPathShouldInvalidate(filePath: string): boolean {
+  let normalized: string;
+  try {
+    normalized = normalizeWorkbenchSourcePath(filePath);
+  } catch {
+    return false;
+  }
+  if (isWorkbenchRuntimeMetadataPath(normalized)) {
+    return false;
+  }
+  return isWorkbenchPackageSourcePath(normalized) || isWorkbenchAuthoredControlPath(normalized);
 }
 
 async function resolveDevOpenAssetRoot(): Promise<string> {
@@ -112,10 +191,16 @@ async function resolveDevOpenAssetRoot(): Promise<string> {
   return candidates[0]!;
 }
 
+async function devOpenAssetVersion(assetRoot: string): Promise<string> {
+  const stats = await fs.stat(path.join(assetRoot, "client.js"));
+  return `${Math.trunc(stats.mtimeMs)}-${stats.size}`;
+}
+
 async function handleRequest({
   request,
   response,
   assetRoot,
+  assetVersion,
   dir,
   authToken,
   signal,
@@ -123,6 +208,7 @@ async function handleRequest({
   request: IncomingMessage;
   response: ServerResponse;
   assetRoot: string;
+  assetVersion: string;
   dir?: string;
   authToken?: string;
   signal: AbortSignal;
@@ -211,14 +297,14 @@ async function handleRequest({
       return;
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      sendText(response, 200, html(), "text/html; charset=utf-8");
+      sendText(response, 200, html(assetVersion), "text/html; charset=utf-8");
       return;
     }
     if (url.pathname === "/client.js" || url.pathname === "/client.css" || url.pathname.startsWith("/fonts/")) {
       await sendAsset(response, assetRoot, url.pathname.slice(1));
       return;
     }
-    sendText(response, 200, html(), "text/html; charset=utf-8");
+    sendText(response, 200, html(assetVersion), "text/html; charset=utf-8");
   } catch (error) {
     if (signal.aborted || response.destroyed || response.writableEnded) {
       return;
@@ -377,6 +463,7 @@ function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): Work
         files: inspectionFileManifests(evalCase.files),
       })),
     })),
+    ...(snapshot.evaluationFiles ? { evaluationFiles: inspectionFileManifests(snapshot.evaluationFiles) } : {}),
     ...(snapshot.results ? {
       results: {
         ...snapshot.results,
@@ -448,7 +535,7 @@ function findInspectionFileOwner(
   snapshot: WorkbenchInspectionSnapshot,
   ownerKind: WorkbenchInspectionFileOwnerKind,
   ownerId: string,
-): WorkbenchVersion | WorkbenchTrace | WorkbenchArtifact | WorkbenchEvalCaseSnapshot | undefined {
+): Pick<WorkbenchVersion | WorkbenchTrace | WorkbenchArtifact | WorkbenchEvalCaseSnapshot | WorkbenchEvalSnapshot, "files"> | undefined {
   if (ownerKind === "version") {
     return snapshot.versions.find((entry) => entry.id === ownerId);
   }
@@ -463,6 +550,11 @@ function findInspectionFileOwner(
     return snapshot.evals
       .find((entry) => entry.hash === parsed.evaluationHash)
       ?.cases.find((entry) => entry.id === parsed.caseId);
+  }
+  if (ownerKind === "evaluation") {
+    return ownerId === "current"
+      ? { files: snapshot.evaluationFiles ?? snapshot.evals[0]?.files ?? [] }
+      : snapshot.evals.find((entry) => entry.hash === ownerId);
   }
   return snapshot.artifacts.find((entry) => entry.id === ownerId);
 }
@@ -480,16 +572,19 @@ async function sendAsset(response: ServerResponse, assetRoot: string, relativePa
   }
   response.statusCode = 200;
   response.setHeader("content-type", contentType(normalized));
+  response.setHeader("cache-control", "no-store");
   response.end(content);
 }
 
 function sendText(response: ServerResponse, status: number, content: string, type: string): void {
   response.statusCode = status;
   response.setHeader("content-type", type);
+  response.setHeader("cache-control", "no-store");
   response.end(content);
 }
 
-function html(): string {
+function html(assetVersion: string): string {
+  const version = encodeURIComponent(assetVersion);
   return [
     "<!doctype html>",
     "<html lang=\"en\">",
@@ -497,11 +592,11 @@ function html(): string {
     "<meta charset=\"utf-8\">",
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
     "<title>Workbench</title>",
-    "<link rel=\"stylesheet\" href=\"/client.css\">",
+    `<link rel="stylesheet" href="/client.css?v=${version}">`,
     "</head>",
     "<body>",
     "<div id=\"root\"></div>",
-    "<script type=\"module\" src=\"/client.js\"></script>",
+    `<script type="module" src="/client.js?v=${version}"></script>`,
     "</body>",
     "</html>",
     "",
