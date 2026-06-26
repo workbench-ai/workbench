@@ -5,7 +5,7 @@
   "submission_schema_version": 1,
   "suite_latency_expectation": {
     "minimum_significant_improvement_ratio": 0.2,
-    "notes": "Eval cases evaluate whether an agent uses Workbench as a skill management runtime with the hard-cut CLI and source vocabulary."
+    "notes": "Eval cases evaluate whether an agent uses Workbench with the current CLI and source vocabulary."
   },
   "evals": [
     {
@@ -127,7 +127,7 @@
       "title": "Publish and install a Workbench skill",
       "category": "sharing",
       "prompt": "Share a Workbench-managed skill through Workbench Cloud and explain what gets published.",
-      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench clone OWNER/SKILL DIR. It explains that publish exposes an installable Workbench agent skill package for use and editable Workbench source for evaluation or improvement, while object sync stores versions, evidence, refs, traces, and artifacts. It distinguishes this from external Agent Skill fallback installs, which are not Workbench-versioned and do not support clone, eval evidence, improve lineage, or Workbench Cloud visibility.",
+      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench clone OWNER/SKILL DIR. It explains that publish exposes an installable Workbench agent skill package for use and editable Workbench source for evaluation or improvement, while Workbench sync carries versions, evidence, refs, traces, and artifacts. It distinguishes this from external Agent Skill fallback installs, which are not Workbench-versioned and do not support clone, eval evidence, improve lineage, or Workbench Cloud visibility.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -163,9 +163,9 @@
           "value": "(?:^|\\s)workbench\\s+clone\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\s+\\S+\\b"
         },
         {
-          "text": "describes object remote",
+          "text": "describes Workbench sync",
           "kind": "equals",
-          "path": "answer.describes_workbench_object_remote",
+          "path": "answer.describes_workbench_sync",
           "value": true
         }
       ]

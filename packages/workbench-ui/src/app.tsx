@@ -27,6 +27,7 @@ import {
   PlayCircleIcon,
   RefreshCwIcon,
   WorkflowIcon,
+  XIcon,
 } from "lucide-react";
 
 import {
@@ -115,7 +116,7 @@ import { SurfaceSection } from "./components/surface-section";
 import { LineageGraph } from "./components/lineage-graph";
 import { RepositoryFilesView } from "./components/repository-files-view";
 import { EvaluationResultsVisualSummary } from "./components/evaluation-results-visual-summary";
-import { WorkbenchActionBar } from "./components/workbench-action-bar";
+import { WorkbenchActionBar, type WorkbenchOperationPreviewState } from "./components/workbench-action-bar";
 import {
   caseFileOwnerId,
   fileContentApiPath,
@@ -158,11 +159,14 @@ import {
 import {
   routeForWorkbenchRunSnapshot,
 } from "./lib/operations";
+import type { VersionLineageFlow } from "./lib/lineage";
 import {
   defaultSourceVersion,
   orderedVersions,
   publishedVersionId,
 } from "./lib/version-selection";
+
+export type { WorkbenchOperationPreviewState } from "./components/workbench-action-bar";
 import {
   buildComparisonEvidenceRows,
   buildComparisonGroups,
@@ -183,11 +187,17 @@ export interface WorkbenchWorkspaceProps {
   apiBasePath?: string;
   routeBasePath?: string;
   brandHref?: string;
+  hideHeader?: boolean;
   headerControls?: ReactNode;
   identityControls?: ReactNode;
   initialEnvelope?: WorkbenchInspectionSnapshotEnvelope | null;
   initialRoute?: WorkbenchRoute;
   hostContext?: WorkbenchHostContext;
+  contentScrollTop?: number;
+  operationPreview?: WorkbenchOperationPreviewState;
+  sidebarMode?: "auto" | "hidden";
+  syncLocation?: boolean;
+  versionHistoryDialog?: WorkbenchVersionHistoryDialogState;
 }
 
 export interface WorkbenchHostContext {
@@ -237,16 +247,39 @@ const EVALUATION_VIEW_ITEMS: Array<{
   { value: "cases", label: "Cases", icon: FileTextIcon },
 ];
 
-type VersionHistoryView = "list" | "lineage";
+export type WorkbenchVersionHistoryView = "list" | "lineage";
+
+export interface WorkbenchVersionHistoryDialogState {
+  open?: boolean;
+  view?: WorkbenchVersionHistoryView;
+  initialLineageFlow?: VersionLineageFlow;
+}
+
+export interface WorkbenchVersionHistoryDialogSurfaceProps {
+  className?: string;
+  graphClassName?: string;
+  initialLineageFlow?: VersionLineageFlow;
+  onValueChange: (versionId: string) => void;
+  onViewChange: (view: WorkbenchVersionHistoryView) => void;
+  snapshot: WorkbenchInspectionSnapshot;
+  value: string;
+  view: WorkbenchVersionHistoryView;
+}
 
 const VERSION_HISTORY_VIEW_ITEMS: Array<{
-  value: VersionHistoryView;
+  value: WorkbenchVersionHistoryView;
   label: string;
   icon: typeof WorkflowIcon;
 }> = [
   { value: "list", label: "List", icon: FolderOpenIcon },
   { value: "lineage", label: "Lineage", icon: GitBranchIcon },
 ];
+
+const VERSION_HISTORY_DIALOG_CONTENT_CLASS =
+  "flex h-[min(42rem,calc(100dvh-2rem))] w-[calc(100vw-2rem)] max-w-2xl grid-rows-none flex-col gap-0 overflow-hidden p-0 data-open:animate-none data-closed:animate-none sm:max-w-2xl";
+
+const VERSION_HISTORY_DIALOG_SURFACE_CLASS =
+  "relative flex h-[min(42rem,calc(100dvh-2rem))] w-[calc(100vw-2rem)] max-w-2xl flex-col gap-0 overflow-hidden rounded-xl bg-popover text-sm text-popover-foreground ring-1 ring-foreground/10";
 
 function useWorkbenchInspection({
   apiBasePath,
@@ -487,11 +520,17 @@ export function WorkbenchWorkspace({
   apiBasePath = "/api",
   routeBasePath = "/",
   brandHref = "/",
+  hideHeader = false,
   headerControls,
   identityControls,
   initialEnvelope = null,
   initialRoute,
   hostContext,
+  contentScrollTop,
+  operationPreview,
+  sidebarMode = "auto",
+  syncLocation = true,
+  versionHistoryDialog,
 }: WorkbenchWorkspaceProps) {
   const {
     cursor: inspectionCursor,
@@ -505,6 +544,7 @@ export function WorkbenchWorkspace({
   } = useWorkbenchInspection({ apiBasePath, initialEnvelope });
   const [route, setRoute] = useState<WorkbenchRoute>(() =>
     initialRoute ?? parseWorkbenchLocation(undefined, routeBasePath));
+  const hasInitialRoute = initialRoute !== undefined;
   const [routePending, startRouteTransition] = useTransition();
   const [routeLoadingIds, setRouteLoadingIds] = useState<ReadonlySet<string>>(() => new Set());
   const reportRouteLoading = useCallback<RouteLoadingReporter>((id, active) => {
@@ -523,33 +563,41 @@ export function WorkbenchWorkspace({
   }, []);
 
   useEffect(() => {
+    if (!syncLocation) {
+      return;
+    }
     const updateRoute = () => setRoute(parseWorkbenchLocation(undefined, routeBasePath));
-    updateRoute();
+    if (!hasInitialRoute) {
+      updateRoute();
+    }
     window.addEventListener("popstate", updateRoute);
     return () => window.removeEventListener("popstate", updateRoute);
-  }, [routeBasePath]);
+  }, [hasInitialRoute, routeBasePath, syncLocation]);
 
   const hrefFor = useCallback(
     (nextRoute: WorkbenchRoute) => buildWorkbenchLocationHref(nextRoute, routeBasePath),
     [routeBasePath],
   );
   useEffect(() => {
+    if (!syncLocation) {
+      return;
+    }
     const canonicalHref = hrefFor(route);
     const current = `${window.location.pathname}${window.location.search}`;
     if (current !== canonicalHref) {
       window.history.replaceState({}, "", canonicalHref);
     }
-  }, [hrefFor, route]);
+  }, [hrefFor, route, syncLocation]);
   const navigate = useCallback((nextRoute: WorkbenchRoute, options: { replace?: boolean } = {}) => {
     const href = hrefFor(nextRoute);
     const current = `${window.location.pathname}${window.location.search}`;
     startRouteTransition(() => {
-      if (href !== current) {
+      if (syncLocation && href !== current) {
         window.history[options.replace ? "replaceState" : "pushState"]({}, "", href);
       }
       setRoute(nextRoute);
     });
-  }, [hrefFor, startRouteTransition]);
+  }, [hrefFor, startRouteTransition, syncLocation]);
   const onRouteClick = useCallback((nextRoute: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
@@ -592,7 +640,7 @@ export function WorkbenchWorkspace({
     requestedEvidenceRefresh,
   ]);
 
-  const header = (
+  const header = hideHeader ? null : (
     <WorkbenchShellHeader
       brandHref={brandHref}
       error={error}
@@ -604,6 +652,7 @@ export function WorkbenchWorkspace({
     />
   );
   const routeFeedbackActive = loading || refreshing || routePending || routeLoadingIds.size > 0 || routeNeedsEvidenceRefresh;
+  const showRouteSidebar = sidebarMode !== "hidden";
   const renderWorkspace = (children: ReactNode) => (
     <RouteLoadingContext.Provider value={reportRouteLoading}>
       <TopLoadingBar active={routeFeedbackActive} />
@@ -642,7 +691,10 @@ export function WorkbenchWorkspace({
 
   return renderWorkspace(
     <div className="min-h-0 overflow-y-auto px-4 py-5 sm:px-6 sm:py-7">
-      <div className={cn("mx-auto grid w-full gap-0", WORKBENCH_CONTENT_RAIL_CLASS)}>
+      <div
+        className={cn("mx-auto grid w-full gap-0", WORKBENCH_CONTENT_RAIL_CLASS)}
+        style={typeof contentScrollTop === "number" ? { translate: `0 ${-contentScrollTop}px` } : undefined}
+      >
         <SkillIdentityHeader
           actions={actions}
           apiBasePath={apiBasePath}
@@ -651,6 +703,7 @@ export function WorkbenchWorkspace({
           identityControls={identityControls}
           onOperationStarted={onOperationStarted}
           onRouteClick={onRouteClick}
+          operationPreview={operationPreview}
           snapshot={snapshot}
           hostContext={hostContext}
         />
@@ -662,7 +715,14 @@ export function WorkbenchWorkspace({
           hrefFor={hrefFor}
           onRouteClick={onRouteClick}
         />
-        <div className="grid min-w-0 gap-6 pt-6 xl:grid-cols-[minmax(0,1fr)_280px] xl:items-start xl:gap-8">
+        <div
+          className={cn(
+            "grid min-w-0 gap-6 pt-6 xl:items-start",
+            showRouteSidebar
+              ? "xl:grid-cols-[minmax(0,1fr)_280px] xl:gap-8"
+              : "xl:grid-cols-1",
+          )}
+        >
           <main className="min-w-0" data-testid="workbench-primary-content">
             {routeNeedsEvidenceRefresh ? (
               <ProblemState
@@ -681,15 +741,18 @@ export function WorkbenchWorkspace({
                 progressCursor={progressCursor}
                 route={route}
                 snapshot={snapshot}
+                versionHistoryDialog={versionHistoryDialog}
               />
             )}
           </main>
-          <RouteSidebar
-            hostContext={hostContext}
-            identity={identity}
-            route={route}
-            snapshot={snapshot}
-          />
+          {showRouteSidebar ? (
+            <RouteSidebar
+              hostContext={hostContext}
+              identity={identity}
+              route={route}
+              snapshot={snapshot}
+            />
+          ) : null}
         </div>
       </div>
     </div>,
@@ -862,6 +925,7 @@ function SkillIdentityHeader({
   identityControls,
   onOperationStarted,
   onRouteClick,
+  operationPreview,
   snapshot,
 }: {
   actions: WorkbenchActionCapabilities | null;
@@ -872,6 +936,7 @@ function SkillIdentityHeader({
   identityControls: ReactNode;
   onOperationStarted: (started: WorkbenchRunSnapshot) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  operationPreview?: WorkbenchOperationPreviewState;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
   const handleParts = splitSkillHandle(identity.handle);
@@ -926,6 +991,7 @@ function SkillIdentityHeader({
             actions={actions}
             apiBasePath={apiBasePath}
             onOperationStarted={onOperationStarted}
+            operationPreview={operationPreview}
           />
         ) : null}
       </div>
@@ -988,6 +1054,7 @@ function RouteBody({
   progressCursor,
   route,
   snapshot,
+  versionHistoryDialog,
 }: {
   apiBasePath: string;
   hrefFor: (route: WorkbenchRoute) => string;
@@ -997,6 +1064,7 @@ function RouteBody({
   progressCursor: string | null;
   route: WorkbenchRoute;
   snapshot: WorkbenchInspectionSnapshot;
+  versionHistoryDialog?: WorkbenchVersionHistoryDialogState;
 }) {
   switch (route.kind) {
     case "files":
@@ -1006,6 +1074,7 @@ function RouteBody({
           navigate={navigate}
           route={route}
           snapshot={snapshot}
+          versionHistoryDialog={versionHistoryDialog}
         />
       );
     case "evaluation":
@@ -1063,11 +1132,13 @@ function FilesSurface({
   navigate,
   route,
   snapshot,
+  versionHistoryDialog,
 }: {
   apiBasePath: string;
   navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
   route: Extract<WorkbenchRoute, { kind: "files" }>;
   snapshot: WorkbenchInspectionSnapshot;
+  versionHistoryDialog?: WorkbenchVersionHistoryDialogState;
 }) {
   const owner = defaultSourceVersion(snapshot, route.file.versionId);
   if (!owner) {
@@ -1092,6 +1163,7 @@ function FilesSurface({
       onVersionChange={(versionId) => navigate(withFileRouteState(route, { versionId }))}
       snapshot={snapshot}
       versionId={owner.id}
+      versionHistoryDialog={versionHistoryDialog}
     />
   );
 }
@@ -1117,6 +1189,7 @@ function RepositorySourceSurface({
   ownerId,
   snapshot,
   versionId,
+  versionHistoryDialog,
 }: {
   apiBasePath: string;
   file: WorkbenchFileRouteState;
@@ -1126,6 +1199,7 @@ function RepositorySourceSurface({
   onVersionChange: (versionId: string) => void;
   snapshot: WorkbenchInspectionSnapshot;
   versionId: string;
+  versionHistoryDialog?: WorkbenchVersionHistoryDialogState;
 }) {
   const reportRouteLoading = useRouteLoadingReporter();
 
@@ -1145,6 +1219,7 @@ function RepositorySourceSurface({
       <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           <VersionHistoryDialog
+            controlledState={versionHistoryDialog}
             snapshot={snapshot}
             value={versionId}
             onValueChange={onVersionChange}
@@ -1172,16 +1247,22 @@ function RepositorySourceSurface({
 }
 
 function VersionHistoryDialog({
+  controlledState,
   onValueChange,
   snapshot,
   value,
 }: {
+  controlledState?: WorkbenchVersionHistoryDialogState;
   onValueChange: (versionId: string) => void;
   snapshot: WorkbenchInspectionSnapshot;
   value: string;
 }) {
-  const [open, setOpen] = useState(false);
-  const [view, setView] = useState<VersionHistoryView>("list");
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const [uncontrolledView, setUncontrolledView] = useState<WorkbenchVersionHistoryView>("list");
+  const open = controlledState?.open ?? uncontrolledOpen;
+  const view = controlledState?.view ?? uncontrolledView;
+  const setOpen = controlledState?.open === undefined ? setUncontrolledOpen : () => undefined;
+  const setView = controlledState?.view === undefined ? setUncontrolledView : () => undefined;
   const selectVersion = (versionId: string) => {
     onValueChange(versionId);
     setOpen(false);
@@ -1194,46 +1275,123 @@ function VersionHistoryDialog({
           Version history
         </Button>
       </DialogTrigger>
-      <DialogContent className="flex h-[min(42rem,calc(100dvh-2rem))] w-[calc(100vw-2rem)] max-w-2xl grid-rows-none flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
-        <DialogHeader className="shrink-0 gap-3 border-b border-border/70 px-4 pb-3 pt-4 pr-12">
-          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <DialogTitle>Version history</DialogTitle>
-            <ViewSwitch
-              ariaLabel="Version history views"
-              value={view}
-              items={VERSION_HISTORY_VIEW_ITEMS}
-              onValueChange={(nextView) => {
-                if (nextView === "list" || nextView === "lineage") {
-                  setView(nextView);
-                }
-              }}
-            />
-          </div>
-        </DialogHeader>
-        {view === "lineage" ? (
-          <div className="flex min-h-0 flex-1 overflow-hidden">
-            <LineageGraph
-              className="min-h-0 rounded-none border-0"
-              currentVersionId={value}
-              publishedVersionId={publishedVersionId(snapshot)}
-              lineage={snapshot.lineage}
-              versions={snapshot.versions}
-              runs={snapshot.runs}
-              jobs={snapshot.jobs}
-              onVersionClick={selectVersion}
-            />
-          </div>
-        ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-            <VersionHistory
-              snapshot={snapshot}
-              value={value}
-              onValueChange={selectVersion}
-            />
-          </div>
-        )}
+      <DialogContent className={VERSION_HISTORY_DIALOG_CONTENT_CLASS}>
+        <WorkbenchVersionHistoryDialogContent
+          dialogSemantics
+          initialLineageFlow={controlledState?.initialLineageFlow}
+          onValueChange={selectVersion}
+          onViewChange={setView}
+          snapshot={snapshot}
+          value={value}
+          view={view}
+        />
       </DialogContent>
     </Dialog>
+  );
+}
+
+export function WorkbenchVersionHistoryDialogSurface({
+  className,
+  graphClassName,
+  initialLineageFlow,
+  onValueChange,
+  onViewChange,
+  snapshot,
+  value,
+  view,
+}: WorkbenchVersionHistoryDialogSurfaceProps) {
+  return (
+    <div className={cn(VERSION_HISTORY_DIALOG_SURFACE_CLASS, className)}>
+      <WorkbenchVersionHistoryDialogContent
+        graphClassName={graphClassName}
+        initialLineageFlow={initialLineageFlow}
+        onValueChange={onValueChange}
+        onViewChange={onViewChange}
+        snapshot={snapshot}
+        value={value}
+        view={view}
+      />
+      <Button
+        aria-hidden="true"
+        className="absolute right-2 top-2"
+        size="icon-sm"
+        tabIndex={-1}
+        type="button"
+        variant="ghost"
+      >
+        <XIcon aria-hidden="true" />
+      </Button>
+    </div>
+  );
+}
+
+function WorkbenchVersionHistoryDialogContent({
+  dialogSemantics = false,
+  graphClassName,
+  initialLineageFlow,
+  onValueChange,
+  onViewChange,
+  snapshot,
+  value,
+  view,
+}: WorkbenchVersionHistoryDialogSurfaceProps & { dialogSemantics?: boolean }) {
+  return (
+    <>
+      <DialogHeader className="shrink-0 gap-3 border-b border-border/70 px-4 pb-3 pt-4 pr-12">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          {dialogSemantics ? (
+            <>
+              <DialogTitle>Version history</DialogTitle>
+              <DialogDescription className="sr-only">
+                Review version history and lineage for this skill.
+              </DialogDescription>
+            </>
+          ) : (
+            <>
+              <h3 className="font-heading text-base font-medium leading-none">
+                Version history
+              </h3>
+              <p className="sr-only">
+                Review version history and lineage for this skill.
+              </p>
+            </>
+          )}
+          <ViewSwitch
+            ariaLabel="Version history views"
+            value={view}
+            items={VERSION_HISTORY_VIEW_ITEMS}
+            onValueChange={(nextView) => {
+              if (nextView === "list" || nextView === "lineage") {
+                onViewChange(nextView);
+              }
+            }}
+          />
+        </div>
+      </DialogHeader>
+      {view === "lineage" ? (
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <LineageGraph
+            className={cn("min-h-0 rounded-none border-0", graphClassName)}
+            currentVersionId={value}
+            initialFlow={initialLineageFlow}
+            publishedVersionId={publishedVersionId(snapshot)}
+            lineage={snapshot.lineage}
+            versions={snapshot.versions}
+            runs={snapshot.runs}
+            jobs={snapshot.jobs}
+            onVersionClick={onValueChange}
+          />
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          <VersionHistory
+            snapshot={snapshot}
+            value={value}
+            onValueChange={onValueChange}
+          />
+        </div>
+      )}
+    </>
   );
 }
 

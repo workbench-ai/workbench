@@ -46,6 +46,7 @@ import {
 const BAR_CHART_MIN_HEIGHT = 220;
 const BAR_CHART_MAX_HEIGHT = 520;
 const TRADEOFF_CHART_HEIGHT = 320;
+const DENSE_TRADEOFF_CHART_HEIGHT = 220;
 
 export function EvaluationResultsVisualSummary({
   rows,
@@ -121,6 +122,7 @@ export function EvaluationResultsVisualSummary({
         ) : null}
         {showTradeoff && tradeoffPairs.length > 0 ? (
           <EvaluationTradeoffChart
+            dense={dense}
             groupColorById={groupColorById}
             groups={groups}
             rows={rows}
@@ -270,11 +272,13 @@ function EvaluationMetricBarChart({
 }
 
 function EvaluationTradeoffChart({
+  dense,
   groupColorById,
   groups,
   rows,
   tradeoffPairs,
 }: {
+  dense: boolean;
   groupColorById: ReadonlyMap<string, string>;
   groups: readonly ComparisonGroupPresentation[];
   rows: ComparisonEvidenceRow[];
@@ -316,6 +320,7 @@ function EvaluationTradeoffChart({
   }
 
   const title = tradeoffPairLabel(pair);
+  const chartHeight = dense ? DENSE_TRADEOFF_CHART_HEIGHT : TRADEOFF_CHART_HEIGHT;
   return (
     <section
       aria-label={title}
@@ -351,7 +356,7 @@ function EvaluationTradeoffChart({
         config={chartConfig}
         className="w-full min-w-0 !aspect-auto"
         data-testid="evaluation-tradeoff-plot"
-        style={{ aspectRatio: "auto", height: TRADEOFF_CHART_HEIGHT }}
+        style={{ aspectRatio: "auto", height: chartHeight }}
       >
         <ScatterChart
           accessibilityLayer

@@ -61,7 +61,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "new",
       title: "New",
-      summary: "Creates a brand-new Workbench skill project.",
+      summary: "Creates a Workbench skill project.",
       usage: ["workbench new DIR [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]"],
       example: "workbench new earnings-prep",
       quickHelpGroup: "taught",
@@ -72,7 +72,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "init",
       title: "Init",
-      summary: "Initializes the current skill directory as a Workbench-managed project without rewriting SKILL.md.",
+      summary: "Adds Workbench controls to the current skill directory without rewriting SKILL.md.",
       usage: ["workbench init [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]"],
       example: "workbench init",
       quickHelpGroup: "taught",
@@ -94,7 +94,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "run",
       title: "Run",
-      summary: "Runs the selected cases without running graders.",
+      summary: "Runs selected cases without grading them.",
       usage: ["workbench run [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]"],
       example: "workbench run -n 3",
       quickHelpGroup: "taught",
@@ -105,7 +105,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "grade",
       title: "Grade",
-      summary: "Grades existing execution jobs without rerunning them.",
+      summary: "Grades existing execution output without rerunning the skill.",
       usage: ["workbench grade [--versions all|LIST] [--agents all|LIST] [--cases LIST] [--rerun] [--cloud] [--dry-run] [--json]"],
       example: "workbench grade",
       quickHelpGroup: "taught",
@@ -116,7 +116,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "eval",
       title: "Eval",
-      summary: "Runs execute and grade jobs for the selected skill versions and agents. Omitted selectors use manifest defaults.",
+      summary: "Runs execution and grading for selected skill versions and agents. Omitted selectors use manifest defaults.",
       usage: ["workbench eval [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]"],
       example: "workbench eval -n 5",
       quickHelpGroup: "taught",
@@ -127,7 +127,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "results",
       title: "Results",
-      summary: "Shows recorded eval results across selected skill versions and agents.",
+      summary: "Shows recorded eval results for selected skill versions and agents.",
       usage: ["workbench results [--versions all|LIST] [--agents all|LIST] [--json]"],
       example: "workbench results --agents all",
       quickHelpGroup: "taught",
@@ -138,7 +138,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "improve",
       title: "Improve",
-      summary: "Creates one improved child skill version from evidence. The selected version and agent must resolve to exactly one entry each.",
+      summary: "Creates one improved skill version from evidence. Select exactly one version and one agent.",
       usage: ["workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]"],
       example: "workbench improve --budget 1 -n 1",
       quickHelpGroup: "taught",
@@ -158,7 +158,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "publish",
       title: "Publish",
-      summary: "Publishes installable skill source to Workbench Cloud. --as sets the linked OWNER/SKILL handle.",
+      summary: "Publishes installable skill source to Workbench Cloud. Use --as to set the linked OWNER/SKILL handle.",
       usage: ["workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]"],
       example: "workbench publish --as OWNER/SKILL --dry-run",
       quickHelpGroup: "taught",
@@ -177,7 +177,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "unpublish",
       title: "Unpublish",
-      summary: "Removes exact source availability for a non-current published version.",
+      summary: "Removes source availability for a non-current published version.",
       usage: ["workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]"],
       example: "workbench unpublish v_abc123 --dry-run",
       fullHelpGroup: "usage",
@@ -187,7 +187,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "delete",
       title: "Delete",
-      summary: "Deletes an entire Workbench Cloud skill project. Use unpublish for one exact package version.",
+      summary: "Deletes an entire Workbench Cloud skill project. Use unpublish for one package version.",
       usage: ["workbench delete OWNER/SKILL|URL [--dry-run] [--yes] [--json]"],
       example: "workbench delete test/disposable-skill --dry-run",
       quickHelpGroup: "other",
@@ -198,7 +198,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "skills",
       title: "Skills",
-      summary: "Lists local skills accessible to Codex and Claude across folder and global scopes.",
+      summary: "Lists local skills available to Codex and Claude across folder and global scopes.",
       usage: ["workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]"],
       example: "workbench skills",
       quickHelpGroup: "taught",
@@ -209,7 +209,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "install",
       title: "Install",
-      summary: "Installs a Workbench Cloud source when available, otherwise delegates external Agent Skill sources to skills add.",
+      summary: "Installs a Workbench Cloud source when available, or delegates external Agent Skill sources to skills add.",
       usage: ["workbench install SOURCE [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json] [-- SKILLS_ARGS...]"],
       example: "workbench install test/workbench-smoke",
       quickHelpGroup: "taught",
@@ -220,7 +220,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "status",
       title: "Status",
-      summary: "Reports project, worktree, run, per-remote sync/publication, and auth state. --json emits the workbench.status.v1 dashboard.",
+      summary: "Reports project, worktree, run, sync, publication, and auth state. Use --json for the workbench.status.v1 dashboard.",
       usage: ["workbench status [--dir DIR] [--json]"],
       example: "workbench status --json",
       fullHelpGroup: "inspect",
@@ -261,7 +261,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "log",
       title: "Log",
-      summary: "Shows one reverse-chronological timeline of versions and runs.",
+      summary: "Shows recent versions and runs.",
       usage: ["workbench log [--runs|--versions] [--json]"],
       example: "workbench log --runs",
       fullHelpGroup: "inspect",
@@ -355,7 +355,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "login",
       title: "Login",
-      summary: "Connects the CLI to Workbench Cloud or captures local adapter auth for a provider.",
+      summary: "Connects the CLI to Workbench Cloud or captures provider auth.",
       usage: [
         "workbench login [PROVIDER] [--method METHOD] [--profile PROFILE] [--profile-root DIR] [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--local-only] [--json]",
         "workbench logout [PROVIDER] [--json]",
@@ -380,7 +380,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "logout",
       title: "Logout",
-      summary: "With no provider, logs out of Workbench Cloud. With a provider such as codex or claude, removes local adapter auth.",
+      summary: "Logs out of Workbench Cloud or removes local provider auth.",
       usage: ["workbench logout [PROVIDER] [--json]"],
       example: "workbench logout claude",
       fullHelpGroup: "share-auth",
@@ -390,7 +390,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "sync",
       title: "Sync",
-      summary: "Plumbing command: synchronizes local evidence and version objects with a Workbench remote.",
+      summary: "Synchronizes local evidence and version objects with a Workbench remote.",
       usage: ["workbench sync [REMOTE] [--dry-run] [--dir DIR] [--json]"],
       allHelpUsage: "workbench sync [REMOTE] [--dry-run] [--json]",
       example: "workbench sync cloud --dry-run",
@@ -432,7 +432,7 @@ export const WORKBENCH_COMMAND_SURFACE = {
   ],
   remoteUrls: [
     "https://HOST/skills/OWNER/SKILL  Workbench Cloud skill remote",
-    "file:///absolute/path            local file remote for plumbing sync",
+    "file:///absolute/path            local file remote for explicit sync",
   ],
   commands: WORKBENCH_COMMANDS,
 } as const satisfies {
@@ -521,9 +521,9 @@ export function allowedFlagsForWorkbenchCommand(
 
 export function renderWorkbenchCliReference(): string {
   const lines: string[] = [
-    "## Command Surface",
+    "## Command surface",
     "",
-    "This section is generated from the same command metadata that renders `workbench help` and validates accepted flags.",
+    "Generated from the same command metadata that renders `workbench help` and validates accepted flags.",
     "",
   ];
 

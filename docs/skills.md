@@ -1,34 +1,41 @@
-# Skill Packages
+# Skill packages
 
-Workbench works with standard [Agent Skills](https://agentskills.io/specification). A skill package is the installable source agents use: `SKILL.md` plus optional scripts, references, assets, `dist/**`, and support files.
+Workbench publishes and installs standard [Agent Skills](https://agentskills.io/specification). A skill package is the source an agent can use directly: `SKILL.md` plus optional scripts, references, assets, `dist/**`, and support files.
 
-Use this page when you want to understand the boundary between the installable skill package, Workbench eval controls, and the generated Workbench skill that helps agents operate the CLI.
+Workbench adds evals, evidence, versions, improvement loops, and publishing around that package. Those project files are not part of the installed Agent Skill.
 
-Use the upstream [skill creator best practices](https://agentskills.io/skill-creation/best-practices) for general authoring guidance. Use Workbench when you need evals, evidence, versioning, improvement loops, publishing, and install/clone workflows around that package.
-
-## What Workbench Adds
+## Package boundary
 
 | Agent Skill package | Workbench project |
 | --- | --- |
-| `SKILL.md` instructions | `.workbench/eval.yaml` quality definition |
-| `scripts/`, `references/`, `assets/` | `.workbench/cases/**` workflow cases |
-| Installable package source | `.workbench/agents.yaml` agent matrix |
-| Published package versions | Runs, internal jobs, traces, artifacts, and result evidence |
+| `SKILL.md` instructions | `.workbench/eval.yaml` grading standard |
+| `scripts/`, `references/`, `assets/`, `dist/**` | `.workbench/cases/**` workflow cases |
+| Files an agent needs at runtime | `.workbench/agents.yaml` agent configuration |
+| Installable published source | Runs, traces, artifacts, results, versions, and lineage |
 
-`workbench install` copies the Agent Skill package only. Workbench-published sources install with Workbench provenance; external sources delegate to `skills add` and remain ordinary Agent Skills with no Workbench version, eval, improve, publish, or clone behavior. `workbench clone` creates editable Workbench-published package source inside a fresh Workbench project.
+Keep reusable workflow instructions, scripts, reference material, and assets in the package. Keep evaluation criteria, cases, runtime configuration, and generated evidence in `.workbench/**`.
 
-## Generated Workbench Skill
+## Install
 
-The generated Workbench skill teaches coding agents how to create, evaluate, improve, publish, install, and clone Workbench-managed skills.
+`workbench install` copies the Agent Skill package only:
 
-The skill stays intentionally thin. It loads copied reference docs for CLI syntax, workflows, eval source shape, and the product contract instead of duplicating those contracts in the prompt itself.
+```bash
+workbench install OWNER/SKILL
+workbench install OWNER/SKILL@VERSION
+```
 
-## Ownership Boundary
+It does not copy `.workbench` eval controls, run history, traces, artifacts, remotes, sync state, or local runtime files. For Workbench-published packages, Workbench records the source handle and exact published version. External Agent Skill sources can still install through Workbench. Workbench-only behavior such as clone, eval evidence, improvement lineage, and Cloud visibility does not apply.
 
-The Workbench skill owns the agent-operated workflow: deciding what skill to create or edit, turning conversations and traces into eval cases, drafting grade criteria, choosing local or hosted operation loops, configuring skill composition, running run/grade/eval/improve loops, and explaining the evidence.
+## Clone
 
-Workbench core owns durable substrate behavior: automatic package versions, skill bundle snapshots, eval snapshots, agent records, operation graphs, runs, jobs, traces, artifacts, lineage, object remotes, source publication, shared inspection, and operation capabilities.
+`workbench clone` creates editable source in a fresh Workbench project:
 
-Do not add core features for flows that can be encoded in a skill.
+```bash
+workbench clone OWNER/SKILL ./local-copy
+```
 
-Keep generated-skill changes in the authored source and refresh installed copies through the documented Workbench skill sync path. Do not edit installed user-home skill copies directly.
+Use `install` when the recipient only needs the skill in an agent. Use `clone` when they need editable source, evals, and future improvement loops.
+
+## Authoring
+
+Use the upstream [skill creator best practices](https://agentskills.io/skill-creation/best-practices) for general Agent Skill authoring. Use Workbench when you need a measured development loop: representative cases, graded evidence, version history, improvement proofs, publishing, install, and clone.

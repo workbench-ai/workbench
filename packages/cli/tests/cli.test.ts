@@ -59,12 +59,8 @@ async function invoke(args: string[]): Promise<{ code: number; stdout: string; s
 }
 
 async function invokeChild(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const child = spawn("pnpm", [
-    "exec",
-    "tsx",
-    "--eval",
-    "import { runCli } from './src/index.ts'; void (async () => { process.exitCode = await runCli(process.argv.slice(1)); })();",
-    "--",
+  const child = spawn(process.execPath, [
+    path.join(import.meta.dirname, "../dist/workbench.js"),
     ...args,
   ], {
     cwd: path.join(import.meta.dirname, ".."),
@@ -10095,8 +10091,8 @@ describe("workbench skill-first CLI", () => {
     const root = await makeTempRoot("workbench-cli-open-child-stop-");
     await invoke(["new", root, "--agent", "local"]);
 
-    const child = spawn(path.join(import.meta.dirname, "../node_modules/.bin/tsx"), [
-      path.join(import.meta.dirname, "../src/workbench.ts"),
+    const child = spawn(process.execPath, [
+      path.join(import.meta.dirname, "../dist/workbench.js"),
       "open",
       "--no-open",
       "--port",

@@ -34,10 +34,12 @@ export function WorkbenchActionBar({
   actions,
   apiBasePath,
   onOperationStarted,
+  operationPreview,
 }: {
   actions: WorkbenchActionCapabilities;
   apiBasePath: string;
   onOperationStarted: (started: WorkbenchRunSnapshot) => void;
+  operationPreview?: WorkbenchOperationPreviewState;
 }) {
   const sourceOnly = actions.evidenceAccess === "source";
   return (
@@ -49,6 +51,8 @@ export function WorkbenchActionBar({
               apiBasePath={apiBasePath}
               capability={actions.run}
               onOperationStarted={onOperationStarted}
+              operationKey="run"
+              previewOpen={operationPreview ? operationPreview.openOperation === "run" : undefined}
               title="Run"
             />
           ) : null}
@@ -57,6 +61,8 @@ export function WorkbenchActionBar({
               apiBasePath={apiBasePath}
               capability={actions.grade}
               onOperationStarted={onOperationStarted}
+              operationKey="grade"
+              previewOpen={operationPreview ? operationPreview.openOperation === "grade" : undefined}
               title="Grade"
             />
           ) : null}
@@ -65,6 +71,9 @@ export function WorkbenchActionBar({
             capability={actions.improve}
             fallbackOperation={actions.eval}
             onOperationStarted={onOperationStarted}
+            operationKey="improve"
+            previewPortal={operationPreview?.portal}
+            previewOpen={operationPreview ? operationPreview.openOperation === "improve" : undefined}
             title="Improve"
           />
           <OperationPopover
@@ -72,6 +81,9 @@ export function WorkbenchActionBar({
             buttonVariant="default"
             capability={actions.eval}
             onOperationStarted={onOperationStarted}
+            operationKey="evaluate"
+            previewPortal={operationPreview?.portal}
+            previewOpen={operationPreview ? operationPreview.openOperation === "evaluate" : undefined}
             title="Evaluate"
           />
         </>
@@ -84,12 +96,22 @@ export function WorkbenchActionBar({
   );
 }
 
+export type WorkbenchOperationPreviewName = "run" | "grade" | "improve" | "evaluate";
+
+export interface WorkbenchOperationPreviewState {
+  openOperation?: WorkbenchOperationPreviewName | null;
+  portal?: boolean;
+}
+
 function OperationPopover({
   apiBasePath,
   buttonVariant = "outline",
   capability,
   fallbackOperation,
   onOperationStarted,
+  operationKey,
+  previewPortal,
+  previewOpen,
   title,
 }: {
   apiBasePath: string;
@@ -97,39 +119,63 @@ function OperationPopover({
   capability: WorkbenchOperationCapability;
   fallbackOperation?: WorkbenchOperationCapability;
   onOperationStarted: (started: WorkbenchRunSnapshot) => void;
+  operationKey: WorkbenchOperationPreviewName;
+  previewPortal?: boolean;
+  previewOpen?: boolean;
   title: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const [samples, setSamples] = useState(String(capability.defaultRequest.samples ?? 1));
   const [budget, setBudget] = useState(String(capability.defaultRequest.budget ?? 1));
-  const [pending, setPending] = useState(false);
+  const [uncontrolledPending, setUncontrolledPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const open = previewOpen ?? uncontrolledOpen;
+  const pending = uncontrolledPending;
   const disabled = !capability.enabled;
   const request = requestWithFormValues(capability.defaultRequest, samples, budget);
 
   const submit = async (nextRequest: WorkbenchOperationRequest) => {
-    setPending(true);
+    if (previewOpen !== undefined) {
+      return;
+    }
+    setUncontrolledPending(true);
     setError(null);
     try {
       const started = await startWorkbenchOperation(apiBasePath, nextRequest);
-      setOpen(false);
+      setUncontrolledOpen(false);
       onOperationStarted(started);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
-      setPending(false);
+      setUncontrolledPending(false);
     }
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (previewOpen === undefined) {
+          setUncontrolledOpen(nextOpen);
+        }
+      }}
+    >
       <PopoverTrigger asChild>
-        <Button type="button" variant={buttonVariant} size="sm">
+        <Button
+          data-workbench-operation={title.toLowerCase()}
+          type="button"
+          variant={buttonVariant}
+          size="sm"
+        >
           {title}
           <ChevronDownIcon aria-hidden="true" data-icon="inline-end" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[min(24rem,calc(100vw-2rem))] gap-3 p-3">
+      <PopoverContent
+        align="end"
+        className="w-[min(24rem,calc(100vw-2rem))] gap-3 p-3"
+        portal={previewPortal}
+      >
         <PopoverHeader>
           <PopoverTitle>{title}</PopoverTitle>
           <PopoverDescription>{operationDescription(capability.defaultRequest)}</PopoverDescription>
@@ -167,6 +213,7 @@ function OperationPopover({
             </div>
           ) : null}
           <Button
+            data-workbench-operation-start={operationKey}
             type="button"
             variant={buttonVariant}
             disabled={disabled || pending}

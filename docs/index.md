@@ -1,29 +1,41 @@
 # Workbench Docs
 
-Workbench turns [Agent Skills](https://agentskills.io/home) into evaluated, versioned workflows. Use it to create a skill, define representative eval cases, run and grade those cases with agents, improve from evidence, review results, and publish installable source.
+Workbench turns [Agent Skills](https://agentskills.io/home) into evaluated, versioned workflows. Create a skill, define eval cases, run and grade them with agents, improve from evidence, and publish installable source.
 
-## Choose A Path
+## Choose a path
 
-| If you want to... | Read this |
+| Goal | Start here |
 | --- | --- |
-| Try Workbench end to end | [Quickstart](quickstart.md) |
-| See the common command paths | [Workflows](workflows.md) |
-| Author cases, rubrics, agents, and runtime files | [Evals](evals.md) |
-| Look up command behavior | [CLI Reference](cli.md) |
-| Understand installable skill packages | [Skill Packages](skills.md) |
-| Check the full product contract | [Spec](spec.md) |
+| Build your first measured skill | [Quickstart](quickstart.md) |
+| Choose a task path | [Common workflows](workflows.md) |
+| Learn the eval source model | [Evaluation basics](evals.md) |
+| Author cases and rubrics | [Cases and rubrics](cases-rubrics.md) |
+| Configure agents and models | [Agents and models](agents-models.md) |
+| Choose tools for Office, PDF, and other file artifacts | [File formats](file-formats.md) |
+| Improve from failed or below-perfect evidence | [Improve from evidence](improve.md) |
+| Review candidate changes | [Review candidate changes](improve-review.md) |
+| Rerun proof evidence | [Rerun proof evals](improve-rerun.md) |
+| Inspect results | [Results](track.md) |
+| Follow runs and jobs | [Runs and jobs](track-runs-jobs.md) |
+| Inspect traces, artifacts, and files | [Traces, artifacts, and files](track-files.md) |
+| Review versions and lineage | [Versions and lineage](track-versions.md) |
+| Publish source | [Publish](share.md) |
+| Install or clone a skill | [Install and clone](install-clone.md) |
+| Manage visibility and hosted operations | [Visibility and Cloud](visibility-cloud.md) |
+| Look up command behavior | [CLI reference](cli.md) |
+| Understand installable skill packages | [Skill packages](skills.md) |
 
-## Core Concepts
+## Core concepts
 
 | Concept | Meaning |
 | --- | --- |
 | Skill | A standards-compliant [Agent Skill](https://agentskills.io/specification) package with `SKILL.md` plus support files. |
-| Eval | The quality bar for a workflow: cases, grading config, agents, and runtime environment source under `.workbench/`. |
-| Run | Durable execution evidence: run state, internal jobs, traces, artifacts, result items, and score summaries. |
+| Eval | The grading standard for a workflow: cases, grading config, agents, and runtime environment source under `.workbench/`. |
+| Run | Recorded evidence: run state, jobs, traces, artifacts, result items, and score summaries. |
 | Package version | The exact skill source Workbench evaluated, improved, or published. |
 | Handle | A published identifier such as `acme/earnings-prep`, used for install and clone handoffs. |
 
-## Daily Loop
+## Daily loop
 
 ```bash
 workbench new ./earnings-prep
@@ -35,4 +47,4 @@ workbench improve
 workbench publish
 ```
 
-Start with [Quickstart](quickstart.md) for the first run. Use [Workflows](workflows.md) when you already know the job you need to finish.
+Start with [Quickstart](quickstart.md). Use [Common workflows](workflows.md) when you already know the task you want to finish.

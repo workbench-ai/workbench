@@ -1,6 +1,6 @@
 # Workbench Skill-Eval Catalog
 
-This product-local catalog checks whether the Workbench skill drives the hard-cut skill runtime correctly.
+This product-local catalog checks whether the Workbench skill teaches the current Workbench CLI and source model correctly.
 
 It checks:
 
@@ -9,7 +9,7 @@ It checks:
 - treating versions as evaluated skill versions
 - using agents for local command and provider-backed eval configurations
 - treating the web UI as a snapshot-backed, capability-driven inspection and operation-start surface
-- using Workbench object remotes with `workbench sync` and explicit source publication with `workbench publish`
+- using `workbench sync` for explicit repair or portability and `workbench publish` for source publication
 - keeping workflow-specific authoring in the skill layer
 
 Validate from `products/workbench` when the skill-eval runner is available:

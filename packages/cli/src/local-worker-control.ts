@@ -199,6 +199,10 @@ async function resolveLocalWorkerLaunch(payloadPath: string): Promise<LocalWorke
   }
   const sourceWorkerPath = fileURLToPath(new URL("./local-worker.ts", import.meta.url));
   const packageRoot = path.dirname(path.dirname(sourceWorkerPath));
+  const packageDistWorkerPath = path.join(packageRoot, "dist", "local-worker.js");
+  if (await pathExists(packageDistWorkerPath)) {
+    return { command: process.execPath, args: [packageDistWorkerPath, payloadPath] };
+  }
   const tsxBin = path.join(packageRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
   if (await pathExists(sourceWorkerPath) && await pathExists(tsxBin)) {
     return { command: tsxBin, args: [sourceWorkerPath, payloadPath] };

@@ -4,19 +4,19 @@ Workbench is a skill management runtime for [Agent Skills](https://agentskills.i
 
 The core runtime and CLI remain the canonical source of truth for Workbench behavior. The local and hosted web UX renders the same `WorkbenchInspectionSnapshot` used by CLI formatters and receives a required `WorkbenchActionCapabilities` object describing which run, grade, eval, improve, and acquisition actions the host can perform. Workbench Cloud is the hosted Workbench remote, runner provider, team skill catalog, hosted source provider, and hosted web operation provider.
 
-Use [Workflows](workflows.md) for the command paths users run to finish each common task. Changes to the CLI contract below must keep those paths true.
+[Common workflows](workflows.md) contains the command paths users run to finish each common task. Changes to the CLI contract below must keep those paths true.
 
-## Contract Map
+## Contract map
 
 | If you are changing... | Start here | Cross-check |
 | --- | --- | --- |
-| Authored project files | [Source And Eval Shape](#source-and-eval-shape) | [Evals](evals.md) |
-| CLI commands or JSON output | [Command Surface](#command-surface) | [CLI Reference](cli.md) and [Workflows](workflows.md) |
-| Run, grade, eval, improve, or results behavior | [Execution And Evidence](#execution-and-evidence) | [Workflows](workflows.md) |
-| Cloud sync, publishing, install, or ownership | [Remotes, Publishing, And Installation](#remotes-publishing-and-installation) | [Skill Packages](skills.md) |
-| Local or hosted browser behavior | [Web Surfaces](#web-surfaces) | Workbench Cloud route tests |
+| Authored project files | [Source and eval shape](#source-and-eval-shape) | [Evaluation basics](evals.md) and [Cases and rubrics](cases-rubrics.md) |
+| CLI commands or JSON output | [Command surface](#command-surface) | [CLI reference](cli.md) and [Common workflows](workflows.md) |
+| Run, grade, eval, improve, or results behavior | [Execution and evidence](#execution-and-evidence) | [Agents and models](agents-models.md), [Improve from evidence](improve.md), and [Results](track.md) |
+| Cloud sync, publishing, install, or ownership | [Remotes, publishing, and installation](#remotes-publishing-and-installation) | [Publish](share.md), [Install and clone](install-clone.md), and [Skill packages](skills.md) |
+| Local or hosted browser behavior | [Web surfaces](#web-surfaces) | Workbench Cloud route tests |
 
-## Read This When
+## When to use this spec
 
 - You need the exact source, command, runtime, remote, or web invariant.
 - You are changing CLI or Workbench Cloud behavior.
@@ -43,9 +43,9 @@ Use [Workflows](workflows.md) for the command paths users run to finish each com
 - Published source: an immutable package version exposed by a remote as an installable skill.
 - Source visibility: the install/list visibility of the published package version. It is separate from full project evidence access and is `private`, `internal`, or `public`.
 
-## Source And Eval Shape
+## Source and eval shape
 
-### Project Layout
+### Project layout
 
 Simple skill projects need no `.workbench/versions.yaml`:
 
@@ -74,7 +74,7 @@ versions:
 
 Local result labels default to the `name` frontmatter in `SKILL.md`, with a selected result-matrix ordinal appended so every selected local package version has a distinct JSON label.
 
-### Version Sources
+### Version sources
 
 Advanced projects may add `.workbench/versions.yaml`:
 
@@ -99,7 +99,7 @@ versions:
 
 Top-level `versions` entries are measured package versions. The top-level `default` selector must be `all` or a configured version name; `all` is reserved and cannot be used as a version name. Each measured version defines one `source:` string. `source: local:PATH` reads a mutable or vendored skill package inside the project root after realpath resolution; absolute paths, `..` escapes, and symlink escapes are invalid. `source: none` is the built-in no-skill version: Workbench runs the eval with no entry `SKILL.md`, records normal run evidence, and does not create installable source files for that row. `source: workbench:OWNER/SKILL@VERSION` and `source: github:OWNER/REPO//PATH@COMMIT` are immutable external pins; GitHub `COMMIT` must be the full 40-character SHA, not a branch, tag, or short prefix. `includes` are dependencies for a measured local or remote version and are not allowed on `source: none`. When `current` is `source: local:.`, other configured local version source directories are excluded from the current bundle so alternate versions do not become part of the active skill merely because they live in the same project.
 
-### Agents And Grading
+### Agents and grading
 
 Agents use the same top-level `default` selector shape in `.workbench/agents.yaml`; the selector must be `all` or a configured agent name, and `all` is reserved so it cannot be used as an agent name:
 
@@ -133,13 +133,13 @@ grade:
 
 Workbench core runs the selected measured skill with the selected agent, then invokes the grade adapter against the completed workspace, public case files, private case files, traces, and output artifacts. Graders such as `tests` and `rubric` own judgment and score result items only. Provider-backed agents such as `codex` and `claude` own `skill.run` only. Engine adapters such as Harbor still own their own `engine.resolve` and `grade.run` behavior when used as external engines, but the first-party skill-eval path does not wrap agent execution inside the built-in Workbench engine.
 
-### Package Boundary
+### Package boundary
 
 Authored package-version snapshots contain only the [Agent Skills package](https://agentskills.io/specification): `SKILL.md`, scripts, references, assets, package metadata, and support files outside `.workbench/**`. Workbench quality and runtime controls are separate axes: `.workbench/eval.yaml`, `.workbench/cases/`, and `.workbench/environment/Dockerfile` create evaluation identity; `.workbench/agents.yaml` creates agent identity; `.workbench/versions.yaml` selects measured package sources. Editing cases, grade criteria, environments, version selection, or agents does not create a new package version unless package files outside `.workbench/**` also change. Runtime, install, and local metadata under `.agents/`, `.workbench/objects/`, `.workbench/refs/`, `.workbench/sync/`, `.workbench/tmp/`, `.workbench/logs/`, `.workbench/locks/`, `.workbench/remotes.yaml`, and `.workbench/.gitignore` are not versioned skill source and are not installable source.
 
-## Command Surface
+## Command surface
 
-### Command List
+### Command list
 
 The taught operator loop is `new`, `init`, `run`, `grade`, `eval`, `improve`, `results`, `publish`, `skills`, and `install`. `clone` is the explicit editable remote-source acquisition command. The full CLI contract also exposes status, inspection, source switching, known-run lifecycle, agent configuration, auth, and plumbing sync.
 
@@ -175,7 +175,7 @@ workbench open [--host HOST] [--port PORT] [--no-open]
 workbench help [COMMAND] [--all]
 ```
 
-### Output And Auth
+### Output and auth
 
 Default help shows orientation plus the taught lifecycle commands. `help --all` shows the complete product contract above. New docs and skills should teach the primary loop first and link to command help or this contract for lower-level inspection and sync commands.
 
@@ -183,9 +183,9 @@ Human list output is presentation, not the automation contract. Commands that co
 
 Auth commands keep the same command-shaped guidance in JSON and human output. Headless `workbench login --start-only --no-open --json` or `workbench login --no-open --json` records a pending device authorization, returns `verificationUriComplete`, and returns a bounded `workbench login --wait --timeout 120 --json` resume command; the operator opens `verificationUriComplete`, signs in and approves the device request, then runs the printed resume command. Provider OAuth capture is native-aware: when native Codex or Claude OAuth material is missing, the first setup command is the provider CLI command, and when native material is present the next setup command is `workbench login PROVIDER --method oauth`. Errors that include `subject.setupCommands` render those commands as a human `setup:` block before the executable `next:` remediation. Isolated Codex `--profile-root DIR` setup is staged as `mkdir -p DIR/.codex`, `CODEX_HOME=DIR/.codex codex login --device-auth`, then `workbench login codex --method oauth --profile-root DIR`; `next:` remains the first provider CLI command.
 
-## Execution And Evidence
+## Execution and evidence
 
-### Live Source And Snapshots
+### Live source and snapshots
 
 Ordinary authoring reads the live working folder. `status`, `versions`, `log`, `show`, `diff`, and `open` are read-only and do not create package versions. `versions` lists durable immutable package snapshots only.
 
@@ -195,15 +195,15 @@ Default `diff` compares the live working folder against the latest durable packa
 
 Dry-run previews may compute package hashes and would-be launch facts in memory, but they must not write package versions, object state, refs, remotes, sync state, runs, jobs, traces, artifacts, or cancellation files. Runtime evidence ids are collision-resistant object ids so isolated copies can create runs before syncing to the same remote.
 
-### Run, Grade, And Eval
+### Run, grade, and eval
 
 `run`, `grade`, and `eval` resolve selected package versions and agents after launch readiness passes. `run` records or reuses execute jobs only: it executes selected cases only when current execute evidence is missing or stale, captures runner traces, output artifacts, workspace artifacts, and generic result evidence, and never invokes the grade adapter. `grade` records grade jobs only: it selects existing eligible execute jobs, stages their subject output, workspace, traces, and result through read-only dependencies in a clean grader workspace, invokes `grade.run`, and never reruns the skill. `eval` combines the two phases: it creates any missing or stale execute jobs, creates any missing or stale grade jobs, and reuses current execute or grade evidence unless `--rerun` forces the selected phase work. Failed terminal grade jobs are current grade evidence until `--rerun`, so a repeated `grade` or cacheable `eval` does not retry a failing judge by default. Scores are projected from grade job result items; runs and jobs do not store top-level score fields.
 
-### Interactive Eval Authoring
+### Interactive eval authoring
 
 Interactive eval development is first-class and uses the same primitives. A provider-backed Codex project can draft a case, execute it with `workbench run --agents default --cases CASE_ID`, inspect output and runner traces, add or edit `grade.with.criteria`, then call `workbench grade --agents default --cases CASE_ID` to judge existing output without rerunning Codex. Execution freshness is keyed by prompt, public case input, package version, agent snapshot, and sample selection. Grade freshness is keyed by the subject execution evidence plus the current grade adapter, effective grade config, grader config, and private grader-visible files. Therefore grade-only edits invalidate grade jobs, not execute jobs; `workbench eval` after a grade-only edit and existing execute evidence reuses that execute job and creates grade work only. `workbench run --rerun` forces fresh execute jobs, `workbench grade --rerun` forces fresh grade jobs only, and `workbench eval --rerun` forces both selected execute and grade phases. Fresh grade jobs do not inherit prior grade workspaces, traces, or artifacts; they only receive subject execution evidence through declared read-only dependencies.
 
-### Case Drafting And Readiness
+### Case drafting and readiness
 
 If no cases exist under `.workbench/cases`, real eval fails before scheduling with `no_eval_cases` and remediates to `workbench case draft CASE_ID`, which creates a draft `.workbench/cases/CASE_ID/case.yaml`; local and command-backed projects also get an executable `tests/test.sh` harness. Provider-backed projects return an editor `next` command for `case.yaml`; local or command-backed projects return an editor `next` command for both generated files.
 
@@ -213,7 +213,7 @@ The generated shell harness intentionally fails with score `0` until edited so l
 
 Real local `run`, `grade`, and `eval` use the same readiness gate as dry-run before launch; draft placeholders, missing provider auth, missing or invalid `.workbench/environment/Dockerfile`, unavailable Docker, or an unready grade adapter fails before package-version persistence, scheduling, and run/job/evidence writes.
 
-### Selection, Reuse, And Dry Runs
+### Selection, reuse, and dry runs
 
 If `--versions` or `--agents` is omitted, Workbench uses the matching manifest `default` selector. Matching completed local evidence is reused unless `--rerun` is passed: `run` reuses current execute jobs, `grade` reuses current grade jobs, and `eval` reuses both phases when possible.
 
@@ -221,7 +221,7 @@ If `--versions` or `--agents` is omitted, Workbench uses the matching manifest `
 
 Local reusable terminal jobs appear in `cachedJobIds`; `cachedRunIds` is provenance derived from the runs that own those reusable jobs, and both fields can describe a partially reusable subset of the selected matrix. A fully cacheable eval is still a new run envelope over reused execute and grade evidence, not a special whole-run cache path. Hosted dry-run keeps planned package versions in memory for readiness instead of resolving them through persisted object state and leaves cache IDs empty rather than presenting local evidence as hosted planner output; accepted hosted runs use the Cloud planner after sync.
 
-### Progress Output
+### Progress output
 
 The launch contract is one `workbench.run.v1` snapshot; version, agent, case, sample, execute, and grade details appear in `progress` and `measurements`. During long-running non-cached work, CLI progress is derived from normalized run and job state and written sparsely to stderr with phase, planned/completed/scored/remaining work, clearly labeled partial score, failures and cancellations, active job, evidence count, reported usage cost, elapsed time, and heartbeat. It does not show ETA.
 
@@ -229,7 +229,7 @@ In `--json` mode, stdout remains one final schema-tagged document containing one
 
 Queued status and hosted-worker guidance begin only after Workbench Cloud accepts the run. Terminal failed or canceled `workbench.run.v1` snapshots and terminal `watch` output omit self-referential `next: workbench show RUN_ID` hints.
 
-### Next Commands And Setup
+### Next commands and setup
 
 Successful perfect eval output points to `workbench results`; publishing and Workbench Cloud login are explicit sharing/readiness workflows surfaced by `status`, `publish`, `sync`, and hosted commands. Successful below-perfect eval output points to `improve` only when that command can run with an improvement-capable agent; otherwise the next command is one staged provider-backed improver setup step, followed by provider setup for that improver, followed by an improver rerun once that agent is runnable.
 
@@ -239,7 +239,7 @@ Missing local provider auth, missing or invalid `.workbench/environment/Dockerfi
 
 Evaluating an older internal full-project state is not part of the execution command surface; use `show`, `diff`, `switch`, and `results` for historical inspection.
 
-### Runtime Isolation And Failures
+### Runtime isolation and failures
 
 Execute jobs mount all resolved skills at `/workspace/input/skills`. `SKILL_DIR` points at the selected entry skill directory, `SKILLS_DIR` points at `/workspace/input/skills`, `CASE_DIR` points at the case files, and `OUTPUT_DIR` points at output files.
 
@@ -247,11 +247,11 @@ Command and local agents run execute jobs with isolated network unless configure
 
 If an execute adapter, command, auth materialization, or runtime fails before producing a public result file, Workbench records failed run, job, trace, and artifact evidence with the error. When a shell test writes `$OUTPUT_DIR/result.json`, that public result file controls pass/fail and score even if the shell exits nonzero afterward; failed result-file evidence is not treated as missing score data.
 
-### Improvement Scope
+### Improvement scope
 
 `improve` edits only the mutable `current` project skill package: any file outside `.workbench/**`, including `SKILL.md`, scripts, references, assets, agent metadata, and package support files. Ordinary improve may read `.workbench` eval/case/evidence state but must not rewrite `.workbench/**`; improving eval design is a separate future job, not hidden in skill improvement.
 
-### Improvement Agent Readiness
+### Improvement agent readiness
 
 `improve` requires exactly one selected version and one selected agent; if a default selector expands to multiple entries, the usage error lists configured versions and agents and shows concrete commands such as `workbench improve --versions current --agents default`. The selected agent must have a skill-improvement adapter before execution starts whenever actionable evidence exists; empty projects and perfect-only eval history return a diagnostic evidence error, not an unconditional rerun command.
 
@@ -259,7 +259,7 @@ If the current eval definition has not been run yet, improve remediation points 
 
 There is no implicit fallback improver: the selected agent is both the improver and proof eval agent unless the user follows the explicit `--agents improver` setup path.
 
-### Improvement Provider Auth
+### Improvement provider auth
 
 The hard-cut setup path is to configure that selected agent directly, for example `codex login --device-auth` if `~/.codex/auth.json` is missing, `workbench login codex --method oauth`, and `workbench agent add default --adapter codex --model gpt-5.4-mini --with auth=default`. Claude setup is `claude setup-token` in an interactive shell, browser authorization, `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth`, and `workbench agent add default --adapter claude --model sonnet --with auth=default`; Workbench captures the Claude profile plus OAuth token without implementing a second Claude browser authorization flow. Provider `model` values are adapter pass-through; Claude models must be Claude Code accepted aliases such as `opus` or `sonnet`, or full Claude Code model ids.
 
@@ -267,7 +267,7 @@ Hosted dry-run reports local improve-agent ineligibility before Cloud target che
 
 Isolated validation can pass `--profile-root DIR` to read provider-native state from an alternate home root: Codex reads `DIR/.codex/auth.json`; Claude reads `DIR/.claude.json` plus `CLAUDE_CODE_OAUTH_TOKEN`. Empty or malformed Codex `auth.json` files are treated as missing native auth for readiness and are rejected by `workbench login codex --method oauth` with `provider_oauth_invalid`.
 
-### Improvement Evidence And Proof
+### Improvement evidence and proof
 
 `improve` requires graded below-perfect, failed, or reviewed eval evidence for the selected version and eval definition; perfect eval runs are not improvement evidence, unscored runtime or auth failures are not improvement evidence, and useful evidence is not rejected merely because it came from a different eval agent or a historical smoke-labeled case. Once the selected proof agent has a perfect current comparable eval for the same eval definition, older below-perfect traces stop making `improve` ready.
 
@@ -277,7 +277,7 @@ Workbench records the proposed improved version plus proof execute and proof gra
 
 Workbench switches to the improved version only when the proof run succeeds and beats the incumbent for the same eval agent and eval hash, and the switched output points to a higher-sample rerun before publish when the proof was small. Hosted `improve --cloud` validates local target and evidence before hosted plan checks, Cloud auto-linking, sync, or scheduling, then follows the same local materialization rule after terminal Cloud evidence syncs back and reconciles the same Cloud remote once more after a promoted local switch; if the local current version changed while the hosted run was in flight, Workbench refuses to overwrite it and leaves `workbench switch VERSION` as the explicit resolution.
 
-### Run Watch, Cancel, And Retry
+### Run watch, cancel, and retry
 
 Known-run lifecycle operations are top-level commands. `watch RUN_ID` follows local committed state, local hosted live-handle state, or hosted inspection state until the run is terminal, renders the same concrete `workbench.run.v1` snapshot projection as the launch command, and syncs terminal hosted evidence before returning; if the run is already terminal locally, it summarizes local evidence without contacting Cloud. A successful terminal inspection exits `0` for succeeded, failed, and canceled runs; automation reads `run.status` for result semantics. Failed or canceled terminal watch output omits self-referential `next: workbench show RUN_ID`; succeeded eval watch/retry next commands preserve non-default version or agent selectors so the printed results command inspects the evidence from that run. `watch` exits `130` on user interrupt and nonzero when the run cannot be inspected or is still pending past the watch timeout.
 
@@ -301,9 +301,9 @@ Result cells prefer the terminal run with the most case/sample evidence, using r
 
 Human latency output is per selected result cell from matching runner or execute job duration, averaged per sample for multi-sample runs, while stored run evidence keeps aggregate timing. Cost is also per selected result cell when matching runner or execute usage exists, including multi-agent comparison runs; grader duration and usage stay in run evidence and are not copied into row cells. When matching runner evidence does not exist, latency and cost stay `n/a`.
 
-## Remotes, Publishing, And Installation
+## Remotes, publishing, and installation
 
-### Local Storage And Remotes
+### Local storage and remotes
 
 Raw Workbench runtime state is not a Git repository. Git users keep using Git normally; Workbench does not call Git, write Git branches, create tags, commit, push, pull, or mutate Git refs. Workbench storage is repo-local and ignored, similar in spirit to `.git` but independent of Git.
 
@@ -315,7 +315,7 @@ Accepted URLs are explicit `file:///absolute/path` remotes and Workbench Cloud s
 
 File remotes are sync-only. Workbench Cloud remotes use the same object pack schema over HTTP and are the only remotes that can publish installable source. Local live-inspection metadata under `.workbench/live/`, including hosted pre-schedule run handles, is ignored delivery state and is never versioned, synced, published, or installed.
 
-### Network Operations
+### Network operations
 
 Network is explicit. Ordinary local reads and writes do not perform hidden remote synchronization. `workbench sync`, `publish`, `install`, `run --cloud`, `grade --cloud`, `eval --cloud`, `improve --cloud`, and accepted hosted `workbench watch|cancel|retry` are the network command surfaces.
 
@@ -337,7 +337,7 @@ Once a hosted run reaches a terminal state, the CLI reports terminal evidence sy
 
 If local source or local-owned objects changed after the last successful sync, status reports `local_changes` instead of `up_to_date` without contacting the remote; when another workflow action remains primary, status also exposes `syncNext` in JSON and `sync next: workbench sync REMOTE --dry-run` in human output. When the affected remote is Workbench Cloud and the CLI is logged out, status reports `auth_required` and points to `workbench login`. Published logged-out Cloud remotes also report `auth_required` so status and `sync cloud --dry-run` agree that login is required before reconciliation.
 
-### Publishing And Removal
+### Publishing and removal
 
 `workbench publish [VERSION]` syncs the selected version to a Workbench Cloud remote, records it in the published-version set, moves the mutable `publication/current-version` pointer to that version, and asks Workbench Cloud to expose source through two read surfaces: an installable agent skill package and editable package source for `workbench clone`. After a successful publish, the persisted remote sync fingerprint includes those publication refs, so `status` reports the remote as `up_to_date` and `sync cloud --dry-run` reports no push or pull work unless additional local-owned changes exist.
 
@@ -377,11 +377,11 @@ Broad inventory sorts folder rows before global rows, managed/current or Workben
 
 Inventory performs no network access, takes no project write lock, writes no files, and reports `current`, `modified`, `missing`, `project`, `unmanaged`, or `duplicate-name` status from visible skill roots and Workbench install ledgers. `project` means a visible local skill folder has `.workbench` project controls but no Workbench install-ledger provenance. It does not show a `not installed` universe because catalog search is a separate job.
 
-### Install Targets
+### Install targets
 
 For Codex folder scope, Workbench reads `.agents/skills` roots visible from the requested directory up to the Git root and writes to exactly `<dir>/.agents/skills`. For Codex global scope, Workbench reads and writes `$HOME/.agents/skills`. For Claude folder scope, Workbench reads and writes `<dir>/.claude/skills`. For Claude global scope, Workbench reads and writes `$CLAUDE_CONFIG_DIR/skills` when set, otherwise `$HOME/.claude/skills`. These target paths are implementation details in human output and are present in JSON for automation.
 
-### Project Creation And Cloning
+### Project creation and cloning
 
 `workbench new DIR` creates a brand-new Workbench skill project and fails on any non-empty target directory. It writes `SKILL.md`, `.workbench/eval.yaml`, `.workbench/agents.yaml`, `.workbench/environment/Dockerfile`, `.workbench/.gitignore`, and ignored runtime directories.
 
@@ -389,15 +389,15 @@ Provider-backed default agent setup is reported separately from first-case autho
 
 `workbench clone OWNER/SKILL[@VERSION]|URL DIR` is the editable-source acquisition path. The bare handle clones the current published package source; `@VERSION` clones an exact still-published package version. It creates a Workbench project containing the agent skill package plus the normal minimal `.workbench` scaffold, including its own environment Dockerfile. Authored eval controls, agents, runtime object state, refs, sync state, logs, locks, remotes, install ledgers, and `.agents` pollution are not copied from the published source; the cloned project initializes its own fresh local `.workbench/objects`, `.workbench/refs`, and `.workbench/sync` state for versioning.
 
-### Ownership And Visibility
+### Ownership and visibility
 
 Workbench Cloud owns the `OWNER` namespace in those URLs. Personal namespaces are created from user profiles. Organization namespaces, teams, membership, and skill grants live only in Cloud. The CLI does not add commands for organization or team state, and no organization/team metadata is persisted in `.workbench`.
 
 Published source visibility does not grant project evidence access. `private` source is readable only by users with project read access. `internal` source is readable by members of the owning organization and is valid only for organization-owned skills. `public` source is readable by anyone through the canonical `/skills/OWNER/SKILL/.well-known/skills/index.json` discovery URL used by Agent Skills clients and the upstream `skills` CLI; the bare `/skills/OWNER/SKILL/.well-known/skills` route redirects there, and unsupported `.well-known` paths return JSON 404 responses. Internal and private installs use the same `/skills/OWNER/SKILL` URL with Workbench CLI auth. Runs, jobs, traces, artifacts, eval evidence, reviews, and improvement history require project read access regardless of source visibility.
 
-## Web Surfaces
+## Web surfaces
 
-### Local Browser And Inspection
+### Local browser and inspection
 
 `workbench open` serves the local Workbench UI from a read-only inspection snapshot as a foreground server; the CLI prints the actual bound URL and a `Press Ctrl-C to stop` hint, then closes the server and exits `0` when the user presses Ctrl-C. `--port` accepts integers from 0 through 65535, and port 0 asks the OS for an ephemeral port.
 
@@ -417,15 +417,15 @@ Run/job evidence projections expose one canonical user-facing path per file, fil
 
 Hosted skill pages use the same snapshot projection, live invalidation contract, and operation vocabulary. Run status starts as `queued` for hosted work waiting on environment or worker capacity, moves to `running` once work is claimed or proof work is pending, and becomes terminal when all jobs finish. Captured files and terminal trace artifacts are attached when the job records terminal trace evidence.
 
-### Hosted Snapshot Reads
+### Hosted snapshot reads
 
 Cloud hosted skill pages initially receive a `WorkbenchInspectionSnapshot` inside the envelope. Users with project read access boot from a compact project index that includes identity, status counts, refs, action capabilities, and source/version file manifests, but omits historical runs, jobs, traces, execution events, artifacts, result matrices, lineage, and file contents. Evidence views load the full evidence snapshot through explicit Workbench detail reads. Source-only viewers receive a snapshot constructed from the published package version and publication refs only; it includes package files and intentionally omits authored Workbench controls, runs, jobs, traces, execution events, artifacts, private score evidence, and improvement history. Source-only live cursors advance only when publication/source-visible refs change; private durable run and job mutations advance the full project state cursor, while progress-only execution events advance the full project progress cursor.
 
-### Hosted File Reads
+### Hosted file reads
 
 Hosted selected-file reads are exact detail reads. A file preview or `show REF:PATH`-equivalent URL must resolve the selected owner, version/run/evidence object, and path, then fetch that one file body. It must not hydrate the whole hosted project merely to extract a single package, evaluation, trace, or artifact file. The public route shape stays the same; this is a storage and performance invariant under the shared read contract.
 
-### Primary Surfaces
+### Primary surfaces
 
 The primary web surfaces are `Files`, `Evaluation`, and `Runs`. `Files` is the default browser route for local `workbench open` and hosted `/skills/OWNER/SKILL` pages.
 

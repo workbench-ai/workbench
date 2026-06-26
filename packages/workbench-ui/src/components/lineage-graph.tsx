@@ -4,10 +4,12 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
+  type FitViewOptions,
   type NodeProps,
+  type Viewport,
 } from "@xyflow/react";
 import { GitBranchIcon, SparklesIcon } from "lucide-react";
-import { memo, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useEffect, useMemo, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
 
 import type {
   WorkbenchLineageEdge,
@@ -42,7 +44,7 @@ const FIT_VIEW_OPTIONS = {
   padding: 0.08,
   minZoom: 0.75,
   maxZoom: 1.2,
-} as const;
+} satisfies FitViewOptions<VersionLineageNode>;
 
 const HIDDEN_HANDLE_STYLE = {
   width: 1,
@@ -58,11 +60,19 @@ const HIDDEN_HANDLE_STYLE = {
 interface LineageGraphProps {
   className?: string;
   currentVersionId?: string | null;
+  defaultViewport?: Viewport;
+  fitView?: boolean;
+  fitViewOptions?: FitViewOptions<VersionLineageNode>;
+  initialFlow?: {
+    nodes: VersionLineageNode[];
+    edges: VersionLineageEdge[];
+  };
   publishedVersionId?: string | null;
   lineage: readonly WorkbenchLineageEdge[];
   jobs?: readonly WorkbenchJob[];
   onVersionClick: (versionId: string) => void;
   runs?: readonly WorkbenchRun[];
+  style?: CSSProperties;
   versions: readonly WorkbenchVersion[];
 }
 
@@ -77,19 +87,25 @@ export function LineageGraph(props: LineageGraphProps) {
 function LineageGraphCanvas({
   className,
   currentVersionId,
+  defaultViewport,
+  fitView = true,
+  fitViewOptions,
+  initialFlow,
   publishedVersionId,
   lineage,
   jobs,
   onVersionClick,
   runs,
+  style,
   versions,
 }: LineageGraphProps) {
   const reactFlow = useReactFlow<VersionLineageNode, VersionLineageEdge>();
   const [flowState, setFlowState] = useState<FlowState>({
     loading: false,
-    nodes: [],
-    edges: [],
+    nodes: initialFlow?.nodes ?? [],
+    edges: initialFlow?.edges ?? [],
   });
+  const resolvedFitViewOptions = fitViewOptions ?? FIT_VIEW_OPTIONS;
   const interactiveNodes = useMemo(
     () =>
       flowState.nodes.map((node) => ({
@@ -106,6 +122,10 @@ function LineageGraphCanvas({
 
   useEffect(() => {
     let cancelled = false;
+    if (initialFlow) {
+      setFlowState({ loading: false, nodes: initialFlow.nodes, edges: initialFlow.edges });
+      return;
+    }
     if (versions.length === 0) {
       setFlowState({ loading: false, nodes: [], edges: [] });
       return;
@@ -119,9 +139,12 @@ function LineageGraphCanvas({
     return () => {
       cancelled = true;
     };
-  }, [currentVersionId, jobs, lineage, publishedVersionId, runs, versions]);
+  }, [currentVersionId, initialFlow, jobs, lineage, publishedVersionId, runs, versions]);
 
   useEffect(() => {
+    if (!fitView) {
+      return;
+    }
     if (flowState.nodes.length === 0) {
       return;
     }
@@ -130,13 +153,17 @@ function LineageGraphCanvas({
     const activeNode = flowState.nodes.find((node) => node.data.version.id === currentVersionId);
     const frameId = requestAnimationFrame(() => {
       void reactFlow.fitView(activeNode
-        ? { ...FIT_VIEW_OPTIONS, maxZoom: 1, nodes: [{ id: activeNode.id }] }
-        : FIT_VIEW_OPTIONS);
+        ? {
+            ...resolvedFitViewOptions,
+            maxZoom: Math.min(resolvedFitViewOptions.maxZoom ?? FIT_VIEW_OPTIONS.maxZoom, 1),
+            nodes: [{ id: activeNode.id }],
+          }
+        : resolvedFitViewOptions);
     });
     return () => {
       cancelAnimationFrame(frameId);
     };
-  }, [currentVersionId, flowState.nodes, reactFlow]);
+  }, [currentVersionId, fitView, flowState.nodes, reactFlow, resolvedFitViewOptions]);
 
   if (versions.length === 0) {
     return (
@@ -158,14 +185,16 @@ function LineageGraphCanvas({
     <div
       data-testid="lineage-graph"
       className={cn("flex h-full min-h-[28rem] min-w-0 flex-1 overflow-hidden rounded-lg border border-border/60 bg-card", className)}
+      style={style}
     >
       <ReactFlow<VersionLineageNode, VersionLineageEdge>
         className="h-full min-h-[28rem] w-full flex-1"
         nodes={interactiveNodes}
         edges={flowState.edges}
+        defaultViewport={defaultViewport}
         proOptions={{ hideAttribution: true }}
-        fitView
-        fitViewOptions={FIT_VIEW_OPTIONS}
+        fitView={fitView}
+        fitViewOptions={resolvedFitViewOptions}
         minZoom={0.2}
         maxZoom={4.5}
         nodesDraggable={false}

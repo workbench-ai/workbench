@@ -32,6 +32,10 @@ export interface VersionLineageNodeData extends Record<string, unknown> {
 
 export type VersionLineageNode = Node<VersionLineageNodeData, "version">;
 export type VersionLineageEdge = Edge<Record<string, never>>;
+export interface VersionLineageFlow {
+  nodes: VersionLineageNode[];
+  edges: VersionLineageEdge[];
+}
 
 interface ElkInstance {
   layout(graph: Record<string, unknown>): Promise<{
@@ -151,13 +155,39 @@ export async function buildVersionLineageFlow(args: {
   publishedVersionId?: string | null;
   jobs?: readonly WorkbenchJob[];
   runs?: readonly WorkbenchRun[];
-}): Promise<{
-  nodes: VersionLineageNode[];
-  edges: VersionLineageEdge[];
-}> {
+}): Promise<VersionLineageFlow> {
   const graph = buildVersionLineageGraph(args);
-  const validEdges = graph.edges;
-  const nodes = graph.nodes.map((node) => ({
+  const nodes = createVersionLineageNodes(graph.nodes);
+  const edgeRefs = createVersionLineageEdgeRefs(graph.edges);
+
+  return {
+    nodes: await layoutVersionLineageNodes(nodes, edgeRefs),
+    edges: createVersionLineageEdges(edgeRefs),
+  };
+}
+
+export function buildVersionLineageFlowFromPositions(args: {
+  versions: readonly WorkbenchVersion[];
+  lineage: readonly WorkbenchLineageEdge[];
+  currentVersionId?: string | null;
+  publishedVersionId?: string | null;
+  jobs?: readonly WorkbenchJob[];
+  runs?: readonly WorkbenchRun[];
+  positions: Record<string, { x: number; y: number }>;
+}): VersionLineageFlow {
+  const graph = buildVersionLineageGraph(args);
+  const nodes = createVersionLineageNodes(graph.nodes).map((node) => ({
+    ...node,
+    position: args.positions[node.data.version.id] ?? node.position,
+  }));
+  return {
+    nodes,
+    edges: createVersionLineageEdges(createVersionLineageEdgeRefs(graph.edges)),
+  };
+}
+
+function createVersionLineageNodes(nodes: readonly VersionLineageNodeData[]): VersionLineageNode[] {
+  return nodes.map((node) => ({
     id: versionLineageNodeId(node.version.id),
     type: "version",
     position: { x: 0, y: 0 },
@@ -183,22 +213,32 @@ export async function buildVersionLineageFlow(args: {
       width: VERSION_LINEAGE_NODE_WIDTH,
     },
   })) satisfies VersionLineageNode[];
-  const edges = validEdges.map((edge) => ({
+}
+
+function createVersionLineageEdgeRefs(edges: readonly WorkbenchLineageEdge[]): Array<{
+  id: string;
+  sourceId: string;
+  targetId: string;
+}> {
+  return edges.map((edge) => ({
     id: `${edge.parentId}:${edge.childId}:${edge.createdAt}`,
     sourceId: versionLineageNodeId(edge.parentId),
     targetId: versionLineageNodeId(edge.childId),
   }));
+}
 
-  return {
-    nodes: await layoutVersionLineageNodes(nodes, edges),
-    edges: edges.map((edge) => ({
-      id: edge.id,
-      source: edge.sourceId,
-      target: edge.targetId,
-      markerEnd: EDGE_MARKER_END,
-      style: BASE_EDGE_STYLE,
-    })),
-  };
+function createVersionLineageEdges(edges: ReadonlyArray<{
+  id: string;
+  sourceId: string;
+  targetId: string;
+}>): VersionLineageEdge[] {
+  return edges.map((edge) => ({
+    id: edge.id,
+    source: edge.sourceId,
+    target: edge.targetId,
+    markerEnd: EDGE_MARKER_END,
+    style: BASE_EDGE_STYLE,
+  }));
 }
 
 async function layoutVersionLineageNodes(

@@ -220,6 +220,19 @@ describe("hub-shaped Workbench UI", () => {
     expect(html).not.toContain(">Earnings Skill</a>");
   });
 
+  test("can render the workspace without the contextual sidebar", () => {
+    const html = renderToStaticMarkup(createElement(WorkbenchWorkspace, {
+      initialEnvelope: inspectionEnvelope(inspectionSnapshot()),
+      routeBasePath: "/skills/alice/earnings",
+      sidebarMode: "hidden",
+    }));
+
+    expect(html).toContain("data-testid=\"workbench-primary-content\"");
+    expect(html).toContain("SKILL.md");
+    expect(html).not.toContain(">About</h2>");
+    expect(html).not.toContain("Workbench skill source.");
+  });
+
   test("counts About cases from the latest authored evaluation", () => {
     const snapshot = inspectionSnapshot();
     const [latestEval] = snapshot.evals;
