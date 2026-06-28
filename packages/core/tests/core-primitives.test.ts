@@ -282,6 +282,35 @@ describe("workbench execution DAG scheduler", () => {
       .toThrow(/does not record an operation plan/u);
   });
 
+  test("rejects live session retry before requiring an operation plan", () => {
+    const run: WorkbenchRun = {
+      id: "run_live",
+      kind: "live",
+      versionId: "v_base",
+      skillName: "current",
+      skillBundleHash: "bundle_hash",
+      evalHash: "live",
+      agentName: "claude",
+      agentHash: "agent_hash",
+      status: "succeeded",
+      jobIds: [],
+      traceIds: ["tr_live"],
+      createdAt: "2026-06-15T00:00:00.000Z",
+    };
+
+    try {
+      resolveWorkbenchRunRetryPlan(retrySnapshot({ run, jobs: [] }), run);
+      throw new Error("Expected live run retry to fail.");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "run_retry_incomplete",
+        remediation: "workbench show run_live",
+      });
+      expect(String((error as Error).message)).toMatch(/live session and cannot be retried/u);
+      expect(String((error as Error).message)).not.toMatch(/operation plan/u);
+    }
+  });
+
   test("rejects retry when stored operation plan samples are not an integer", () => {
     const run: WorkbenchRun = {
       id: "run_eval",

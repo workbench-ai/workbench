@@ -16,20 +16,20 @@ workbench show RUN_ID:cases/investor-focus/output/result.json
 
 If a suffix is ambiguous, Workbench prints exact `workbench show REF:PATH` commands.
 
-## Live traces
+## Live run evidence
 
-Use `record` to capture live skill turns from supported agent hosts:
+Use `record` to capture live skill turns from supported agent hosts. Project-matched captures appear in the browser under `Runs` as live runs with agent-session jobs:
 
 ```bash
 workbench record on
 # use a Workbench skill in Codex or Claude Code
+workbench open
 workbench traces
-workbench show TRACE_ID
 workbench trace review TRACE_ID --pass
 workbench case promote TRACE_ID --id case-001
 ```
 
-Live capture is plugin-based. Workbench installs or enables its own Codex and Claude Code trace plugins through official host plugin commands, then host hooks append events to Workbench's local spool under `~/.workbench/traces/spool/`. `traces`, `show`, review, and promotion compact pending spool events before reading trace records. The shipped plugins record explicit leading `$skill` invocations; the generic hook also accepts exact host skill-claim events when a host integration emits them. Unrelated host turns are discarded. Workbench does not scan provider session histories such as `~/.codex/sessions` as a hidden side effect.
+Live capture is plugin-based. Workbench installs or enables its own Codex and Claude Code trace plugins through official host plugin commands, then host hooks append events to Workbench's local spool under `~/.workbench/traces/spool/`. Browser inspection happens through Runs; `traces`, `show`, review, and promotion are low-level CLI tools for trace records. The shipped plugins record explicit leading `$skill` invocations; the generic hook also accepts exact host skill-claim events when a host integration emits them. Unrelated host turns are discarded. Workbench does not scan provider session histories such as `~/.codex/sessions` as a hidden side effect.
 
 Promotion requires a captured, terminal trace with captured input. Unfinished candidates stay inspectable as traces but cannot become cases until capture finishes.
 
@@ -50,4 +50,4 @@ For generated files, put outputs and diagnostics under `/workspace/output`. Keep
 
 ## Browser evidence
 
-The browser UI reads the same inspection data as CLI commands. It can show source files, run details, trace evidence, and output files without changing project state.
+The browser UI reads the same inspection data as CLI commands. It can show source files, run details, job timelines, and output files without changing project state.

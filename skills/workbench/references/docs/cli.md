@@ -167,7 +167,7 @@ Flags:
 
 #### `workbench traces`
 
-Lists live, imported, and eval trace evidence.
+Lists low-level trace records for review and case promotion.
 
 Usage:
 

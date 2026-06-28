@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, realpathSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import os from "node:os";
@@ -49,6 +49,7 @@ import type {
   WorkbenchInspectionFileOwnerKind,
   WorkbenchInspectionSnapshot,
   WorkbenchActionCapabilities,
+  WorkbenchCaseRunKind,
   WorkbenchJobReport,
   WorkbenchOperationPreview,
   WorkbenchOperationPlanSummary,
@@ -66,6 +67,7 @@ import type {
   WorkbenchJob,
   WorkbenchJobDependency,
   WorkbenchJobResult,
+  WorkbenchJobStatus,
   WorkbenchResultItem,
   WorkbenchLineageEdge,
   WorkbenchObjectPack,
@@ -221,6 +223,7 @@ export type {
   WorkbenchInspectionFileOwnerKind,
   WorkbenchInspectionSnapshotEnvelope,
   WorkbenchInspectionSnapshot,
+  WorkbenchCaseRunKind,
   WorkbenchActionCapabilities,
   WorkbenchAcquisitionOption,
   WorkbenchOperationPreview,
@@ -515,14 +518,14 @@ export interface WorkbenchInitOptions extends WorkbenchCommandOptions {
 }
 
 type WorkbenchSelectorCommand = "run" | "grade" | "eval" | "results" | "improve";
-type WorkbenchEvalLikeRunKind = Exclude<WorkbenchRunKind, "improve">;
+type WorkbenchSchedulableRunKind = WorkbenchCaseRunKind | "improve";
 
 export interface WorkbenchEvalOptions extends WorkbenchCommandOptions {
   version?: string;
   skill?: string;
   agent?: string;
   samples?: number;
-  kind?: WorkbenchRunKind;
+  kind?: WorkbenchCaseRunKind;
   parentRunId?: string;
   caseIds?: readonly string[];
   operationTargets?: readonly WorkbenchOperationTarget[];
@@ -544,7 +547,7 @@ export interface WorkbenchStateEvalOptions {
   skill?: string;
   agent?: string;
   samples?: number;
-  kind?: WorkbenchRunKind;
+  kind?: WorkbenchCaseRunKind;
   operationTargets?: readonly WorkbenchOperationTarget[];
   operationPhases?: readonly WorkbenchOperationPhase[];
   operationGrader?: WorkbenchOperationGrader;
@@ -556,6 +559,28 @@ export interface WorkbenchStateEvalOptions {
   location?: WorkbenchRun["location"];
   remoteName?: string;
   retryOfRunId?: string;
+}
+
+function isWorkbenchCaseRunKind(kind: unknown): kind is WorkbenchCaseRunKind {
+  return kind === "run" || kind === "grade" || kind === "eval";
+}
+
+function isWorkbenchRunKind(kind: unknown): kind is WorkbenchRunKind {
+  return isWorkbenchCaseRunKind(kind) || kind === "improve" || kind === "live";
+}
+
+function normalizeWorkbenchCaseRunKind(kind: unknown, fallback: WorkbenchCaseRunKind): WorkbenchCaseRunKind {
+  if (kind === undefined) {
+    return fallback;
+  }
+  if (isWorkbenchCaseRunKind(kind)) {
+    return kind;
+  }
+  throw new WorkbenchCodedError("unsupported_run_kind", `Workbench case runs support kind run, grade, or eval; received ${String(kind)}.`, {
+    remediation: "workbench eval",
+    subject: { kind: String(kind) },
+    exitCode: 2,
+  });
 }
 
 export interface WorkbenchStateImproveOptions {
@@ -630,7 +655,7 @@ export interface WorkbenchLaunchReadinessIssue {
 
 export type WorkbenchRunRetryPlan =
   | {
-      kind: WorkbenchEvalLikeRunKind;
+      kind: WorkbenchCaseRunKind;
       location: WorkbenchRunLocation;
       remoteName?: string;
       versionId: string;
@@ -4532,6 +4557,7 @@ export async function reconcileCurrentWorkbenchVersion(options: WorkbenchCommand
 
 export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Promise<WorkbenchRun[]> {
   const root = resolveRoot(options.dir);
+  const kind = normalizeWorkbenchCaseRunKind(options.kind, "eval");
   return withWorkbenchProjectLockIfInitialized(root, async () => {
     await requireInitialized(root);
     const state = await loadState(root);
@@ -4562,7 +4588,7 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
       throw noEvalCasesError();
     }
     const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
-    assertDraftCaseReadinessReady(selectedCases, options.kind ?? "eval", evalSnapshot);
+    assertDraftCaseReadinessReady(selectedCases, kind, evalSnapshot);
     if ((options.location ?? "local") === "local") {
       await assertLocalWorkbenchLaunchReady(root, agents, options);
     }
@@ -4598,7 +4624,7 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
       evalSnapshot,
       agent: primaryTarget.agent,
       targets,
-      kind: options.kind ?? "eval",
+      kind,
       parentRunId: options.parentRunId,
       location: options.location ?? "local",
       remoteName: options.remoteName,
@@ -5321,6 +5347,7 @@ function stripSurfaceFilePrefix(prefix: string, files: readonly SurfaceSnapshotF
 
 export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { cloud?: boolean } = {}): Promise<WorkbenchEvalPreview> {
   const root = resolveRoot(options.dir);
+  const kind = normalizeWorkbenchCaseRunKind(options.kind, "eval");
   await requireInitialized(root);
   const state = await loadStateReadOnlyWithRetry(root);
   const source = await planWorkbenchLaunchSource(root, state, {
@@ -5347,7 +5374,7 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
   const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
   const draftCaseIssues = runtimeCases.length === 0
     ? []
-    : draftCaseReadinessIssues(selectedCases, options.kind ?? "eval", runtime.evalSnapshot);
+    : draftCaseReadinessIssues(selectedCases, kind, runtime.evalSnapshot);
   const localReadiness = options.cloud === true
     ? await cloudWorkbenchLaunchReadiness(root)
     : await localWorkbenchLaunchReadiness(root, runtime.selectedAgents, options);
@@ -5368,7 +5395,7 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
         targets,
         cases: selectedCases,
         samples,
-        kind: options.kind ?? "eval",
+        kind,
         rerun: options.rerun === true,
         selectedSamples: options.selectedSamples,
       });
@@ -5402,7 +5429,7 @@ function cachedEvalPreviewEvidence(args: {
   targets: readonly WorkbenchEvaluationRunTarget[];
   cases: readonly WorkbenchEvalCaseRuntime[];
   samples: number;
-  kind: WorkbenchRunKind;
+  kind: WorkbenchCaseRunKind;
   rerun: boolean;
   selectedSamples?: readonly unknown[];
 }): { runIds: string[]; jobIds: string[] } {
@@ -5468,7 +5495,7 @@ function cachedEvalPreviewEvidence(args: {
 
 export async function prepareWorkbenchCloudEvalRequest(
   options: Omit<Pick<WorkbenchEvalOptions, "dir" | "authToken" | "skill" | "agent" | "caseIds" | "samples" | "kind" | "rerun">, "kind"> & {
-    kind?: WorkbenchEvalLikeRunKind;
+    kind?: WorkbenchCaseRunKind;
   } = {},
 ): Promise<WorkbenchPreparedCloudEvalRequest> {
   const root = resolveRoot(options.dir);
@@ -5478,7 +5505,7 @@ export async function prepareWorkbenchCloudEvalRequest(
     if (cases.length === 0) {
       throw noEvalCasesError();
     }
-    const kind = options.kind ?? "eval";
+    const kind = normalizeWorkbenchCaseRunKind(options.kind, "eval");
     const evalSnapshot = await readEvalSnapshot(root);
     assertDraftCaseReadinessReady(selectEvalCasesForRun(cases, options.caseIds, undefined), kind, evalSnapshot);
     const state = await loadState(root);
@@ -5506,6 +5533,9 @@ export function resolveWorkbenchRunRetryPlan(
   snapshot: WorkbenchInspectionSnapshot,
   run: WorkbenchRun,
 ): WorkbenchRunRetryPlan {
+  if (run.kind === "live") {
+    throw retryIncompleteError(run, `Run ${run.id} is a live session and cannot be retried.`);
+  }
   const plan = retryOperationPlanForRun(run);
   const location = plan.variant;
   const samples = positiveRetryInteger(run, plan.samples, "operationPlan.samples");
@@ -5598,7 +5628,7 @@ function requireRetryVersion(snapshot: WorkbenchInspectionSnapshot, versionId: s
 
 function retryIncompleteError(run: WorkbenchRun, message: string): WorkbenchCodedError {
   return new WorkbenchCodedError("run_retry_incomplete", message, {
-    remediation: `workbench ${run.kind}`,
+    remediation: run.kind === "live" ? `workbench show ${run.id}` : `workbench ${run.kind}`,
     subject: { runId: run.id },
     exitCode: 1,
   });
@@ -7315,7 +7345,7 @@ export function superviseLocalWorkbenchOperation(
 }
 
 function operationPlanSummaryForRun(input: {
-  kind: WorkbenchRunKind;
+  kind: WorkbenchSchedulableRunKind;
   variant: WorkbenchOperationVariant;
   targets?: readonly WorkbenchOperationTarget[];
   phases?: readonly WorkbenchOperationPhase[];
@@ -7333,13 +7363,6 @@ function operationPlanSummaryForRun(input: {
   gradeOfRunId?: string;
   retryOfRunId?: string;
 }): WorkbenchOperationPlanSummary {
-  if (input.kind !== "run" && input.kind !== "grade" && input.kind !== "eval" && input.kind !== "improve") {
-    throw new WorkbenchCodedError("operation_plan_unsupported", `Run kind ${input.kind} cannot be persisted as a Workbench operation plan.`, {
-      remediation: "workbench eval",
-      subject: { kind: input.kind },
-      exitCode: 2,
-    });
-  }
   return {
     kind: input.kind,
     variant: input.variant,
@@ -7484,20 +7507,17 @@ function copyWorkbenchOperationGrader(grader: WorkbenchOperationGrader): Workben
   return { kind: grader.kind };
 }
 
-function phasesForRunKind(kind: WorkbenchRunKind): WorkbenchOperationPhase[] {
+function phasesForRunKind(kind: WorkbenchCaseRunKind): WorkbenchOperationPhase[] {
   if (kind === "run") {
     return ["execute"];
   }
   if (kind === "grade") {
     return ["grade"];
   }
-  if (kind === "eval") {
-    return ["execute", "grade"];
-  }
-  return [];
+  return ["execute", "grade"];
 }
 
-function runKindForOperationPhases(phases: readonly WorkbenchOperationPhase[]): Exclude<WorkbenchRunKind, "improve"> {
+function runKindForOperationPhases(phases: readonly WorkbenchOperationPhase[]): WorkbenchCaseRunKind {
   const hasExecute = phases.includes("execute");
   const hasGrade = phases.includes("grade");
   if (hasExecute && hasGrade) {
@@ -7607,8 +7627,6 @@ export function createWorkbenchRunSnapshot(
     route: {
       kind: "run",
       runId: firstRun.id,
-      source: plan.kind === "eval" ? "evaluation" : "runs",
-      evaluationId: firstRun.evalHash,
     },
     ...(options.cursor ? { cursor: options.cursor } : {}),
     cliEquivalent: workbenchOperationPlanCliEquivalent(plan),
@@ -7621,8 +7639,53 @@ export function createWorkbenchRunSnapshotForRun(
   jobs: readonly WorkbenchJob[] = [],
   options: { cursor?: string; traces?: readonly WorkbenchTrace[]; now?: string } = {},
 ): WorkbenchRunSnapshot {
+  if (run.kind === "live") {
+    return createWorkbenchLiveRunSnapshotForRun(run, jobs, options);
+  }
   const plan = run.operationPlan ? copyOperationPlanSummary(run.operationPlan) : undefined;
   return createWorkbenchRunSnapshot(operationRequestFromRunPlan(run, plan), [run], { ...options, jobs, ...(plan ? { plan } : {}) });
+}
+
+function createWorkbenchLiveRunSnapshotForRun(
+  run: WorkbenchRun,
+  jobs: readonly WorkbenchJob[] = [],
+  options: { cursor?: string; traces?: readonly WorkbenchTrace[]; now?: string } = {},
+): WorkbenchRunSnapshot {
+  const traces = options.traces ?? [];
+  const runJobs = jobsForSnapshotRuns([run], jobs);
+  const reportOptions = { now: options.now ?? now() };
+  const result = runSnapshotResultSummary([run], jobs);
+  const plan = copyOperationPlanSummary(run.operationPlan?.kind === "live" ? run.operationPlan : {
+    kind: "live",
+    variant: run.location ?? "local",
+    versionId: run.versionId,
+    evalHash: run.evalHash,
+    skills: [run.skillName],
+    agents: [run.agentName],
+    samples: Math.max(1, runJobs.length || run.jobIds?.length || 1),
+  });
+  const next = runSnapshotNext(run, plan);
+  return {
+    schema: "workbench.run.v1",
+    id: run.id,
+    kind: "live",
+    variant: plan.variant,
+    status: run.status,
+    phase: runPhaseForRuns([run]),
+    plan,
+    progress: runProgressSummary([run], jobs, reportOptions),
+    report: buildWorkbenchJobReport(runJobs, traces, reportOptions),
+    measurements: [],
+    ...(result ? { result } : {}),
+    ...(run.retryOfRunId ? { retryOfRunId: run.retryOfRunId } : {}),
+    route: {
+      kind: "run",
+      runId: run.id,
+    },
+    ...(options.cursor ? { cursor: options.cursor } : {}),
+    cliEquivalent: `workbench show ${run.id}`,
+    ...(next ? { next } : {}),
+  };
 }
 
 function operationRequestFromRunPlan(
@@ -7645,16 +7708,14 @@ function operationRequestFromRunPlan(
       ...(plan?.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : run.retryOfRunId ? { retryOfRunId: run.retryOfRunId } : {}),
     };
   }
-  const phases = plan?.phases ?? phasesForRunKind(plan?.kind ?? run.kind);
+  const kind = normalizeWorkbenchCaseRunKind(plan?.kind ?? run.kind, "eval");
+  const phases = plan?.phases ?? phasesForRunKind(kind);
   return {
     kind: "eval",
     variant: plan?.variant ?? run.location ?? "local",
     caseIds: plan?.caseIds ?? [],
     targets: plan?.targets ?? operationTargetsFromPlan(plan ?? {
-      kind: run.kind,
-      variant: run.location ?? "local",
       versionId: run.versionId,
-      evalHash: run.evalHash,
       skills: [run.skillName],
       agents: [run.agentName],
     }),
@@ -7712,12 +7773,13 @@ function workbenchOperationPlanCliEquivalent(plan: WorkbenchOperationPlanSummary
       ...(plan.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : {}),
     });
   }
+  const kind = normalizeWorkbenchCaseRunKind(plan.kind, "eval");
   return workbenchOperationCliEquivalent({
     kind: "eval",
     variant: plan.variant,
     caseIds: plan.caseIds ?? [],
     targets: plan.targets ?? operationTargetsFromPlan(plan),
-    phases: plan.phases ?? phasesForRunKind(plan.kind),
+    phases: plan.phases ?? phasesForRunKind(kind),
     ...(plan.grader ? { grader: plan.grader } : {}),
     ...(plan.samples !== undefined ? { samples: plan.samples } : {}),
     ...(plan.rerun ? { rerun: true } : {}),
@@ -8037,6 +8099,9 @@ function runSnapshotNext(run: WorkbenchRun, plan: WorkbenchOperationPlanSummary 
   if (run.status === "failed" || run.status === "canceled") {
     return undefined;
   }
+  if (run.kind === "live") {
+    return undefined;
+  }
   if (run.kind === "run") {
     return workbenchRunTransitionCliEquivalent(run, "grade", plan ? { plan } : {});
   }
@@ -8150,7 +8215,7 @@ function isTerminalRun(run: WorkbenchRun): boolean {
 
 function defaultWorkbenchOperationRequest(
   snapshot: WorkbenchInspectionSnapshot,
-  kind: WorkbenchRunKind,
+  kind: WorkbenchSchedulableRunKind,
   variant: WorkbenchOperationVariant,
 ): WorkbenchOperationRequest {
   const versionId = variant === "cloud" ? snapshot.refs.current ?? latestSnapshotVersionId(snapshot) : undefined;
@@ -10421,6 +10486,248 @@ function mergeInspectionTraces(
   );
 }
 
+function projectStateWithLiveTraceRuns(state: WorkbenchProjectState, root: string): WorkbenchProjectState {
+  const existingRunIds = new Set(state.runs.map((run) => run.id));
+  const existingJobIds = new Set(state.jobs.map((job) => job.id));
+  const groups = new Map<string, WorkbenchTrace[]>();
+  for (const trace of state.traces) {
+    if (trace.origin !== "live" || existingRunIds.has(trace.runId) || !liveTraceBelongsToRoot(trace, root)) {
+      continue;
+    }
+    const group = groups.get(trace.runId);
+    if (group) {
+      group.push(trace);
+    } else {
+      groups.set(trace.runId, [trace]);
+    }
+  }
+  if (groups.size === 0) {
+    return state;
+  }
+
+  const liveRuns: WorkbenchRun[] = [];
+  const liveJobs: WorkbenchJob[] = [];
+  for (const [runId, traces] of groups.entries()) {
+    const ordered = [...traces].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
+    );
+    const first = ordered[0];
+    if (!first) {
+      continue;
+    }
+    const runJobs = ordered.map((trace) => liveJobFromTrace(trace)).filter((job) => !existingJobIds.has(job.id));
+    if (runJobs.length === 0) {
+      continue;
+    }
+    for (const job of runJobs) {
+      existingJobIds.add(job.id);
+    }
+    const finishedAt = liveTraceRunFinishedAt(runJobs);
+    const lastProgressAt = ordered
+      .map((trace) => trace.updatedAt ?? trace.createdAt)
+      .sort()
+      .at(-1);
+    liveJobs.push(...runJobs);
+    liveRuns.push({
+      id: runId,
+      kind: "live",
+      versionId: first.versionId,
+      skillName: first.skillName,
+      skillBundleHash: first.skillBundleHash,
+      evalHash: first.evalHash ?? "live",
+      agentName: first.agentName,
+      agentHash: first.agentHash ?? liveTraceAgentHash(first),
+      status: liveTraceRunStatus(runJobs),
+      jobIds: runJobs.map((job) => job.id),
+      traceIds: ordered.map((trace) => trace.id),
+      createdAt: first.createdAt,
+      ...(finishedAt ? { finishedAt } : {}),
+      location: "local",
+      ...(lastProgressAt ? { lastProgressAt } : {}),
+    });
+  }
+  if (liveRuns.length === 0) {
+    return state;
+  }
+  return {
+    ...state,
+    runs: [...state.runs, ...liveRuns],
+    jobs: [...state.jobs, ...liveJobs],
+  };
+}
+
+function liveJobFromTrace(trace: WorkbenchTrace): WorkbenchJob {
+  const status = liveJobStatusFromTrace(trace);
+  const finishedAt = status === "running" || status === "queued" ? undefined : trace.updatedAt ?? trace.createdAt;
+  const durationMs = finishedAt ? timestampDeltaMs(trace.createdAt, finishedAt) : undefined;
+  const result = liveJobResultFromTrace(trace);
+  return {
+    id: trace.jobId ?? `job_live_${safeObjectFileName(trace.id)}`,
+    runId: trace.runId,
+    kind: "live",
+    role: "agent-session",
+    versionId: trace.versionId,
+    skillName: trace.skillName,
+    skillBundleHash: trace.skillBundleHash,
+    evalHash: trace.evalHash ?? "live",
+    agentName: trace.agentName,
+    agentHash: trace.agentHash ?? liveTraceAgentHash(trace),
+    caseId: "current",
+    sample: 0,
+    status,
+    adapter: { use: trace.agentName },
+    ...(trace.source?.command ? { command: trace.source.command } : {}),
+    ...(result ? { result } : {}),
+    artifactIds: [],
+    traceIds: [trace.id],
+    createdAt: trace.createdAt,
+    startedAt: trace.createdAt,
+    ...(finishedAt ? { finishedAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(status === "failed" ? { error: liveTraceError(trace) ?? "Live agent session failed." } : {}),
+  };
+}
+
+function liveJobStatusFromTrace(trace: WorkbenchTrace): WorkbenchJobStatus {
+  const lifecycleStatus = liveJobStatusFromLifecycle(trace.status);
+  if (lifecycleStatus) {
+    return lifecycleStatus;
+  }
+  const resultStatus = liveJobStatusFromResult(trace.result);
+  if (resultStatus) {
+    return resultStatus;
+  }
+  return trace.output?.assistantText ? "succeeded" : "running";
+}
+
+function liveJobStatusFromLifecycle(status: WorkbenchTrace["status"]): WorkbenchJobStatus | null {
+  if (!status) {
+    return null;
+  }
+  if (status.capture === "discarded" || status.execution === "canceled") {
+    return "canceled";
+  }
+  if (status.execution === "failed") {
+    return "failed";
+  }
+  if (status.execution === "running" || status.execution === "unknown" || status.capture === "capturing") {
+    return "running";
+  }
+  if (status.execution === "completed") {
+    return "succeeded";
+  }
+  return "running";
+}
+
+function liveJobStatusFromResult(result: Json): WorkbenchJobStatus | null {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+  const record = result as Record<string, Json>;
+  const status = typeof record.status === "string"
+    ? record.status.trim().toLowerCase()
+    : null;
+  if (!status) {
+    return null;
+  }
+  if (status === "completed" || status === "succeeded") {
+    return "succeeded";
+  }
+  if (status === "failed") {
+    return "failed";
+  }
+  if (status === "canceled") {
+    return "canceled";
+  }
+  if (status === "queued") {
+    return "queued";
+  }
+  if (status === "running" || status === "unknown") {
+    return "running";
+  }
+  return null;
+}
+
+function liveTraceRunStatus(jobs: readonly WorkbenchJob[]): WorkbenchRun["status"] {
+  const statuses = jobs.map((job) => job.status);
+  if (statuses.includes("running")) {
+    return "running";
+  }
+  if (statuses.includes("queued")) {
+    return "queued";
+  }
+  if (statuses.includes("failed")) {
+    return "failed";
+  }
+  if (statuses.length > 0 && statuses.every((status) => status === "canceled")) {
+    return "canceled";
+  }
+  return "succeeded";
+}
+
+function liveTraceRunFinishedAt(jobs: readonly WorkbenchJob[]): string | undefined {
+  if (jobs.some((job) => job.status === "queued" || job.status === "running")) {
+    return undefined;
+  }
+  return jobs
+    .map((job) => job.finishedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1);
+}
+
+function liveJobResultFromTrace(trace: WorkbenchTrace): WorkbenchJobResult | undefined {
+  const summary = trace.output?.assistantText;
+  if (!summary && !trace.usage && !trace.result) {
+    return undefined;
+  }
+  return {
+    ...(summary ? { summary } : {}),
+    ...(trace.usage ? { usage: JSON.parse(JSON.stringify(trace.usage)) as UsageSummary } : {}),
+    ...(trace.result ? { payload: JSON.parse(JSON.stringify(trace.result)) as Json } : {}),
+  };
+}
+
+function liveTraceError(trace: WorkbenchTrace): string | undefined {
+  if (!trace.result || typeof trace.result !== "object" || Array.isArray(trace.result)) {
+    return undefined;
+  }
+  const record = trace.result as Record<string, Json>;
+  return typeof record.error === "string"
+    ? record.error
+    : typeof record.error_message === "string"
+      ? record.error_message
+      : undefined;
+}
+
+function timestampDeltaMs(start: string, end: string): number | undefined {
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+    return undefined;
+  }
+  return endMs - startMs;
+}
+
+function liveTraceAgentHash(trace: Pick<WorkbenchTrace, "agentName" | "source">): string {
+  return `agent_live_${hashJson({ agentName: trace.agentName, source: trace.source?.host ?? null }).slice(0, 12)}`;
+}
+
+function liveTraceBelongsToRoot(trace: WorkbenchTrace, root: string): boolean {
+  if (!trace.source?.workspaceRoot) {
+    return false;
+  }
+  return canonicalRootPath(trace.source.workspaceRoot) === canonicalRootPath(root);
+}
+
+function canonicalRootPath(value: string): string {
+  try {
+    return realpathSync.native(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
 export function currentWorkbenchVersionIdFromState(state: WorkbenchProjectState): string | undefined {
   return state.refs.current;
 }
@@ -10461,7 +10768,7 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
       ...state,
       agents: authoredAgents.length > 0 ? authoredAgents : state.agents,
     }));
-  const snapshotState = evalSnapshot
+  const snapshotStateWithTraces = evalSnapshot
     ? {
         ...state,
         evals: [
@@ -10474,6 +10781,7 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
         ...state,
         traces: mergeInspectionTraces(traceOverlay, state.traces),
       };
+  const snapshotState = projectStateWithLiveTraceRuns(snapshotStateWithTraces, root);
   return createWorkbenchInspectionSnapshotFromState({
     root,
     state: snapshotState,
@@ -10538,7 +10846,7 @@ export async function createWorkbenchInspectionSnapshot(options: WorkbenchComman
     const evaluationFiles = await readWorkbenchEvaluationSourceFiles(root).catch(() => []);
     const environmentStatus = await readSkillEvalEnvironmentStatus(root).catch(() => undefined);
     const traceOverlay = await inspectionTraceOverlay(root, options).catch(() => []);
-    const snapshotState = evalSnapshot
+    const snapshotStateWithTraces = evalSnapshot
       ? {
           ...state,
           evals: [
@@ -10551,6 +10859,7 @@ export async function createWorkbenchInspectionSnapshot(options: WorkbenchComman
           ...state,
           traces: mergeInspectionTraces(traceOverlay, state.traces),
         };
+    const snapshotState = projectStateWithLiveTraceRuns(snapshotStateWithTraces, root);
     return createWorkbenchInspectionSnapshotFromState({
       root,
       skillSources: await readSkillSources(root).catch(() => state.skillSources),
@@ -11561,7 +11870,7 @@ async function executeWorkbenchEvaluationRun(args: {
   evalSnapshot: WorkbenchEvalSnapshot;
   agent: WorkbenchAgent;
   targets?: readonly WorkbenchEvaluationRunTarget[];
-  kind: WorkbenchRunKind;
+  kind: WorkbenchSchedulableRunKind;
   samples: number;
   cases?: readonly WorkbenchEvalCaseRuntime[];
   environmentDockerfile: string;
@@ -12047,7 +12356,7 @@ function jobTerminalSortKey(job: WorkbenchJob): string {
   return job.finishedAt ?? job.startedAt ?? job.createdAt;
 }
 
-function shouldRunGradersForEvaluationRun(kind: WorkbenchRunKind): boolean {
+function shouldRunGradersForEvaluationRun(kind: WorkbenchSchedulableRunKind): boolean {
   return kind !== "run";
 }
 
@@ -12295,7 +12604,7 @@ function noEvalCasesReadinessIssue(): WorkbenchLaunchReadinessIssue {
 
 function assertDraftCaseReadinessReady(
   cases: readonly WorkbenchEvalCaseRuntime[],
-  kind: WorkbenchRunKind,
+  kind: WorkbenchCaseRunKind,
   evalSnapshot: WorkbenchEvalSnapshot,
 ): void {
   const issue = draftCaseReadinessIssues(cases, kind, evalSnapshot)[0];
@@ -12313,7 +12622,7 @@ function assertDraftCaseReadinessReady(
 
 function draftCaseReadinessIssues(
   cases: readonly WorkbenchEvalCaseRuntime[],
-  kind: WorkbenchRunKind,
+  kind: WorkbenchCaseRunKind,
   evalSnapshot: WorkbenchEvalSnapshot,
 ): WorkbenchLaunchReadinessIssue[] {
   const issues: WorkbenchLaunchReadinessIssue[] = [];
@@ -18510,8 +18819,8 @@ function validateStateRun(value: unknown, index: number): void {
 function validateStateRunOperationPlan(value: unknown, pathLabel: string): void {
   const record = readRequiredRecord(value, pathLabel);
   readRequiredString(record.kind, `${pathLabel}.kind`);
-  if (record.kind !== "run" && record.kind !== "grade" && record.kind !== "eval" && record.kind !== "improve") {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel}.kind must be run, grade, eval, or improve.`);
+  if (!isWorkbenchRunKind(record.kind)) {
+    throw new WorkbenchUserError(`Workbench state field ${pathLabel}.kind must be run, grade, eval, improve, or live.`);
   }
   readRequiredString(record.variant, `${pathLabel}.variant`);
   if (record.variant !== "local" && record.variant !== "cloud") {

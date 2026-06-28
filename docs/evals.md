@@ -46,7 +46,7 @@ workbench results
 
 `eval --dry-run` previews selectors, cases, samples, package source status, environment file, reusable evidence, and launch checks without writing state. Real `run`, `grade`, and `eval` use the same launch checks.
 
-Live traces use the same evidence object as eval traces. `workbench record on` enables Workbench's native Codex and Claude Code trace plugins, `workbench traces` compacts claimed skill turns from pending plugin-spooled events, and `workbench case promote TRACE_ID --id CASE_ID` turns a reviewed live trace into a normal case.
+Live captures use the same run/job evidence model as eval runs. `workbench record on` enables Workbench's native Codex and Claude Code trace plugins, project-matched captures appear in `Runs` as live agent-session jobs, and `workbench case promote TRACE_ID --id CASE_ID` turns a reviewed low-level trace into a normal case.
 
 ## Skill instructions
 

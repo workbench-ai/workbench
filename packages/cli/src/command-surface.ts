@@ -148,10 +148,10 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
     {
       id: "traces",
       title: "Traces",
-      summary: "Lists live, imported, and eval trace evidence.",
+      summary: "Lists low-level trace records for review and case promotion.",
       usage: ["workbench traces [--dir DIR] [--json]"],
       example: "workbench traces",
-      quickHelpGroup: "taught",
+      quickHelpGroup: "other",
       fullHelpGroup: "inspect",
       docGroup: inspectDocGroup,
       flags: { ...PROJECT_FLAGS, ...HELP_FLAG },

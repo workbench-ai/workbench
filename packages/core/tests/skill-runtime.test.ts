@@ -140,6 +140,22 @@ afterEach(async () => {
 });
 
 describe("skill-first Workbench runtime", () => {
+  test("rejects live as an eval operation kind", async () => {
+    const root = await makeTempRoot("workbench-live-kind-eval-boundary-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+
+    await expect(evalWorkbenchSkill({ dir: root, kind: "live" as never })).rejects.toMatchObject({
+      code: "unsupported_run_kind",
+      remediation: "workbench eval",
+    });
+    await expect(previewWorkbenchEval({ dir: root, kind: "live" as never })).rejects.toMatchObject({
+      code: "unsupported_run_kind",
+      remediation: "workbench eval",
+    });
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(snapshot.runs).toEqual([]);
+  });
+
   dockerTest("versions, evaluates, improves, compares, and switches a skill with Docker jobs", async () => {
     const root = await makeTempRoot("workbench-skill-runtime-");
     await createNewWorkbenchSkillProject({ dir: root, agent: "local" });

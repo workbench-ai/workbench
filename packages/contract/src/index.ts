@@ -328,7 +328,8 @@ export interface WorkbenchEvalCaseSnapshot {
   files: SurfaceSnapshotFile[];
 }
 
-export type WorkbenchRunKind = "run" | "grade" | "eval" | "improve";
+export type WorkbenchCaseRunKind = "run" | "grade" | "eval";
+export type WorkbenchRunKind = WorkbenchCaseRunKind | "improve" | "live";
 export type WorkbenchRunLocation = "local" | "cloud";
 export type WorkbenchRunStatus = "queued" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -420,8 +421,6 @@ export interface WorkbenchOperationPreview {
 export interface WorkbenchOperationRouteTarget {
   kind: "run";
   runId: string;
-  source: "runs" | "evaluation";
-  evaluationId?: string;
 }
 
 export type WorkbenchRunPhase =

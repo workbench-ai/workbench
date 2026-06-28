@@ -16,9 +16,9 @@ import type {
 export interface WorkbenchRunEvidenceView {
   runId: string;
   measurements: WorkbenchRunEvidenceMeasurementResult[];
-  otherWork: WorkbenchRunEvidenceOtherWorkResult[];
+  jobGroups: WorkbenchRunEvidenceJobGroupResult[];
   cases: WorkbenchRunEvidenceCaseResult[];
-  traceJobs: WorkbenchRunEvidenceTraceJob[];
+  jobs: WorkbenchRunEvidenceJob[];
 }
 
 export interface WorkbenchRunEvidenceSkillIdentity {
@@ -50,7 +50,7 @@ export interface WorkbenchRunEvidenceMeasurementResult extends WorkbenchRunEvide
   errors: string[];
 }
 
-export interface WorkbenchRunEvidenceOtherWorkResult extends WorkbenchRunEvidenceAgentIdentity {
+export interface WorkbenchRunEvidenceJobGroupResult extends WorkbenchRunEvidenceAgentIdentity {
   status: WorkbenchRunStatus;
   report: WorkbenchJobReport;
   succeededJobs: number;
@@ -83,7 +83,7 @@ export interface WorkbenchRunEvidenceJobPhase {
   dependencyReason?: string;
 }
 
-export interface WorkbenchRunEvidenceTraceJob extends WorkbenchRunEvidenceAgentIdentity {
+export interface WorkbenchRunEvidenceJob extends WorkbenchRunEvidenceAgentIdentity {
   jobId: string;
   runId: string;
   role?: WorkbenchJobRole;
@@ -549,11 +549,11 @@ export function buildWorkbenchRunEvidenceView(
   }
 
   const jobs = jobsForRunEvidence(snapshot, run);
-  const traceJobs = jobs.map((job) => traceJobForEvidence(snapshot, job)).sort(compareTraceJobs);
+  const evidenceJobs = jobs.map((job) => jobForEvidence(snapshot, job)).sort(compareEvidenceJobs);
   const cases = caseResultsForEvidence(snapshot, jobs).sort(compareCaseResults);
   const measurements = measurementResultsForEvidence(snapshot, run, jobs, cases).sort(compareMeasurementResults);
-  const otherWork = otherWorkResultsForEvidence(snapshot, run, jobs).sort(compareOtherWorkResults);
-  return { runId: run.id, measurements, otherWork, cases, traceJobs };
+  const jobGroups = jobGroupResultsForEvidence(snapshot, run, jobs).sort(compareJobGroupResults);
+  return { runId: run.id, measurements, jobGroups, cases, jobs: evidenceJobs };
 }
 
 function jobsForRunEvidence(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): WorkbenchJob[] {
@@ -563,7 +563,7 @@ function jobsForRunEvidence(snapshot: WorkbenchInspectionSnapshot, run: Workbenc
     .sort(compareJobs);
 }
 
-function traceJobForEvidence(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob): WorkbenchRunEvidenceTraceJob {
+function jobForEvidence(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob): WorkbenchRunEvidenceJob {
   return {
     ...agentIdentityForJob(snapshot, job),
     jobId: job.id,
@@ -692,11 +692,11 @@ function measurementResultsForEvidence(
   return measurements;
 }
 
-function otherWorkResultsForEvidence(
+function jobGroupResultsForEvidence(
   snapshot: WorkbenchInspectionSnapshot,
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
-): WorkbenchRunEvidenceOtherWorkResult[] {
+): WorkbenchRunEvidenceJobGroupResult[] {
   const jobGroups = new Map<string, WorkbenchJob[]>();
   for (const job of jobs.filter((entry) => !isMeasuredSampleJob(entry))) {
     const key = measurementKeyFromJob(job);
@@ -708,13 +708,13 @@ function otherWorkResultsForEvidence(
     }
   }
 
-  const work: WorkbenchRunEvidenceOtherWorkResult[] = [];
+  const groups: WorkbenchRunEvidenceJobGroupResult[] = [];
   for (const groupJobs of jobGroups.values()) {
     const identitySource = groupJobs[0];
     if (!identitySource) {
       continue;
     }
-    work.push({
+    groups.push({
       ...agentIdentityForJob(snapshot, identitySource),
       status: agentStatus(groupJobs, run.status),
       report: buildWorkbenchJobReport(groupJobs, snapshot.traces),
@@ -725,7 +725,7 @@ function otherWorkResultsForEvidence(
       errors: uniqueStrings(groupJobs.flatMap((job) => job.error ? [job.error] : [])),
     });
   }
-  return work;
+  return groups;
 }
 
 function isMeasuredSampleJob(job: Pick<WorkbenchJob, "caseId">): boolean {
@@ -734,12 +734,12 @@ function isMeasuredSampleJob(job: Pick<WorkbenchJob, "caseId">): boolean {
 
 function agentIdentityForJob(
   snapshot: WorkbenchInspectionSnapshot,
-  job: Pick<WorkbenchJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentName" | "agentHash" | "adapter">,
+  job: Pick<WorkbenchJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentName" | "agentHash" | "adapter" | "result">,
 ): WorkbenchRunEvidenceAgentIdentity {
   const resultAgent = snapshot.results?.agents.find((agent) => agent.id === job.agentHash);
   const agentSnapshot = snapshot.agents.find((agent) => agent.hash === job.agentHash);
   const adapter = resultAgent?.adapter ?? agentSnapshot?.agent.adapter ?? job.adapter?.use ?? "recorded";
-  const model = resultAgent?.model ?? agentSnapshot?.agent.model;
+  const model = resultAgent?.model ?? agentSnapshot?.agent.model ?? usageModelForJob(job);
   return {
     ...skillIdentityForJob(snapshot, job),
     agentName: resultAgent?.name ?? agentSnapshot?.agent.name ?? job.agentName,
@@ -748,6 +748,12 @@ function agentIdentityForJob(
     adapter,
     ...(model ? { model } : {}),
   };
+}
+
+function usageModelForJob(job: Pick<WorkbenchJob, "result">): string | undefined {
+  return job.result?.usage?.runner?.model ??
+    job.result?.usage?.engine?.model ??
+    job.result?.usage?.total?.model;
 }
 
 function skillIdentityForJob(
@@ -929,7 +935,7 @@ function compareMeasurementResults(left: WorkbenchRunEvidenceMeasurementResult, 
     left.agentHash.localeCompare(right.agentHash);
 }
 
-function compareOtherWorkResults(left: WorkbenchRunEvidenceOtherWorkResult, right: WorkbenchRunEvidenceOtherWorkResult): number {
+function compareJobGroupResults(left: WorkbenchRunEvidenceJobGroupResult, right: WorkbenchRunEvidenceJobGroupResult): number {
   return compareSkillIdentity(left, right) ||
     left.agentLabel.localeCompare(right.agentLabel, undefined, { numeric: true, sensitivity: "base" }) ||
     left.agentHash.localeCompare(right.agentHash);
@@ -944,7 +950,7 @@ function compareCaseResults(left: WorkbenchRunEvidenceCaseResult, right: Workben
     left.selectedJobId.localeCompare(right.selectedJobId);
 }
 
-function compareTraceJobs(left: WorkbenchRunEvidenceTraceJob, right: WorkbenchRunEvidenceTraceJob): number {
+function compareEvidenceJobs(left: WorkbenchRunEvidenceJob, right: WorkbenchRunEvidenceJob): number {
   return left.caseId.localeCompare(right.caseId, undefined, { numeric: true, sensitivity: "base" }) ||
     left.sample - right.sample ||
     compareSkillIdentity(left, right) ||

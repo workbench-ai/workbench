@@ -26,7 +26,7 @@ workbench show RUN_ID
 workbench show JOB_ID
 ```
 
-Run pages show the measured skill, agent results, case results, trace jobs, status, duration, errors, and evidence counts.
+Run pages show the measured skill, agent results, case results, jobs, status, duration, errors, and evidence counts.
 
 ## Hosted runs
 

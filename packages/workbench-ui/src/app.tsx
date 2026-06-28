@@ -38,7 +38,6 @@ import {
   workbenchJobReportMetricBreakdown,
   workbenchSampleCoverage,
   workbenchSampleCoverageForJobs,
-  workbenchTraceProjection,
 } from "@workbench-ai/workbench-contract";
 import type {
   SurfaceSnapshotFile,
@@ -61,8 +60,8 @@ import type {
   WorkbenchSampleCoverage,
   WorkbenchRun,
   WorkbenchRunEvidenceCaseResult,
+  WorkbenchRunEvidenceJob,
   WorkbenchRunEvidenceJobPhase,
-  WorkbenchRunEvidenceTraceJob,
   WorkbenchRunEvidenceView,
   WorkbenchRunSnapshot,
   WorkbenchSkillVersion,
@@ -150,6 +149,7 @@ import {
   createCaseRoute,
   createEvaluationRoute,
   createFilesRoute,
+  createRunJobRoute,
   createRunRoute,
   createRunsRoute,
   emptyFileRouteState,
@@ -161,8 +161,8 @@ import {
   type WorkbenchFileOwnerKind,
   type WorkbenchFileRouteState,
   type WorkbenchPrimaryTab,
-  type WorkbenchRunCaseEvidenceView,
   type WorkbenchRunCasePhase,
+  type WorkbenchRunJobEvidenceView,
   type WorkbenchRoute,
 } from "./lib/routes";
 import {
@@ -255,7 +255,6 @@ const EVALUATION_VIEW_ITEMS: Array<{
 }> = [
   { value: "results", label: "Results", icon: WorkflowIcon },
   { value: "cases", label: "Cases", icon: FileTextIcon },
-  { value: "traces", label: "Traces", icon: ActivityIcon },
 ];
 
 export type WorkbenchVersionHistoryView = "list" | "lineage";
@@ -502,14 +501,12 @@ export function workbenchRouteEvidenceMode(route: WorkbenchRoute): WorkbenchRout
       if (route.view === "results") {
         return "required";
       }
-      if (route.view === "cases") {
-        return "optional";
-      }
-      return "required";
+      return "optional";
     case "case":
       return route.section === "runs" ? "required" : "none";
     case "runs":
     case "run":
+    case "run-job":
       return "required";
     case "files":
     case "not-found":
@@ -1035,7 +1032,7 @@ function PrimaryTabs({
   const active = routePrimaryTab(route);
   const routeFor = (tab: WorkbenchPrimaryTab): WorkbenchRoute => {
     if (tab === "evaluation") {
-      return createEvaluationRoute({ view: "results", evaluationId: route.kind === "evaluation" || route.kind === "case" || route.kind === "run" ? route.evaluationId : null });
+      return createEvaluationRoute({ view: "results", evaluationId: route.kind === "evaluation" || route.kind === "case" ? route.evaluationId : null });
     }
     if (tab === "runs") {
       return createRunsRoute();
@@ -1132,6 +1129,7 @@ function RouteBody({
     case "runs":
       return <RunsSurface route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />;
     case "run":
+    case "run-job":
       return (
         <RunDetailPage
           apiBasePath={apiBasePath}
@@ -1561,7 +1559,7 @@ function EvaluationSurface({
           value={route.view}
           items={EVALUATION_VIEW_ITEMS}
           onValueChange={(value) => {
-            if (value === "results" || value === "cases" || value === "traces") {
+            if (value === "results" || value === "cases") {
               navigate(createEvaluationRoute({ view: value, evaluationId: activeEvaluationId ?? route.evaluationId }));
             }
           }}
@@ -1584,13 +1582,6 @@ function EvaluationSurface({
           refreshSnapshot={refreshSnapshot}
           snapshot={snapshot}
         />
-      ) : route.view === "traces" ? (
-        <EvaluationTraces
-          evaluationId={activeEvaluationId}
-          hrefFor={hrefFor}
-          onRouteClick={onRouteClick}
-          snapshot={snapshot}
-        />
       ) : (
         <EvaluationResults
           evaluationId={activeEvaluationId}
@@ -1602,100 +1593,6 @@ function EvaluationSurface({
           snapshot={snapshot}
         />
       )}
-    </div>
-  );
-}
-
-function EvaluationTraces({
-  evaluationId,
-  hrefFor,
-  onRouteClick,
-  snapshot,
-}: {
-  evaluationId: string | null;
-  hrefFor: (route: WorkbenchRoute) => string;
-  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  snapshot: WorkbenchInspectionSnapshot;
-}) {
-  const evalSnapshot = selectedEvalSnapshot(snapshot, evaluationId);
-  const evalCaseIds = new Set(evalSnapshot?.cases.map((entry) => entry.id) ?? []);
-  const traces = snapshot.traces
-    .filter((trace) => {
-      if (!evaluationId) {
-        return true;
-      }
-      if (trace.evalHash === evaluationId) {
-        return true;
-      }
-      if (trace.evalHash) {
-        return false;
-      }
-      return evalCaseIds.size > 0 && (trace.links?.some((link) => link.type === "case" && evalCaseIds.has(link.id)) ?? false);
-    })
-    .slice()
-    .sort((left, right) => (right.updatedAt ?? right.createdAt).localeCompare(left.updatedAt ?? left.createdAt));
-  if (traces.length === 0) {
-    return <EmptyState icon={ActivityIcon} title="No traces" message="Live and eval traces appear here after Workbench records agent evidence." variant="hero" size="sm" />;
-  }
-  return (
-    <section className="grid min-w-0 gap-4" aria-label="Evaluation traces">
-      <SurfaceSection title="Traces" icon={ActivityIcon} headingLevel={2} description={`${traces.length} trace${traces.length === 1 ? "" : "s"} recorded across live sessions and eval runs.`}>
-        <div className="grid min-w-0 divide-y">
-          {traces.map((trace) => {
-            const run = snapshot.runs.find((entry) => entry.id === trace.runId);
-            const traceProjection = workbenchTraceProjection(trace);
-            const prompt = traceProjection.prompt;
-            const output = traceProjection.output;
-            const evidenceRoute = run ? createRunRoute({ runId: run.id, source: "evaluation", evaluationId }) : null;
-            return (
-              <article key={trace.id} className="grid min-w-0 gap-3 py-4 first:pt-0 last:pb-0">
-                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="grid min-w-0 gap-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm font-medium">{shortId(trace.id)}</span>
-                      <Badge variant="outline">{trace.origin ?? "eval"}</Badge>
-                      <Badge variant="secondary">{traceProjection.lifecycleStatus}</Badge>
-                      <Badge variant="outline">{traceProjection.reviewStatus}</Badge>
-                      {traceProjection.promotionStatus === "promoted" ? <Badge variant="outline">promoted</Badge> : null}
-                    </div>
-                    <div className="min-w-0 text-sm text-muted-foreground">
-                      {trace.skillName} / {trace.agentName} / {formatTimestamp(trace.createdAt)}
-                    </div>
-                  </div>
-                  {evidenceRoute ? (
-                    <Button size="sm" variant="outline" asChild>
-                      <a href={hrefFor(evidenceRoute)} onClick={onRouteClick(evidenceRoute)}>
-                        <ActivityIcon className="size-4" />
-                        Evidence
-                      </a>
-                    </Button>
-                  ) : null}
-                </div>
-                {prompt || output ? (
-                  <div className="grid min-w-0 gap-2 md:grid-cols-2">
-                    {prompt ? <TracePreviewBlock title="Input" value={prompt} /> : null}
-                    {output ? <TracePreviewBlock title="Output" value={output} /> : null}
-                  </div>
-                ) : null}
-                <div className="flex min-w-0 flex-wrap gap-3 text-xs text-muted-foreground">
-                  <span>files {trace.files.length}</span>
-                  {trace.source?.host ? <span>host {trace.source.host}</span> : null}
-                  {trace.links?.find((link) => link.type === "case") ? <span>case {trace.links.find((link) => link.type === "case")?.id}</span> : null}
-                </div>
-              </article>
-            );
-          })}
-        </div>
-      </SurfaceSection>
-    </section>
-  );
-}
-
-function TracePreviewBlock({ title, value }: { title: string; value: string }) {
-  return (
-    <div className="grid min-w-0 gap-1 rounded-md border bg-muted/20 p-3">
-      <span className="text-xs font-medium uppercase text-muted-foreground">{title}</span>
-      <p className="line-clamp-5 whitespace-pre-wrap break-words text-sm [overflow-wrap:anywhere]">{value}</p>
     </div>
   );
 }
@@ -1829,7 +1726,7 @@ export function EvaluationLeaderboard({
                   missingCostLabelForStatus(row.statusLabel, Boolean(row.runId)),
                 );
                 const runRoute = hrefFor && onRouteClick && row.runId
-                  ? createRunRoute({ runId: row.runId, source: "evaluation", evaluationId })
+                  ? createRunRoute({ runId: row.runId })
                   : null;
                 return (
                   <TableRow
@@ -2644,10 +2541,8 @@ function CaseMatrixCellDialog({
                   {related.map(({ run, caseResult }) => {
                     const route = createRunCaseRoute({
                       caseResult,
-                      evaluationId,
                       phase: defaultRunCasePhase(caseResult),
                       runId: run.id,
-                      source: "evaluation",
                       view: "output",
                     });
                     return (
@@ -3130,8 +3025,6 @@ function CaseDetail({
             snapshot={snapshot}
             hrefFor={hrefFor}
             onRouteClick={onRouteClick}
-            source="evaluation"
-            evaluationId={evalSnapshot.hash}
           />
         )}
       </div>
@@ -3372,12 +3265,13 @@ function RunsSurface({
           </TableHeader>
           <TableBody>
             {runs.map((run) => {
-              const runRoute = createRunRoute({ runId: run.id, source: "runs" });
+              const runRoute = createRunRoute({ runId: run.id });
               const runJobs = jobsForRun(run, snapshot.jobs);
+              const evidence = runEvidenceView(snapshot, run);
               const report = buildWorkbenchJobReport(runJobs, snapshot.traces);
               const latencyMetric = formatReportMetricStack(report, "latency", formatDurationMs);
               const costMetric = formatReportMetricStack(report, "cost", formatCost, formatReportCost(report, run.status));
-              const coverage = workbenchSampleCoverageForJobs(runJobs);
+              const summary = runEvidenceSummary(snapshot, run, evidence, runJobs);
               return (
                 <TableRow key={run.id} className="cursor-pointer" onClick={onRouteClick(runRoute)}>
                   <TableCell className="align-top">
@@ -3387,9 +3281,9 @@ function RunsSurface({
                     <div className="mt-1"><StatusBadge status={run.status} /></div>
                   </TableCell>
                   <TableCell className="align-top">
-                    <div className="break-words font-medium [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</div>
-                    <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)} / {formatEvaluationDisplayName(run.evalHash, snapshot.evals)}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">{formatCoverage(coverage)}</div>
+                    <div className="break-words font-medium [overflow-wrap:anywhere]">{summary.subject}</div>
+                    <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{summary.context}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">{summary.detail}</div>
                   </TableCell>
                   <TableCell className="align-top font-medium">{formatQualityMetric(runScore(run, snapshot.jobs))}</TableCell>
                   <TableCell className="align-top text-muted-foreground">
@@ -3429,7 +3323,7 @@ function RunDetailPage({
   inspectionCursor: string | null;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   progressCursor: string | null;
-  route: Extract<WorkbenchRoute, { kind: "run" }>;
+  route: Extract<WorkbenchRoute, { kind: "run" | "run-job" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
   const run = snapshot.runs.find((entry) => entry.id === route.runId) ?? null;
@@ -3437,45 +3331,32 @@ function RunDetailPage({
     return <MissingObject label={`Run ${route.runId}`} />;
   }
   const jobs = jobsForRun(run, snapshot.jobs);
-  const evidence = buildWorkbenchRunEvidenceView(snapshot, run) ?? {
-    runId: run.id,
-    measurements: [],
-    otherWork: [],
-    cases: [],
-    traceJobs: [],
-  };
+  const evidence = runEvidenceView(snapshot, run);
   const runReport = buildWorkbenchJobReport(jobs, snapshot.traces);
   const runLatencyMetric = formatReportMetricStack(runReport, "latency", formatDurationMs);
   const runCostMetric = formatReportMetricStack(runReport, "cost", formatCost, formatReportCost(runReport, run.status));
   const runCoverage = workbenchSampleCoverageForJobs(jobs);
-  const summaryRoute = createRunRoute({
-    runId: run.id,
-    source: route.source,
-    evaluationId: route.evaluationId,
-    section: { kind: "summary" },
-  });
-  const selectedCaseRoute = route.section.kind === "case" ? route.section : null;
-  const selectedCaseResult = selectedCaseRoute
-    ? evidence.cases.find((caseResult) => runCaseRouteMatches(caseResult, selectedCaseRoute)) ?? null
+  const summaryRoute = createRunRoute({ runId: run.id });
+  const selectedJobId = route.kind === "run-job" ? route.jobId : null;
+  const selectedJob = selectedJobId ? jobs.find((job) => job.id === selectedJobId) ?? null : null;
+  const selectedCaseResult = selectedJobId
+    ? evidence.cases.find((caseResult) => runCaseResultHasJob(caseResult, selectedJobId)) ?? null
     : null;
-  const selectedPhaseName = selectedCaseResult
-    ? availableRunCasePhase(selectedCaseResult, selectedCaseRoute?.phase ?? null)
-    : null;
+  const selectedPhaseName = selectedCaseResult ? runCasePhaseForJob(selectedCaseResult, selectedJobId) : null;
   const selectedPhase = selectedCaseResult && selectedPhaseName
     ? phaseForCaseResult(selectedCaseResult, selectedPhaseName)
     : null;
-  const selectedJob = selectedPhase
-    ? jobs.find((job) => job.id === selectedPhase.jobId) ?? null
+  const selectedEvidenceJob = selectedJob
+    ? evidence.jobs.find((job) => job.jobId === selectedJob.id) ?? null
     : null;
-  const selectedTraceJob = selectedPhase
-    ? evidence.traceJobs.find((job) => job.jobId === selectedPhase.jobId) ?? null
-    : null;
+  const caseJobIds = new Set(evidence.cases.flatMap(runCaseResultJobIds));
+  const genericNavJobs = evidence.jobs.filter((job) => !caseJobIds.has(job.jobId));
   return (
     <div className="grid min-w-0 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
       <nav className="grid h-max gap-1 rounded-lg border border-border/70 bg-background p-2 text-sm" aria-label="Run sections">
         <a
-          aria-current={route.section.kind === "summary" ? "page" : undefined}
-          className={sectionNavItemClass(route.section.kind === "summary")}
+          aria-current={route.kind === "run" ? "page" : undefined}
+          className={sectionNavItemClass(route.kind === "run")}
           href={hrefFor(summaryRoute)}
           onClick={onRouteClick(summaryRoute)}
         >
@@ -3484,12 +3365,10 @@ function RunDetailPage({
         {evidence.cases.map((caseResult) => {
           const caseRoute = createRunCaseRoute({
             caseResult,
-            evaluationId: route.evaluationId,
             phase: defaultRunCasePhase(caseResult),
             runId: run.id,
-            source: route.source,
           });
-          const active = selectedCaseRoute ? runCaseRouteMatches(caseResult, selectedCaseRoute) : false;
+          const active = selectedCaseResult ? runCaseResultKey(caseResult) === runCaseResultKey(selectedCaseResult) : false;
           return (
             <a
               aria-current={active ? "page" : undefined}
@@ -3502,14 +3381,29 @@ function RunDetailPage({
             </a>
           );
         })}
+        {genericNavJobs.map((evidenceJob) => {
+          const jobRoute = createRunJobRoute({ runId: run.id, jobId: evidenceJob.jobId });
+          const active = selectedJobId === evidenceJob.jobId;
+          return (
+            <a
+              aria-current={active ? "page" : undefined}
+              className={sectionNavItemClass(active, "truncate")}
+              href={hrefFor(jobRoute)}
+              key={evidenceJob.jobId}
+              onClick={onRouteClick(jobRoute)}
+            >
+              {genericRunJobNavLabel(evidenceJob)}
+            </a>
+          );
+        })}
       </nav>
       <div className="grid min-w-0 gap-5">
         <DetailPageHeader
           eyebrow={runOperationLabel(run)}
-          title={runDisplayTitle(run, snapshot)}
-          description={`${runOperationLabel(run)} from ${formatTimestamp(run.createdAt)} with ${formatRunEvidenceSummary(jobs)}.`}
+          title={runDisplayTitle(run, snapshot, evidence, jobs)}
+          description={runDescription(run, snapshot, evidence, jobs)}
         />
-        {route.section.kind === "summary" ? (
+        {route.kind === "run" ? (
           <>
             <MetricStrip
               items={[
@@ -3535,37 +3429,48 @@ function RunDetailPage({
             />
             {run.error ? <ProblemState icon={CircleAlertIcon} title="Run error" message={run.error} align="start" /> : null}
             <RunSummaryMeasurementTable evidence={evidence} />
-            <RunSummaryOtherWorkTable evidence={evidence} />
-            <RunSummaryCaseTable
-              evidence={evidence}
-              evaluationId={route.evaluationId}
-              hrefFor={hrefFor}
-              onRouteClick={onRouteClick}
-              run={run}
-              snapshot={snapshot}
-              source={route.source}
-            />
+            <RunSummaryJobTable evidence={evidence} />
+            {runHasCaseEvidence(run, evidence, jobs) ? (
+              <RunSummaryCaseTable
+                evidence={evidence}
+                hrefFor={hrefFor}
+                onRouteClick={onRouteClick}
+                run={run}
+                snapshot={snapshot}
+              />
+            ) : null}
             <RunTimelineSummary jobs={jobs} run={run} snapshot={snapshot} />
           </>
         ) : selectedCaseResult && selectedJob && selectedPhase && selectedPhaseName ? (
           <CaseResultDetail
             apiBasePath={apiBasePath}
             caseResult={selectedCaseResult}
-            evaluationId={route.evaluationId}
             hrefFor={hrefFor}
             inspectionCursor={inspectionCursor}
             job={selectedJob}
             phase={selectedPhaseName}
             progressCursor={progressCursor}
-            traceJob={selectedTraceJob}
+            evidenceJob={selectedEvidenceJob}
             onRouteClick={onRouteClick}
             run={run}
             snapshot={snapshot}
-            source={route.source}
-            view={route.section.view}
+            view={route.view}
+          />
+        ) : selectedJob ? (
+          <GenericJobDetail
+            apiBasePath={apiBasePath}
+            hrefFor={hrefFor}
+            inspectionCursor={inspectionCursor}
+            job={selectedJob}
+            onRouteClick={onRouteClick}
+            progressCursor={progressCursor}
+            run={run}
+            snapshot={snapshot}
+            evidenceJob={selectedEvidenceJob}
+            view={route.view}
           />
         ) : (
-          <MissingObject label={`Case result ${selectedCaseRoute?.caseId ?? "unknown"}`} />
+          <MissingObject label={`Job ${selectedJobId ?? "unknown"}`} />
         )}
       </div>
     </div>
@@ -3601,7 +3506,7 @@ function RunSummaryMeasurementTable({
                 <TableRow key={runEvidenceGroupKey(measurement)}>
                   <TableCell className="align-top">
                     <div className="font-medium">{formatSkillLabel(measurement)}</div>
-                    <div className="text-xs text-muted-foreground">{measurement.agentLabel} / {formatAdapterModel(measurement)}</div>
+                    <div className="text-xs text-muted-foreground">{formatEvidenceAgentModel(measurement)}</div>
                     <div className="mt-1"><StatusBadge status={measurement.status} /></div>
                   </TableCell>
                   <TableCell className="align-top font-medium">{formatQualityMetric(measurement.score)}</TableCell>
@@ -3628,36 +3533,36 @@ function RunSummaryMeasurementTable({
   );
 }
 
-function RunSummaryOtherWorkTable({
+function RunSummaryJobTable({
   evidence,
 }: {
   evidence: WorkbenchRunEvidenceView;
 }) {
-  if (evidence.otherWork.length === 0) {
+  if (evidence.jobGroups.length === 0) {
     return null;
   }
   return (
-    <SurfaceSection title="Other work" icon={WorkflowIcon} headingLevel={3}>
+    <SurfaceSection title="Jobs" icon={WorkflowIcon} headingLevel={3}>
       <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Work</TableHead>
+              <TableHead>Job</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Latency</TableHead>
               <TableHead>Cost</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {evidence.otherWork.map((work) => (
-              <TableRow key={runEvidenceGroupKey(work)}>
+            {evidence.jobGroups.map((group) => (
+              <TableRow key={runEvidenceGroupKey(group)}>
                 <TableCell className="align-top">
-                  <div className="font-medium">{formatSkillLabel(work)}</div>
-                  <div className="text-xs text-muted-foreground">{work.agentLabel} / {formatAdapterModel(work)}</div>
+                  <div className="font-medium">{formatSkillLabel(group)}</div>
+                  <div className="text-xs text-muted-foreground">{formatEvidenceAgentModel(group)}</div>
                 </TableCell>
-                <TableCell className="align-top"><StatusBadge status={work.status} /></TableCell>
-                <TableCell className="align-top text-muted-foreground">{formatReportMetricTotal(work.report, "latency", formatDurationMs)}</TableCell>
-                <TableCell className="align-top text-muted-foreground">{formatReportMetricTotal(work.report, "cost", formatCost, formatReportCost(work.report, work.status))}</TableCell>
+                <TableCell className="align-top"><StatusBadge status={group.status} /></TableCell>
+                <TableCell className="align-top text-muted-foreground">{formatReportMetricTotal(group.report, "latency", formatDurationMs)}</TableCell>
+                <TableCell className="align-top text-muted-foreground">{formatReportMetricTotal(group.report, "cost", formatCost, formatReportCost(group.report, group.status))}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -3669,20 +3574,16 @@ function RunSummaryOtherWorkTable({
 
 function RunSummaryCaseTable({
   evidence,
-  evaluationId,
   hrefFor,
   onRouteClick,
   run,
   snapshot,
-  source,
 }: {
   evidence: WorkbenchRunEvidenceView;
-  evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
-  source: "evaluation" | "runs";
 }) {
   const evalSnapshot = selectedEvalSnapshot(snapshot, run.evalHash);
   const casesById = new Map((evalSnapshot?.cases ?? []).map((evalCase) => [evalCase.id, evalCase]));
@@ -3710,10 +3611,8 @@ function RunSummaryCaseTable({
             {evidence.cases.map((caseResult) => {
               const caseRoute = createRunCaseRoute({
                 caseResult,
-                evaluationId,
                 phase: defaultRunCasePhase(caseResult),
                 runId: run.id,
-                source,
               });
               const evalCase = casesById.get(caseResult.caseId);
               const title = evalCase ? caseDisplayTitle(evalCase) : caseResult.caseId;
@@ -3734,7 +3633,7 @@ function RunSummaryCaseTable({
                   </TableCell>
                   <TableCell className="align-top">
                     <div className="font-medium">{formatSkillLabel(caseResult)}</div>
-                    <div className="text-xs text-muted-foreground">{caseResult.agentLabel} / {formatAdapterModel(caseResult)}</div>
+                    <div className="text-xs text-muted-foreground">{formatEvidenceAgentModel(caseResult)}</div>
                     <div className="mt-1"><StatusBadge status={caseResult.status} /></div>
                   </TableCell>
                   <TableCell className="align-top font-medium">{formatQualityMetric(caseResult.score)}</TableCell>
@@ -3801,10 +3700,6 @@ function RunTimelineSummary({
   );
 }
 
-function formatRunEvidenceSummary(jobs: readonly WorkbenchJob[]): string {
-  return formatCoverage(workbenchSampleCoverageForJobs(jobs)).toLowerCase();
-}
-
 function formatMeasurementResultsSummary(evidence: WorkbenchRunEvidenceView): string {
   return formatCount(evidence.measurements.length, "measurement");
 }
@@ -3814,11 +3709,13 @@ function formatEvidenceCaseSummary(evidence: WorkbenchRunEvidenceView): string {
   return `${completed} / ${evidence.cases.length} covered`;
 }
 
-function formatAdapterModel(entry: Pick<WorkbenchRunEvidenceTraceJob, "adapter" | "model">): string {
-  return entry.model ? `${entry.adapter} / ${entry.model}` : entry.adapter;
+function formatAdapterModel(entry: Pick<WorkbenchRunEvidenceJob, "adapter" | "model">): string {
+  const adapter = compactDisplayPart(entry.adapter);
+  const model = compactDisplayPart(entry.model);
+  return [adapter, model].filter((part): part is string => Boolean(part)).join(" / ");
 }
 
-function formatSkillLabel(entry: Pick<WorkbenchRunEvidenceTraceJob, "skillLabel" | "skillName">): string {
+function formatSkillLabel(entry: Pick<WorkbenchRunEvidenceJob, "skillLabel" | "skillName">): string {
   return entry.skillLabel || entry.skillName;
 }
 
@@ -3830,7 +3727,15 @@ function formatRunCasePhase(phase: WorkbenchRunCasePhase): string {
   return phase === "grade" ? "Grade" : "Execute";
 }
 
-function formatTraceJobDependencies(job: WorkbenchRunEvidenceTraceJob): string {
+function formatJobRoleLabel(role: string): string {
+  return role
+    .split(/[-_\s]+/u)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ") || "Job";
+}
+
+function formatJobDependencies(job: WorkbenchRunEvidenceJob): string {
   return job.dependencies
     .map((dependency) => dependency.jobId ? `${dependency.name}: ${dependency.jobId}` : dependency.name)
     .join(", ");
@@ -3841,55 +3746,62 @@ function runCaseNavLabel(caseResult: WorkbenchRunEvidenceCaseResult): string {
   return `${caseResult.caseId}${sample} · ${formatSkillLabel(caseResult)} · ${caseResult.agentLabel}`;
 }
 
-type SelectedRunCaseSection = Extract<Extract<WorkbenchRoute, { kind: "run" }>["section"], { kind: "case" }>;
+function genericRunJobNavLabel(job: WorkbenchRunEvidenceJob): string {
+  return `${formatJobRoleLabel(job.role ?? "job")} · ${formatSkillLabel(job)} · ${job.agentLabel}`;
+}
 
 function createRunCaseRoute({
   caseResult,
-  evaluationId,
   phase,
   runId,
-  source,
-  view = "trace",
+  view = "timeline",
 }: {
   caseResult: WorkbenchRunEvidenceCaseResult;
-  evaluationId: string | null;
   phase: WorkbenchRunCasePhase;
   runId: string;
-  source: "evaluation" | "runs";
-  view?: WorkbenchRunCaseEvidenceView;
+  view?: WorkbenchRunJobEvidenceView;
 }): WorkbenchRoute {
-  return createRunRoute({
+  const selectedPhase = phaseForCaseResult(caseResult, phase) ?? phaseForCaseResult(caseResult, defaultRunCasePhase(caseResult));
+  return createRunJobRoute({
     runId,
-    source,
-    evaluationId,
-    section: {
-      kind: "case",
-      caseId: caseResult.caseId,
-      agentHash: caseResult.agentHash,
-      skillName: caseResult.skillName,
-      skillBundleHash: caseResult.skillBundleHash,
-      versionId: caseResult.versionId,
-      sample: caseResult.sample,
-      phase,
-      view,
-    },
+    jobId: selectedPhase?.jobId ?? caseResult.selectedJobId,
+    view,
   });
 }
 
-function runCaseRouteMatches(
+function runCaseResultJobIds(caseResult: WorkbenchRunEvidenceCaseResult): string[] {
+  return [
+    caseResult.selectedJobId,
+    caseResult.execute?.jobId,
+    caseResult.grade?.jobId,
+  ].filter((jobId, index, jobIds): jobId is string => Boolean(jobId) && jobIds.indexOf(jobId) === index);
+}
+
+function runCaseResultHasJob(
   caseResult: WorkbenchRunEvidenceCaseResult,
-  section: SelectedRunCaseSection,
+  jobId: string,
 ): boolean {
-  return caseResult.caseId === section.caseId &&
-    caseResult.agentHash === section.agentHash &&
-    caseResult.skillName === section.skillName &&
-    caseResult.skillBundleHash === section.skillBundleHash &&
-    caseResult.versionId === section.versionId &&
-    caseResult.sample === section.sample;
+  return runCaseResultJobIds(caseResult).includes(jobId);
+}
+
+function runCasePhaseForJob(
+  caseResult: WorkbenchRunEvidenceCaseResult,
+  jobId: string | null,
+): WorkbenchRunCasePhase | null {
+  if (!jobId) {
+    return null;
+  }
+  if (caseResult.grade?.jobId === jobId) {
+    return "grade";
+  }
+  if (caseResult.execute?.jobId === jobId) {
+    return "execute";
+  }
+  return null;
 }
 
 function runEvidenceGroupKey(
-  group: Pick<WorkbenchRunEvidenceTraceJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentHash" | "agentName">,
+  group: Pick<WorkbenchRunEvidenceJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentHash" | "agentName">,
 ): string {
   return [
     group.versionId,
@@ -3913,19 +3825,6 @@ function defaultRunCasePhase(caseResult: WorkbenchRunEvidenceCaseResult): Workbe
   return caseResult.execute ? "execute" : "grade";
 }
 
-function availableRunCasePhase(
-  caseResult: WorkbenchRunEvidenceCaseResult,
-  requested: WorkbenchRunCasePhase | null,
-): WorkbenchRunCasePhase {
-  if (requested === "grade" && caseResult.grade) {
-    return "grade";
-  }
-  if (requested === "execute" && caseResult.execute) {
-    return "execute";
-  }
-  return defaultRunCasePhase(caseResult);
-}
-
 function phaseForCaseResult(
   caseResult: WorkbenchRunEvidenceCaseResult,
   phase: WorkbenchRunCasePhase,
@@ -3939,33 +3838,29 @@ function phaseForCaseResult(
 function CaseResultDetail({
   apiBasePath,
   caseResult,
-  evaluationId,
   hrefFor,
   inspectionCursor,
   job,
   phase,
   progressCursor,
-  traceJob,
+  evidenceJob,
   onRouteClick,
   run,
   snapshot,
-  source,
   view,
 }: {
   apiBasePath: string;
   caseResult: WorkbenchRunEvidenceCaseResult;
-  evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
   inspectionCursor: string | null;
   job: WorkbenchJob;
   phase: WorkbenchRunCasePhase;
   progressCursor: string | null;
-  traceJob: WorkbenchRunEvidenceTraceJob | null;
+  evidenceJob: WorkbenchRunEvidenceJob | null;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
-  source: "evaluation" | "runs";
-  view: WorkbenchRunCaseEvidenceView;
+  view: WorkbenchRunJobEvidenceView;
 }) {
   const traces = snapshot.traces.filter((trace) => job.traceIds.includes(trace.id) || trace.jobId === job.id);
   const artifacts = snapshot.artifacts.filter((artifact) => job.artifactIds.includes(artifact.id));
@@ -3982,7 +3877,7 @@ function CaseResultDetail({
     ...(job.durationMs !== undefined ? { durationMs: job.durationMs } : {}),
     ...(job.error ? { error: job.error } : {}),
   };
-  const dependencies = traceJob?.dependencies.length ? formatTraceJobDependencies(traceJob) : selectedPhase.dependencyReason;
+  const dependencies = evidenceJob?.dependencies.length ? formatJobDependencies(evidenceJob) : selectedPhase.dependencyReason;
   const phaseError = selectedPhase.error && selectedPhase.error !== caseResult.error ? selectedPhase.error : null;
   return (
     <section className="grid min-w-0 gap-4" aria-label={`${caseTitle} evidence`}>
@@ -3996,12 +3891,10 @@ function CaseResultDetail({
         </div>
         <CasePhaseNav
           caseResult={caseResult}
-          evaluationId={evaluationId}
           hrefFor={hrefFor}
           onRouteClick={onRouteClick}
           phase={phase}
           run={run}
-          source={source}
           view={view}
         />
       </div>
@@ -4025,26 +3918,108 @@ function CaseResultDetail({
         </FactGrid>
         {phaseError ? <ProblemState icon={CircleAlertIcon} title={`${phaseLabel} error`} message={phaseError} align="start" /> : null}
         <div className="flex min-w-0 justify-end">
-          <CaseEvidenceViewNav
-            caseResult={caseResult}
-            evaluationId={evaluationId}
+          <JobEvidenceViewNav
             hrefFor={hrefFor}
+            jobId={job.id}
             onRouteClick={onRouteClick}
-            phase={phase}
-            run={run}
-            source={source}
+            runId={run.id}
             view={view}
           />
         </div>
-        {view === "trace" ? (
+        {view === "timeline" ? (
           <JobEvidencePanel
             apiBasePath={apiBasePath}
-            description={phase === "grade" ? "Judgment evidence for this case sample." : "Skill run evidence for this case sample."}
+            description={phase === "grade" ? "Judgment timeline for this case sample." : "Skill execution timeline for this case sample."}
             jobId={job.id}
             jobStatus={job.status}
             refreshToken={job.status === "queued" || job.status === "running" ? progressCursor ?? inspectionCursor : null}
             runId={job.runId}
-            title={`${phaseLabel} trace`}
+            title={`${phaseLabel} timeline`}
+          />
+        ) : (
+          <CaseOutputView apiBasePath={apiBasePath} artifacts={artifacts} job={job} traces={traces} />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function GenericJobDetail({
+  apiBasePath,
+  hrefFor,
+  inspectionCursor,
+  job,
+  onRouteClick,
+  progressCursor,
+  run,
+  snapshot,
+  evidenceJob,
+  view,
+}: {
+  apiBasePath: string;
+  hrefFor: (route: WorkbenchRoute) => string;
+  inspectionCursor: string | null;
+  job: WorkbenchJob;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  progressCursor: string | null;
+  run: WorkbenchRun;
+  snapshot: WorkbenchInspectionSnapshot;
+  evidenceJob: WorkbenchRunEvidenceJob | null;
+  view: WorkbenchRunJobEvidenceView;
+}) {
+  const traces = snapshot.traces.filter((trace) => job.traceIds.includes(trace.id) || trace.jobId === job.id);
+  const artifacts = snapshot.artifacts.filter((artifact) => job.artifactIds.includes(artifact.id));
+  const primaryTrace = traces[0] ?? null;
+  const roleLabel = formatJobRoleLabel(job.role ?? job.kind);
+  const adapterModel = evidenceJob ? formatAdapterModel(evidenceJob) : job.adapter?.use ?? "recorded";
+  const dependencies = evidenceJob?.dependencies.length ? formatJobDependencies(evidenceJob) : null;
+  return (
+    <section className="grid min-w-0 gap-4" aria-label={`${roleLabel} evidence`}>
+      <div className="grid min-w-0 gap-3">
+        <div className="grid min-w-0 gap-1">
+          <div className="text-xs font-medium text-muted-foreground">Job</div>
+          <h2 className="break-words text-xl font-semibold leading-tight text-foreground [overflow-wrap:anywhere]">{roleLabel}</h2>
+          <p className="break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
+            {job.skillName} · {job.agentName}
+          </p>
+        </div>
+      </div>
+      <FactGrid>
+        <FactItem title="Skill" value={job.skillName} />
+        <FactItem title="Agent" value={job.agentName} />
+        <FactItem title="Model" value={adapterModel} />
+        <FactItem title="Role" value={roleLabel} />
+        <FactItem title="Status" value={<StatusBadge status={job.status} />} />
+        <FactItem title="Started" value={formatTimestamp(job.startedAt ?? job.createdAt)} />
+        <FactItem title="Finished" value={job.finishedAt ? formatTimestamp(job.finishedAt) : job.status === "running" || job.status === "queued" ? "Still running" : "n/a"} />
+        <FactItem title="Duration" value={formatDurationMs(job.durationMs)} />
+        {primaryTrace?.source?.sessionId ? <FactItem title="Session" value={primaryTrace.source.sessionId} /> : null}
+        {primaryTrace?.source?.workspaceRoot ? <FactItem title="Project" value={primaryTrace.source.workspaceRoot} /> : null}
+        {job.command ? <FactItem title="Command" value={job.command} /> : null}
+        {job.caseId !== "current" ? <FactItem title="Case" value={job.caseId} /> : null}
+        {job.caseId !== "current" ? <FactItem title="Sample" value={formatSampleNumber(job.sample)} /> : null}
+        {dependencies ? <FactItem title="Dependencies" value={dependencies} /> : null}
+      </FactGrid>
+      {job.error ? <ProblemState icon={CircleAlertIcon} title={`${roleLabel} error`} message={job.error} align="start" /> : null}
+      <div className="grid min-w-0 gap-4">
+        <div className="flex min-w-0 justify-end">
+          <JobEvidenceViewNav
+            hrefFor={hrefFor}
+            jobId={job.id}
+            onRouteClick={onRouteClick}
+            runId={run.id}
+            view={view}
+          />
+        </div>
+        {view === "timeline" ? (
+          <JobEvidencePanel
+            apiBasePath={apiBasePath}
+            description="Execution timeline and recorded evidence for this job."
+            jobId={job.id}
+            jobStatus={job.status}
+            refreshToken={job.status === "queued" || job.status === "running" ? progressCursor ?? inspectionCursor : null}
+            runId={job.runId}
+            title={`${roleLabel} timeline`}
           />
         ) : (
           <CaseOutputView apiBasePath={apiBasePath} artifacts={artifacts} job={job} traces={traces} />
@@ -4056,22 +4031,18 @@ function CaseResultDetail({
 
 function CasePhaseNav({
   caseResult,
-  evaluationId,
   hrefFor,
   onRouteClick,
   phase,
   run,
-  source,
   view,
 }: {
   caseResult: WorkbenchRunEvidenceCaseResult;
-  evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   phase: WorkbenchRunCasePhase;
   run: WorkbenchRun;
-  source: "evaluation" | "runs";
-  view: WorkbenchRunCaseEvidenceView;
+  view: WorkbenchRunJobEvidenceView;
 }) {
   const phases = [
     caseResult.execute ? { value: "execute" as const, label: "Execute" } : null,
@@ -4085,10 +4056,8 @@ function CasePhaseNav({
       {phases.map((item) => {
         const route = createRunCaseRoute({
           caseResult,
-          evaluationId,
           phase: item.value,
           runId: run.id,
-          source,
           view,
         });
         const active = item.value === phase;
@@ -4111,48 +4080,27 @@ function CasePhaseNav({
   );
 }
 
-function CaseEvidenceViewNav({
-  caseResult,
-  evaluationId,
+function JobEvidenceViewNav({
   hrefFor,
+  jobId,
   onRouteClick,
-  phase,
-  run,
-  source,
+  runId,
   view,
 }: {
-  caseResult: WorkbenchRunEvidenceCaseResult;
-  evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
+  jobId: string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  phase: WorkbenchRunCasePhase;
-  run: WorkbenchRun;
-  source: "evaluation" | "runs";
-  view: WorkbenchRunCaseEvidenceView;
+  runId: string;
+  view: WorkbenchRunJobEvidenceView;
 }) {
-  const views: Array<{ value: WorkbenchRunCaseEvidenceView; label: string; icon: typeof ActivityIcon }> = [
-    { value: "trace", label: "Trace", icon: ActivityIcon },
+  const views: Array<{ value: WorkbenchRunJobEvidenceView; label: string; icon: typeof ActivityIcon }> = [
+    { value: "timeline", label: "Timeline", icon: ActivityIcon },
     { value: "output", label: "Output", icon: ArchiveIcon },
   ];
   return (
-    <nav className="flex w-fit max-w-full shrink-0 flex-wrap items-center gap-1 rounded-lg border border-border/70 bg-background p-1 text-sm" aria-label="Case result evidence">
+    <nav className="flex w-fit max-w-full shrink-0 flex-wrap items-center gap-1 rounded-lg border border-border/70 bg-background p-1 text-sm" aria-label="Job evidence">
       {views.map((item) => {
-        const route = createRunRoute({
-          runId: run.id,
-          source,
-          evaluationId,
-          section: {
-            kind: "case",
-            caseId: caseResult.caseId,
-            agentHash: caseResult.agentHash,
-            skillName: caseResult.skillName,
-            skillBundleHash: caseResult.skillBundleHash,
-            versionId: caseResult.versionId,
-            sample: caseResult.sample,
-            phase,
-            view: item.value,
-          },
-        });
+        const route = createRunJobRoute({ runId, jobId, view: item.value });
         const active = item.value === view;
         const Icon = item.icon;
         return (
@@ -4177,21 +4125,17 @@ function CaseEvidenceViewNav({
 
 function LinkedRunTable({
   empty,
-  evaluationId,
   hrefFor,
   jobs,
   onRouteClick,
   snapshot,
-  source,
   title,
 }: {
   empty: string;
-  evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
   jobs: WorkbenchJob[];
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   snapshot: WorkbenchInspectionSnapshot;
-  source: "evaluation" | "runs";
   title: string;
 }) {
   const runs = uniqueRunsForJobs(snapshot, jobs);
@@ -4212,7 +4156,7 @@ function LinkedRunTable({
             </TableHeader>
             <TableBody>
               {runs.map((run) => {
-                const runRoute = createRunRoute({ runId: run.id, source, evaluationId });
+                const runRoute = createRunRoute({ runId: run.id });
                 const runJobs = jobsForRun(run, snapshot.jobs);
                 const report = buildWorkbenchJobReport(runJobs, snapshot.traces);
                 const latencyMetric = formatReportMetricStack(report, "latency", formatDurationMs);
@@ -4282,7 +4226,7 @@ function RouteSidebar({
       );
     }
   }
-  if (route.kind === "run") {
+  if (route.kind === "run" || route.kind === "run-job") {
     const run = snapshot.runs.find((entry) => entry.id === route.runId) ?? null;
     if (run) {
       return <RunContextSidebar run={run} snapshot={snapshot} />;
@@ -4330,6 +4274,12 @@ function RunContextSidebar({
   run: WorkbenchRun;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
+  const jobs = jobsForRun(run, snapshot.jobs);
+  const evidence = runEvidenceView(snapshot, run);
+  const summary = runEvidenceSummary(snapshot, run, evidence, jobs);
+  const primaryJob = primaryRunEvidenceJob(evidence);
+  const primaryTrace = primaryRunTrace(run, jobs, snapshot.traces);
+  const caseBacked = runHasCaseEvidence(run, evidence, jobs);
   return (
     <aside className="grid min-w-0 gap-4 rounded-lg border border-border/70 bg-background p-4 text-sm xl:sticky xl:top-6">
       <div className="grid gap-1">
@@ -4339,9 +4289,22 @@ function RunContextSidebar({
       <FactGrid>
         <FactItem title="Status" value={<StatusBadge status={run.status} />} />
         <FactItem title="Operation" value={runOperationLabel(run)} />
-        <FactItem title="Version" value={runVersionDisplayName(snapshot, run)} />
-        <FactItem title="Agent" value={runAgentDisplayName(snapshot, run)} />
-        <FactItem title="Evaluation" value={formatEvaluationDisplayName(run.evalHash, snapshot.evals)} />
+        {caseBacked ? (
+          <>
+            <FactItem title="Version" value={runVersionDisplayName(snapshot, run)} />
+            <FactItem title="Agent" value={runAgentDisplayName(snapshot, run)} />
+            <FactItem title="Evaluation" value={formatEvaluationDisplayName(run.evalHash, snapshot.evals)} />
+          </>
+        ) : (
+          <>
+            <FactItem title="Skill" value={summary.subject} />
+            <FactItem title="Agent" value={primaryJob?.agentLabel ?? runAgentDisplayName(snapshot, run)} />
+            {primaryJob ? <FactItem title="Model" value={formatAdapterModel(primaryJob)} /> : null}
+            <FactItem title="Jobs" value={formatCount(evidence.jobs.length || jobs.length, "job")} />
+            {primaryTrace?.source?.sessionId ? <FactItem title="Session" value={primaryTrace.source.sessionId} /> : null}
+            {primaryTrace?.source?.workspaceRoot ? <FactItem title="Project" value={primaryTrace.source.workspaceRoot} /> : null}
+          </>
+        )}
       </FactGrid>
     </aside>
   );
@@ -4394,8 +4357,10 @@ function CaseOutputView({
     : trace
       ? { kind: "trace" as const, id: trace.id, files: trace.files }
       : null;
+  const summary = typeof job.result?.summary === "string" ? job.result.summary.trim() : "";
+  const summaryBlock = summary ? <JobResultSummary summary={summary} /> : null;
   if (!owner) {
-    return (
+    return summaryBlock ?? (
       <EmptyState
         icon={ArchiveIcon}
         title="No output recorded"
@@ -4405,7 +4370,24 @@ function CaseOutputView({
     );
   }
   return (
-    <OutputFilesSurface apiBasePath={apiBasePath} ownerKind={owner.kind} ownerId={owner.id} files={owner.files} />
+    <div className="grid min-w-0 gap-4">
+      {summaryBlock}
+      <OutputFilesSurface apiBasePath={apiBasePath} ownerKind={owner.kind} ownerId={owner.id} files={owner.files} />
+    </div>
+  );
+}
+
+function JobResultSummary({ summary }: { summary: string }) {
+  return (
+    <section className="grid min-w-0 gap-3" aria-label="Result summary">
+      <div className="grid min-w-0 gap-1">
+        <h3 className="text-base font-semibold">Result summary</h3>
+        <p className="text-sm text-muted-foreground">Recorded job result.</p>
+      </div>
+      <pre className="max-h-96 overflow-auto rounded-md border border-border/70 bg-muted/30 p-3 text-sm leading-6 text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
+        {summary}
+      </pre>
+    </section>
   );
 }
 
@@ -4435,7 +4417,7 @@ function JobEvidencePanel({
   useRouteLoadingSignal(evidence.loading && !execution);
 
   const isActiveJob = jobStatus === "queued" || jobStatus === "running";
-  const panelTitle = title ?? "Trace";
+  const panelTitle = title ?? "Timeline";
   const panelDescription = description ?? "Execution timeline and recorded trace events for this case run.";
   let content: ReactNode;
   if (!execution && isActiveJob) {
@@ -4585,11 +4567,7 @@ function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSna
   }
   if (route.kind === "evaluation") {
     return [{
-      label: route.view === "cases"
-        ? "Cases"
-        : route.view === "traces"
-          ? "Traces"
-          : "Results",
+      label: route.view === "cases" ? "Cases" : "Results",
     }];
   }
   if (route.kind === "case") {
@@ -4601,17 +4579,17 @@ function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSna
   if (route.kind === "runs") {
     return [{ label: "Runs" }];
   }
-  if (route.kind === "run") {
+  if (route.kind === "run" || route.kind === "run-job") {
     const run = snapshot?.runs.find((entry) => entry.id === route.runId) ?? null;
-    return [
-      {
-        label: route.source === "runs" ? "Runs" : "Results",
-        route: route.source === "runs"
-          ? createRunsRoute()
-          : createEvaluationRoute({ view: "results", evaluationId: route.evaluationId }),
-      },
-      { label: run && snapshot ? runDisplayTitle(run, snapshot) : shortId(route.runId) },
+    const items: Array<{ label: string; route?: WorkbenchRoute }> = [
+      { label: "Runs", route: createRunsRoute() },
+      { label: run && snapshot ? runDisplayTitle(run, snapshot) : shortId(route.runId), route: route.kind === "run-job" ? createRunRoute({ runId: route.runId }) : undefined },
     ];
+    if (route.kind === "run-job") {
+      const job = snapshot?.jobs.find((entry) => entry.id === route.jobId && entry.runId === route.runId) ?? null;
+      items.push({ label: job ? formatJobRoleLabel(job.role ?? job.kind) : shortId(route.jobId) });
+    }
+    return items;
   }
   return [{ label: "Not found" }];
 }
@@ -4966,8 +4944,119 @@ type InspectionResults = NonNullable<WorkbenchInspectionSnapshot["results"]>;
 type InspectionResultVersion = InspectionResults["versions"][number];
 type InspectionResultAgent = InspectionResults["agents"][number];
 
-function runDisplayTitle(run: WorkbenchRun, snapshot: WorkbenchInspectionSnapshot): string {
-  return `${runOperationLabel(run)}: ${runVersionDisplayName(snapshot, run)} on ${formatEvaluationDisplayName(run.evalHash, snapshot.evals)}`;
+function runEvidenceView(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): WorkbenchRunEvidenceView {
+  return buildWorkbenchRunEvidenceView(snapshot, run) ?? {
+    runId: run.id,
+    measurements: [],
+    jobGroups: [],
+    cases: [],
+    jobs: [],
+  };
+}
+
+function runHasCaseEvidence(
+  run: WorkbenchRun,
+  evidence: WorkbenchRunEvidenceView,
+  jobs: readonly WorkbenchJob[],
+): boolean {
+  return evidence.cases.length > 0 ||
+    jobs.some((job) => job.caseId !== "current") ||
+    run.kind === "run" ||
+    run.kind === "grade" ||
+    run.kind === "eval" ||
+    run.operationPlan?.kind === "run" ||
+    run.operationPlan?.kind === "grade" ||
+    run.operationPlan?.kind === "eval";
+}
+
+function primaryRunEvidenceJob(evidence: WorkbenchRunEvidenceView): WorkbenchRunEvidenceJob | null {
+  return evidence.jobs[0] ?? null;
+}
+
+function primaryRunTrace(
+  run: WorkbenchRun,
+  jobs: readonly WorkbenchJob[],
+  traces: readonly WorkbenchTrace[],
+): WorkbenchTrace | null {
+  const traceIds = new Set([...run.traceIds, ...jobs.flatMap((job) => job.traceIds)]);
+  return traces.find((trace) => trace.runId === run.id || traceIds.has(trace.id)) ?? null;
+}
+
+function runEvidenceSummary(
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+  evidence: WorkbenchRunEvidenceView,
+  jobs: readonly WorkbenchJob[],
+): { subject: string; context: string; detail: string; caseBacked: boolean } {
+  const caseBacked = runHasCaseEvidence(run, evidence, jobs);
+  if (caseBacked) {
+    return {
+      subject: runVersionDisplayName(snapshot, run),
+      context: `${runAgentDisplayName(snapshot, run)} / ${formatEvaluationDisplayName(run.evalHash, snapshot.evals)}`,
+      detail: formatCoverage(workbenchSampleCoverageForJobs(jobs)),
+      caseBacked,
+    };
+  }
+  const primaryJob = primaryRunEvidenceJob(evidence);
+  return {
+    subject: primaryJob ? formatSkillLabel(primaryJob) : run.skillName || runVersionDisplayName(snapshot, run),
+    context: primaryJob ? formatEvidenceAgentModel(primaryJob) : runAgentDisplayName(snapshot, run),
+    detail: formatCount(evidence.jobs.length || jobs.length, "job"),
+    caseBacked,
+  };
+}
+
+function formatEvidenceAgentModel(
+  job: Pick<WorkbenchRunEvidenceJob, "agentLabel" | "adapter" | "model">,
+): string {
+  const label = compactDisplayPart(job.agentLabel);
+  const adapter = compactDisplayPart(job.adapter);
+  const model = compactDisplayPart(job.model);
+  const labelParts = label ? displayParts(label) : [];
+  return [
+    label,
+    adapter && !displayPartsInclude(labelParts, adapter) ? adapter : null,
+    model && !displayPartsInclude(labelParts, model) ? model : null,
+  ].filter((part): part is string => Boolean(part)).join(" / ");
+}
+
+function compactDisplayPart(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function displayParts(value: string): string[] {
+  return value.split("/").map((part) => part.trim()).filter(Boolean);
+}
+
+function displayPartsInclude(parts: readonly string[], value: string): boolean {
+  const normalized = value.toLowerCase();
+  return parts.some((part) => part.toLowerCase() === normalized);
+}
+
+function runDisplayTitle(
+  run: WorkbenchRun,
+  snapshot: WorkbenchInspectionSnapshot,
+  evidence: WorkbenchRunEvidenceView = runEvidenceView(snapshot, run),
+  jobs: readonly WorkbenchJob[] = jobsForRun(run, snapshot.jobs),
+): string {
+  const summary = runEvidenceSummary(snapshot, run, evidence, jobs);
+  if (summary.caseBacked) {
+    return `${runOperationLabel(run)}: ${summary.subject} on ${formatEvaluationDisplayName(run.evalHash, snapshot.evals)}`;
+  }
+  return summary.context
+    ? `${runOperationLabel(run)}: ${summary.subject} with ${summary.context}`
+    : `${runOperationLabel(run)}: ${summary.subject}`;
+}
+
+function runDescription(
+  run: WorkbenchRun,
+  snapshot: WorkbenchInspectionSnapshot,
+  evidence: WorkbenchRunEvidenceView,
+  jobs: readonly WorkbenchJob[],
+): string {
+  const summary = runEvidenceSummary(snapshot, run, evidence, jobs);
+  return `${runOperationLabel(run)} from ${formatTimestamp(run.createdAt)} with ${summary.detail.toLowerCase()}.`;
 }
 
 function runOperationLabel(run: WorkbenchRun): string {
@@ -4977,7 +5066,9 @@ function runOperationLabel(run: WorkbenchRun): string {
       ? "Grade"
       : run.kind === "run"
         ? "Run"
-        : "Eval";
+        : run.kind === "live"
+          ? "Live session"
+          : "Eval";
   return run.retryOfRunId ? `Retry ${base.toLowerCase()}` : base;
 }
 

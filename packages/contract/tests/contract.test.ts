@@ -601,8 +601,6 @@ describe("workbench contract", () => {
       route: {
         kind: "run",
         runId: "run_matrix",
-        source: "evaluation",
-        evaluationId: "eval_hash",
       },
       cliEquivalent: "workbench eval --versions all -n 2",
       next: "workbench watch run_matrix",
@@ -898,7 +896,7 @@ describe("workbench contract", () => {
         grade: { jobId: "job_codex_grade", status: "succeeded", score: 1 },
       },
     ]);
-    expect(evidence?.traceJobs.map((job) => `${job.agentLabel}:${job.role}:${job.status}`)).toEqual([
+    expect(evidence?.jobs.map((job) => `${job.agentLabel}:${job.role}:${job.status}`)).toEqual([
       "claude / haiku-4.5:execute:failed",
       "claude / haiku-4.5:grade:canceled",
       "codex / gpt-5.5:execute:succeeded",
@@ -1100,7 +1098,7 @@ describe("workbench contract", () => {
       "Dummy skill:job_dummy-skill_grade:0.7",
       "No skill:job_no-skill_grade:0.4",
     ]);
-    expect(evidence?.traceJobs.map((entry) => `${entry.skillLabel}:${entry.role}`)).toEqual([
+    expect(evidence?.jobs.map((entry) => `${entry.skillLabel}:${entry.role}`)).toEqual([
       "Current:execute",
       "Current:grade",
       "Dummy skill:execute",

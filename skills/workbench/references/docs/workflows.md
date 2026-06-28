@@ -17,7 +17,7 @@ Most workflows follow the same loop: author source, run or grade cases, inspect 
 | Improve from evidence | `workbench improve` | Candidate source plus proof eval before switching. |
 | Run hosted | `--cloud` | The same run graph executed by Workbench Cloud. |
 | Inspect evidence | `workbench show` | Source, run, job, trace, artifact, or file evidence. |
-| Capture live skill use | `workbench record on` | Plugin-captured live traces that can be reviewed or promoted to cases. |
+| Capture live skill use | `workbench record on` | Plugin-captured live runs with low-level traces for review and case promotion. |
 
 ## Create and publish a skill
 
@@ -214,16 +214,16 @@ workbench open
 
 ## Capture live skill use
 
-Turn on native host tracing, use a Workbench-managed skill in an agent host, then inspect or promote the captured trace:
+Turn on native host tracing, use a Workbench-managed skill in an agent host, then inspect the captured session as run/job evidence or promote the low-level trace into a case:
 
 ```bash
 workbench record on
+workbench open
 workbench traces
-workbench show TRACE_ID
 workbench case promote TRACE_ID --id case-001
 ```
 
-`record on` manages Workbench's Codex and Claude Code trace plugins through the hosts' plugin commands. Host hooks write to Workbench's local spool, and `traces` compacts claimed skill turns into normal trace records. The shipped plugins record explicit leading `$skill` invocations; the generic hook also accepts exact host skill-claim events when a host integration emits them. Unrelated host turns are discarded. Workbench does not import provider session history implicitly; promotion creates a normal authored case under `.workbench/cases/` only after the trace is captured, terminal, and has captured input.
+`record on` manages Workbench's Codex and Claude Code trace plugins through the hosts' plugin commands. Host hooks write to Workbench's local spool, and project-matched captures appear under `Runs` as live runs with agent-session jobs. `traces` is a low-level inventory for review and promotion. The shipped plugins record explicit leading `$skill` invocations; the generic hook also accepts exact host skill-claim events when a host integration emits them. Unrelated host turns are discarded. Workbench does not import provider session history implicitly; promotion creates a normal authored case under `.workbench/cases/` only after the trace is captured, terminal, and has captured input.
 
 When a trace is reviewed as failed or deferred, add `--expected` with the corrected outcome before promotion so the case captures the intended behavior rather than the bad response.
 

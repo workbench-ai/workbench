@@ -122,9 +122,9 @@ import {
   type WorkbenchJobReport,
   type WorkbenchReportMetricKind,
   type WorkbenchRunEvidenceMeasurementResult,
-  type WorkbenchRunEvidenceOtherWorkResult,
+  type WorkbenchRunEvidenceJobGroupResult,
   type WorkbenchRunEvidenceCaseResult,
-  type WorkbenchRunEvidenceTraceJob,
+  type WorkbenchRunEvidenceJob,
   type WorkbenchRunEvidenceView,
   type WorkbenchSampleCoverage,
 } from "@workbench-ai/workbench-contract";
@@ -1983,12 +1983,15 @@ function runWatchExitCode(run: WorkbenchRun): number {
   return isTerminalRun(run) ? 0 : 1;
 }
 
-function runWatchNextCommand(run: WorkbenchRun): string {
+function runWatchNextCommand(run: WorkbenchRun): string | null {
   if (run.status === "queued" || run.status === "running" || run.status === "canceling") {
     return `workbench watch ${run.id}`;
   }
   if (run.status === "failed" || run.status === "canceled") {
     return terminalRunRepairCommand(run) ?? `workbench show ${run.id}`;
+  }
+  if (run.kind === "live") {
+    return null;
   }
   if (run.kind === "run") {
     return workbenchRunTransitionCliEquivalent(run, "grade");
@@ -4672,6 +4675,13 @@ function runProgressSnapshotForInspection(input: {
   next?: string;
 }): WorkbenchRunSnapshot | undefined {
   const runIds = input.runs.map((run) => run.id);
+  if (input.runs.length === 1 && input.runs[0]?.kind === "live") {
+    const liveRun = input.runs[0];
+    const liveSnapshot = createWorkbenchRunSnapshotForRun(liveRun, jobsForRuns(input.snapshot, runIds), {
+      traces: input.snapshot.traces,
+    });
+    return input.next ? { ...liveSnapshot, next: input.next } : liveSnapshot;
+  }
   return runProgressSnapshotFromRuns({
     command: input.command,
     location: input.location,
@@ -8829,9 +8839,9 @@ function formatRunOrJobEvidence(
     ...jobs.map((job) => job.runId),
     ...details.map((detail) => detail.runId),
   ]);
-  const traceJobs = traceJobsForSelection(snapshot, jobs);
-  const jobLines = traceJobs.length > 0
-    ? ["Trace jobs:", ...traceJobs.map((job) => formatTraceJobEvidenceSummary(job, jobRefs))]
+  const evidenceJobs = evidenceJobsForSelection(snapshot, jobs);
+  const jobLines = evidenceJobs.length > 0
+    ? ["Jobs:", ...evidenceJobs.map((job) => formatJobEvidenceSummary(job, jobRefs))]
     : [];
   const detailLines = details.map((detail) => formatTraceDetail(detail, { jobRefs, runRefs })).filter(Boolean);
   const highlightLines = formatEvidenceHighlights(evidenceHighlights(files));
@@ -8873,8 +8883,8 @@ function formatRunEvidenceView(evidence: WorkbenchRunEvidenceView): string[] {
     ...(evidence.measurements.length > 0
       ? ["Measurements:", ...evidence.measurements.map(formatEvidenceMeasurementResult)]
       : []),
-    ...(evidence.otherWork.length > 0
-      ? ["Other work:", ...evidence.otherWork.map(formatEvidenceOtherWorkResult)]
+    ...(evidence.jobGroups.length > 0
+      ? ["Job groups:", ...evidence.jobGroups.map(formatEvidenceJobGroupResult)]
       : []),
     ...(evidence.cases.length > 0
       ? ["Case results:", ...evidence.cases.map(formatEvidenceCaseResult)]
@@ -8897,18 +8907,19 @@ function formatEvidenceMeasurementResult(measurement: WorkbenchRunEvidenceMeasur
   ].filter(Boolean).join("\t");
 }
 
-function formatEvidenceOtherWorkResult(work: WorkbenchRunEvidenceOtherWorkResult): string {
+function formatEvidenceJobGroupResult(group: WorkbenchRunEvidenceJobGroupResult): string {
   return [
     "  ",
-    work.agentLabel,
-    `skill=${work.skillLabel}`,
-    `agent=${work.agentName}`,
-    `model=${formatEvidenceModel(work)}`,
-    work.status,
-    `jobs=${work.succeededJobs}/${work.totalJobs}`,
-    `latency=${formatReportLatencyCli(work.report, { includePerSample: false })}`,
-    `cost=${formatReportCostCli(work.report, { includePerSample: false })}`,
-    work.errors.length > 0 ? `error=${singleLine(work.errors[0]!)}` : undefined,
+    group.agentLabel,
+    `skill=${group.skillLabel}`,
+    `agent=${group.agentName}`,
+    `model=${formatEvidenceModel(group)}`,
+    group.status,
+    `jobs=${group.succeededJobs}/${group.totalJobs}`,
+    `latency=${formatReportLatencyCli(group.report, { includePerSample: false })}`,
+    `cost=${formatReportCostCli(group.report, { includePerSample: false })}`,
+    group.errors.length > 0 ? `error=${singleLine(group.errors[0]!)}`
+      : undefined,
   ].filter(Boolean).join("\t");
 }
 
@@ -8931,38 +8942,38 @@ function formatEvidenceCaseResult(result: WorkbenchRunEvidenceCaseResult): strin
   ].filter(Boolean).join("\t");
 }
 
-function traceJobsForSelection(
+function evidenceJobsForSelection(
   snapshot: WorkbenchInspectionSnapshot,
   jobs: readonly WorkbenchJob[],
-): WorkbenchRunEvidenceTraceJob[] {
+): WorkbenchRunEvidenceJob[] {
   const selectedJobIds = new Set(jobs.map((job) => job.id));
-  const traceJobs = new Map<string, WorkbenchRunEvidenceTraceJob>();
+  const evidenceJobs = new Map<string, WorkbenchRunEvidenceJob>();
   for (const runId of new Set(jobs.map((job) => job.runId))) {
     const run = snapshot.runs.find((entry) => entry.id === runId);
     const evidence = run ? buildWorkbenchRunEvidenceView(snapshot, run) : null;
-    for (const traceJob of evidence?.traceJobs ?? []) {
-      if (selectedJobIds.has(traceJob.jobId)) {
-        traceJobs.set(traceJob.jobId, traceJob);
+    for (const evidenceJob of evidence?.jobs ?? []) {
+      if (selectedJobIds.has(evidenceJob.jobId)) {
+        evidenceJobs.set(evidenceJob.jobId, evidenceJob);
       }
     }
   }
   for (const job of jobs) {
-    if (!traceJobs.has(job.id)) {
-      traceJobs.set(job.id, fallbackTraceJob(snapshot, job));
+    if (!evidenceJobs.has(job.id)) {
+      evidenceJobs.set(job.id, fallbackEvidenceJob(snapshot, job));
     }
   }
   return jobs.flatMap((job) => {
-    const traceJob = traceJobs.get(job.id);
-    return traceJob ? [traceJob] : [];
+    const evidenceJob = evidenceJobs.get(job.id);
+    return evidenceJob ? [evidenceJob] : [];
   });
 }
 
-function fallbackTraceJob(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob): WorkbenchRunEvidenceTraceJob {
+function fallbackEvidenceJob(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob): WorkbenchRunEvidenceJob {
   const resultAgent = snapshot.results?.agents.find((agent) => agent.id === job.agentHash);
   const resultVersion = resultVersionForJob(snapshot, job);
   const snapshotAgent = snapshot.agents.find((agent) => agent.hash === job.agentHash);
   const adapter = resultAgent?.adapter ?? snapshotAgent?.agent.adapter ?? job.adapter?.use ?? "recorded";
-  const model = resultAgent?.model ?? snapshotAgent?.agent.model;
+  const model = resultAgent?.model ?? snapshotAgent?.agent.model ?? usageModelForJob(job);
   return {
     skillName: job.skillName,
     skillBundleHash: job.skillBundleHash,
@@ -8993,6 +9004,12 @@ function fallbackTraceJob(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJ
   };
 }
 
+function usageModelForJob(job: Pick<WorkbenchJob, "result">): string | undefined {
+  return job.result?.usage?.runner?.model ??
+    job.result?.usage?.engine?.model ??
+    job.result?.usage?.total?.model;
+}
+
 function resultVersionForJob(
   snapshot: WorkbenchInspectionSnapshot,
   job: Pick<WorkbenchJob, "versionId" | "skillName" | "skillBundleHash">,
@@ -9016,8 +9033,8 @@ function uniqueResultVersion<T>(versions: readonly T[]): T | undefined {
   return versions.length === 1 ? versions[0] : undefined;
 }
 
-function formatTraceJobEvidenceSummary(
-  job: WorkbenchRunEvidenceTraceJob,
+function formatJobEvidenceSummary(
+  job: WorkbenchRunEvidenceJob,
   _refs: ReadonlyMap<string, string> = new Map(),
 ): string {
   return [
@@ -9037,7 +9054,7 @@ function formatTraceJobEvidenceSummary(
   ].filter(Boolean).join("\t");
 }
 
-function formatEvidenceDependency(dependency: WorkbenchRunEvidenceTraceJob["dependencies"][number]): string {
+function formatEvidenceDependency(dependency: WorkbenchRunEvidenceJob["dependencies"][number]): string {
   return dependency.jobId ? `${dependency.name}:${dependency.jobId}` : dependency.name;
 }
 
@@ -9052,7 +9069,7 @@ function formatEvidencePhase(phase: WorkbenchRunEvidenceCaseResult["execute"]): 
   ].filter(Boolean).join("/");
 }
 
-function formatEvidenceModel(entry: Pick<WorkbenchRunEvidenceTraceJob, "adapter" | "model">): string {
+function formatEvidenceModel(entry: Pick<WorkbenchRunEvidenceJob, "adapter" | "model">): string {
   return entry.model ? `${entry.adapter}/${entry.model}` : entry.adapter;
 }
 

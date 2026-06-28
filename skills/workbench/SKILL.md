@@ -138,7 +138,7 @@ Use `switch VERSION --dry-run` before materializing a saved version. If the dry 
 
 Use `watch RUN_ID` for an active or detached run, `cancel RUN_ID` to request cancellation without deleting evidence, and `retry RUN_ID` to start a new whole-run attempt from the selected run's stored plan.
 
-The browser UI reads the same inspection data and trace projection as CLI commands. It can show source files, eval source, results, run details, trace evidence, and output files without changing project state.
+The browser UI reads the same inspection data as CLI commands. It shows source files, eval source, results, run details, job timelines, and output files without changing project state. Traces are underlying evidence records for timelines, raw debugging, review, and case promotion.
 
 ## Publish, install, clone, and Cloud
 
@@ -212,7 +212,7 @@ Load only what is needed:
 - `references/docs/improve-rerun.md` when rerunning proof evals or retrying stored run plans.
 - `references/docs/track.md` when reading result scorecards.
 - `references/docs/track-runs-jobs.md` when inspecting run lifecycle state or job evidence.
-- `references/docs/track-files.md` when inspecting traces, artifacts, captured outputs, or exact files.
+- `references/docs/track-files.md` when inspecting artifacts, captured outputs, exact files, or low-level trace records.
 - `references/docs/track-versions.md` when inspecting versions, lineage, diffs, or switching.
 - `references/docs/share.md` when publishing source.
 - `references/docs/install-clone.md` when installing packages or cloning editable source.

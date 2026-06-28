@@ -5,24 +5,10 @@ import {
 import type { WorkbenchInspectionFileOwnerKind } from "@workbench-ai/workbench-contract";
 
 export type WorkbenchPrimaryTab = "files" | "evaluation" | "runs";
-export type WorkbenchEvaluationView = "results" | "cases" | "traces";
-export type WorkbenchRunRouteSource = "evaluation" | "runs";
+export type WorkbenchEvaluationView = "results" | "cases";
 export type WorkbenchCaseSection = "definition" | "runs";
 export type WorkbenchRunCasePhase = "execute" | "grade";
-export type WorkbenchRunCaseEvidenceView = "trace" | "output";
-export type WorkbenchRunSection =
-  | { kind: "summary" }
-  | {
-    kind: "case";
-    caseId: string;
-    agentHash: string;
-    skillName: string;
-    skillBundleHash: string;
-    versionId: string;
-    sample: number;
-    phase: WorkbenchRunCasePhase;
-    view: WorkbenchRunCaseEvidenceView;
-  };
+export type WorkbenchRunJobEvidenceView = "timeline" | "output";
 export type WorkbenchFileOwnerKind = WorkbenchInspectionFileOwnerKind;
 
 export interface WorkbenchFileRouteState {
@@ -36,7 +22,8 @@ export type WorkbenchRoute =
   | { kind: "files"; file: WorkbenchFileRouteState }
   | { kind: "evaluation"; view: WorkbenchEvaluationView; evaluationId: string | null }
   | { kind: "case"; caseId: string; evaluationId: string | null; section: WorkbenchCaseSection; file: WorkbenchFileRouteState }
-  | { kind: "run"; runId: string; source: WorkbenchRunRouteSource; evaluationId: string | null; section: WorkbenchRunSection }
+  | { kind: "run"; runId: string }
+  | { kind: "run-job"; runId: string; jobId: string; view: WorkbenchRunJobEvidenceView }
   | { kind: "runs" }
   | { kind: "not-found"; path: string };
 
@@ -68,12 +55,6 @@ export function parseWorkbenchRoute(
     if (subsection === "cases" && !id) {
       return createEvaluationRoute({ view: "cases", evaluationId });
     }
-    if (subsection === "traces" && !id) {
-      return createEvaluationRoute({ view: "traces", evaluationId });
-    }
-    if (subsection === "runs" && id && rest.length === 0) {
-      return createRunRoute({ runId: id, source: "evaluation", evaluationId, section: parseRunSection(searchParams) });
-    }
     return createNotFoundRoute(segments);
   }
   if (section === "runs") {
@@ -81,7 +62,11 @@ export function parseWorkbenchRoute(
       return createRunsRoute();
     }
     if (subsection && !id && rest.length === 0) {
-      return createRunRoute({ runId: subsection, source: "runs", evaluationId: null, section: parseRunSection(searchParams) });
+      return createRunRoute({ runId: subsection });
+    }
+    const [jobId] = rest;
+    if (subsection && id === "jobs" && jobId && rest.length === 1) {
+      return createRunJobRoute({ runId: subsection, jobId, view: parseRunJobEvidenceView(searchParams.get("view")) });
     }
     return createNotFoundRoute(segments);
   }
@@ -143,17 +128,23 @@ export function createCaseRoute(args: {
 
 export function createRunRoute(args: {
   runId: string;
-  source?: WorkbenchRunRouteSource;
-  evaluationId?: string | null;
-  section?: WorkbenchRunSection;
 }): WorkbenchRoute {
-  const source = args.source ?? "runs";
   return {
     kind: "run",
     runId: args.runId,
-    source,
-    evaluationId: source === "evaluation" ? normalizedQueryValue(args.evaluationId ?? null) : null,
-    section: normalizeRunSection(args.section),
+  };
+}
+
+export function createRunJobRoute(args: {
+  runId: string;
+  jobId: string;
+  view?: WorkbenchRunJobEvidenceView;
+}): WorkbenchRoute {
+  return {
+    kind: "run-job",
+    runId: args.runId,
+    jobId: args.jobId,
+    view: args.view === "output" ? "output" : "timeline",
   };
 }
 
@@ -169,14 +160,11 @@ export function createNotFoundRoute(path: string[] | string): WorkbenchRoute {
 }
 
 export function routePrimaryTab(route: WorkbenchRoute): WorkbenchPrimaryTab {
-  if (route.kind === "runs") {
+  if (route.kind === "runs" || route.kind === "run" || route.kind === "run-job") {
     return "runs";
   }
-  if (route.kind === "evaluation" || route.kind === "case" || (route.kind === "run" && route.source === "evaluation")) {
+  if (route.kind === "evaluation" || route.kind === "case") {
     return "evaluation";
-  }
-  if (route.kind === "run" && route.source === "runs") {
-    return "runs";
   }
   return "files";
 }
@@ -202,8 +190,6 @@ export function withEvaluationId(route: WorkbenchRoute, evaluationId: string | n
       return createEvaluationRoute({ view: route.view, evaluationId });
     case "case":
       return createCaseRoute({ caseId: route.caseId, evaluationId, section: route.section, file: route.file });
-    case "run":
-      return createRunRoute({ runId: route.runId, source: route.source, evaluationId, section: route.section });
     default:
       return route;
   }
@@ -223,17 +209,13 @@ function routeParts(route: WorkbenchRoute): string[] {
     case "files":
       return routeHasExplicitFileState(route.file) ? ["files"] : [];
     case "evaluation":
-      return route.view === "cases"
-        ? ["evaluation", "cases"]
-        : route.view === "traces"
-          ? ["evaluation", "traces"]
-          : ["evaluation", "results"];
+      return route.view === "cases" ? ["evaluation", "cases"] : ["evaluation", "results"];
     case "case":
       return ["evaluation", "cases", route.caseId];
     case "run":
-      return route.source === "evaluation"
-        ? ["evaluation", "runs", route.runId]
-        : ["runs", route.runId];
+      return ["runs", route.runId];
+    case "run-job":
+      return ["runs", route.runId, "jobs", route.jobId];
     case "runs":
       return ["runs"];
     case "not-found":
@@ -247,7 +229,7 @@ function routeQuery(route: WorkbenchRoute): URLSearchParams {
     fileRouteQuery(route.file, params);
     return params;
   }
-  if ((route.kind === "evaluation" || route.kind === "case" || route.kind === "run") && route.evaluationId) {
+  if ((route.kind === "evaluation" || route.kind === "case") && route.evaluationId) {
     params.set("evaluation", route.evaluationId);
   }
   if (route.kind === "case" && route.section !== "definition") {
@@ -256,17 +238,8 @@ function routeQuery(route: WorkbenchRoute): URLSearchParams {
   if (route.kind === "case" && route.section === "definition") {
     sourceFileRouteQuery(route.file, params);
   }
-  if (route.kind === "run" && route.section.kind === "case") {
-    params.set("case", route.section.caseId);
-    params.set("agent", route.section.agentHash);
-    params.set("skill", route.section.skillName);
-    params.set("bundle", route.section.skillBundleHash);
-    params.set("version", route.section.versionId);
-    if (route.section.sample > 0) {
-      params.set("sample", String(route.section.sample + 1));
-    }
-    params.set("phase", route.section.phase);
-    params.set("view", route.section.view);
+  if (route.kind === "run-job" && route.view !== "timeline") {
+    params.set("view", route.view);
   }
   return params;
 }
@@ -332,50 +305,8 @@ function parseCaseSection(section: string | null): WorkbenchCaseSection {
   return section === "runs" ? "runs" : "definition";
 }
 
-function parseRunSection(searchParams: URLSearchParams): WorkbenchRunSection {
-  const caseId = normalizedQueryValue(searchParams.get("case"));
-  const agentHash = normalizedQueryValue(searchParams.get("agent"));
-  const skillName = normalizedQueryValue(searchParams.get("skill"));
-  const skillBundleHash = normalizedQueryValue(searchParams.get("bundle"));
-  const versionId = normalizedQueryValue(searchParams.get("version"));
-  if (!caseId || !agentHash || !skillName || !skillBundleHash || !versionId) {
-    return { kind: "summary" };
-  }
-  const phase = searchParams.get("phase") === "grade" ? "grade" : "execute";
-  const view = searchParams.get("view") === "output" ? "output" : "trace";
-  return {
-    kind: "case",
-    caseId,
-    agentHash,
-    skillName,
-    skillBundleHash,
-    versionId,
-    sample: parseRunCaseSample(searchParams.get("sample")),
-    phase,
-    view,
-  };
-}
-
-function normalizeRunSection(section: WorkbenchRunSection | undefined): WorkbenchRunSection {
-  if (!section || section.kind === "summary") {
-    return { kind: "summary" };
-  }
-  return {
-    kind: "case",
-    caseId: section.caseId,
-    agentHash: section.agentHash,
-    skillName: section.skillName,
-    skillBundleHash: section.skillBundleHash,
-    versionId: section.versionId,
-    sample: Number.isInteger(section.sample) && section.sample >= 0 ? section.sample : 0,
-    phase: section.phase === "grade" ? "grade" : "execute",
-    view: section.view ?? "trace",
-  };
-}
-
-function parseRunCaseSample(value: string | null): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 1 ? parsed - 1 : 0;
+function parseRunJobEvidenceView(value: string | null): WorkbenchRunJobEvidenceView {
+  return value === "output" ? "output" : "timeline";
 }
 
 function routeHasExplicitFileState(file: WorkbenchFileRouteState): boolean {

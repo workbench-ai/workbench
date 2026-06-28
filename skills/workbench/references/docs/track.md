@@ -41,4 +41,4 @@ Open the local web view when evidence is easier to inspect visually:
 workbench open
 ```
 
-The browser UI reads the same inspection data as CLI commands. It can show files, Results, the Cases matrix, Traces, run details, trace evidence, and output files. Adding a row in Cases creates an authored case, and cell submissions create durable runs and traces for that case.
+The browser UI reads the same inspection data as CLI commands. It can show files, Results, the Cases matrix, Runs, run details, job timelines, and output files. Adding a row in Cases creates an authored case, and cell submissions create durable runs, jobs, and trace-backed evidence for that case.

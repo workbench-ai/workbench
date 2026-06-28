@@ -51,8 +51,6 @@ export async function createEvaluationCase(
 export function routeForWorkbenchRunSnapshot(started: WorkbenchRunSnapshot): WorkbenchRoute {
   return createRunRoute({
     runId: started.route.runId,
-    source: started.route.source,
-    evaluationId: started.route.evaluationId ?? null,
   });
 }
 

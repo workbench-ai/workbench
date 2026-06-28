@@ -180,8 +180,6 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
     route: {
       kind: "run",
       runId: run.id,
-      source: run.kind === "eval" ? "evaluation" : "runs",
-      evaluationId: run.evalHash,
     },
     cliEquivalent: `workbench ${run.kind} --cloud`,
     next: run.status === "queued" || run.status === "running"
@@ -1839,7 +1837,7 @@ describe("workbench skill-first CLI", () => {
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
     expect(shown.stdout).toContain("Measurements:");
     expect(shown.stdout).toContain("Case results:");
-    expect(shown.stdout).toContain("Trace jobs:");
+    expect(shown.stdout).toContain("Jobs:");
     expect(shown.stdout).toContain("jobs=");
     expect(shown.stdout).toContain("skill=");
     expect(shown.stdout).not.toContain("work=");
@@ -5024,6 +5022,54 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench watch run_live");
   });
 
+  test("status and show keep unknown live trace sessions active", async () => {
+    const root = await makeTempRoot("workbench-cli-status-live-trace-active-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const traceRoot = path.join(root, ".workbench", "traces", "records");
+    await fs.mkdir(traceRoot, { recursive: true });
+    await fs.writeFile(path.join(traceRoot, "trace_live_active.json"), JSON.stringify({
+      id: "trace_live_active",
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      runId: "live1234",
+      jobId: "job_live_active",
+      versionId: "unknown",
+      skillName: "workbench",
+      skillBundleHash: "unknown",
+      agentName: "codex",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:01.000Z",
+      source: {
+        host: "codex",
+        sessionId: "live1234",
+        turnId: "turn-live-active",
+        workspaceRoot: root,
+      },
+      status: {
+        capture: "captured",
+        execution: "unknown",
+        grade: "ungraded",
+        review: "unreviewed",
+        promotion: "none",
+      },
+      request: {},
+      result: { status: "unknown" },
+      files: [],
+    }));
+
+    const status = await invoke(["status", "--dir", root, "--json"]);
+    expect(status.code, status.stdout || status.stderr).toBe(0);
+    expect(stdoutJson<{ next: string | null }>(status).next).toBe("workbench watch live1234");
+
+    const shown = await invoke(["show", "live1234", "--dir", root, "--json"]);
+    expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+    expect(stdoutJson<{ result: { jobs: Array<{ id: string; status: string }>; progress: { status: string; next: string } } }>(shown).result)
+      .toMatchObject({
+        jobs: [{ id: "job_live_active", status: "running" }],
+        progress: { status: "running", next: "workbench watch live1234" },
+      });
+  });
+
   test("status points at a queued run before generic next steps", async () => {
     const root = await makeTempRoot("workbench-cli-status-queued-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
@@ -6157,8 +6203,8 @@ describe("workbench skill-first CLI", () => {
     expect(human.code, human.stdout || human.stderr).toBe(0);
     expect(human.stdout).toContain("Measurements:");
     expect(human.stdout).toContain("Case results:");
-    expect(human.stdout).toContain("Trace jobs:");
-    expect(human.stdout).not.toContain("Jobs:");
+    expect(human.stdout).toContain("Jobs:");
+    expect(human.stdout).not.toContain("Trace jobs:");
     expect(human.stdout).toContain("jobs=");
     expect(human.stdout).toContain("skill=current");
     expect(human.stdout).not.toContain("work=");
@@ -11775,7 +11821,7 @@ describe("workbench skill-first CLI", () => {
     try {
       expect(server.url.startsWith("http://127.0.0.1:")).toBe(true);
       expect(server.url.endsWith("/")).toBe(true);
-      const response = await fetch(new URL("/evaluation/runs/run_example", server.url));
+      const response = await fetch(new URL("/runs/run_example", server.url));
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/html");
       expect(response.headers.get("cache-control")).toBe("no-store");
