@@ -13,12 +13,14 @@ import { gzipSync } from "node:zlib";
 import YAML from "yaml";
 
 import {
+  buildWorkbenchJobReport,
   isWorkbenchAuthoredControlPath,
   isWorkbenchLiveInspectableProjectPath,
   isWorkbenchPackageSourcePath,
   isWorkbenchRuntimeMetadataPath,
   normalizeWorkbenchSkillName,
   normalizeWorkbenchSourcePath,
+  workbenchSampleCoverageForJobs,
 } from "@workbench-ai/workbench-contract";
 import type {
   Json,
@@ -47,13 +49,18 @@ import type {
   WorkbenchInspectionFileOwnerKind,
   WorkbenchInspectionSnapshot,
   WorkbenchActionCapabilities,
+  WorkbenchJobReport,
   WorkbenchOperationPreview,
   WorkbenchOperationPlanSummary,
+  WorkbenchOperationGrader,
+  WorkbenchOperationPhase,
   WorkbenchOperationRequest,
   WorkbenchOperationSelection,
+  WorkbenchOperationTarget,
   WorkbenchOperationVariant,
   WorkbenchRunSnapshot,
   WorkbenchMeasurementSummary,
+  WorkbenchSampleCoverage,
   WorkbenchRunPhase,
   WorkbenchStateNotice,
   WorkbenchJob,
@@ -125,6 +132,10 @@ import {
   resolveDockerRuntimeImageRef,
   resolveWorkbenchWorkerId,
 } from "./runtime-utils.ts";
+import {
+  compactWorkbenchTraceSpool,
+  listWorkbenchTraceRecords,
+} from "./trace-runtime.ts";
 import type {
   WorkbenchAdapterAuthBundle,
   WorkbenchAdapterAuthTarget,
@@ -237,6 +248,7 @@ export type {
   WorkbenchStatus,
   WorkbenchStatusSnapshot,
   WorkbenchTrace,
+  WorkbenchTraceReviewStatus,
   WorkbenchTraceSession,
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
@@ -249,6 +261,12 @@ export {
   workbenchInspectionFileContent,
   workbenchInspectionFileContentUnavailableReason,
   workbenchInspectionFileManifest,
+  workbenchTraceLifecycleStatus,
+  workbenchTraceOutputText,
+  workbenchTraceProjection,
+  workbenchTracePromotionReadiness,
+  workbenchTracePrompt,
+  workbenchTraceReviewStatus,
 } from "@workbench-ai/workbench-contract";
 export type {
   WorkbenchExecutionRuntimeInput,
@@ -368,6 +386,36 @@ export {
   combineWorkbenchTraceSessions,
   mergeWorkbenchExecutionTracesByJob,
 } from "./execution-traces.ts";
+export {
+  appendWorkbenchTraceCandidateEvent,
+  appendWorkbenchTraceSpoolEvent,
+  claimWorkbenchTraceCandidateSubject,
+  closeWorkbenchTraceCandidate,
+  compactWorkbenchTraceSpool,
+  createWorkbenchTraceId,
+  createWorkbenchTraceRecord,
+  discardWorkbenchTraceCandidate,
+  listWorkbenchTraceRecords,
+  openWorkbenchTraceCandidate,
+  readWorkbenchTraceRecord,
+  readWorkbenchTraceRecordingConfig,
+  reviewWorkbenchTrace,
+  writeWorkbenchTraceRecord,
+  writeWorkbenchTraceRecordingConfig,
+  workbenchProjectTraceRuntimeRoot,
+  workbenchTraceCandidateKey,
+  workbenchTraceRuntimeRoot,
+  workbenchTraceSpoolPath,
+  type WorkbenchTraceCandidateCloseInput,
+  type WorkbenchTraceCandidateEventInput,
+  type WorkbenchTraceCandidateKeyInput,
+  type WorkbenchTraceRecordInput,
+  type WorkbenchTraceRecordingConfig,
+  type WorkbenchTraceReviewUpdate,
+  type WorkbenchTraceRuntimeOptions,
+  type WorkbenchTraceSpoolEvent,
+  type WorkbenchTraceSpoolStats,
+} from "./trace-runtime.ts";
 
 export interface WorkbenchDraftEvalCaseFile {
   path: string;
@@ -441,6 +489,25 @@ export interface WorkbenchCommandOptions {
   env?: Record<string, string | undefined>;
 }
 
+export interface WorkbenchSwitchOptions extends WorkbenchCommandOptions {
+  dryRun?: boolean;
+  overwrite?: boolean;
+}
+
+export interface WorkbenchSwitchFileChanges {
+  added: string[];
+  changed: string[];
+  removed: string[];
+}
+
+export interface WorkbenchSwitchResult {
+  version: WorkbenchVersion;
+  dryRun: boolean;
+  changes: WorkbenchSwitchFileChanges;
+  requiresOverwrite: boolean;
+  unchanged: boolean;
+}
+
 export interface WorkbenchInitOptions extends WorkbenchCommandOptions {
   agent?: string;
   model?: string;
@@ -458,6 +525,10 @@ export interface WorkbenchEvalOptions extends WorkbenchCommandOptions {
   kind?: WorkbenchRunKind;
   parentRunId?: string;
   caseIds?: readonly string[];
+  operationTargets?: readonly WorkbenchOperationTarget[];
+  operationPhases?: readonly WorkbenchOperationPhase[];
+  operationGrader?: WorkbenchOperationGrader;
+  gradeOfRunId?: string;
   selectedSamples?: readonly WorkbenchCaseSampleSelection[];
   rerun?: boolean;
   location?: WorkbenchRun["location"];
@@ -474,6 +545,10 @@ export interface WorkbenchStateEvalOptions {
   agent?: string;
   samples?: number;
   kind?: WorkbenchRunKind;
+  operationTargets?: readonly WorkbenchOperationTarget[];
+  operationPhases?: readonly WorkbenchOperationPhase[];
+  operationGrader?: WorkbenchOperationGrader;
+  gradeOfRunId?: string;
   parentRunId?: string;
   caseIds?: readonly string[];
   selectedSamples?: readonly WorkbenchCaseSampleSelection[];
@@ -498,26 +573,9 @@ export interface WorkbenchStateImproveOptions {
   retryOfRunId?: string;
 }
 
-export interface WorkbenchPreparedCloudEvalRequest {
-  runId?: string;
-  kind: WorkbenchEvalLikeRunKind;
-  versionId: string;
-  skill?: string;
-  agent?: string;
-  caseIds?: readonly string[];
-  samples: number;
-  rerun?: boolean;
-}
+export type WorkbenchPreparedCloudEvalRequest = Extract<WorkbenchOperationRequest, { kind: "eval" }>;
 
-export interface WorkbenchPreparedCloudImproveRequest {
-  runId?: string;
-  versionId: string;
-  skill?: string;
-  agent?: string;
-  samples: number;
-  budget: number;
-  evidenceTraceIds?: string[];
-}
+export type WorkbenchPreparedCloudImproveRequest = Extract<WorkbenchOperationRequest, { kind: "improve" }>;
 
 export interface WorkbenchEvalPreview {
   dryRun: true;
@@ -3078,7 +3136,7 @@ async function readPublicSkillEvalResult(args: {
   if (score === undefined || !Number.isFinite(score)) {
     throw new WorkbenchUserError("OUTPUT_DIR/result.json must include a finite numeric score or boolean ok/passed/pass.");
   }
-  const passed = rawPassed === undefined ? undefined : rawPassed && score > 0;
+  const passed = rawPassed;
   const metrics = publicSkillEvalResultMetrics(record, score);
   const message = typeof record.message === "string"
     ? record.message
@@ -3110,7 +3168,7 @@ async function readPublicSkillEvalResult(args: {
   return {
     result,
     ...(passed !== undefined ? { passed } : {}),
-    ...(passed === false ? { error: message ?? (score <= 0 ? "Score is 0." : "Test failed.") } : {}),
+    ...(passed === false ? { error: message ?? "Test failed." } : {}),
   };
 }
 
@@ -3313,9 +3371,8 @@ interface InternalComparisonCell {
   runId?: string;
   status?: WorkbenchRun["status"];
   score?: number;
-  samples?: number;
-  costUsd?: number;
-  latencyMs?: number;
+  coverage?: WorkbenchSampleCoverage;
+  report?: WorkbenchJobReport;
   error?: string;
 }
 
@@ -3509,6 +3566,7 @@ const REMOTES_FILE = "remotes.yaml";
 const WORKBENCH_GITIGNORE_FILE = ".gitignore";
 const EVAL_FILE = "eval.yaml";
 const CASES_DIR = "cases";
+const CASE_DESCRIPTOR_FILE = "case.yaml";
 const ENVIRONMENT_DIR = "environment";
 const AGENTS_FILE = "agents.yaml";
 const VERSIONS_FILE = "versions.yaml";
@@ -4499,10 +4557,11 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
     }
     const skillBundles = runtime.skillBundles;
     const evalSnapshot = runtime.evalSnapshot;
-    if (runtime.cases.length === 0) {
+    const runtimeCases = runtime.cases;
+    if (runtimeCases.length === 0) {
       throw noEvalCasesError();
     }
-    const selectedCases = selectEvalCasesForRun(runtime.cases, options.caseIds, options.selectedSamples);
+    const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
     assertDraftCaseReadinessReady(selectedCases, options.kind ?? "eval", evalSnapshot);
     if ((options.location ?? "local") === "local") {
       await assertLocalWorkbenchLaunchReady(root, agents, options);
@@ -4546,10 +4605,14 @@ export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Pr
       retryOfRunId: options.retryOfRunId,
       rerun: options.rerun === true,
       samples,
-      cases: runtime.cases,
+      cases: runtimeCases,
       environmentDockerfile,
       caseIds: options.caseIds,
       selectedSamples: options.selectedSamples,
+      operationTargets: options.operationTargets,
+      operationPhases: options.operationPhases,
+      operationGrader: options.operationGrader,
+      gradeOfRunId: options.gradeOfRunId,
       onRunStarted: options.onRunStarted,
     });
     await saveState(root, state);
@@ -4582,10 +4645,11 @@ export async function gradeWorkbenchSkill(options: WorkbenchEvalOptions = {}): P
     for (const agent of agents) {
       assertSkillEvalAgentSupported(agent);
     }
-    if (runtime.cases.length === 0) {
+    const runtimeCases = runtime.cases;
+    if (runtimeCases.length === 0) {
       throw noEvalCasesError();
     }
-    const selectedCases = selectEvalCasesForRun(runtime.cases, options.caseIds, options.selectedSamples);
+    const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
     assertDraftCaseReadinessReady(selectedCases, "grade", runtime.evalSnapshot);
     if ((options.location ?? "local") === "local") {
       await assertLocalWorkbenchLaunchReady(root, agents, options);
@@ -4619,10 +4683,14 @@ export async function gradeWorkbenchSkill(options: WorkbenchEvalOptions = {}): P
       retryOfRunId: options.retryOfRunId,
       rerun: options.rerun === true,
       samples: options.samples ?? 1,
-      cases: runtime.cases,
+      cases: runtimeCases,
       environmentDockerfile,
       caseIds: options.caseIds,
       selectedSamples: options.selectedSamples,
+      operationTargets: options.operationTargets,
+      operationPhases: options.operationPhases,
+      operationGrader: options.operationGrader,
+      gradeOfRunId: options.gradeOfRunId,
       onRunStarted: options.onRunStarted,
     });
     await saveState(root, state);
@@ -4644,6 +4712,7 @@ function eligibleGradeSubjectsForRuntime(args: {
   evalSnapshot: WorkbenchEvalSnapshot;
   targets: readonly WorkbenchEvaluationRunTarget[];
   cases: readonly WorkbenchEvalCaseRuntime[];
+  executeRunId?: string;
 }): WorkbenchGradeSubject[] {
   const casesById = new Map(args.cases.flatMap((runtimeCase) => [
     [runtimeCase.id, runtimeCase],
@@ -4656,6 +4725,9 @@ function eligibleGradeSubjectsForRuntime(args: {
   const eligibleSubjects: WorkbenchGradeSubject[] = [];
   for (const job of args.state.jobs) {
     if ((job.role ?? "execute") !== "execute" || job.status !== "succeeded") {
+      continue;
+    }
+    if (args.executeRunId && job.runId !== args.executeRunId) {
       continue;
     }
     const target = targetsByKey.get(gradeTargetKey(job.skillBundleHash, job.agentHash));
@@ -4701,6 +4773,7 @@ function currentGradeSubjectsForRuntime(args: {
   cases: readonly WorkbenchEvalCaseRuntime[];
   samples: number;
   selectedSamples?: readonly WorkbenchCaseSampleSelection[];
+  executeRunId?: string;
 }): WorkbenchGradeSubject[] {
   const samples = Math.max(1, Math.floor(args.samples));
   const targetsByKey = new Map(args.targets.map((target) => [
@@ -5079,7 +5152,7 @@ function evalCaseExecutionFingerprint(evalSnapshot: WorkbenchEvalSnapshot, caseI
   const caseRoot = evalSnapshotCaseRoot(runtimeCase);
   const caseFiles = runtimeCase.files.map((file) => {
     const localPath = normalizeEvalCaseLocalPath(file.path, caseRoot);
-    const content = isCaseDescriptorPath(localPath)
+    const content = localPath === CASE_DESCRIPTOR_FILE
       ? comparableEvalCaseDescriptorContent(file.content)
       : file.content;
     return {
@@ -5099,9 +5172,7 @@ function evalSnapshotCaseRoot(runtimeCase: WorkbenchEvalCaseSnapshot): string {
   if (!normalized.startsWith(`${CASES_DIR}/`)) {
     return "";
   }
-  return isCaseDescriptorPath(normalized.slice(CASES_DIR.length + 1))
-    ? normalizeRelativePath(path.posix.dirname(normalized))
-    : normalized;
+  return normalizeRelativePath(path.posix.dirname(normalized));
 }
 
 function normalizeEvalCaseLocalPath(filePath: string, caseRoot: string): string {
@@ -5272,14 +5343,15 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
   for (const agent of runtime.selectedAgents) {
     assertSkillEvalAgentSupported(agent);
   }
-  const selectedCases = selectEvalCasesForRun(runtime.cases, options.caseIds, options.selectedSamples);
-  const draftCaseIssues = runtime.cases.length === 0
+  const runtimeCases = runtime.cases;
+  const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
+  const draftCaseIssues = runtimeCases.length === 0
     ? []
     : draftCaseReadinessIssues(selectedCases, options.kind ?? "eval", runtime.evalSnapshot);
   const localReadiness = options.cloud === true
     ? await cloudWorkbenchLaunchReadiness(root)
     : await localWorkbenchLaunchReadiness(root, runtime.selectedAgents, options);
-  const readiness = runtime.cases.length === 0
+  const readiness = runtimeCases.length === 0
     ? readinessFromIssues([noEvalCasesReadinessIssue(), ...localReadiness.issues])
     : readinessFromIssues([...draftCaseIssues, ...localReadiness.issues]);
   const adapterAuthTargets = uniqueLocalAdapterAuthTargets(runtime.selectedAgents.flatMap(localAdapterAuthTargetsForAgent));
@@ -5412,12 +5484,18 @@ export async function prepareWorkbenchCloudEvalRequest(
     const state = await loadState(root);
     const version = await resolveOrCreateRunVersion(root, state);
     await saveState(root, state);
+    const phases = phasesForRunKind(kind);
     return {
-      kind,
-      versionId: version.id,
-      ...(options.skill !== undefined ? { skill: options.skill } : {}),
-      ...(options.agent !== undefined ? { agent: options.agent } : {}),
-      ...(options.caseIds?.length ? { caseIds: [...options.caseIds] } : {}),
+      kind: "eval",
+      variant: "cloud",
+      caseIds: [...(options.caseIds ?? [])],
+      targets: [{
+        versionId: version.id,
+        ...(options.skill !== undefined ? { skill: options.skill } : {}),
+        ...(options.agent !== undefined ? { agent: options.agent } : {}),
+      }],
+      phases,
+      grader: phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
       samples: options.samples ?? 1,
       ...(options.rerun === true ? { rerun: true } : {}),
     };
@@ -5555,6 +5633,10 @@ export async function evalWorkbenchProjectState(
       agent: options.agent,
       samples: options.samples,
       kind: options.kind,
+      operationTargets: options.operationTargets,
+      operationPhases: options.operationPhases,
+      operationGrader: options.operationGrader,
+      gradeOfRunId: options.gradeOfRunId,
       parentRunId: options.parentRunId,
       location: options.location,
       remoteName: options.remoteName,
@@ -5671,9 +5753,14 @@ export async function prepareWorkbenchCloudImproveRequest(
     base = await resolveOrCreateRunVersion(root, state);
     await saveState(root, state);
     return {
+      kind: "improve",
+      variant: "cloud",
       versionId: base.id,
-      ...(options.skill !== undefined ? { skill: options.skill } : {}),
-      ...(options.agent !== undefined ? { agent: options.agent } : {}),
+      target: {
+        versionId: base.id,
+        ...(options.skill !== undefined ? { skill: options.skill } : {}),
+        ...(options.agent !== undefined ? { agent: options.agent } : {}),
+      },
       samples: options.samples ?? 1,
       budget: options.budget ?? 1,
       ...(options.evidenceTraceIds !== undefined ? { evidenceTraceIds: [...options.evidenceTraceIds] } : {}),
@@ -6611,7 +6698,6 @@ export async function executeQueuedWorkbenchSkillEvalJob(
     const run: WorkbenchRun = {
       ...existingRun,
       status: proofStatus,
-      latencyMs: result.job.durationMs ?? 0,
       traceIds: [result.trace.id],
       jobIds: [result.job.id],
       finishedAt,
@@ -7055,19 +7141,20 @@ export async function previewLocalWorkbenchOperation(
 ): Promise<WorkbenchOperationPreview> {
   const request = normalizeWorkbenchOperationRequest(options.request);
   try {
-    if (request.kind === "run" || request.kind === "grade" || request.kind === "eval") {
+    if (request.kind === "eval") {
       const preview = await previewWorkbenchEval({
         dir: options.dir,
         authToken: options.authToken,
         adapterAuthStoreRoot: options.adapterAuthStoreRoot,
         homeDir: options.homeDir,
         env: options.env,
-        version: request.versionId,
-        skill: request.skill,
-        agent: request.agent,
+        version: operationTargetVersionId(request.targets),
+        skill: operationTargetSkillSelector(request.targets),
+        agent: operationTargetAgentSelector(request.targets),
         caseIds: request.caseIds,
+        operationGrader: request.grader,
         samples: request.samples,
-        kind: request.kind,
+        kind: runKindForOperationPhases(request.phases),
         rerun: request.rerun,
         cloud: false,
       });
@@ -7079,9 +7166,9 @@ export async function previewLocalWorkbenchOperation(
       adapterAuthStoreRoot: options.adapterAuthStoreRoot,
       homeDir: options.homeDir,
       env: options.env,
-      version: request.versionId,
-      skill: request.skill,
-      agent: request.agent,
+      version: request.versionId ?? (request.target ? operationTargetVersionId([request.target]) : undefined),
+      skill: request.target?.skill,
+      agent: request.target?.agent,
       samples: request.samples,
       budget: request.budget,
       evidenceTraceIds: request.evidenceTraceIds,
@@ -7108,70 +7195,60 @@ async function executeLocalWorkbenchOperation(
     notifiedStarted = true;
     await options.onRunStarted?.(run);
   };
-  const runs = request.kind === "run"
-    ? await evalWorkbenchSkill({
-        dir: options.dir,
-        authToken: options.authToken,
-        adapterAuthStoreRoot: options.adapterAuthStoreRoot,
-        homeDir: options.homeDir,
-        env: options.env,
-        version: request.versionId,
-        skill: request.skill,
-        agent: request.agent,
-        caseIds: request.caseIds,
-        samples: request.samples,
-        rerun: request.rerun,
-        kind: "run",
-        location: "local",
-        retryOfRunId: request.retryOfRunId,
-        onRunStarted,
-      })
-    : request.kind === "eval"
-      ? await evalWorkbenchSkill({
+  const runs = request.kind === "eval"
+    ? request.phases.includes("grade") && !request.phases.includes("execute")
+      ? await gradeWorkbenchSkill({
           dir: options.dir,
           authToken: options.authToken,
           adapterAuthStoreRoot: options.adapterAuthStoreRoot,
           homeDir: options.homeDir,
           env: options.env,
-          version: request.versionId,
-          skill: request.skill,
-          agent: request.agent,
+          version: operationTargetVersionId(request.targets),
+          skill: operationTargetSkillSelector(request.targets),
+          agent: operationTargetAgentSelector(request.targets),
           caseIds: request.caseIds,
           samples: request.samples,
           rerun: request.rerun,
-          kind: "eval",
+          kind: "grade",
           location: "local",
+          operationTargets: request.targets,
+          operationPhases: request.phases,
+          operationGrader: request.grader,
+          gradeOfRunId: request.gradeOfRunId,
           retryOfRunId: request.retryOfRunId,
           onRunStarted,
         })
-      : request.kind === "grade"
-        ? await gradeWorkbenchSkill({
-            dir: options.dir,
-            authToken: options.authToken,
-            adapterAuthStoreRoot: options.adapterAuthStoreRoot,
-            homeDir: options.homeDir,
-            env: options.env,
-            version: request.versionId,
-            skill: request.skill,
-            agent: request.agent,
-            caseIds: request.caseIds,
-            samples: request.samples,
-            rerun: request.rerun,
-            kind: "grade",
-            location: "local",
-            retryOfRunId: request.retryOfRunId,
-            onRunStarted,
-          })
-        : [(
+      : await evalWorkbenchSkill({
+          dir: options.dir,
+          authToken: options.authToken,
+          adapterAuthStoreRoot: options.adapterAuthStoreRoot,
+          homeDir: options.homeDir,
+          env: options.env,
+          version: operationTargetVersionId(request.targets),
+          skill: operationTargetSkillSelector(request.targets),
+          agent: operationTargetAgentSelector(request.targets),
+          caseIds: request.caseIds,
+          samples: request.samples,
+          rerun: request.rerun,
+          kind: runKindForOperationPhases(request.phases),
+          location: "local",
+          operationTargets: request.targets,
+          operationPhases: request.phases,
+          operationGrader: request.grader,
+          gradeOfRunId: request.gradeOfRunId,
+          retryOfRunId: request.retryOfRunId,
+          onRunStarted,
+        })
+    : [(
         await improveWorkbenchSkill({
           dir: options.dir,
           authToken: options.authToken,
           adapterAuthStoreRoot: options.adapterAuthStoreRoot,
           homeDir: options.homeDir,
           env: options.env,
-          version: request.versionId,
-          skill: request.skill,
-          agent: request.agent,
+          version: request.versionId ?? (request.target ? operationTargetVersionId([request.target]) : undefined),
+          skill: request.target?.skill,
+          agent: request.target?.agent,
           samples: request.samples,
           budget: request.budget,
           evidenceTraceIds: request.evidenceTraceIds,
@@ -7181,7 +7258,12 @@ async function executeLocalWorkbenchOperation(
         })
         ).run];
   const cursor = await readWorkbenchReadOnlyInspectionCursor(options).catch(() => undefined);
-  return createWorkbenchRunSnapshot(request, runs, { cursor });
+  const state = await loadState(resolveRoot(options.dir)).catch(() => undefined);
+  return createWorkbenchRunSnapshot(request, runs, {
+    cursor,
+    jobs: state?.jobs ?? [],
+    traces: state?.traces ?? [],
+  });
 }
 
 export interface WorkbenchLocalOperationSupervisor {
@@ -7235,6 +7317,9 @@ export function superviseLocalWorkbenchOperation(
 function operationPlanSummaryForRun(input: {
   kind: WorkbenchRunKind;
   variant: WorkbenchOperationVariant;
+  targets?: readonly WorkbenchOperationTarget[];
+  phases?: readonly WorkbenchOperationPhase[];
+  grader?: WorkbenchOperationGrader;
   versionId: string;
   evalHash: string;
   skillName?: string;
@@ -7245,6 +7330,7 @@ function operationPlanSummaryForRun(input: {
   samples?: number;
   rerun?: boolean;
   budget?: number;
+  gradeOfRunId?: string;
   retryOfRunId?: string;
 }): WorkbenchOperationPlanSummary {
   if (input.kind !== "run" && input.kind !== "grade" && input.kind !== "eval" && input.kind !== "improve") {
@@ -7257,6 +7343,9 @@ function operationPlanSummaryForRun(input: {
   return {
     kind: input.kind,
     variant: input.variant,
+    ...(input.targets?.length ? { targets: input.targets.map(copyWorkbenchOperationTarget) } : {}),
+    ...(input.phases?.length ? { phases: [...input.phases] } : {}),
+    ...(input.grader ? { grader: copyWorkbenchOperationGrader(input.grader) } : {}),
     versionId: input.versionId,
     evalHash: input.evalHash,
     skills: uniqueStrings([...(input.skillNames ?? []), ...(input.skillName ? [input.skillName] : [])]),
@@ -7265,6 +7354,7 @@ function operationPlanSummaryForRun(input: {
     ...(input.samples !== undefined ? { samples: input.samples } : {}),
     ...(input.rerun === true ? { rerun: true } : {}),
     ...(input.budget !== undefined ? { budget: input.budget } : {}),
+    ...(input.gradeOfRunId ? { gradeOfRunId: input.gradeOfRunId } : {}),
     ...(input.retryOfRunId ? { retryOfRunId: input.retryOfRunId } : {}),
   };
 }
@@ -7272,6 +7362,9 @@ function operationPlanSummaryForRun(input: {
 function copyOperationPlanSummary(plan: WorkbenchOperationPlanSummary): WorkbenchOperationPlanSummary {
   return {
     ...plan,
+    ...(plan.targets ? { targets: plan.targets.map(copyWorkbenchOperationTarget) } : {}),
+    ...(plan.phases ? { phases: [...plan.phases] } : {}),
+    ...(plan.grader ? { grader: copyWorkbenchOperationGrader(plan.grader) } : {}),
     skills: [...plan.skills],
     agents: [...plan.agents],
     ...(plan.caseIds ? { caseIds: [...plan.caseIds] } : {}),
@@ -7296,9 +7389,15 @@ function operationPlanSummaryForSnapshotRuns(runs: readonly WorkbenchRun[]): Wor
   const budget = commonNumber(plans.map((plan) => plan.budget));
   const retryOfRunId = commonString(plans.map((plan) => plan.retryOfRunId));
   const caseIds = commonStringArrays(plans.map((plan) => plan.caseIds));
+  const phases = commonStringArrays(plans.map((plan) => plan.phases));
+  const grader = commonJsonObject(plans.map((plan) => plan.grader));
+  const targets = commonJsonArray(plans.map((plan) => plan.targets));
   return {
     kind: first.kind,
     variant: first.variant,
+    ...(targets ? { targets: (targets as WorkbenchOperationTarget[]).map(copyWorkbenchOperationTarget) } : {}),
+    ...(phases ? { phases: phases as WorkbenchOperationPhase[] } : {}),
+    ...(grader ? { grader: copyWorkbenchOperationGrader(grader as WorkbenchOperationGrader) } : {}),
     ...(versionId ? { versionId } : {}),
     ...(evalHash ? { evalHash } : {}),
     skills: uniqueStrings(plans.flatMap((plan) => plan.skills)),
@@ -7309,6 +7408,34 @@ function operationPlanSummaryForSnapshotRuns(runs: readonly WorkbenchRun[]): Wor
     ...(budget !== undefined ? { budget } : {}),
     ...(retryOfRunId ? { retryOfRunId } : {}),
   };
+}
+
+function commonJsonObject<T>(values: readonly (T | undefined)[]): T | undefined {
+  if (values.some((value) => value === undefined)) {
+    return undefined;
+  }
+  const present = values as readonly T[];
+  const [first] = present;
+  if (first === undefined) {
+    return undefined;
+  }
+  const firstHash = hashJson(first);
+  return present.every((value) => hashJson(value) === firstHash) ? JSON.parse(JSON.stringify(first)) as T : undefined;
+}
+
+function commonJsonArray<T>(values: readonly (readonly T[] | undefined)[]): T[] | undefined {
+  if (values.some((value) => value === undefined)) {
+    return undefined;
+  }
+  const present = values as readonly (readonly T[])[];
+  const [first] = present;
+  if (!first) {
+    return undefined;
+  }
+  const firstHash = hashJson(first);
+  return present.every((value) => hashJson(value) === firstHash)
+    ? JSON.parse(JSON.stringify(first)) as T[]
+    : undefined;
 }
 
 function commonStringArrays(values: readonly (readonly string[] | undefined)[]): string[] | undefined {
@@ -7345,10 +7472,86 @@ function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.filter((value) => value.length > 0))];
 }
 
+function copyWorkbenchOperationTarget(target: WorkbenchOperationTarget): WorkbenchOperationTarget {
+  return {
+    ...(target.skill ? { skill: target.skill } : {}),
+    ...(target.versionId ? { versionId: target.versionId } : {}),
+    ...(target.agent ? { agent: target.agent } : {}),
+  };
+}
+
+function copyWorkbenchOperationGrader(grader: WorkbenchOperationGrader): WorkbenchOperationGrader {
+  return { kind: grader.kind };
+}
+
+function phasesForRunKind(kind: WorkbenchRunKind): WorkbenchOperationPhase[] {
+  if (kind === "run") {
+    return ["execute"];
+  }
+  if (kind === "grade") {
+    return ["grade"];
+  }
+  if (kind === "eval") {
+    return ["execute", "grade"];
+  }
+  return [];
+}
+
+function runKindForOperationPhases(phases: readonly WorkbenchOperationPhase[]): Exclude<WorkbenchRunKind, "improve"> {
+  const hasExecute = phases.includes("execute");
+  const hasGrade = phases.includes("grade");
+  if (hasExecute && hasGrade) {
+    return "eval";
+  }
+  if (hasGrade) {
+    return "grade";
+  }
+  return "run";
+}
+
+function commandForOperationPhases(phases: readonly WorkbenchOperationPhase[]): "run" | "grade" | "eval" {
+  return runKindForOperationPhases(phases);
+}
+
+function operationTargetSkillSelector(targets: readonly WorkbenchOperationTarget[]): string | undefined {
+  const skills = uniqueStrings(targets.flatMap((target) => target.skill ? [target.skill] : []));
+  return skills.length > 0 ? skills.join(",") : undefined;
+}
+
+function operationTargetAgentSelector(targets: readonly WorkbenchOperationTarget[]): string | undefined {
+  const agents = uniqueStrings(targets.flatMap((target) => target.agent ? [target.agent] : []));
+  return agents.length > 0 ? agents.join(",") : undefined;
+}
+
+function operationTargetVersionId(targets: readonly WorkbenchOperationTarget[]): string | undefined {
+  const versions = uniqueStrings(targets.flatMap((target) => target.versionId ? [target.versionId] : []));
+  return versions.length === 1 ? versions[0] : undefined;
+}
+
+function operationTargetsFromPlan(plan: Pick<WorkbenchOperationPlanSummary, "agents" | "skills" | "versionId">): WorkbenchOperationTarget[] {
+  const agents = plan.agents.length > 0 ? plan.agents : [undefined];
+  const skills = plan.skills;
+  return agents.map((agent, index) => ({
+    ...(skills[index] ? { skill: skills[index] } : skills[0] ? { skill: skills[0] } : {}),
+    ...(plan.versionId ? { versionId: plan.versionId } : {}),
+    ...(agent ? { agent } : {}),
+  }));
+}
+
+function operationTargetFromPlan(plan: Pick<WorkbenchOperationPlanSummary, "agents" | "skills" | "versionId">): WorkbenchOperationTarget | undefined {
+  return operationTargetsFromPlan(plan)[0];
+}
+
 export function createWorkbenchRunSnapshot(
   request: WorkbenchOperationRequest,
   runs: readonly WorkbenchRun[],
-  options: { cursor?: string; jobs?: readonly WorkbenchJob[]; plan?: WorkbenchOperationPlanSummary } = {},
+  options: {
+    cursor?: string;
+    jobs?: readonly WorkbenchJob[];
+    traces?: readonly WorkbenchTrace[];
+    now?: string;
+    plan?: WorkbenchOperationPlanSummary;
+  } = {},
 ): WorkbenchRunSnapshot {
   const firstRun = runs[0];
   if (!firstRun) {
@@ -7360,23 +7563,34 @@ export function createWorkbenchRunSnapshot(
   }
   const normalized = normalizeWorkbenchOperationRequest(request);
   const jobs = options.jobs ?? [];
+  const traces = options.traces ?? [];
+  const runJobs = jobsForSnapshotRuns(runs, jobs);
+  const reportOptions = { now: options.now ?? now() };
   const result = runSnapshotResultSummary(runs, jobs);
   const persistedPlan = options.plan ?? operationPlanSummaryForSnapshotRuns(runs);
   const plan = persistedPlan
     ? copyOperationPlanSummary(persistedPlan)
     : {
-        kind: normalized.kind,
+        kind: normalized.kind === "improve" ? "improve" : runKindForOperationPhases(normalized.phases),
         variant: normalized.variant,
-        ...(normalized.versionId ? { versionId: normalized.versionId } : { versionId: firstRun.versionId }),
-        ...(normalized.evalHash ? { evalHash: normalized.evalHash } : { evalHash: firstRun.evalHash }),
+        ...(normalized.kind === "improve" && normalized.versionId ? { versionId: normalized.versionId } : { versionId: firstRun.versionId }),
+        ...(normalized.kind === "improve" && normalized.evalHash ? { evalHash: normalized.evalHash } : { evalHash: firstRun.evalHash }),
+        ...(normalized.kind === "eval" ? {
+          targets: normalized.targets.map(copyWorkbenchOperationTarget),
+          phases: [...normalized.phases],
+          grader: copyWorkbenchOperationGrader(normalized.grader ?? (normalized.phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" })),
+        } : {}),
         skills: [...new Set(runs.map((run) => run.skillName))],
         agents: [...new Set(runs.map((run) => run.agentName))],
-        ...(normalized.caseIds?.length ? { caseIds: normalized.caseIds } : {}),
+        ...(normalized.kind === "eval" && normalized.caseIds.length
+          ? { caseIds: [...normalized.caseIds] }
+          : {}),
         ...(normalized.samples !== undefined ? { samples: normalized.samples } : {}),
-        ...(normalized.rerun ? { rerun: true } : {}),
-        ...(normalized.budget !== undefined ? { budget: normalized.budget } : {}),
+        ...(normalized.kind === "eval" && normalized.rerun ? { rerun: true } : {}),
+        ...(normalized.kind === "improve" && normalized.budget !== undefined ? { budget: normalized.budget } : {}),
         ...(normalized.retryOfRunId ? { retryOfRunId: normalized.retryOfRunId } : {}),
       } satisfies WorkbenchOperationPlanSummary;
+  const next = runSnapshotNext(firstRun, plan);
   return {
     schema: "workbench.run.v1",
     id: firstRun.id,
@@ -7385,8 +7599,9 @@ export function createWorkbenchRunSnapshot(
     status: aggregateRunStatus(runs),
     phase: runPhaseForRuns(runs),
     plan,
-    progress: runProgressSummary(runs, jobs),
-    measurements: runMeasurementSummaries(runs, jobs),
+    progress: runProgressSummary(runs, jobs, reportOptions),
+    report: buildWorkbenchJobReport(runJobs, traces, reportOptions),
+    measurements: runMeasurementSummaries(runs, jobs, traces, reportOptions),
     ...(result ? { result } : {}),
     ...(firstRun.retryOfRunId ? { retryOfRunId: firstRun.retryOfRunId } : {}),
     route: {
@@ -7397,28 +7612,58 @@ export function createWorkbenchRunSnapshot(
     },
     ...(options.cursor ? { cursor: options.cursor } : {}),
     cliEquivalent: workbenchOperationPlanCliEquivalent(plan),
-    ...(runSnapshotNext(firstRun, plan) ? { next: runSnapshotNext(firstRun, plan) } : {}),
+    ...(next ? { next } : {}),
   };
 }
 
 export function createWorkbenchRunSnapshotForRun(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[] = [],
-  options: { cursor?: string } = {},
+  options: { cursor?: string; traces?: readonly WorkbenchTrace[]; now?: string } = {},
 ): WorkbenchRunSnapshot {
   const plan = run.operationPlan ? copyOperationPlanSummary(run.operationPlan) : undefined;
-  return createWorkbenchRunSnapshot({
-    kind: plan?.kind ?? run.kind,
+  return createWorkbenchRunSnapshot(operationRequestFromRunPlan(run, plan), [run], { ...options, jobs, ...(plan ? { plan } : {}) });
+}
+
+function operationRequestFromRunPlan(
+  run: WorkbenchRun,
+  plan: WorkbenchOperationPlanSummary | undefined,
+): WorkbenchOperationRequest {
+  if ((plan?.kind ?? run.kind) === "improve") {
+    return {
+      kind: "improve",
+      variant: plan?.variant ?? run.location ?? "local",
+      target: operationTargetFromPlan(plan ?? {
+        versionId: run.versionId,
+        skills: [run.skillName],
+        agents: [run.agentName],
+      }),
+      versionId: plan?.versionId ?? run.versionId,
+      evalHash: plan?.evalHash ?? run.evalHash,
+      ...(plan?.samples !== undefined ? { samples: plan.samples } : run.requestedSamples !== undefined ? { samples: run.requestedSamples } : {}),
+      ...(plan?.budget !== undefined ? { budget: plan.budget } : run.requestedBudget !== undefined ? { budget: run.requestedBudget } : {}),
+      ...(plan?.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : run.retryOfRunId ? { retryOfRunId: run.retryOfRunId } : {}),
+    };
+  }
+  const phases = plan?.phases ?? phasesForRunKind(plan?.kind ?? run.kind);
+  return {
+    kind: "eval",
     variant: plan?.variant ?? run.location ?? "local",
-    versionId: plan?.versionId ?? run.versionId,
-    evalHash: plan?.evalHash ?? run.evalHash,
-    skill: plan?.skills.join(",") || run.skillName,
-    agent: plan?.agents.join(",") || run.agentName,
+    caseIds: plan?.caseIds ?? [],
+    targets: plan?.targets ?? operationTargetsFromPlan(plan ?? {
+      kind: run.kind,
+      variant: run.location ?? "local",
+      versionId: run.versionId,
+      evalHash: run.evalHash,
+      skills: [run.skillName],
+      agents: [run.agentName],
+    }),
+    phases,
+    grader: plan?.grader ?? (phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" }),
     ...(plan?.samples !== undefined ? { samples: plan.samples } : run.requestedSamples !== undefined ? { samples: run.requestedSamples } : {}),
     ...(plan?.rerun ? { rerun: true } : {}),
-    ...(plan?.budget !== undefined ? { budget: plan.budget } : run.kind === "improve" && run.requestedBudget !== undefined ? { budget: run.requestedBudget } : {}),
     ...(plan?.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : run.retryOfRunId ? { retryOfRunId: run.retryOfRunId } : {}),
-  }, [run], { ...options, jobs, ...(plan ? { plan } : {}) });
+  };
 }
 
 function workbenchRunFromSnapshot(
@@ -7439,8 +7684,6 @@ function workbenchRunFromSnapshot(
     agentHash: measurement?.agentHash ?? "",
     status: snapshot.status,
     operationPlan: copyOperationPlanSummary(snapshot.plan),
-    ...(measurement?.costUsd !== undefined ? { costUsd: measurement.costUsd } : {}),
-    ...(measurement?.latencyMs !== undefined ? { latencyMs: measurement.latencyMs } : {}),
     jobIds: [],
     traceIds: [],
     createdAt: nowIso,
@@ -7457,40 +7700,58 @@ function workbenchRunFromSnapshot(
 }
 
 function workbenchOperationPlanCliEquivalent(plan: WorkbenchOperationPlanSummary): string {
+  if (plan.kind === "improve") {
+    return workbenchOperationCliEquivalent({
+      kind: "improve",
+      variant: plan.variant,
+      target: operationTargetFromPlan(plan),
+      ...(plan.versionId ? { versionId: plan.versionId } : {}),
+      ...(plan.evalHash ? { evalHash: plan.evalHash } : {}),
+      ...(plan.samples !== undefined ? { samples: plan.samples } : {}),
+      ...(plan.budget !== undefined ? { budget: plan.budget } : {}),
+      ...(plan.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : {}),
+    });
+  }
   return workbenchOperationCliEquivalent({
-    kind: plan.kind,
+    kind: "eval",
     variant: plan.variant,
-    ...(plan.versionId ? { versionId: plan.versionId } : {}),
-    ...(plan.evalHash ? { evalHash: plan.evalHash } : {}),
-    ...(plan.skills.length > 0 ? { skill: plan.skills.join(",") } : {}),
-    ...(plan.agents.length > 0 ? { agent: plan.agents.join(",") } : {}),
-    ...(plan.caseIds?.length ? { caseIds: plan.caseIds } : {}),
+    caseIds: plan.caseIds ?? [],
+    targets: plan.targets ?? operationTargetsFromPlan(plan),
+    phases: plan.phases ?? phasesForRunKind(plan.kind),
+    ...(plan.grader ? { grader: plan.grader } : {}),
     ...(plan.samples !== undefined ? { samples: plan.samples } : {}),
     ...(plan.rerun ? { rerun: true } : {}),
-    ...(plan.budget !== undefined ? { budget: plan.budget } : {}),
     ...(plan.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : {}),
   });
 }
 
 export function workbenchOperationCliEquivalent(request: WorkbenchOperationRequest): string {
   const normalized = normalizeWorkbenchOperationRequest(request);
-  const parts = ["workbench", normalized.kind];
+  const command = normalized.kind === "improve"
+    ? "improve"
+    : commandForOperationPhases(normalized.phases);
+  const parts = ["workbench", command];
   if (normalized.variant === "cloud") {
     parts.push("--cloud");
   }
-  if (normalized.skill) {
-    parts.push("--versions", quoteShellArg(normalized.skill));
+  const targets = normalized.kind === "improve"
+    ? normalized.target ? [normalized.target] : []
+    : normalized.targets;
+  const skillSelector = operationTargetSkillSelector(targets);
+  const agentSelector = operationTargetAgentSelector(targets);
+  if (skillSelector) {
+    parts.push("--versions", quoteShellArg(skillSelector));
   }
-  if (normalized.agent) {
-    parts.push("--agents", quoteShellArg(normalized.agent));
+  if (agentSelector) {
+    parts.push("--agents", quoteShellArg(agentSelector));
   }
-  if (normalized.caseIds?.length) {
+  if (normalized.kind === "eval" && normalized.caseIds.length > 0) {
     parts.push("--cases", quoteShellArg(normalized.caseIds.join(",")));
   }
   if (normalized.samples && normalized.samples !== 1) {
     parts.push("-n", String(normalized.samples));
   }
-  if ((normalized.kind === "run" || normalized.kind === "grade" || normalized.kind === "eval") && normalized.rerun) {
+  if (normalized.kind === "eval" && normalized.rerun) {
     parts.push("--rerun");
   }
   if (normalized.kind === "improve" && normalized.budget && normalized.budget !== 1) {
@@ -7535,6 +7796,7 @@ function runPhaseForRuns(runs: readonly WorkbenchRun[]): WorkbenchRunPhase {
 function runProgressSummary(
   runs: readonly WorkbenchRun[],
   jobs: readonly WorkbenchJob[],
+  options: { now?: string } = {},
 ): WorkbenchRunSnapshot["progress"] {
   const runJobs = jobsForSnapshotRuns(runs, jobs);
   const caseJobs = runJobs.filter((job) => job.caseId !== "current");
@@ -7545,12 +7807,13 @@ function runProgressSummary(
   const canceledJobs = selectedJobs.filter((job) => job.status === "canceled");
   const activeJobs = selectedJobs.filter((job) => job.status === "running");
   const firstRun = runs[0];
-  const observedAt = latestRunObservedAt(runs, selectedJobs);
+  const observedAt = runs.every(isTerminalRun)
+    ? latestRunObservedAt(runs, selectedJobs)
+    : options.now ?? latestRunObservedAt(runs, selectedJobs);
   const startedAt = firstRun?.createdAt ?? observedAt ?? now();
   const score = scoredJobs.length > 0
     ? averageScores(scoredJobs.map(jobQualityScore))
     : undefined;
-  const costUsd = aggregateRunCost(runs);
   const observedAtMs = timestampMs(observedAt ?? now()) ?? Date.now();
   const startedAtMs = timestampMs(startedAt) ?? observedAtMs;
   const lastProgressAt = latestRunProgressAt(runs, selectedJobs);
@@ -7575,7 +7838,6 @@ function runProgressSummary(
     } : {}),
     ...(!runs.every(isTerminalRun) && score !== undefined ? { partialScore: score } : {}),
     evidenceCount: runs.reduce((sum, run) => sum + run.traceIds.length + (run.jobIds?.length ?? 0), 0),
-    ...(costUsd !== undefined ? { costUsd } : {}),
     elapsedMs: Math.max(0, observedAtMs - startedAtMs),
     ...(lastProgressAt ? { lastProgressAt } : {}),
   };
@@ -7619,21 +7881,20 @@ function plannedJobCountForRun(run: WorkbenchRun): number | undefined {
     return undefined;
   }
   const samples = Math.max(1, Math.floor(plan.samples ?? run.requestedSamples ?? 1));
-  const skillCount = Math.max(1, plan.skills.length);
-  const agentCount = Math.max(1, plan.agents.length);
-  const phaseCount = plan.kind === "eval" ? 2 : 1;
-  return caseCount * samples * skillCount * agentCount * phaseCount;
+  const targetCount = Math.max(1, plan.targets?.length ?? (plan.skills.length * plan.agents.length));
+  const phaseCount = Math.max(1, plan.phases?.length ?? (plan.kind === "eval" ? 2 : 1));
+  return caseCount * samples * targetCount * phaseCount;
 }
 
 function runMeasurementSummary(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
+  traces: readonly WorkbenchTrace[] = [],
+  reportOptions: { now?: string } = {},
 ): WorkbenchMeasurementSummary {
   const runJobs = jobs.filter((job) => runOwnsJob(run, job) && job.caseId !== "current");
-  const samples = runJobs.length > 0
-    ? new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size
-    : run.jobIds?.length;
   const score = aggregateJobScore(runJobs);
+  const coverage = workbenchSampleCoverageForJobs(runJobs);
   return {
     versionId: run.versionId,
     skillName: run.skillName,
@@ -7644,9 +7905,8 @@ function runMeasurementSummary(
     runId: run.id,
     status: run.status,
     ...(score !== undefined ? { score } : {}),
-    ...(samples !== undefined && samples > 0 ? { samples } : {}),
-    ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
-    ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
+    ...(coverage ? { coverage } : {}),
+    ...(runJobs.length > 0 ? { report: buildWorkbenchJobReport(runJobs, traces, reportOptions) } : {}),
     ...(run.error ? { error: run.error } : {}),
   };
 }
@@ -7654,6 +7914,8 @@ function runMeasurementSummary(
 function runMeasurementSummaries(
   runs: readonly WorkbenchRun[],
   jobs: readonly WorkbenchJob[],
+  traces: readonly WorkbenchTrace[] = [],
+  reportOptions: { now?: string } = {},
 ): WorkbenchMeasurementSummary[] {
   const runsById = new Map(runs.map((run) => [run.id, run]));
   const runsByReferencedJobId = new Map<string, WorkbenchRun[]>();
@@ -7696,11 +7958,11 @@ function runMeasurementSummaries(
   const measuredRunIds = new Set<string>();
   const measurements = [...jobsByMeasurement.values()].map(({ run, jobs: measurementJobs, versionId, evalHash }) => {
     measuredRunIds.add(run.id);
-    return runMeasurementSummaryFromJobs(run, measurementJobs, { versionId, evalHash });
+    return runMeasurementSummaryFromJobs(run, measurementJobs, traces, reportOptions, { versionId, evalHash });
   });
   for (const run of runs) {
     if (!measuredRunIds.has(run.id)) {
-      measurements.push(runMeasurementSummary(run, jobs));
+      measurements.push(runMeasurementSummary(run, jobs, traces, reportOptions));
     }
   }
   return measurements;
@@ -7709,15 +7971,16 @@ function runMeasurementSummaries(
 function runMeasurementSummaryFromJobs(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
+  traces: readonly WorkbenchTrace[] = [],
+  reportOptions: { now?: string } = {},
   options: { versionId?: string; evalHash?: string } = {},
 ): WorkbenchMeasurementSummary {
   const [firstJob] = jobs;
   if (!firstJob) {
-    return runMeasurementSummary(run, jobs);
+    return runMeasurementSummary(run, jobs, traces, reportOptions);
   }
   const scoredJobs = jobs.filter((job) => jobQualityScore(job) !== undefined);
-  const samples = new Set(jobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
-  const latencyMs = comparisonRunnerLatencyMsFromJobs(jobs, samples);
+  const coverage = workbenchSampleCoverageForJobs(jobs);
   const errors = jobs.flatMap((job) => job.error ? [job.error] : []);
   const status = comparisonJobStatus(jobs, run.status);
   const score = status === "canceled" || scoredJobs.length === 0
@@ -7733,8 +7996,8 @@ function runMeasurementSummaryFromJobs(
     runId: run.id,
     status,
     ...(score !== undefined ? { score } : {}),
-    ...(samples > 0 ? { samples } : {}),
-    ...(latencyMs !== undefined ? { latencyMs } : {}),
+    ...(coverage ? { coverage } : {}),
+    report: buildWorkbenchJobReport(jobs, traces, reportOptions),
     ...(errors.length > 0 ? { error: summarizeJobErrors(errors) } : {}),
   };
 }
@@ -7806,16 +8069,20 @@ export function workbenchRunTransitionCliEquivalent(
   options: { plan?: WorkbenchOperationPlanSummary; rerun?: boolean; samples?: number } = {},
 ): string {
   const plan = options.plan ?? run.operationPlan;
-  const skillSelection = plan?.skills.join(",") || run.skillName;
-  const agentSelection = plan?.agents.join(",") || run.agentName;
-  const caseIds = plan?.caseIds;
-  const shouldCarryAgent = Boolean(agentSelection && (agentSelection !== "default" || (caseIds?.length ?? 0) > 0));
   return workbenchOperationCliEquivalent({
-    kind,
+    kind: "eval",
     variant: plan?.variant ?? run.location ?? "local",
-    ...(skillSelection && skillSelection !== CURRENT_SKILL_VERSION_NAME ? { skill: skillSelection } : {}),
-    ...(shouldCarryAgent ? { agent: agentSelection } : {}),
-    ...(caseIds?.length ? { caseIds } : {}),
+    caseIds: plan?.caseIds ?? [],
+    targets: plan?.targets ?? operationTargetsFromPlan(plan ?? {
+      kind: run.kind,
+      variant: run.location ?? "local",
+      versionId: run.versionId,
+      evalHash: run.evalHash,
+      skills: [run.skillName],
+      agents: [run.agentName],
+    }),
+    phases: phasesForRunKind(kind),
+    grader: kind === "grade" || kind === "eval" ? { kind: "evaluation" } : { kind: "none" },
     samples: options.samples ?? plan?.samples ?? run.requestedSamples ?? 1,
     ...(options.rerun ? { rerun: true } : {}),
   });
@@ -7853,16 +8120,6 @@ function averageScores(values: readonly (number | undefined)[]): number | undefi
   return Number((scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(3));
 }
 
-function aggregateRunCost(runs: readonly WorkbenchRun[]): number | undefined {
-  const costs = runs
-    .map((run) => run.costUsd)
-    .filter((cost): cost is number => typeof cost === "number");
-  if (costs.length === 0) {
-    return undefined;
-  }
-  return Number(costs.reduce((sum, cost) => sum + cost, 0).toFixed(6));
-}
-
 function latestRunObservedAt(runs: readonly WorkbenchRun[], jobs: readonly WorkbenchJob[]): string | undefined {
   return [
     ...runs.flatMap((run) => [run.finishedAt, run.lastProgressAt, run.createdAt]),
@@ -7893,20 +8150,37 @@ function isTerminalRun(run: WorkbenchRun): boolean {
 
 function defaultWorkbenchOperationRequest(
   snapshot: WorkbenchInspectionSnapshot,
-  kind: WorkbenchOperationRequest["kind"],
+  kind: WorkbenchRunKind,
   variant: WorkbenchOperationVariant,
 ): WorkbenchOperationRequest {
   const versionId = variant === "cloud" ? snapshot.refs.current ?? latestSnapshotVersionId(snapshot) : undefined;
   const evalHash = latestSnapshotEvalHash(snapshot);
-  return {
-    kind,
-    variant,
+  const target: WorkbenchOperationTarget = {
     ...(versionId ? { versionId } : {}),
-    ...(evalHash ? { evalHash } : {}),
-    ...(snapshot.status.defaultSkill ? { skill: snapshot.status.defaultSkill } : {}),
-    ...(snapshot.status.defaultAgent ? { agent: snapshot.status.defaultAgent } : {}),
+  };
+  if (kind === "improve") {
+    return {
+      kind: "improve",
+      variant,
+      target,
+      ...(versionId ? { versionId } : {}),
+      ...(evalHash ? { evalHash } : {}),
+      samples: 1,
+      budget: 1,
+    };
+  }
+  const phases = phasesForRunKind(kind);
+  return {
+    kind: "eval",
+    variant,
+    caseIds: snapshot.evals
+      .slice()
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.hash.localeCompare(left.hash))[0]
+      ?.cases.map((entry) => entry.id) ?? [],
+    targets: [target],
+    phases,
+    grader: phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
     samples: 1,
-    ...(kind === "improve" ? { budget: 1 } : {}),
   };
 }
 
@@ -7970,22 +8244,46 @@ function normalizeWorkbenchOperationRequest(
   request: WorkbenchOperationRequest,
 ): WorkbenchOperationRequest {
   const samples = positiveIntegerOrUndefined(request.samples);
-  const budget = positiveIntegerOrUndefined(request.budget);
+  if (request.kind === "improve") {
+    const budget = positiveIntegerOrUndefined(request.budget);
+    return {
+      kind: "improve",
+      variant: request.variant,
+      ...(request.runId ? { runId: request.runId } : {}),
+      ...(request.target ? { target: copyWorkbenchOperationTarget(request.target) } : {}),
+      ...(request.versionId ? { versionId: request.versionId } : {}),
+      ...(request.evalHash ? { evalHash: request.evalHash } : {}),
+      samples: samples ?? 1,
+      budget: budget ?? 1,
+      ...(request.evidenceTraceIds?.length ? { evidenceTraceIds: [...request.evidenceTraceIds] } : {}),
+      ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId } : {}),
+    };
+  }
+  const phases = uniqueOperationPhases(request.phases);
+  const targets = request.targets.map(copyWorkbenchOperationTarget);
   return {
-    kind: request.kind,
+    kind: "eval",
     variant: request.variant,
     ...(request.runId ? { runId: request.runId } : {}),
-    ...(request.versionId ? { versionId: request.versionId } : {}),
-    ...(request.evalHash ? { evalHash: request.evalHash } : {}),
-    ...(request.skill ? { skill: request.skill } : {}),
-    ...(request.agent ? { agent: request.agent } : {}),
-    ...(request.caseIds?.length ? { caseIds: [...request.caseIds] } : {}),
+    caseIds: uniqueStrings([...request.caseIds]),
+    targets,
+    phases,
+    grader: request.grader ? copyWorkbenchOperationGrader(request.grader) : phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
     samples: samples ?? 1,
-    ...((request.kind === "run" || request.kind === "grade" || request.kind === "eval") && request.rerun === true ? { rerun: true } : {}),
-    ...(request.kind === "improve" ? { budget: budget ?? 1 } : {}),
-    ...(request.evidenceTraceIds?.length ? { evidenceTraceIds: [...request.evidenceTraceIds] } : {}),
+    ...(request.rerun === true ? { rerun: true } : {}),
+    ...(request.gradeOfRunId ? { gradeOfRunId: request.gradeOfRunId } : {}),
     ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId } : {}),
   };
+}
+
+function uniqueOperationPhases(phases: readonly WorkbenchOperationPhase[]): WorkbenchOperationPhase[] {
+  const result: WorkbenchOperationPhase[] = [];
+  for (const phase of phases) {
+    if ((phase === "execute" || phase === "grade") && !result.includes(phase)) {
+      result.push(phase);
+    }
+  }
+  return result.length > 0 ? result : ["execute", "grade"];
 }
 
 function positiveIntegerOrUndefined(value: number | undefined): number | undefined {
@@ -7996,9 +8294,16 @@ function operationPreviewFromEvalPreview(
   request: WorkbenchOperationRequest,
   preview: WorkbenchEvalPreview,
 ): WorkbenchOperationPreview {
+  if (request.kind !== "eval") {
+    throw new WorkbenchUserError("Eval preview requires an eval operation request.");
+  }
   return {
     kind: request.kind,
     variant: request.variant,
+    caseIds: [...request.caseIds],
+    targets: request.targets.map(copyWorkbenchOperationTarget),
+    phases: [...request.phases],
+    grader: copyWorkbenchOperationGrader(request.grader ?? (request.phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" })),
     ...operationPreviewReadiness(preview.readiness),
     versionId: preview.versionId,
     evalHash: preview.evalHash,
@@ -8081,9 +8386,21 @@ function disabledOperationPreviewFromError(
   return {
     kind: request.kind,
     variant: request.variant,
+    ...(request.kind === "eval" ? {
+      caseIds: [...request.caseIds],
+      targets: request.targets.map(copyWorkbenchOperationTarget),
+      phases: [...request.phases],
+      grader: copyWorkbenchOperationGrader(request.grader ?? (request.phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" })),
+    } : request.target ? {
+      targets: [copyWorkbenchOperationTarget(request.target)],
+    } : {}),
     canStart: false,
-    skills: request.skill ? [{ name: request.skill }] : [],
-    agents: request.agent ? [{ name: request.agent }] : [],
+    skills: request.kind === "eval"
+      ? uniqueStrings(request.targets.flatMap((target) => target.skill ? [target.skill] : [])).map((name) => ({ name }))
+      : request.target?.skill ? [{ name: request.target.skill }] : [],
+    agents: request.kind === "eval"
+      ? uniqueStrings(request.targets.flatMap((target) => target.agent ? [target.agent] : [])).map((name) => ({ name }))
+      : request.target?.agent ? [{ name: request.target.agent }] : [],
     caseCount: 0,
     samples: request.samples ?? 1,
     ...(request.kind === "improve" ? { budget: request.budget ?? 1 } : {}),
@@ -8879,9 +9196,8 @@ function resultsFromInternalComparison(
       ...(cell.runId ? { runId: cell.runId } : {}),
       ...(cell.status ? { status: cell.status } : {}),
       ...(cell.score !== undefined ? { quality: cell.score } : {}),
-      ...(cell.samples !== undefined ? { samples: cell.samples } : {}),
-      ...(cell.costUsd !== undefined ? { costUsd: cell.costUsd } : {}),
-      ...(cell.latencyMs !== undefined ? { latencyMs: cell.latencyMs } : {}),
+      ...(cell.coverage ? { coverage: cell.coverage } : {}),
+      ...(cell.report ? { report: cell.report } : {}),
       ...(cell.error ? { error: cell.error } : {}),
     };
     const resultCellKey = [
@@ -9039,7 +9355,7 @@ function compareResultCellEvidence(
   if (leftTerminal !== rightTerminal) {
     return leftTerminal ? 1 : -1;
   }
-  const sampleDelta = (left.samples ?? 0) - (right.samples ?? 0);
+  const sampleDelta = (left.coverage?.planned ?? 0) - (right.coverage?.planned ?? 0);
   if (sampleDelta !== 0) {
     return sampleDelta;
   }
@@ -9190,17 +9506,49 @@ export function buildWorkbenchResultsFromState(
   return resultsFromInternalComparison(buildInternalComparisonFromState(state, options), state);
 }
 
-export async function switchWorkbenchVersion(versionRef: string, options: WorkbenchCommandOptions = {}): Promise<WorkbenchVersion> {
+export async function switchWorkbenchVersion(versionRef: string, options: WorkbenchSwitchOptions = {}): Promise<WorkbenchSwitchResult> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
-  await requireInitialized(root);
-  const state = await loadState(root);
-  const version = resolveVersion(state, versionRef);
-  await materializeSkillFiles(root, version.files);
-  state.remotes = await readWorkbenchRemotesFile(root);
-  state.refs.current = version.id;
-  await saveState(root, state);
-  return version;
+    await requireInitialized(root);
+    const state = await loadState(root);
+    const version = resolveVersion(state, versionRef);
+    const liveFiles = await readSkillFiles(root);
+    const changes = compareSwitchFiles(liveFiles, version.files);
+    const unchanged = switchFileChangesEmpty(changes);
+    const liveHash = hashFiles(liveFiles);
+    const liveIsKnownVersion = Boolean(findWorkbenchVersionBySourceHash(state.versions, liveHash));
+    const requiresOverwrite = !unchanged && !liveIsKnownVersion;
+    if (requiresOverwrite && !options.overwrite && !options.dryRun) {
+      throw new WorkbenchCodedError(
+        "worktree_changed",
+        "Local package source has unsaved edits; refusing to overwrite it with workbench switch.",
+        {
+          remediation: `workbench switch ${version.id} --yes`,
+          subject: {
+            versionId: version.id,
+            added: changes.added,
+            changed: changes.changed,
+            removed: changes.removed,
+          },
+          exitCode: 1,
+        },
+      );
+    }
+    if (!options.dryRun) {
+      if (!unchanged) {
+        await materializeSkillFiles(root, version.files);
+      }
+      state.remotes = await readWorkbenchRemotesFile(root);
+      state.refs.current = version.id;
+      await saveState(root, state);
+    }
+    return {
+      version: copyVersion(version),
+      dryRun: options.dryRun === true,
+      changes,
+      requiresOverwrite,
+      unchanged,
+    };
   });
 }
 
@@ -9359,7 +9707,9 @@ function resolveStateObjectByRef<T extends { id: string }>(
   if (!normalized) {
     return undefined;
   }
-  const candidates = entries.filter((entry) => objectIdRefMatches(entry.id, normalized));
+  const candidates = entries
+    .filter((entry) => objectIdRefMatches(entry.id, normalized))
+    .sort((left, right) => left.id.localeCompare(right.id));
   if (candidates.length > 1) {
     throw new WorkbenchCodedError("ref_ambiguous", `${capitalize(kind)} ref is ambiguous: ${ref}. Candidates: ${candidates.map((entry) => entry.id).slice(0, 8).join(", ")}.`, {
       subject: { ref, candidates: candidates.map((entry) => entry.id).slice(0, 20) },
@@ -10037,6 +10387,40 @@ export function createWorkbenchInspectionSnapshotFromState(
   };
 }
 
+async function inspectionTraceOverlay(
+  root: string,
+  options: Pick<WorkbenchCommandOptions, "homeDir">,
+): Promise<WorkbenchTrace[]> {
+  const includeHome = options.homeDir !== undefined;
+  if (includeHome) {
+    await compactWorkbenchTraceSpool({
+      homeDir: options.homeDir,
+    });
+  }
+  return await listWorkbenchTraceRecords({
+    homeDir: options.homeDir,
+    projectRoot: root,
+    includeCandidates: true,
+    includeHome,
+  });
+}
+
+function mergeInspectionTraces(
+  overlay: readonly WorkbenchTrace[],
+  stateTraces: readonly WorkbenchTrace[],
+): WorkbenchTrace[] {
+  const byId = new Map<string, WorkbenchTrace>();
+  for (const trace of [...overlay, ...stateTraces]) {
+    if (!byId.has(trace.id)) {
+      byId.set(trace.id, copyTrace(trace));
+    }
+  }
+  return [...byId.values()].sort((left, right) =>
+    (right.updatedAt ?? right.createdAt).localeCompare(left.updatedAt ?? left.createdAt) ||
+    right.id.localeCompare(left.id)
+  );
+}
+
 export function currentWorkbenchVersionIdFromState(state: WorkbenchProjectState): string | undefined {
   return state.refs.current;
 }
@@ -10060,7 +10444,7 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
   const loadedState = await loadStateReadOnlyWithRetry(root);
   const stateWithHostedHandles = await applyLocalHostedRunHandles(root, loadedState);
   const state = await applyLocalRunCancellationRequests(root, stateWithHostedHandles);
-  const [authoredAgents, skillSources, syncCount, liveVersion, evalSnapshot, evaluationFiles, environmentStatus] = await Promise.all([
+  const [authoredAgents, skillSources, syncCount, liveVersion, evalSnapshot, evaluationFiles, environmentStatus, traceOverlay] = await Promise.all([
     readAgents(root).catch(() => []),
     readSkillSources(root).catch(() => state.skillSources),
     pendingSyncCount(root).catch(() => undefined),
@@ -10068,6 +10452,7 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
     readEvalSnapshot(root).catch(() => undefined),
     readWorkbenchEvaluationSourceFiles(root).catch(() => []),
     readSkillEvalEnvironmentStatus(root).catch(() => undefined),
+    inspectionTraceOverlay(root, options).catch(() => []),
   ]);
   const defaultSkill = await readDefaultSkillSelection(root, skillSources)
     .catch(() => defaultWorkbenchSkillSelectionFromState({ ...state, skillSources }));
@@ -10083,8 +10468,12 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
           copyEval(evalSnapshot),
           ...state.evals.filter((entry) => entry.hash !== evalSnapshot.hash).map(copyEval),
         ],
+        traces: mergeInspectionTraces(traceOverlay, state.traces),
       }
-    : state;
+    : {
+        ...state,
+        traces: mergeInspectionTraces(traceOverlay, state.traces),
+      };
   return createWorkbenchInspectionSnapshotFromState({
     root,
     state: snapshotState,
@@ -10148,6 +10537,7 @@ export async function createWorkbenchInspectionSnapshot(options: WorkbenchComman
     const evalSnapshot = await readEvalSnapshot(root).catch(() => undefined);
     const evaluationFiles = await readWorkbenchEvaluationSourceFiles(root).catch(() => []);
     const environmentStatus = await readSkillEvalEnvironmentStatus(root).catch(() => undefined);
+    const traceOverlay = await inspectionTraceOverlay(root, options).catch(() => []);
     const snapshotState = evalSnapshot
       ? {
           ...state,
@@ -10155,8 +10545,12 @@ export async function createWorkbenchInspectionSnapshot(options: WorkbenchComman
             copyEval(evalSnapshot),
             ...state.evals.filter((entry) => entry.hash !== evalSnapshot.hash).map(copyEval),
           ],
+          traces: mergeInspectionTraces(traceOverlay, state.traces),
         }
-      : state;
+      : {
+          ...state,
+          traces: mergeInspectionTraces(traceOverlay, state.traces),
+        };
     return createWorkbenchInspectionSnapshotFromState({
       root,
       skillSources: await readSkillSources(root).catch(() => state.skillSources),
@@ -11171,6 +11565,10 @@ async function executeWorkbenchEvaluationRun(args: {
   samples: number;
   cases?: readonly WorkbenchEvalCaseRuntime[];
   environmentDockerfile: string;
+  operationTargets?: readonly WorkbenchOperationTarget[];
+  operationPhases?: readonly WorkbenchOperationPhase[];
+  operationGrader?: WorkbenchOperationGrader;
+  gradeOfRunId?: string;
   parentRunId?: string;
   location?: WorkbenchRun["location"];
   remoteName?: string;
@@ -11228,22 +11626,24 @@ async function executeWorkbenchEvaluationRun(args: {
       : operationPlanSummaryForRun({
           kind: args.kind,
           variant: args.location ?? args.run?.location ?? "local",
+          targets: args.operationTargets,
+          phases: args.operationPhases,
+          grader: args.operationGrader,
           versionId: args.kind === "improve" ? args.baseVersionId ?? args.version.id : args.version.id,
           evalHash: args.evalSnapshot.hash,
           skillNames: targets.map((target) => target.skillBundle.skillName),
-	          agentNames: targets.map((target) => target.agent.name),
-	          caseIds: cases.map((runtimeCase) => runtimeCase.id),
-	          samples,
-	          rerun: (args.kind === "run" || args.kind === "grade" || args.kind === "eval") && args.rerun === true,
-	          budget: args.kind === "improve" ? args.requestedBudget : undefined,
-	          retryOfRunId: args.retryOfRunId,
-	        }),
+          agentNames: targets.map((target) => target.agent.name),
+          caseIds: cases.map((runtimeCase) => runtimeCase.id),
+          samples,
+          rerun: (args.kind === "run" || args.kind === "grade" || args.kind === "eval") && args.rerun === true,
+          budget: args.kind === "improve" ? args.requestedBudget : undefined,
+          gradeOfRunId: args.gradeOfRunId,
+          retryOfRunId: args.retryOfRunId,
+        }),
     lastProgressAt: createdAt,
   };
   delete run.finishedAt;
   delete run.error;
-  delete run.latencyMs;
-  delete run.costUsd;
   const environmentDockerfile = args.environmentDockerfile;
   const terminalDependencyJobs = new Map<string, RemoteWorkbenchJob>();
   const reusableJobsById = new Map<string, WorkbenchJob>();
@@ -11299,6 +11699,7 @@ async function executeWorkbenchEvaluationRun(args: {
       cases,
       samples,
       selectedSamples: args.selectedSamples,
+      executeRunId: args.gradeOfRunId,
     });
     if (subjects.length === 0) {
       throw new WorkbenchCodedError("no_grade_subjects", "No execution jobs found for the selected skill, agent, and cases.", {
@@ -11577,15 +11978,6 @@ async function executeWorkbenchEvaluationRun(args: {
   const allRunJobs = args.run
     ? args.state.jobs.filter((job) => job.runId === run.id && (run.jobIds ?? []).includes(job.id))
     : jobs;
-  run.latencyMs = allRunJobs.reduce((sum, job) => sum + (job.durationMs ?? 0), 0);
-  const costUsd = readWorkbenchSkillTraceResultsCostUsd(
-    args.state.traces
-      .filter((trace) => trace.runId === run.id)
-      .map((trace) => trace.result),
-  );
-  if (costUsd !== undefined) {
-    run.costUsd = costUsd;
-  }
   const errors = allRunJobs.flatMap((job) => job.error ? [job.error] : []);
   if (errors.length > 0) {
     run.error = summarizeJobErrors(errors);
@@ -11618,11 +12010,15 @@ function runCommandForGradeSelection(args: {
   const agents = uniqueStrings(args.targets.map((target) => target.agent.name));
   const caseIds = uniqueStrings(args.cases.map((runtimeCase) => runtimeCase.id));
   return workbenchOperationCliEquivalent({
-    kind: "run",
+    kind: "eval",
     variant: args.location,
-    ...(skills.length > 0 ? { skill: skills.join(",") } : {}),
-    ...(agents.length > 0 ? { agent: agents.join(",") } : {}),
-    ...(caseIds.length > 0 ? { caseIds } : {}),
+    caseIds,
+    targets: agents.map((agent) => ({
+      ...(skills[0] ? { skill: skills[0] } : {}),
+      agent,
+    })),
+    phases: ["execute"],
+    grader: { kind: "none" },
   });
 }
 
@@ -11972,11 +12368,12 @@ function draftCaseReadinessIssue(
 }
 
 function evalCaseDescriptorProjectPath(runtimeCase: WorkbenchEvalCaseRuntime): string {
-  const casePath = normalizeRelativePath(runtimeCase.path);
-  if (isCaseDescriptorPath(casePath)) {
-    return normalizeRelativePath(path.join(WORKBENCH_DIR, CASES_DIR, casePath));
-  }
-  return normalizeRelativePath(path.join(WORKBENCH_DIR, CASES_DIR, casePath, "case.yaml"));
+  return normalizeRelativePath(path.join(
+    WORKBENCH_DIR,
+    CASES_DIR,
+    normalizeRelativePath(runtimeCase.path),
+    CASE_DESCRIPTOR_FILE,
+  ));
 }
 
 function selectEvalCasesForRun(
@@ -12131,7 +12528,12 @@ function skillEvalObjectsFromRemoteJob(args: {
   const execution = jsonRecord(args.remoteJob.input).execution;
   const executionAdapter = asRuntimeRecord(asRuntimeRecord(execution).adapter);
   const adapterUse = typeof executionAdapter.use === "string" ? executionAdapter.use : undefined;
+  const jobCommand = configString(asRuntimeRecord(asRuntimeRecord(jsonRecord(args.remoteJob.input).execution).adapter).with as Record<string, Json>, "command");
   const jobResult = jobResultFromPayload(resultPayload, files, (args.role ?? "execute") === "grade");
+  const traceRole = args.role ?? "execute";
+  const outputSummary = textFromJson((resultPayload as Record<string, Json>).summary) ??
+    textFromJson((resultPayload as Record<string, Json>).error) ??
+    undefined;
   const trace: WorkbenchTrace = {
     id: args.traceId ?? `trace_${args.remoteJob.id}`,
     runId: args.run.id,
@@ -12150,6 +12552,46 @@ function skillEvalObjectsFromRemoteJob(args: {
       textFile("result.json", JSON.stringify(resultPayload, null, 2) + "\n"),
       ...files.map(copyFile),
     ],
+    protocol: "workbench.trace.v1",
+    origin: "eval",
+    updatedAt: finishedAt,
+    source: {
+      host: adapterUse ?? args.agent.adapter,
+      sessionId: args.run.id,
+      turnId: args.remoteJob.id,
+      ...(jobCommand ? { command: jobCommand } : {}),
+    },
+    status: {
+      capture: "captured",
+      execution: status === "succeeded" ? "completed" : status,
+      grade: traceRole === "grade" ? "graded" : "ungraded",
+      review: "unreviewed",
+      promotion: "none",
+    },
+    subjects: [
+      {
+        type: "skill",
+        id: args.skillBundle.skillName,
+        versionId: args.version.id,
+        confidence: "exact",
+        activation: "workbench-owned",
+      },
+      { type: "case", id: args.runtimeCase.id, confidence: "exact" },
+      { type: "agent", id: args.agent.name, confidence: "exact" },
+    ],
+    links: [
+      { type: "run", id: args.run.id },
+      { type: "job", id: args.remoteJob.id },
+      { type: "case", id: args.runtimeCase.id },
+      { type: "version", id: args.version.id },
+      { type: "agent", id: args.agent.name },
+    ],
+    input: { prompt: skillEvalCasePrompt(args.runtimeCase) },
+    ...(outputSummary ? { output: { assistantText: outputSummary } } : {}),
+    ...(usage ? { usage } : {}),
+    artifacts: files.map(copyFile),
+    review: { status: "unreviewed" },
+    resultIds: [],
   };
   const job: WorkbenchJob = {
     id: args.remoteJob.id,
@@ -12168,7 +12610,7 @@ function skillEvalObjectsFromRemoteJob(args: {
     ...(adapterUse ? { adapter: { use: adapterUse, hash: hashJson(executionAdapter) } } : {}),
     ...(args.dependencies && args.dependencies.length > 0 ? { dependencies: args.dependencies.map(copyJobDependency) } : {}),
     ...(jobResult ? { result: jobResult } : {}),
-    command: configString(asRuntimeRecord(asRuntimeRecord(jsonRecord(args.remoteJob.input).execution).adapter).with as Record<string, Json>, "command"),
+    command: jobCommand,
     artifactIds: [artifact.id],
     traceIds: [trace.id],
     createdAt: args.remoteJob.createdAt,
@@ -12390,6 +12832,10 @@ function skillImproveObjectsFromRemoteJob(args: {
       : {}),
     ...(jobError ? { error: jobError } : {}),
   } satisfies Record<string, Json>;
+  const execution = jsonRecord(args.remoteJob.input).execution;
+  const executionAdapter = asRuntimeRecord(asRuntimeRecord(execution).adapter);
+  const adapterUse = typeof executionAdapter.use === "string" ? executionAdapter.use : undefined;
+  const outputSummary = textFromJson(resultPayload.summary) ?? textFromJson(resultPayload.error) ?? undefined;
   const trace: WorkbenchTrace = {
     id: `trace_${args.remoteJob.id}`,
     runId: args.run.id,
@@ -12408,6 +12854,45 @@ function skillImproveObjectsFromRemoteJob(args: {
       textFile("result.json", JSON.stringify(resultPayload, null, 2) + "\n"),
       ...files.map(copyFile),
     ],
+    protocol: "workbench.trace.v1",
+    origin: "eval",
+    updatedAt: finishedAt,
+    source: {
+      host: adapterUse ?? args.agent.adapter,
+      sessionId: args.run.id,
+      turnId: args.remoteJob.id,
+    },
+    status: {
+      capture: "captured",
+      execution: status === "succeeded" ? "completed" : status,
+      grade: "ungraded",
+      review: "unreviewed",
+      promotion: "none",
+    },
+    subjects: [
+      {
+        type: "skill",
+        id: args.job.skillName,
+        versionId: args.job.versionId,
+        confidence: "exact",
+        activation: "workbench-owned",
+      },
+      { type: "agent", id: args.agent.name, confidence: "exact" },
+      { type: "run", id: args.run.id, confidence: "exact" },
+    ],
+    links: [
+      { type: "run", id: args.run.id },
+      { type: "job", id: args.remoteJob.id },
+      { type: "version", id: args.job.versionId },
+      { type: "agent", id: args.agent.name },
+      ...args.evidenceTraceIds.map((id) => ({ type: "trace" as const, id })),
+    ],
+    input: { prompt: "Improve the Workbench skill using the supplied trace evidence." },
+    ...(outputSummary ? { output: { assistantText: outputSummary } } : {}),
+    ...(usage ? { usage } : {}),
+    artifacts: files.map(copyFile),
+    review: { status: "unreviewed" },
+    resultIds: [],
   };
   const job: WorkbenchJob = {
     ...args.job,
@@ -12429,35 +12914,6 @@ export function readWorkbenchSkillRunOutputUsage(output: unknown): UsageSummary 
     normalizeUsageSummary(record.usage),
     normalizeUsageSummary(result.usage),
   ]);
-}
-
-export function readWorkbenchSkillTraceResultsCostUsd(results: readonly unknown[]): number | undefined {
-  const usage = mergeUsageSummaries(results.map((result) =>
-    normalizeUsageSummary(asRuntimeRecord(result).usage)
-  ));
-  return readWorkbenchSkillUsageCostUsd(usage);
-}
-
-export function readWorkbenchSkillTraceResultsRunnerCostUsd(results: readonly unknown[]): number | undefined {
-  const usage = mergeUsageSummaries(results.map((result) =>
-    normalizeUsageSummary(asRuntimeRecord(result).usage)
-  ));
-  return readWorkbenchSkillUsageRunnerCostUsd(usage);
-}
-
-export function readWorkbenchSkillUsageCostUsd(usage: UsageSummary | undefined): number | undefined {
-  const cost = mergeUsageSummaries([usage])?.total?.costUsd;
-  return typeof cost === "number" && Number.isFinite(cost) && cost >= 0
-    ? Number(cost.toFixed(6))
-    : undefined;
-}
-
-export function readWorkbenchSkillUsageRunnerCostUsd(usage: UsageSummary | undefined): number | undefined {
-  const merged = mergeUsageSummaries([usage]);
-  const cost = merged?.runner?.costUsd ?? merged?.total?.costUsd;
-  return typeof cost === "number" && Number.isFinite(cost) && cost >= 0
-    ? Number(cost.toFixed(6))
-    : undefined;
 }
 
 function durationMsBetween(startedAt: string | undefined, finishedAt: string): number {
@@ -12683,7 +13139,7 @@ function skillEvalCaseGradePlanFromCaseRecord(args: {
     const criteria = mergeRubricCriteria(globalCriteria, caseCriteria);
     if (args.strict && criteria.length === 0) {
       throw new WorkbenchUserError(
-        `Rubric scoring requires effective criteria for case ${args.caseId}. Add grade.with.criteria to ${EVAL_FILE} or ${args.caseSourcePath}.`,
+        `Grading requires effective criteria for case ${args.caseId}. Add grade.with.criteria to ${EVAL_FILE} or ${args.caseSourcePath}.`,
       );
     }
     const usesDerivedJudge = args.agent !== undefined &&
@@ -12703,7 +13159,7 @@ function skillEvalCaseGradePlanFromCaseRecord(args: {
       plan: {
         adapter,
         label: gradeAdapterLabel(adapter),
-        summary: criteria.length === 0 ? "No rubric criteria configured" : formatCount(criteria.length, "criterion"),
+        summary: criteria.length === 0 ? "No grading criteria configured" : formatCount(criteria.length, "criterion"),
         sources: gradePlanSources({
           evalFiles: args.evalFiles,
           caseSourcePath: args.caseSourcePath,
@@ -12754,7 +13210,7 @@ function skillEvalCaseGradeConfig(
 ): { config: Record<string, Json>; hasGrade: boolean } {
   if (caseRecord.rubric !== undefined) {
     throw new WorkbenchUserError(
-      `${caseSourcePath} rubric is not supported. Use grade.with.criteria for rubric criteria.`,
+      `${caseSourcePath} rubric is not supported. Use grade.with.criteria for grading criteria.`,
     );
   }
   const grade = caseRecord.grade;
@@ -12846,7 +13302,7 @@ function rubricCriterionConfig(criterion: RubricCriterion): Json {
 
 function gradeAdapterLabel(adapter: string): string {
   if (adapter === "rubric") {
-    return "Rubric";
+    return "Criteria";
   }
   if (adapter === "tests") {
     return "Tests";
@@ -12871,7 +13327,7 @@ function gradePlanSources(args: {
     sources.push({ path: args.caseSourcePath, role: "case" });
   }
   if (args.hasDerived) {
-    sources.push({ path: "selected agent", role: "derived", note: "Default rubric judge" });
+    sources.push({ path: "selected agent", role: "derived", note: "Default grading judge" });
   }
   return sources;
 }
@@ -12986,12 +13442,11 @@ function formatCount(count: number, singular: string): string {
 }
 
 function evalRuntimeCaseDescriptorSourcePath(runtimeCase: WorkbenchEvalCaseRuntime): string {
-  const casePath = normalizeRelativePath(runtimeCase.path);
-  if (isCaseDescriptorPath(casePath)) {
-    return normalizeRelativePath(path.join(CASES_DIR, casePath));
-  }
-  const descriptor = runtimeCase.files.find((file) => isCaseDescriptorPath(file.path));
-  return normalizeRelativePath(path.join(CASES_DIR, casePath, descriptor?.path ?? "case.yaml"));
+  return normalizeRelativePath(path.join(
+    CASES_DIR,
+    normalizeRelativePath(runtimeCase.path),
+    CASE_DESCRIPTOR_FILE,
+  ));
 }
 
 function commandGenericSpecForSkillEval(
@@ -13190,7 +13645,7 @@ function providerSkillEvalEngineCaseFiles(
   const privateFiles: SurfaceSnapshotFile[] = [];
   for (const file of runtimeCase.files) {
     const normalized = normalizeRelativePath(file.path);
-    if (normalized === "case.yaml" || isCaseDescriptorPath(normalized)) {
+    if (normalized === CASE_DESCRIPTOR_FILE) {
       continue;
     }
     if (normalized.startsWith("tests/")) {
@@ -13979,37 +14434,21 @@ async function readEvalCases(root: string): Promise<WorkbenchEvalCaseRuntime[]> 
   const cases: WorkbenchEvalCaseRuntime[] = [];
   for (const entry of entries) {
     const absolute = path.join(casesRoot, entry.name);
-    if (entry.isDirectory()) {
-      const files = await readFilesUnder(absolute);
-      const descriptor = files.find((file) => isCaseDescriptorPath(file.path));
-      const content = descriptor?.content ?? `id: ${entry.name}\n`;
-      const caseRecord = parseCaseRecord(
-        content,
-        descriptor ? path.join(entry.name, descriptor.path) : entry.name,
-      );
-      const command = caseCommandFromRecord(caseRecord);
-      cases.push({
-        id: caseIdFromRecord(caseRecord, entry.name),
-        path: entry.name,
-        content,
-        files,
-        ...(command ? { command } : {}),
-        ...(caseSmokeFromRecord(caseRecord) ? { smoke: true } : {}),
-      });
+    if (!entry.isDirectory()) {
       continue;
     }
-    if (!entry.isFile() || !isCaseDescriptorPath(entry.name)) {
+    const files = await readFilesUnder(absolute);
+    const descriptor = files.find((file) => normalizeRelativePath(file.path) === CASE_DESCRIPTOR_FILE);
+    if (!descriptor) {
       continue;
     }
-    const content = await fs.readFile(absolute);
-    const file = surfaceFileFromBuffer(entry.name, content, false);
-    const caseRecord = parseCaseRecord(file.content, entry.name);
+    const caseRecord = parseCaseRecord(descriptor.content, path.join(entry.name, descriptor.path));
     const command = caseCommandFromRecord(caseRecord);
     cases.push({
-      id: caseIdFromRecord(caseRecord, path.basename(entry.name, path.extname(entry.name))),
+      id: caseIdFromRecord(caseRecord, entry.name),
       path: entry.name,
-      content: file.content,
-      files: [file],
+      content: descriptor.content,
+      files,
       ...(command ? { command } : {}),
       ...(caseSmokeFromRecord(caseRecord) ? { smoke: true } : {}),
     });
@@ -14079,28 +14518,26 @@ function evalCaseSnapshotsFromEvalFiles(
     }
     const relativeCasePath = normalized.slice(CASES_DIR.length + 1);
     const [first, ...rest] = relativeCasePath.split("/");
-    const key = rest.length > 0
-      ? first
-      : path.basename(first ?? "case", path.extname(first ?? "case"));
-    if (!key) {
+    if (!first || rest.length === 0) {
       continue;
     }
-    const group = grouped.get(key) ?? [];
+    const group = grouped.get(first) ?? [];
     group.push(copyFile({ ...file, path: normalized }));
-    grouped.set(key, group);
+    grouped.set(first, group);
   }
   return [...grouped.entries()]
     .map(([fallbackId, caseFiles]) => {
       const sortedFiles = caseFiles.sort((left, right) => left.path.localeCompare(right.path));
-      const descriptor = sortedFiles.find((file) =>
-        isCaseDescriptorPath(file.path.slice(CASES_DIR.length + 1))
-      );
-      const record = descriptor ? parseCaseSnapshotRecord(descriptor.content) : {};
+      const caseSourcePath = normalizeRelativePath(path.join(CASES_DIR, fallbackId, CASE_DESCRIPTOR_FILE));
+      const descriptor = sortedFiles.find((file) => normalizeRelativePath(file.path) === caseSourcePath);
+      if (!descriptor) {
+        return null;
+      }
+      const record = parseCaseSnapshotRecord(descriptor.content);
       const id = caseIdFromRecord(record, fallbackId);
       const command = caseCommandFromRecord(record);
       const title = caseTitleFromRecord(record);
       const description = caseDescriptionFromRecord(record);
-      const caseSourcePath = descriptor?.path ?? `${CASES_DIR}/${fallbackId}/case.yaml`;
       const grade = skillEvalCaseGradePlanFromCaseRecord({
         evalFiles: files,
         evalGradeDeclaration: gradeDeclaration,
@@ -14119,6 +14556,7 @@ function evalCaseSnapshotsFromEvalFiles(
         files: sortedFiles.map(copyFile),
       };
     })
+    .filter((entry): entry is WorkbenchEvalCaseSnapshot => entry !== null)
     .sort((left, right) => left.id.localeCompare(right.id));
 }
 
@@ -14856,6 +15294,49 @@ async function materializeSkillFiles(root: string, files: readonly SurfaceSnapsh
   for (const file of files) {
     await writeSurfaceFile(root, file);
   }
+}
+
+function compareSwitchFiles(
+  currentFiles: readonly SurfaceSnapshotFile[],
+  targetFiles: readonly SurfaceSnapshotFile[],
+): WorkbenchSwitchFileChanges {
+  assertPackageSourceFilesOnly(targetFiles);
+  const currentByPath = new Map(currentFiles.map((file) => [file.path, file]));
+  const targetByPath = new Map(targetFiles.map((file) => [file.path, file]));
+  const added: string[] = [];
+  const changed: string[] = [];
+  const removed: string[] = [];
+  for (const file of targetFiles) {
+    const current = currentByPath.get(file.path);
+    if (!current) {
+      added.push(file.path);
+      continue;
+    }
+    if (!surfaceSnapshotFileEquivalent(current, file)) {
+      changed.push(file.path);
+    }
+  }
+  for (const file of currentFiles) {
+    if (!targetByPath.has(file.path)) {
+      removed.push(file.path);
+    }
+  }
+  return {
+    added: added.sort(),
+    changed: changed.sort(),
+    removed: removed.sort(),
+  };
+}
+
+function switchFileChangesEmpty(changes: WorkbenchSwitchFileChanges): boolean {
+  return changes.added.length === 0 && changes.changed.length === 0 && changes.removed.length === 0;
+}
+
+function surfaceSnapshotFileEquivalent(left: SurfaceSnapshotFile, right: SurfaceSnapshotFile): boolean {
+  return left.path === right.path &&
+    (left.encoding ?? "utf8") === (right.encoding ?? "utf8") &&
+    left.content === right.content &&
+    (left.executable === true) === (right.executable === true);
 }
 
 function assertPackageSourceFilesOnly(files: readonly SurfaceSnapshotFile[]): void {
@@ -16246,9 +16727,7 @@ function bestScoredComparableRun(args: {
   const run = args.runs.find((entry) => entry.id === evidence.runId);
   return run ? {
     ...run,
-    ...(evidence.samples !== undefined ? { requestedSamples: evidence.samples } : {}),
-    ...(evidence.costUsd !== undefined ? { costUsd: evidence.costUsd } : {}),
-    ...(evidence.latencyMs !== undefined ? { latencyMs: evidence.latencyMs } : {}),
+    ...(evidence.coverage ? { requestedSamples: evidence.coverage.planned } : {}),
     ...(evidence.error ? { error: evidence.error } : {}),
   } : undefined;
 }
@@ -16258,9 +16737,8 @@ type InternalComparisonEvidence = {
   status: WorkbenchRun["status"];
   createdAt: string;
   score?: number;
-  samples?: number;
-  costUsd?: number;
-  latencyMs?: number;
+  coverage?: WorkbenchSampleCoverage;
+  report?: WorkbenchJobReport;
   error?: string;
 };
 
@@ -16279,7 +16757,7 @@ function bestComparableEvidence(args: {
   const terminalMeasurements = measurements.filter((measurement) => isTerminalRunStatus(measurement.status));
   if (terminalMeasurements.length > 0) {
     return terminalMeasurements.sort((left, right) =>
-      (right.samples ?? 0) - (left.samples ?? 0) ||
+      (right.coverage?.planned ?? 0) - (left.coverage?.planned ?? 0) ||
       right.createdAt.localeCompare(left.createdAt)
     )[0];
   }
@@ -16303,7 +16781,7 @@ function bestScoredComparableEvidence(args: {
       typeof measurement.score === "number"
     )
     .sort((left, right) =>
-      (right.samples ?? 0) - (left.samples ?? 0) ||
+      (right.coverage?.planned ?? 0) - (left.coverage?.planned ?? 0) ||
       right.createdAt.localeCompare(left.createdAt)
     )[0];
 }
@@ -16393,14 +16871,6 @@ function latestMatchingRun(
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 }
 
-function comparisonRunSamples(run: WorkbenchRun, jobs: readonly WorkbenchJob[]): number {
-  const runJobs = jobs.filter((job) => runOwnsJob(run, job) && job.caseId !== "current");
-  if (runJobs.length > 0) {
-    return new Set(runJobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
-  }
-  return run.jobIds?.length ?? 0;
-}
-
 function comparisonEntryKey(
   versionId: string,
   skillName: string,
@@ -16415,19 +16885,16 @@ function comparisonEvidenceFromRun(
   jobs: readonly WorkbenchJob[],
   traces: readonly WorkbenchTrace[] = [],
 ): InternalComparisonEvidence {
-  const samples = comparisonRunSamples(run, jobs);
   const runJobs = jobs.filter((job) => runOwnsJob(run, job) && job.caseId !== "current");
-  const latencyMs = comparisonRunnerLatencyMsFromJobs(runJobs, samples);
   const score = runQualityScoreFromJobs(run, jobs);
-  const costUsd = comparisonRunnerCostUsdFromJobs(runJobs, traces);
+  const coverage = workbenchSampleCoverageForJobs(runJobs);
   return {
     runId: run.id,
     status: run.status,
     createdAt: run.createdAt,
     ...(score !== undefined ? { score } : {}),
-    ...(samples > 0 ? { samples } : {}),
-    ...(costUsd !== undefined ? { costUsd } : {}),
-    ...(latencyMs !== undefined ? { latencyMs } : {}),
+    ...(coverage ? { coverage } : {}),
+    ...(runJobs.length > 0 ? { report: buildWorkbenchJobReport(runJobs, traces) } : {}),
     ...(run.error ? { error: run.error } : {}),
   };
 }
@@ -16439,80 +16906,22 @@ function comparisonEvidenceFromJobs(
   traces: readonly WorkbenchTrace[] = [],
 ): InternalComparisonEvidence {
   const scoredJobs = jobs.filter((job) => jobQualityScore(job) !== undefined);
-  const samples = new Set(jobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
-  const latencyMs = comparisonRunnerLatencyMsFromJobs(jobs, samples);
+  const coverage = workbenchSampleCoverageForJobs(jobs);
   const errors = jobs.flatMap((job) => job.error ? [job.error] : []);
   const everyRunJobMatches = allRunJobs.filter((job) => job.caseId !== "current").every((job) => jobs.some((entry) => entry.id === job.id));
   const status = comparisonJobStatus(jobs, run.status);
   const score = status === "canceled" || scoredJobs.length === 0
     ? undefined
     : averageScores(scoredJobs.map(jobQualityScore));
-  const costUsd = comparisonRunnerCostUsdFromJobs(jobs, traces);
   return {
     runId: run.id,
     status,
     createdAt: run.createdAt,
     ...(score !== undefined ? { score } : {}),
-    ...(samples > 0 ? { samples } : {}),
-    ...(costUsd !== undefined ? { costUsd } : {}),
-    ...(latencyMs !== undefined ? { latencyMs } : {}),
+    ...(coverage ? { coverage } : {}),
+    report: buildWorkbenchJobReport(jobs, traces),
     ...(errors.length > 0 ? { error: summarizeJobErrors(errors) } : run.error && everyRunJobMatches ? { error: run.error } : {}),
   };
-}
-
-function comparisonRunnerCostUsdFromJobs(
-  jobs: readonly WorkbenchJob[],
-  traces: readonly WorkbenchTrace[],
-): number | undefined {
-  const runnerJobs = comparisonRunnerJobs(jobs);
-  const costs = runnerJobs
-    .map((job) => comparisonRunnerCostUsdFromJob(job, traces))
-    .filter((cost): cost is number => typeof cost === "number" && Number.isFinite(cost));
-  return costs.length > 0
-    ? Number(costs.reduce((sum, cost) => sum + cost, 0).toFixed(6))
-    : undefined;
-}
-
-function comparisonRunnerCostUsdFromJob(
-  job: WorkbenchJob,
-  traces: readonly WorkbenchTrace[],
-): number | undefined {
-  const cost = readWorkbenchSkillUsageRunnerCostUsd(job.result?.usage);
-  if (cost !== undefined) {
-    return cost;
-  }
-  return comparisonRunnerCostUsdFromTraceIds(job.traceIds, traces, [job]);
-}
-
-function comparisonRunnerLatencyMsFromJobs(
-  jobs: readonly WorkbenchJob[],
-  samples: number,
-): number | undefined {
-  const runnerJobs = comparisonRunnerJobs(jobs);
-  if (!runnerJobs.some((job) => job.durationMs !== undefined)) {
-    return undefined;
-  }
-  return Math.round(runnerJobs.reduce((sum, job) => sum + (job.durationMs ?? 0), 0) / Math.max(1, samples));
-}
-
-function comparisonRunnerJobs(jobs: readonly WorkbenchJob[]): WorkbenchJob[] {
-  return jobs.filter((job) => job.role !== "grade");
-}
-
-function comparisonRunnerCostUsdFromTraceIds(
-  traceIds: readonly string[],
-  traces: readonly WorkbenchTrace[],
-  jobs: readonly WorkbenchJob[] = [],
-): number | undefined {
-  if (traceIds.length === 0 && jobs.length === 0) {
-    return undefined;
-  }
-  const selectedTraceIds = new Set(traceIds);
-  const selectedJobIds = new Set(jobs.map((job) => job.id));
-  const results = traces
-    .filter((trace) => selectedTraceIds.has(trace.id) || (trace.jobId !== undefined && selectedJobIds.has(trace.jobId)))
-    .map((trace) => trace.result);
-  return readWorkbenchSkillTraceResultsRunnerCostUsd(results);
 }
 
 function comparisonJobStatus(jobs: readonly WorkbenchJob[], fallback: WorkbenchRun["status"]): WorkbenchRun["status"] {
@@ -16536,7 +16945,7 @@ function comparisonJobStatus(jobs: readonly WorkbenchJob[], fallback: WorkbenchR
 
 function comparisonCellEvidenceFields(
   evidence: InternalComparisonEvidence,
-): Pick<InternalComparisonCell, "runId" | "status" | "score" | "samples" | "costUsd" | "latencyMs" | "error"> {
+): Pick<InternalComparisonCell, "runId" | "status" | "score" | "coverage" | "report" | "error"> {
   const { createdAt: _createdAt, ...fields } = evidence;
   return fields;
 }
@@ -17629,10 +18038,31 @@ function uniqueResolvedAgentSnapshots(agents: readonly WorkbenchAgentSnapshot[])
 
 function copyRun(run: WorkbenchRun): WorkbenchRun {
   return {
-    ...run,
-    ...(run.operationPlan ? { operationPlan: copyOperationPlanSummary(run.operationPlan) } : {}),
-    ...(run.jobIds ? { jobIds: [...run.jobIds] } : {}),
+    id: run.id,
+    kind: run.kind,
+    versionId: run.versionId,
+    skillName: run.skillName,
+    skillBundleHash: run.skillBundleHash,
+    evalHash: run.evalHash,
+    agentName: run.agentName,
+    agentHash: run.agentHash,
+    status: run.status,
+    ...(run.operationPlan !== undefined ? { operationPlan: copyOperationPlanSummary(run.operationPlan) } : {}),
+    ...(run.jobIds !== undefined ? { jobIds: [...run.jobIds] } : {}),
     traceIds: [...run.traceIds],
+    createdAt: run.createdAt,
+    ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+    ...(run.parentRunId !== undefined ? { parentRunId: run.parentRunId } : {}),
+    ...(run.location !== undefined ? { location: run.location } : {}),
+    ...(run.remoteName !== undefined ? { remoteName: run.remoteName } : {}),
+    ...(run.baseVersionId !== undefined ? { baseVersionId: run.baseVersionId } : {}),
+    ...(run.requestedSamples !== undefined ? { requestedSamples: run.requestedSamples } : {}),
+    ...(run.requestedBudget !== undefined ? { requestedBudget: run.requestedBudget } : {}),
+    ...(run.retryOfRunId !== undefined ? { retryOfRunId: run.retryOfRunId } : {}),
+    ...(run.cancelRequestedAt !== undefined ? { cancelRequestedAt: run.cancelRequestedAt } : {}),
+    ...(run.lastProgressAt !== undefined ? { lastProgressAt: run.lastProgressAt } : {}),
+    ...(run.outputVersionId !== undefined ? { outputVersionId: run.outputVersionId } : {}),
+    ...(run.error !== undefined ? { error: run.error } : {}),
   };
 }
 
@@ -17696,12 +18126,6 @@ function safeName(value: string): string {
 function parseYamlRecord(source: string): Record<string, unknown> {
   const parsed = source.trim() ? YAML.parse(source) : {};
   return asRecord(parsed) ?? {};
-}
-
-function isCaseDescriptorPath(filePath: string): boolean {
-  const base = path.basename(filePath).toLowerCase();
-  return base === "case.yaml" || base === "case.yml" || base.endsWith(".case.yaml") ||
-    base.endsWith(".case.yml") || (/\.ya?ml$/u.test(base) && !filePath.includes("/"));
 }
 
 function parseCaseRecord(content: string, casePath: string): Record<string, unknown> {
@@ -18059,12 +18483,6 @@ function validateStateRun(value: unknown, index: number): void {
   const record = readRequiredRecord(value, `runs[${index}]`);
   for (const key of ["id", "kind", "versionId", "skillName", "skillBundleHash", "evalHash", "agentName", "agentHash", "status", "createdAt"]) {
     readRequiredString(record[key], `runs[${index}].${key}`);
-  }
-  if (record.costUsd !== undefined) {
-    readRequiredNumber(record.costUsd, `runs[${index}].costUsd`);
-  }
-  if (record.latencyMs !== undefined) {
-    readRequiredNumber(record.latencyMs, `runs[${index}].latencyMs`);
   }
   if (record.operationPlan !== undefined) {
     validateStateRunOperationPlan(record.operationPlan, `runs[${index}].operationPlan`);

@@ -9,7 +9,7 @@ Add file-format guidance to the eval case when a workflow generates or inspects 
 - Put runtime tools in `.workbench/environment/Dockerfile`.
 - Use structured parsers for content and data checks.
 - Render files when visual layout, pagination, slide composition, or Office-calculated values matter.
-- Keep format-specific checks in case files, tests, rubrics, scripts, or skill references.
+- Keep format-specific checks in case files, tests, grading criteria, scripts, or skill references.
 
 ## Runtime tools
 
@@ -46,7 +46,7 @@ For slide decks, pitch materials, board updates, and presentation exports:
 
 - Include a parser such as `python-pptx` when slide text, speaker notes, shape structure, or deck metadata drive the score.
 - Include LibreOffice/`soffice` when slide rendering, PDF conversion, or visual fidelity checks matter.
-- Render slides when the rubric depends on layout, alignment, charts, images, brand treatment, or overflow.
+- Render slides when grading depends on layout, alignment, charts, images, brand treatment, or overflow.
 - Check slide order, missing required slides, malformed charts or tables, and text that is visually clipped or off-canvas.
 
 ## PDF

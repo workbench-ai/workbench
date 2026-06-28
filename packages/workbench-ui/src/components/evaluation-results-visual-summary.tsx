@@ -32,6 +32,9 @@ import {
   buildComparisonMetricDescriptors,
   buildComparisonTradeoffData,
   buildComparisonTradeoffPairs,
+  comparisonMetricDisplayLabel,
+  comparisonMetricTestId,
+  comparisonMetricValueLabel,
   formatComparisonMetricValue,
   resultVersionGroupId,
   selectPrimaryComparisonMetrics,
@@ -46,11 +49,12 @@ import {
 const BAR_CHART_MIN_HEIGHT = 220;
 const BAR_CHART_MAX_HEIGHT = 520;
 const TRADEOFF_CHART_HEIGHT = 320;
-const DENSE_TRADEOFF_CHART_HEIGHT = 220;
+const DENSE_TRADEOFF_CHART_HEIGHT = 210;
 
 export function EvaluationResultsVisualSummary({
   rows,
   dense = false,
+  defaultTradeoffMetricId,
   metricIds,
   showBarCharts = true,
   showTradeoff = true,
@@ -61,9 +65,11 @@ export function EvaluationResultsVisualSummary({
    * summary fits without scrolling.
    */
   dense?: boolean;
+  /** Prefer this X-axis metric for the initial tradeoff chart tab. */
+  defaultTradeoffMetricId?: string;
   /**
-   * Restrict the rendered metric charts to this set of ids (for example
-   * `["score", "costUsd"]`). When omitted, all primary metrics are shown.
+   * Restrict the rendered metric charts to this set of ids. When omitted,
+   * all primary metrics are shown.
    */
   metricIds?: readonly string[];
   /** Render the per-metric bar charts. Defaults to true. */
@@ -123,6 +129,7 @@ export function EvaluationResultsVisualSummary({
         {showTradeoff && tradeoffPairs.length > 0 ? (
           <EvaluationTradeoffChart
             dense={dense}
+            defaultMetricId={defaultTradeoffMetricId}
             groupColorById={groupColorById}
             groups={groups}
             rows={rows}
@@ -166,7 +173,7 @@ function EvaluationMetricBarChart({
   const chartConfig = React.useMemo(
     () => ({
       value: {
-        label: displayMetricLabel(descriptor),
+        label: comparisonMetricValueLabel(descriptor),
       },
     }) satisfies ChartConfig,
     [descriptor],
@@ -179,13 +186,13 @@ function EvaluationMetricBarChart({
         BAR_CHART_MAX_HEIGHT,
       );
   const axisDomain = comparisonMetricAxisDomain(data, descriptor);
-  const displayLabel = displayMetricLabel(descriptor);
+  const displayLabel = comparisonMetricDisplayLabel(descriptor);
 
   return (
     <section
       aria-label={displayLabel}
       className="grid min-w-0 gap-3 rounded-lg border border-border/70 bg-background px-3 py-3"
-      data-testid={`evaluation-${metricTestId(descriptor)}-chart`}
+      data-testid={`evaluation-${comparisonMetricTestId(descriptor)}-chart`}
     >
       <header className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-medium text-foreground">{displayLabel}</h3>
@@ -273,18 +280,24 @@ function EvaluationMetricBarChart({
 
 function EvaluationTradeoffChart({
   dense,
+  defaultMetricId,
   groupColorById,
   groups,
   rows,
   tradeoffPairs,
 }: {
   dense: boolean;
+  defaultMetricId?: string;
   groupColorById: ReadonlyMap<string, string>;
   groups: readonly ComparisonGroupPresentation[];
   rows: ComparisonEvidenceRow[];
   tradeoffPairs: ComparisonTradeoffPair[];
 }) {
-  const [pairKey, setPairKey] = React.useState(tradeoffPairs[0]?.key ?? "");
+  const defaultPairKey = React.useMemo(
+    () => defaultTradeoffPairKey(tradeoffPairs, defaultMetricId),
+    [defaultMetricId, tradeoffPairs],
+  );
+  const [pairKey, setPairKey] = React.useState(defaultPairKey);
   const pair = tradeoffPairs.find((entry) => entry.key === pairKey) ?? tradeoffPairs[0];
   React.useEffect(() => {
     if (!pair) {
@@ -293,10 +306,10 @@ function EvaluationTradeoffChart({
       }
       return;
     }
-    if (pair.key !== pairKey) {
-      setPairKey(pair.key);
+    if (pair.key !== pairKey && defaultPairKey !== pairKey) {
+      setPairKey(defaultPairKey);
     }
-  }, [pair, pairKey]);
+  }, [defaultPairKey, pair, pairKey]);
 
   const data = React.useMemo(
     () => (pair ? buildComparisonTradeoffData(rows, pair, groupColorById) : []),
@@ -345,7 +358,7 @@ function EvaluationTradeoffChart({
           >
             {tradeoffPairs.map((entry) => (
               <ToggleGroupItem key={entry.key} value={entry.key}>
-                {tradeoffPairLabel(entry)}
+                {tradeoffTabLabel(entry)}
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
@@ -371,7 +384,7 @@ function EvaluationTradeoffChart({
           <XAxis
             axisLine={false}
             dataKey="x"
-            name={displayMetricLabel(pair.xMetric)}
+            name={comparisonMetricValueLabel(pair.xMetric)}
             tickFormatter={(value) => formatComparisonMetricValue(pair.xMetric, Number(value))}
             tickLine={false}
             tickMargin={8}
@@ -381,7 +394,7 @@ function EvaluationTradeoffChart({
             axisLine={false}
             dataKey="y"
             domain={pair.yMetric.kind === "number" ? [0, 1] : undefined}
-            name={displayMetricLabel(pair.yMetric)}
+            name={comparisonMetricValueLabel(pair.yMetric)}
             tickFormatter={(value) => formatComparisonMetricValue(pair.yMetric, Number(value))}
             tickLine={false}
             tickMargin={8}
@@ -399,10 +412,10 @@ function EvaluationTradeoffChart({
                 formatter={(_value, _name, item) => {
                   const datum = item.payload as ComparisonTradeoffDatum;
                   if (item.dataKey === "x") {
-                    return renderMetricTooltipLine(displayMetricLabel(pair.xMetric), datum.xDisplay);
+                    return renderMetricTooltipLine(comparisonMetricValueLabel(pair.xMetric), datum.xDisplay);
                   }
                   if (item.dataKey === "y") {
-                    return renderMetricTooltipLine(displayMetricLabel(pair.yMetric), datum.yDisplay);
+                    return renderMetricTooltipLine(comparisonMetricValueLabel(pair.yMetric), datum.yDisplay);
                   }
                   return null;
                 }}
@@ -624,32 +637,25 @@ function renderMetricTooltipLine(label: string, displayValue: string) {
   );
 }
 
-function displayMetricLabel(descriptor: ComparisonMetricDescriptor): string {
-  if (descriptor.id === "score") {
-    return "Quality";
-  }
-  return descriptor.label;
-}
-
-function metricTestId(descriptor: ComparisonMetricDescriptor): string {
-  if (descriptor.id === "score") {
-    return "quality";
-  }
-  if (descriptor.id === "latencyMs") {
-    return "latency";
-  }
-  if (descriptor.id === "costUsd") {
-    return "cost";
-  }
-  return descriptor.id.replace(/[^a-z0-9]+/giu, "-").toLowerCase();
-}
-
 function bestDirectionLabel(descriptor: ComparisonMetricDescriptor): string {
   return descriptor.direction === "lower" ? "Lower is better" : "Higher is better";
 }
 
 function tradeoffPairLabel(pair: ComparisonTradeoffPair): string {
-  return `${displayMetricLabel(pair.yMetric)} vs ${displayMetricLabel(pair.xMetric)}`;
+  return pair.label;
+}
+
+function tradeoffTabLabel(pair: ComparisonTradeoffPair): string {
+  return pair.label;
+}
+
+function defaultTradeoffPairKey(
+  pairs: readonly ComparisonTradeoffPair[],
+  metricId: string | undefined,
+): string {
+  return (metricId ? pairs.find((pair) => pair.xMetric.id === metricId) : undefined)?.key
+    ?? pairs[0]?.key
+    ?? "";
 }
 
 function clamp(value: number, min: number, max: number): number {

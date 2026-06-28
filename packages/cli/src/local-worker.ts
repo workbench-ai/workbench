@@ -15,6 +15,7 @@ interface LocalWorkerRequestPayload {
     dir?: string;
     authToken?: string;
     adapterAuthStoreRoot?: string;
+    homeDir?: string;
   };
   request: WorkbenchOperationRequest;
   startedPath: string;

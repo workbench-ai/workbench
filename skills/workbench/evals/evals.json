@@ -48,7 +48,7 @@
       "id": "agent-comparison-loop",
       "title": "Evaluate runtime configurations",
       "category": "agent_comparison",
-      "prompt": "Evaluate a skill across two runtime configurations and explain how to review performance, cost, and latency.",
+      "prompt": "Evaluate a skill across two runtime configurations and explain how to review quality, coverage, latency, and cost.",
       "expected_output": "The response uses workbench agent add for named agents, workbench eval --agents all --samples 1, and workbench results --versions all --agents all. It explains that local/command agents run Docker-style tests and Codex/Claude agents require adapter auth for provider-backed execution.",
       "files": [],
       "required_skills": [
@@ -85,7 +85,7 @@
       "title": "Inspect and switch improved version",
       "category": "version_inspection",
       "prompt": "An improved Workbench skill version id is available from `workbench log --versions`. Inspect SKILL.md, compare it to its base version, and accept that version locally.",
-      "expected_output": "The response uses workbench log --versions, workbench show <version-id>:SKILL.md, workbench diff <base-version-id>..<improved-version-id>, and workbench switch <improved-version-id>.",
+      "expected_output": "The response uses workbench log --versions, workbench show <version-id>:SKILL.md, workbench diff <base-version-id>..<improved-version-id>, workbench switch <improved-version-id> --dry-run, and workbench switch <improved-version-id> --yes.",
       "files": [],
       "required_skills": [
         "workbench"

@@ -58,7 +58,7 @@ Runs selected cases without grading them.
 Usage:
 
 ```bash
-workbench run [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]
+workbench run [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]
 ```
 
 Flags:
@@ -72,7 +72,7 @@ Grades existing execution output without rerunning the skill.
 Usage:
 
 ```bash
-workbench grade [--versions all|LIST] [--agents all|LIST] [--cases LIST] [--rerun] [--cloud] [--dry-run] [--json]
+workbench grade [--versions all|LIST] [--agents all|LIST] [--cases LIST] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]
 ```
 
 Flags:
@@ -86,12 +86,26 @@ Runs execution and grading for selected skill versions and agents. Omitted selec
 Usage:
 
 ```bash
-workbench eval [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]
+workbench eval [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]
 ```
 
 Flags:
 
 `--json`, `--dir VALUE`, `--help`, `--agents VALUE`, `--cases VALUE`, `--cloud`, `--dry-run`, `--rerun`, `--versions VALUE`, `-n N, --samples N`
+
+#### `workbench record`
+
+Turns native live trace capture plugins on, off, or reports status.
+
+Usage:
+
+```bash
+workbench record on|off|status [--hosts codex,claude] [--json]
+```
+
+Flags:
+
+`--json`, `--help`, `--hosts VALUE`
 
 #### `workbench improve`
 
@@ -100,7 +114,7 @@ Creates one improved skill version from evidence. Select exactly one version and
 Usage:
 
 ```bash
-workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]
+workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--dir DIR] [--json]
 ```
 
 Flags:
@@ -144,12 +158,26 @@ Shows recorded eval results for selected skill versions and agents.
 Usage:
 
 ```bash
-workbench results [--versions all|LIST] [--agents all|LIST] [--json]
+workbench results [--versions all|LIST] [--agents all|LIST] [--dir DIR] [--json]
 ```
 
 Flags:
 
 `--json`, `--dir VALUE`, `--help`, `--agents VALUE`, `--versions VALUE`
+
+#### `workbench traces`
+
+Lists live, imported, and eval trace evidence.
+
+Usage:
+
+```bash
+workbench traces [--dir DIR] [--json]
+```
+
+Flags:
+
+`--json`, `--dir VALUE`, `--help`
 
 #### `workbench status`
 
@@ -214,7 +242,7 @@ Shows recent versions and runs.
 Usage:
 
 ```bash
-workbench log [--runs|--versions] [--json]
+workbench log [--runs|--versions] [--dir DIR] [--json]
 ```
 
 Flags:
@@ -242,8 +270,8 @@ Shows a Workbench object, lists files for file-backed objects, or prints one fil
 Usage:
 
 ```bash
-workbench show REF [--json]
-workbench show REF:PATH [--json]
+workbench show REF [--dir DIR] [--json]
+workbench show REF:PATH [--dir DIR] [--json]
 ```
 
 Flags:
@@ -257,7 +285,7 @@ Shows changed files between two Workbench package versions.
 Usage:
 
 ```bash
-workbench diff [A..B] [--json]
+workbench diff [A..B] [--dir DIR] [--json]
 ```
 
 Flags:
@@ -271,12 +299,26 @@ Switches the working skill source to a recorded Workbench version.
 Usage:
 
 ```bash
-workbench switch VERSION [--json]
+workbench switch VERSION [--dry-run] [--yes] [--dir DIR] [--json]
 ```
 
 Flags:
 
-`--json`, `--dir VALUE`, `--help`
+`--json`, `--dir VALUE`, `--help`, `--dry-run`, `--yes`
+
+#### `workbench trace`
+
+Reviews trace evidence; failed and deferred reviews require --expected before promotion.
+
+Usage:
+
+```bash
+workbench trace review TRACE_ID --pass|--fail|--defer [--note TEXT] [--tag TAG]... [--expected TEXT] [--dir DIR] [--json]
+```
+
+Flags:
+
+`--json`, `--dir VALUE`, `--help`, `--pass`, `--fail`, `--defer`, `--note VALUE`, `--tag VALUE`, `--expected VALUE`
 
 #### `workbench open`
 
@@ -285,7 +327,7 @@ Serves the local Workbench UI.
 Usage:
 
 ```bash
-workbench open [--host HOST] [--port PORT] [--no-open]
+workbench open [--host HOST] [--port PORT] [--dir DIR] [--no-open]
 ```
 
 Flags:
@@ -296,17 +338,18 @@ Flags:
 
 #### `workbench case`
 
-Creates a draft eval case. Local and command-backed projects also get a tests/test.sh harness.
+Creates draft eval cases or promotes captured terminal trace evidence with input into a normal case.
 
 Usage:
 
 ```bash
 workbench case draft [ID] [--dir DIR] [--json]
+workbench case promote TRACE_ID --id CASE_ID [--dir DIR] [--json]
 ```
 
 Flags:
 
-`--json`, `--dir VALUE`, `--help`
+`--json`, `--dir VALUE`, `--help`, `--id VALUE`
 
 #### `workbench agent`
 
@@ -315,9 +358,9 @@ Lists, adds, or removes eval agent configurations.
 Usage:
 
 ```bash
-workbench agent list [--json]
-workbench agent add NAME --adapter X [--model M] [--with k=v]... [--json]
-workbench agent rm NAME [--json]
+workbench agent list [--dir DIR] [--json]
+workbench agent add NAME --adapter X [--model M] [--with k=v]... [--dir DIR] [--json]
+workbench agent rm NAME [--dir DIR] [--json]
 ```
 
 Flags:

@@ -1,6 +1,6 @@
 # Results
 
-Results show the recorded scorecard for evaluated versions, agents, cases, and samples. Inspect results before you evaluate again, improve, or publish.
+Results show the recorded scorecard for real evaluated versions, agents, cases, and samples. Inspect results before you evaluate again, improve, or publish.
 
 See [Runs and jobs](track-runs-jobs.md) for lifecycle state, [Traces, artifacts, and files](track-files.md) for raw evidence, and [Versions and lineage](track-versions.md) for source history.
 
@@ -14,18 +14,18 @@ workbench results --versions all --agents all
 workbench results --json
 ```
 
-Human output is optimized for scanning scores, latency, cost, versions, agents, cases, and samples. Use `--json` in automation.
+Human output is optimized for scanning Quality, Coverage, Latency, Cost, versions, agents, cases, and samples. Use `--json` in automation.
 
 ## What results tell you
 
-Results show recorded evidence rows. Human tables omit selected rows that have not run; JSON preserves the full selected set.
+Results show recorded evaluation evidence rows. Human tables omit selected rows that have not run; JSON preserves the full selected set. Cases matrix runs are real run evidence because Cases operates on authored cases and configurations.
 
 Use results to check:
 
 - Which package version was evaluated.
 - Which agent and model produced the outcome.
-- Which case and sample passed or failed.
-- Whether score, latency, cost, or errors changed enough to act.
+- Which case and sample produced which score and status.
+- Whether quality, latency, cost, or errors changed enough to act.
 
 ## Next steps
 
@@ -41,4 +41,4 @@ Open the local web view when evidence is easier to inspect visually:
 workbench open
 ```
 
-The browser UI reads the same inspection data as CLI commands. It can show source, files, evaluation results, run details, trace evidence, and output files without changing project state.
+The browser UI reads the same inspection data as CLI commands. It can show files, Results, the Cases matrix, Traces, run details, trace evidence, and output files. Adding a row in Cases creates an authored case, and cell submissions create durable runs and traces for that case.

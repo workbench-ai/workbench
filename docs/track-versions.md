@@ -12,10 +12,11 @@ Package versions are skill source snapshots. They are separate from eval identit
 workbench log
 workbench versions
 workbench diff <base-version-id>..<candidate-version-id>
-workbench switch <version-id>
+workbench switch <version-id> --dry-run
+workbench switch <version-id> --yes
 ```
 
-`versions` lists recorded package versions. `diff` compares package files. `switch` restores a recorded package version into the working folder without invoking Git.
+`versions` lists recorded package versions. `diff` compares package files. `switch --dry-run` previews the package files that would change. `switch --yes` restores a recorded package version into the working folder without invoking Git after you have reviewed the preview.
 
 ## Lineage
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   assertWorkbenchAdapterAuthEnvNameAllowed,
+  buildWorkbenchJobReport,
   buildWorkbenchRunEvidenceView,
   isWorkbenchAuthoredControlPath,
   isWorkbenchPackageSourcePath,
@@ -16,16 +17,376 @@ import {
   workbenchInspectionFileContent,
   workbenchInspectionFileContentUnavailableReason,
   workbenchInspectionFileManifest,
+  workbenchJobReportMetricBreakdown,
+  workbenchJobReportMetricSummary,
+  workbenchJobReportTotalCostUsd,
+  workbenchTraceProjection,
+  workbenchTracePromotionReadiness,
   type WorkbenchInspectionFileContent,
   type WorkbenchInspectionSnapshot,
   type WorkbenchInspectionSnapshotEnvelope,
+  type WorkbenchJob,
+  type WorkbenchJobReport,
   type WorkbenchProjectState,
   type WorkbenchRun,
   type WorkbenchRunSnapshot,
   type WorkbenchStateNotice,
+  type WorkbenchTrace,
 } from "../src/index";
 
 describe("workbench contract", () => {
+  test("projects trace lifecycle, review, prompt, output, and promotion readiness through one interface", () => {
+    const trace = {
+      id: "trace_projection",
+      runId: "run_projection",
+      versionId: "unknown",
+      skillName: "workbench",
+      skillBundleHash: "unknown",
+      agentName: "codex",
+      createdAt: "2026-06-27T00:00:00.000Z",
+      request: { input: { prompt: "  Project this prompt.  " } },
+      result: { status: "completed", output: { assistantText: "  Project this output.  " } },
+      files: [],
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      status: {
+        capture: "captured",
+        execution: "completed",
+        grade: "ungraded",
+        review: "failed",
+        promotion: "none",
+      },
+      review: {
+        status: "failed",
+        expected: "Expected correction.",
+      },
+    } satisfies WorkbenchTrace;
+
+    expect(workbenchTraceProjection(trace)).toMatchObject({
+      lifecycleStatus: "captured/completed/ungraded",
+      reviewStatus: "failed",
+      promotionStatus: "none",
+      prompt: "Project this prompt.",
+      output: "Project this output.",
+      promotionReadiness: { ok: true },
+    });
+  });
+
+  test("blocks promotion for unfinished traces before case generation", () => {
+    const trace = {
+      id: "trace_candidate",
+      runId: "run_candidate",
+      versionId: "unknown",
+      skillName: "workbench",
+      skillBundleHash: "unknown",
+      agentName: "codex",
+      createdAt: "2026-06-27T00:00:00.000Z",
+      request: { input: { prompt: "$workbench Finish before promotion." } },
+      result: { status: "running" },
+      files: [],
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      status: {
+        capture: "capturing",
+        execution: "running",
+        grade: "ungraded",
+        review: "unreviewed",
+        promotion: "none",
+      },
+      input: { prompt: "$workbench Finish before promotion." },
+      review: { status: "unreviewed" },
+    } satisfies WorkbenchTrace;
+
+    expect(workbenchTracePromotionReadiness(trace)).toMatchObject({
+      ok: false,
+      code: "trace_not_captured",
+    });
+
+    const traceWithoutInput = { ...trace };
+    delete traceWithoutInput.input;
+    expect(workbenchTracePromotionReadiness({
+      ...traceWithoutInput,
+      id: "trace_without_prompt",
+      request: {},
+      result: { status: "completed" },
+      status: {
+        ...trace.status,
+        capture: "captured",
+        execution: "completed",
+      },
+    })).toMatchObject({
+      ok: false,
+      code: "trace_prompt_required",
+    });
+  });
+
+  test("derives job report costs from matching usage roles before totals", () => {
+    const job = (
+      id: string,
+      role: WorkbenchJob["role"],
+      usage: NonNullable<WorkbenchJob["result"]>["usage"],
+    ): WorkbenchJob => ({
+      id,
+      runId: "run_cost_roles",
+      kind: "eval",
+      role,
+      versionId: "v001",
+      skillName: "current",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      caseId: id,
+      sample: 0,
+      status: "succeeded",
+      result: { usage },
+      artifactIds: [],
+      traceIds: [],
+      createdAt: "2026-06-26T00:00:00.000Z",
+    });
+    const report = buildWorkbenchJobReport([
+      job("job_execute", "execute", {
+        total: { costUsd: 0.5 },
+        runner: { costUsd: 0.2 },
+        engine: { costUsd: 0.3 },
+      }),
+      job("job_execute_total_only", "execute", {
+        total: { costUsd: 0.4 },
+      }),
+      job("job_execute_unmatched_scoped", "execute", {
+        total: { costUsd: 1 },
+        engine: { costUsd: 0.9 },
+      }),
+      job("job_grade", "grade", {
+        total: { costUsd: 0.7 },
+        runner: { costUsd: 0.1 },
+        engine: { costUsd: 0.4 },
+      }),
+      job("job_improve", "improve", {
+        total: { costUsd: 0.9 },
+        runner: { costUsd: 0.2 },
+        improver: { costUsd: 0.6 },
+      }),
+      job("job_setup", "setup", {
+        total: { costUsd: 0.8 },
+        runner: { costUsd: 0.1 },
+      }),
+    ]);
+
+    expect(report.roles.map((role) => [role.role, role.costUsd])).toEqual([
+      ["execute", 0.6],
+      ["grade", 0.4],
+      ["improve", 0.6],
+      ["setup", 0.8],
+    ]);
+    expect(workbenchJobReportTotalCostUsd(report)).toBe(2.4);
+  });
+
+  test("summarizes report latency and cost with one sample denominator", () => {
+    const job = (
+      id: string,
+      role: WorkbenchJob["role"],
+      caseId: string,
+      durationMs: number,
+    ): WorkbenchJob => ({
+      id,
+      runId: "run_role_units",
+      kind: "improve",
+      role,
+      versionId: "v001",
+      skillName: "current",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_hash",
+      caseId,
+      sample: 0,
+      status: "succeeded",
+      durationMs,
+      artifactIds: [],
+      traceIds: [],
+      createdAt: "2026-06-26T00:00:00.000Z",
+    });
+    const report = buildWorkbenchJobReport([
+      job("job_improve", "improve", "current", 500),
+      job("job_execute_one", "execute", "case-001", 100),
+      job("job_execute_two", "execute", "case-002", 100),
+      job("job_grade_one", "grade", "case-001", 300),
+    ]);
+
+    expect(report.unitCount).toBe(3);
+    expect(workbenchJobReportMetricSummary(report)).toMatchObject({
+      sampleCount: 3,
+      latency: { total: 1000, perSample: 333 },
+      roles: [
+        { role: "execute", latency: { total: 200, perSample: 67 } },
+        { role: "grade", latency: { total: 300, perSample: 100 } },
+        { role: "improve", latency: { total: 500, perSample: 167 } },
+      ],
+    });
+  });
+
+  test("summarizes grade and improve reports without primary-role semantics", () => {
+    const gradeOnlyReport = {
+      unitCount: 1,
+      jobCount: 1,
+      totalDurationMs: 300,
+      roles: [{
+        role: "grade",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 300,
+        costUsd: 0.91,
+      }],
+    } satisfies WorkbenchJobReport;
+    const improveOnlyReport = {
+      unitCount: 1,
+      jobCount: 1,
+      totalDurationMs: 700,
+      roles: [{
+        role: "improve",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 700,
+        costUsd: 0.12,
+      }],
+    } satisfies WorkbenchJobReport;
+
+    expect(workbenchJobReportMetricSummary(gradeOnlyReport)).toMatchObject({
+      latency: { total: 300, perSample: 300 },
+      cost: { total: 0.91, perSample: 0.91 },
+      roles: [{ role: "grade", latency: { total: 300, perSample: 300 }, cost: { total: 0.91, perSample: 0.91 } }],
+    });
+    expect(workbenchJobReportMetricSummary(improveOnlyReport)).toMatchObject({
+      latency: { total: 700, perSample: 700 },
+      cost: { total: 0.12, perSample: 0.12 },
+      roles: [{ role: "improve", latency: { total: 700, perSample: 700 }, cost: { total: 0.12, perSample: 0.12 } }],
+    });
+  });
+
+  test("breaks report metrics into run primary and grade or eval-total details", () => {
+    const report = {
+      unitCount: 2,
+      jobCount: 4,
+      totalDurationMs: 900,
+      roles: [{
+        role: "execute",
+        jobCount: 2,
+        queued: 0,
+        running: 0,
+        succeeded: 2,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 800,
+        costUsd: 0.6,
+      }, {
+        role: "grade",
+        jobCount: 2,
+        queued: 0,
+        running: 0,
+        succeeded: 2,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 100,
+        costUsd: 0.1,
+      }],
+    } satisfies WorkbenchJobReport;
+
+    expect(workbenchJobReportMetricBreakdown(report, "latency")).toMatchObject({
+      primary: { scope: "run", role: "execute", value: { total: 800, perSample: 400 } },
+      run: { scope: "run", role: "execute", value: { total: 800, perSample: 400 } },
+      grade: { scope: "grade", role: "grade", value: { total: 100, perSample: 50 } },
+      total: { scope: "total", value: { total: 900, perSample: 450 } },
+      details: [
+        { scope: "grade", value: { total: 100, perSample: 50 } },
+        { scope: "total", value: { total: 900, perSample: 450 } },
+      ],
+    });
+    expect(workbenchJobReportMetricBreakdown(report, "cost")).toMatchObject({
+      primary: { scope: "run", role: "execute", value: { total: 0.6, perSample: 0.3 } },
+      details: [
+        { scope: "grade", value: { total: 0.1, perSample: 0.05 } },
+        { scope: "total", value: { total: 0.7, perSample: 0.35 } },
+      ],
+    });
+  });
+
+  test("does not substitute grade cost as the primary run cost", () => {
+    const report = {
+      unitCount: 1,
+      jobCount: 2,
+      totalDurationMs: 1200,
+      roles: [{
+        role: "execute",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 900,
+      }, {
+        role: "grade",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 300,
+        costUsd: 0.91,
+      }],
+    } satisfies WorkbenchJobReport;
+
+    expect(workbenchJobReportMetricBreakdown(report, "latency").primary).toMatchObject({
+      scope: "run",
+      value: { total: 900, perSample: 900 },
+    });
+    expect(workbenchJobReportMetricBreakdown(report, "cost").primary).toBeUndefined();
+    expect(workbenchJobReportMetricBreakdown(report, "cost").details).toEqual([{
+      scope: "grade",
+      label: "grade",
+      role: "grade",
+      value: { total: 0.91, perSample: 0.91 },
+    }]);
+  });
+
+  test("uses the total as primary only when a report has no run role", () => {
+    const report = {
+      unitCount: 1,
+      jobCount: 1,
+      totalDurationMs: 300,
+      roles: [{
+        role: "grade",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 300,
+        costUsd: 0.91,
+      }],
+    } satisfies WorkbenchJobReport;
+
+    expect(workbenchJobReportMetricBreakdown(report, "latency")).toMatchObject({
+      primary: { scope: "total", value: { total: 300, perSample: 300 } },
+      details: [],
+    });
+    expect(workbenchJobReportMetricBreakdown(report, "cost")).toMatchObject({
+      primary: { scope: "total", value: { total: 0.91, perSample: 0.91 } },
+      details: [],
+    });
+  });
+
   test("keeps skill state and inspection snapshots as plain serializable DTOs", () => {
     const state = {
       schema: "workbench.skill.state.v1",
@@ -96,15 +457,39 @@ describe("workbench contract", () => {
         evidenceAccess: "full",
         run: {
           enabled: true,
-          defaultRequest: { kind: "run", variant: "local", samples: 1 },
+          defaultRequest: {
+            kind: "eval",
+            variant: "local",
+            caseIds: ["case_001"],
+            targets: [{ agent: "default" }],
+            phases: ["execute"],
+            grader: { kind: "none" },
+            samples: 1,
+          },
         },
         grade: {
           enabled: true,
-          defaultRequest: { kind: "grade", variant: "local", samples: 1 },
+          defaultRequest: {
+            kind: "eval",
+            variant: "local",
+            caseIds: ["case_001"],
+            targets: [{ agent: "default" }],
+            phases: ["grade"],
+            grader: { kind: "evaluation" },
+            samples: 1,
+          },
         },
         eval: {
           enabled: true,
-          defaultRequest: { kind: "eval", variant: "local", samples: 1 },
+          defaultRequest: {
+            kind: "eval",
+            variant: "local",
+            caseIds: ["case_001"],
+            targets: [{ agent: "default" }],
+            phases: ["execute", "grade"],
+            grader: { kind: "evaluation" },
+            samples: 1,
+          },
         },
         improve: {
           enabled: false,
@@ -127,9 +512,9 @@ describe("workbench contract", () => {
       envelope: {
         actions: {
           variant: "local",
-          run: { enabled: true, defaultRequest: { kind: "run", variant: "local" } },
-          grade: { enabled: true, defaultRequest: { kind: "grade", variant: "local" } },
-          eval: { enabled: true, defaultRequest: { kind: "eval", variant: "local" } },
+          run: { enabled: true, defaultRequest: { kind: "eval", variant: "local", phases: ["execute"] } },
+          grade: { enabled: true, defaultRequest: { kind: "eval", variant: "local", phases: ["grade"] } },
+          eval: { enabled: true, defaultRequest: { kind: "eval", variant: "local", phases: ["execute", "grade"] } },
           improve: { enabled: false, defaultRequest: { kind: "improve", variant: "local" } },
           acquisition: [{ label: "Open local project" }],
         },
@@ -196,6 +581,11 @@ describe("workbench contract", () => {
         elapsedMs: 1000,
         lastProgressAt: "2026-06-16T12:00:00.000Z",
       },
+      report: {
+        unitCount: 1,
+        jobCount: 0,
+        roles: [],
+      },
       measurements: [{
         versionId: "v002",
         skillName: "current",
@@ -206,7 +596,7 @@ describe("workbench contract", () => {
         runId: "run_matrix",
         status: "running",
         score: 1,
-        samples: 1,
+        coverage: { completed: 1, planned: 1 },
       }],
       route: {
         kind: "run",
@@ -309,9 +699,7 @@ describe("workbench contract", () => {
             runId: "run_matrix",
             status: "succeeded",
             quality: 1,
-            samples: 1,
-            costUsd: 0.42,
-            latencyMs: 1000,
+            coverage: { completed: 1, planned: 1 },
           },
           {
             skillVersionId: "skill_current",
@@ -319,7 +707,7 @@ describe("workbench contract", () => {
             agentVersionId: "agent_claude",
             runId: "run_matrix",
             status: "failed",
-            samples: 1,
+            coverage: { completed: 0, planned: 1 },
             error: "Model rejected.",
           },
         ],
@@ -334,8 +722,6 @@ describe("workbench contract", () => {
         agentName: "codex,claude",
         agentHash: "multi_agent_hash",
         status: "failed",
-        costUsd: 0.42,
-        latencyMs: 5000,
         jobIds: ["job_codex_execute", "job_codex_grade", "job_claude_execute", "job_claude_grade"],
         traceIds: [],
         createdAt,
@@ -455,16 +841,20 @@ describe("workbench contract", () => {
 
     const evidence = buildWorkbenchRunEvidenceView(snapshot, "run_matrix");
 
-    expect(evidence?.agents).toMatchObject([
+    expect(evidence?.measurements).toMatchObject([
       {
         agentLabel: "claude / haiku-4.5",
         adapter: "claude",
         model: "haiku-4.5",
         status: "failed",
-        costUsd: 0.23,
-        durationMs: 250,
-        completedCases: 0,
-        totalCases: 1,
+        report: {
+          totalDurationMs: 260,
+          roles: [
+            { role: "execute", costUsd: 0.23, totalDurationMs: 250 },
+            { role: "grade", totalDurationMs: 10 },
+          ],
+        },
+        coverage: { completed: 0, planned: 1 },
         failedJobs: 1,
         canceledJobs: 1,
       },
@@ -474,12 +864,17 @@ describe("workbench contract", () => {
         model: "gpt-5.5",
         status: "succeeded",
         score: 1,
-        costUsd: 0.42,
-        durationMs: 1000,
-        completedCases: 1,
-        totalCases: 1,
+        report: {
+          totalDurationMs: 3000,
+          roles: [
+            { role: "execute", costUsd: 0.32, totalDurationMs: 1000 },
+            { role: "grade", costUsd: 0.1, totalDurationMs: 2000 },
+          ],
+        },
+        coverage: { completed: 1, planned: 1 },
       },
     ]);
+    expect(evidence?.measurements.map((measurement) => workbenchJobReportTotalCostUsd(measurement.report))).toEqual([0.23, 0.42]);
     expect(evidence?.cases).toMatchObject([
       {
         agentLabel: "claude / haiku-4.5",
@@ -520,8 +915,8 @@ describe("workbench contract", () => {
         bundleHash: "bundle_current",
         skillVersionId: "skill_current",
         score: 0.9,
-        costUsd: 0.11,
-        latencyMs: 111,
+        executeCostUsd: 0.11,
+        executeDurationMs: 111,
       },
       {
         name: "no-skill",
@@ -529,8 +924,8 @@ describe("workbench contract", () => {
         bundleHash: "bundle_none",
         skillVersionId: "skill_none",
         score: 0.4,
-        costUsd: 0.22,
-        latencyMs: 222,
+        executeCostUsd: 0.22,
+        executeDurationMs: 222,
       },
       {
         name: "dummy-skill",
@@ -538,8 +933,8 @@ describe("workbench contract", () => {
         bundleHash: "bundle_dummy",
         skillVersionId: "skill_dummy",
         score: 0.7,
-        costUsd: 0.33,
-        latencyMs: 333,
+        executeCostUsd: 0.33,
+        executeDurationMs: 333,
       },
     ];
     const jobs = measuredSkills.flatMap((skill) => [
@@ -560,7 +955,8 @@ describe("workbench contract", () => {
         artifactIds: [],
         traceIds: [],
         createdAt,
-        durationMs: 10,
+        durationMs: skill.executeDurationMs,
+        result: { usage: { total: { costUsd: skill.executeCostUsd } } },
       },
       {
         id: `job_${skill.name}_grade`,
@@ -634,9 +1030,7 @@ describe("workbench contract", () => {
           runId: "run_skills",
           status: "succeeded" as const,
           quality: skill.score,
-          costUsd: skill.costUsd,
-          latencyMs: skill.latencyMs,
-          samples: 1,
+          coverage: { completed: 1, planned: 1 },
         })),
       },
       runs: [{
@@ -665,11 +1059,42 @@ describe("workbench contract", () => {
 
     const evidence = buildWorkbenchRunEvidenceView(snapshot, "run_skills");
 
-    expect(evidence?.agents).toMatchObject([
-      { skillLabel: "Current", agentLabel: "default / deterministic", score: 0.9, costUsd: 0.11, durationMs: 111, totalCases: 1 },
-      { skillLabel: "Dummy skill", agentLabel: "default / deterministic", score: 0.7, costUsd: 0.33, durationMs: 333, totalCases: 1 },
-      { skillLabel: "No skill", agentLabel: "default / deterministic", score: 0.4, costUsd: 0.22, durationMs: 222, totalCases: 1 },
+    expect(evidence?.measurements).toMatchObject([
+      {
+        skillLabel: "Current",
+        agentLabel: "default / deterministic",
+        score: 0.9,
+        report: {
+          roles: expect.arrayContaining([
+            expect.objectContaining({ role: "execute", totalDurationMs: 111 }),
+          ]),
+        },
+        coverage: { completed: 1, planned: 1 },
+      },
+      {
+        skillLabel: "Dummy skill",
+        agentLabel: "default / deterministic",
+        score: 0.7,
+        report: {
+          roles: expect.arrayContaining([
+            expect.objectContaining({ role: "execute", totalDurationMs: 333 }),
+          ]),
+        },
+        coverage: { completed: 1, planned: 1 },
+      },
+      {
+        skillLabel: "No skill",
+        agentLabel: "default / deterministic",
+        score: 0.4,
+        report: {
+          roles: expect.arrayContaining([
+            expect.objectContaining({ role: "execute", totalDurationMs: 222 }),
+          ]),
+        },
+        coverage: { completed: 1, planned: 1 },
+      },
     ]);
+    expect(evidence?.measurements.map((measurement) => workbenchJobReportTotalCostUsd(measurement.report))).toEqual([0.11, 0.33, 0.22]);
     expect(evidence?.cases.map((entry) => `${entry.skillLabel}:${entry.selectedJobId}:${entry.score}`)).toEqual([
       "Current:job_current_grade:0.9",
       "Dummy skill:job_dummy-skill_grade:0.7",

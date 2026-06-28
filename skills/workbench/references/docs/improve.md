@@ -16,7 +16,7 @@ workbench improve
 workbench results
 ```
 
-Perfect-only projects need better cases, stricter rubrics, or higher samples before improvement is useful. Add or tighten eval cases instead of asking for cosmetic source changes.
+Perfect-only projects need better cases, stricter grading criteria, or higher samples before improvement is useful. Add or tighten eval cases instead of asking for cosmetic source changes.
 
 ## Candidate and proof
 

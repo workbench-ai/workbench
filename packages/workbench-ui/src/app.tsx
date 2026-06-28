@@ -24,6 +24,7 @@ import {
   FolderOpenIcon,
   GitBranchIcon,
   HistoryIcon,
+  PlusIcon,
   PlayCircleIcon,
   RefreshCwIcon,
   WorkflowIcon,
@@ -31,8 +32,13 @@ import {
 } from "lucide-react";
 
 import {
+  buildWorkbenchJobReport,
   buildWorkbenchRunEvidenceView,
   isWorkbenchPackageSourcePath,
+  workbenchJobReportMetricBreakdown,
+  workbenchSampleCoverage,
+  workbenchSampleCoverageForJobs,
+  workbenchTraceProjection,
 } from "@workbench-ai/workbench-contract";
 import type {
   SurfaceSnapshotFile,
@@ -45,13 +51,21 @@ import type {
   WorkbenchInspectionFileContent,
   WorkbenchInspectionSnapshot,
   WorkbenchInspectionSnapshotEnvelope,
+  WorkbenchAgentSnapshot,
+  WorkbenchAgentVersion,
   WorkbenchJob,
+  WorkbenchJobReport,
+  WorkbenchOperationRequest,
+  WorkbenchOperationTarget,
+  WorkbenchReportMetricKind,
+  WorkbenchSampleCoverage,
   WorkbenchRun,
   WorkbenchRunEvidenceCaseResult,
   WorkbenchRunEvidenceJobPhase,
   WorkbenchRunEvidenceTraceJob,
   WorkbenchRunEvidenceView,
   WorkbenchRunSnapshot,
+  WorkbenchSkillVersion,
   WorkbenchSkillSource,
   WorkbenchStateNotice,
   WorkbenchTrace,
@@ -82,11 +96,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@workbench-ai/cli-web-ui/components/ui/dialog";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@workbench-ai/cli-web-ui/components/ui/popover";
 import {
   Table,
   TableBody,
@@ -128,7 +137,7 @@ import {
   formatCost,
   formatCount,
   formatDurationMs,
-  formatRunCost,
+  formatReportCost,
   formatScore,
   formatTimestamp,
   jobsForRun,
@@ -157,7 +166,9 @@ import {
   type WorkbenchRoute,
 } from "./lib/routes";
 import {
+  createEvaluationCase,
   routeForWorkbenchRunSnapshot,
+  startWorkbenchOperation,
 } from "./lib/operations";
 import type { VersionLineageFlow } from "./lib/lineage";
 import {
@@ -243,8 +254,8 @@ const EVALUATION_VIEW_ITEMS: Array<{
   icon: typeof WorkflowIcon;
 }> = [
   { value: "results", label: "Results", icon: WorkflowIcon },
-  { value: "source", label: "Source", icon: FolderOpenIcon },
   { value: "cases", label: "Cases", icon: FileTextIcon },
+  { value: "traces", label: "Traces", icon: ActivityIcon },
 ];
 
 export type WorkbenchVersionHistoryView = "list" | "lineage";
@@ -483,18 +494,26 @@ function stateStreamUrl(apiBasePath: string, cursor: string): string {
   return `${apiBasePath}/state/stream?cursor=${encodeURIComponent(cursor)}`;
 }
 
-export function workbenchRouteRequiresEvidence(route: WorkbenchRoute): boolean {
+type WorkbenchRouteEvidenceMode = "none" | "optional" | "required";
+
+export function workbenchRouteEvidenceMode(route: WorkbenchRoute): WorkbenchRouteEvidenceMode {
   switch (route.kind) {
     case "evaluation":
-      return route.view === "results";
+      if (route.view === "results") {
+        return "required";
+      }
+      if (route.view === "cases") {
+        return "optional";
+      }
+      return "required";
     case "case":
-      return route.section === "runs";
+      return route.section === "runs" ? "required" : "none";
     case "runs":
     case "run":
-      return true;
+      return "required";
     case "files":
     case "not-found":
-      return false;
+      return "none";
   }
 }
 
@@ -610,17 +629,20 @@ export function WorkbenchWorkspace({
     refreshSnapshot();
     navigate(routeForWorkbenchRunSnapshot(started));
   }, [navigate, refreshSnapshot]);
-  const routeNeedsEvidenceRefresh = Boolean(
+  const routeEvidenceMode = workbenchRouteEvidenceMode(route);
+  const routeWantsEvidenceRefresh = Boolean(
     snapshot &&
-    workbenchRouteRequiresEvidence(route) &&
+    actions?.evidenceAccess === "full" &&
+    routeEvidenceMode !== "none" &&
     workbenchSnapshotNeedsEvidenceRefresh(snapshot),
   );
+  const routeNeedsEvidenceRefresh = routeWantsEvidenceRefresh && routeEvidenceMode === "required";
   const evidenceRefreshSignature = useMemo(() => {
-    if (!routeNeedsEvidenceRefresh) {
+    if (!routeWantsEvidenceRefresh) {
       return null;
     }
-    return `${inspectionCursor ?? "no-cursor"}:${route.kind}`;
-  }, [inspectionCursor, route.kind, routeNeedsEvidenceRefresh]);
+    return `${inspectionCursor ?? "no-cursor"}:${route.kind}:${routeEvidenceMode}`;
+  }, [inspectionCursor, route.kind, routeEvidenceMode, routeWantsEvidenceRefresh]);
   const [requestedEvidenceRefresh, setRequestedEvidenceRefresh] = useState<string | null>(null);
 
   useEffect(() => {
@@ -651,7 +673,7 @@ export function WorkbenchWorkspace({
       snapshot={snapshot}
     />
   );
-  const routeFeedbackActive = loading || refreshing || routePending || routeLoadingIds.size > 0 || routeNeedsEvidenceRefresh;
+  const routeFeedbackActive = loading || refreshing || routePending || routeLoadingIds.size > 0 || routeWantsEvidenceRefresh;
   const showRouteSidebar = sidebarMode !== "hidden";
   const renderWorkspace = (children: ReactNode) => (
     <RouteLoadingContext.Provider value={reportRouteLoading}>
@@ -733,12 +755,14 @@ export function WorkbenchWorkspace({
               />
             ) : (
               <RouteBody
+                actions={actions}
                 apiBasePath={apiBasePath}
                 hrefFor={hrefFor}
                 inspectionCursor={inspectionCursor}
                 navigate={navigate}
                 onRouteClick={onRouteClick}
                 progressCursor={progressCursor}
+                refreshSnapshot={refreshSnapshot}
                 route={route}
                 snapshot={snapshot}
                 versionHistoryDialog={versionHistoryDialog}
@@ -1046,22 +1070,26 @@ function PrimaryTabs({
 }
 
 function RouteBody({
+  actions,
   apiBasePath,
   hrefFor,
   inspectionCursor,
   navigate,
   onRouteClick,
   progressCursor,
+  refreshSnapshot,
   route,
   snapshot,
   versionHistoryDialog,
 }: {
+  actions: WorkbenchActionCapabilities | null;
   apiBasePath: string;
   hrefFor: (route: WorkbenchRoute) => string;
   inspectionCursor: string | null;
   navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   progressCursor: string | null;
+  refreshSnapshot: () => void;
   route: WorkbenchRoute;
   snapshot: WorkbenchInspectionSnapshot;
   versionHistoryDialog?: WorkbenchVersionHistoryDialogState;
@@ -1080,10 +1108,12 @@ function RouteBody({
     case "evaluation":
       return (
         <EvaluationSurface
+          allowMutations={actions?.evidenceAccess === "full"}
           apiBasePath={apiBasePath}
           hrefFor={hrefFor}
           navigate={navigate}
           onRouteClick={onRouteClick}
+          refreshSnapshot={refreshSnapshot}
           route={route}
           snapshot={snapshot}
         />
@@ -1484,17 +1514,21 @@ function VersionHistory({
 }
 
 function EvaluationSurface({
+  allowMutations,
   apiBasePath,
   hrefFor,
   navigate,
   onRouteClick,
+  refreshSnapshot,
   route,
   snapshot,
 }: {
+  allowMutations: boolean;
   apiBasePath: string;
   hrefFor: (route: WorkbenchRoute) => string;
   navigate: (route: WorkbenchRoute, options?: { replace?: boolean }) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  refreshSnapshot: () => void;
   route: Extract<WorkbenchRoute, { kind: "evaluation" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
@@ -1527,8 +1561,8 @@ function EvaluationSurface({
           value={route.view}
           items={EVALUATION_VIEW_ITEMS}
           onValueChange={(value) => {
-            if (value === "results" || value === "cases" || value === "source") {
-              navigate(createEvaluationRoute({ view: value, evaluationId: activeEvaluationId ?? route.evaluationId, file: route.file }));
+            if (value === "results" || value === "cases" || value === "traces") {
+              navigate(createEvaluationRoute({ view: value, evaluationId: activeEvaluationId ?? route.evaluationId }));
             }
           }}
         />
@@ -1540,16 +1574,23 @@ function EvaluationSurface({
           />
         ) : null}
       </div>
-      {route.view === "source" ? (
-        <EvaluationSourceFiles
+      {route.view === "cases" ? (
+        <EvaluationCases
+          allowMutations={allowMutations}
           apiBasePath={apiBasePath}
           evaluationId={activeEvaluationId}
-          file={route.file}
+          hrefFor={hrefFor}
+          onRouteClick={onRouteClick}
+          refreshSnapshot={refreshSnapshot}
           snapshot={snapshot}
-          onFileChange={(nextFile, options) => navigate(withFileRouteState(route, nextFile), options)}
         />
-      ) : route.view === "cases" ? (
-        <EvaluationCases route={route} snapshot={snapshot} hrefFor={hrefFor} onRouteClick={onRouteClick} />
+      ) : route.view === "traces" ? (
+        <EvaluationTraces
+          evaluationId={activeEvaluationId}
+          hrefFor={hrefFor}
+          onRouteClick={onRouteClick}
+          snapshot={snapshot}
+        />
       ) : (
         <EvaluationResults
           evaluationId={activeEvaluationId}
@@ -1565,43 +1606,97 @@ function EvaluationSurface({
   );
 }
 
-function EvaluationSourceFiles({
-  apiBasePath,
+function EvaluationTraces({
   evaluationId,
-  file,
-  onFileChange,
+  hrefFor,
+  onRouteClick,
   snapshot,
 }: {
-  apiBasePath: string;
   evaluationId: string | null;
-  file: WorkbenchFileRouteState;
-  onFileChange: (file: WorkbenchFileRouteState, options?: { replace?: boolean }) => void;
+  hrefFor: (route: WorkbenchRoute) => string;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const reportRouteLoading = useRouteLoadingReporter();
-  const selectedEvaluation = selectedEvalSnapshot(snapshot, evaluationId);
-  const files = snapshot.evaluationFiles ?? selectedEvaluation?.files ?? [];
-  if (files.length === 0) {
-    return <EmptyState icon={FileTextIcon} title="No evaluation source" message="Evaluation source appears after Workbench observes .workbench authored files." variant="hero" size="sm" />;
+  const evalSnapshot = selectedEvalSnapshot(snapshot, evaluationId);
+  const evalCaseIds = new Set(evalSnapshot?.cases.map((entry) => entry.id) ?? []);
+  const traces = snapshot.traces
+    .filter((trace) => {
+      if (!evaluationId) {
+        return true;
+      }
+      if (trace.evalHash === evaluationId) {
+        return true;
+      }
+      if (trace.evalHash) {
+        return false;
+      }
+      return evalCaseIds.size > 0 && (trace.links?.some((link) => link.type === "case" && evalCaseIds.has(link.id)) ?? false);
+    })
+    .slice()
+    .sort((left, right) => (right.updatedAt ?? right.createdAt).localeCompare(left.updatedAt ?? left.createdAt));
+  if (traces.length === 0) {
+    return <EmptyState icon={ActivityIcon} title="No traces" message="Live and eval traces appear here after Workbench records agent evidence." variant="hero" size="sm" />;
   }
-  const defaultFilePath = files.some((entry) => entry.path === "eval.yaml")
-    ? "eval.yaml"
-    : files.find((entry) => entry.path === "environment/Dockerfile")?.path ?? files[0]?.path ?? null;
-  const ownerId = snapshot.evaluationFiles ? "current" : selectedEvaluation?.hash ?? "current";
   return (
-    <section className="grid min-w-0 gap-4" aria-label="Evaluation source">
-      <RepositoryFilesView
-        apiBasePath={apiBasePath}
-        defaultFilePath={defaultFilePath}
-        file={file}
-        files={files}
-        ownerId={ownerId}
-        ownerKind="evaluation"
-        repositoryLabel="Evaluation source"
-        onFileChange={onFileChange}
-        onLoadingChange={reportRouteLoading}
-      />
+    <section className="grid min-w-0 gap-4" aria-label="Evaluation traces">
+      <SurfaceSection title="Traces" icon={ActivityIcon} headingLevel={2} description={`${traces.length} trace${traces.length === 1 ? "" : "s"} recorded across live sessions and eval runs.`}>
+        <div className="grid min-w-0 divide-y">
+          {traces.map((trace) => {
+            const run = snapshot.runs.find((entry) => entry.id === trace.runId);
+            const traceProjection = workbenchTraceProjection(trace);
+            const prompt = traceProjection.prompt;
+            const output = traceProjection.output;
+            const evidenceRoute = run ? createRunRoute({ runId: run.id, source: "evaluation", evaluationId }) : null;
+            return (
+              <article key={trace.id} className="grid min-w-0 gap-3 py-4 first:pt-0 last:pb-0">
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="grid min-w-0 gap-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="font-mono text-sm font-medium">{shortId(trace.id)}</span>
+                      <Badge variant="outline">{trace.origin ?? "eval"}</Badge>
+                      <Badge variant="secondary">{traceProjection.lifecycleStatus}</Badge>
+                      <Badge variant="outline">{traceProjection.reviewStatus}</Badge>
+                      {traceProjection.promotionStatus === "promoted" ? <Badge variant="outline">promoted</Badge> : null}
+                    </div>
+                    <div className="min-w-0 text-sm text-muted-foreground">
+                      {trace.skillName} / {trace.agentName} / {formatTimestamp(trace.createdAt)}
+                    </div>
+                  </div>
+                  {evidenceRoute ? (
+                    <Button size="sm" variant="outline" asChild>
+                      <a href={hrefFor(evidenceRoute)} onClick={onRouteClick(evidenceRoute)}>
+                        <ActivityIcon className="size-4" />
+                        Evidence
+                      </a>
+                    </Button>
+                  ) : null}
+                </div>
+                {prompt || output ? (
+                  <div className="grid min-w-0 gap-2 md:grid-cols-2">
+                    {prompt ? <TracePreviewBlock title="Input" value={prompt} /> : null}
+                    {output ? <TracePreviewBlock title="Output" value={output} /> : null}
+                  </div>
+                ) : null}
+                <div className="flex min-w-0 flex-wrap gap-3 text-xs text-muted-foreground">
+                  <span>files {trace.files.length}</span>
+                  {trace.source?.host ? <span>host {trace.source.host}</span> : null}
+                  {trace.links?.find((link) => link.type === "case") ? <span>case {trace.links.find((link) => link.type === "case")?.id}</span> : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      </SurfaceSection>
     </section>
+  );
+}
+
+function TracePreviewBlock({ title, value }: { title: string; value: string }) {
+  return (
+    <div className="grid min-w-0 gap-1 rounded-md border bg-muted/20 p-3">
+      <span className="text-xs font-medium uppercase text-muted-foreground">{title}</span>
+      <p className="line-clamp-5 whitespace-pre-wrap break-words text-sm [overflow-wrap:anywhere]">{value}</p>
+    </div>
   );
 }
 
@@ -1703,29 +1798,22 @@ export function EvaluationLeaderboard({
     () => new Map(snapshot.runs.map((run) => [run.id, run])),
     [snapshot.runs],
   );
-  const jobsByRunId = useMemo(
-    () => new Map(snapshot.runs.map((run) => [run.id, jobsForRun(run, snapshot.jobs)])),
-    [snapshot.jobs, snapshot.runs],
-  );
   return (
     <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
-      <Table data-testid="evaluation-results-leaderboard" className="min-w-[49rem]">
+      <Table data-testid="evaluation-results-leaderboard" className="min-w-[42rem]">
         <TableHeader>
           <TableRow>
-            <TableHead className="w-[12rem]">Agent</TableHead>
-            <TableHead className="w-[7.5rem]">Status</TableHead>
-            <TableHead className="w-[5.5rem]">Cases</TableHead>
-            <TableHead className="w-[5.5rem]">Quality</TableHead>
-            <TableHead className="w-[6.5rem]">Latency</TableHead>
-            <TableHead className="w-[8rem]">Cost</TableHead>
-            <TableHead className="w-[8.5rem]">When</TableHead>
+            <TableHead className="w-[18rem]">Measurement</TableHead>
+            <TableHead className="w-[7rem]">Quality</TableHead>
+            <TableHead className="w-[8.5rem]">Latency</TableHead>
+            <TableHead className="w-[8.5rem]">Cost</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {groups.map((group) => (
             <Fragment key={group.id}>
               <TableRow data-testid="evaluation-results-version-group" className="hover:bg-transparent">
-                <TableCell colSpan={7} className="bg-muted/35 py-2 font-medium text-foreground">
+                <TableCell colSpan={4} className="bg-muted/35 py-2 font-medium text-foreground">
                   <span className="break-words [overflow-wrap:anywhere]">
                     {group.label}
                   </span>
@@ -1733,7 +1821,13 @@ export function EvaluationLeaderboard({
               </TableRow>
               {group.rows.map((row) => {
                 const run = row.runId ? runsById.get(row.runId) ?? null : null;
-                const jobs = run ? jobsByRunId.get(run.id) ?? [] : [];
+                const latencyMetric = formatReportMetricStack(row.report, "latency", formatDurationMs);
+                const costMetric = formatReportMetricStack(
+                  row.report,
+                  "cost",
+                  formatCost,
+                  missingCostLabelForStatus(row.statusLabel, Boolean(row.runId)),
+                );
                 const runRoute = hrefFor && onRouteClick && row.runId
                   ? createRunRoute({ runId: row.runId, source: "evaluation", evaluationId })
                   : null;
@@ -1757,19 +1851,28 @@ export function EvaluationLeaderboard({
                           {row.agentDetail}
                         </span>
                       )}
+                      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+                        {row.status ? (
+                          <StatusBadge status={row.status} />
+                        ) : (
+                          <Badge variant="outline">{row.statusLabel}</Badge>
+                        )}
+                        <span className="text-xs text-muted-foreground">{formatCoverage(row.coverage)}</span>
+                      </div>
                     </TableCell>
-                    <TableCell className="align-top">
-                      {row.status ? (
-                        <StatusBadge status={row.status} />
-                      ) : (
-                        <Badge variant="outline">{row.statusLabel}</Badge>
-                      )}
+                    <TableCell className="align-top font-medium">{formatQualityMetric(row.score)}</TableCell>
+                    <TableCell className="align-top text-muted-foreground">
+                      <MetricStack
+                        value={latencyMetric.value}
+                        detail={latencyMetric.detail}
+                      />
                     </TableCell>
-                    <TableCell className="align-top text-muted-foreground">{formatLeaderboardCases(row, jobs)}</TableCell>
-                    <TableCell className="align-top font-medium">{formatScore(row.score)}</TableCell>
-                    <TableCell className="align-top text-muted-foreground">{formatDurationMs(row.latencyMs)}</TableCell>
-                    <TableCell className="align-top text-muted-foreground">{formatLeaderboardCost(row)}</TableCell>
-                    <TableCell className="align-top text-muted-foreground">{formatTimestamp(run?.finishedAt ?? run?.createdAt)}</TableCell>
+                    <TableCell className="align-top text-muted-foreground">
+                      <MetricStack
+                        value={costMetric.value}
+                        detail={costMetric.detail}
+                      />
+                    </TableCell>
                   </TableRow>
                 );
               })}
@@ -1843,7 +1946,7 @@ function EvaluationSelect({
 function sortLeaderboardRows(rows: readonly ComparisonEvidenceRow[]): ComparisonEvidenceRow[] {
   return [...rows].sort((left, right) =>
     compareOptionalNumber(left.score, right.score, "desc") ||
-    compareOptionalNumber(left.latencyMs, right.latencyMs, "asc") ||
+    compareOptionalNumber(left.latencyPerSampleMs, right.latencyPerSampleMs, "asc") ||
     compareOptionalNumber(left.versionOrdinal, right.versionOrdinal, "desc") ||
     compareText(left.setupLabel, right.setupLabel) ||
     compareText(left.agentName, right.agentName) ||
@@ -1851,21 +1954,121 @@ function sortLeaderboardRows(rows: readonly ComparisonEvidenceRow[]): Comparison
   );
 }
 
-function formatLeaderboardCases(row: ComparisonEvidenceRow, jobs: readonly WorkbenchJob[]): string {
-  const coverage = caseSampleCoverage(jobs);
-  if (coverage.total > 0) {
-    return `${coverage.completed}/${coverage.total}`;
-  }
-  if (typeof row.samples === "number" && Number.isFinite(row.samples)) {
-    return `${row.samples}/${row.samples}`;
-  }
-  return "n/a";
+function MetricStack({
+  detail,
+  value,
+}: {
+  detail?: ReactNode;
+  value: ReactNode;
+}) {
+  return (
+    <div className="grid min-w-0 gap-0.5">
+      <div className="break-words font-medium text-foreground [overflow-wrap:anywhere]">{value}</div>
+      {detail ? <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{detail}</div> : null}
+    </div>
+  );
 }
 
-function formatLeaderboardCost(row: ComparisonEvidenceRow): string {
-  return typeof row.costUsd === "number" && Number.isFinite(row.costUsd)
-    ? formatCost(row.costUsd)
-    : missingCostLabelForStatus(row.statusLabel, Boolean(row.runId));
+function formatQualityMetric(score: number | undefined): string {
+  return score === undefined ? "n/a" : `score ${formatScore(score)}`;
+}
+
+function formatCoverage(coverage: WorkbenchSampleCoverage | undefined): string {
+  if (coverage && Number.isFinite(coverage.planned) && coverage.planned > 0) {
+    return `${coverage.completed} / ${coverage.planned} samples`;
+  }
+  return "No measured samples";
+}
+
+type ReportMetricValueKind = "perSample" | "total";
+
+interface ReportMetricLine {
+  label: string;
+  value: string;
+}
+
+function formatReportMetricStack(
+  report: WorkbenchJobReport | undefined,
+  metric: WorkbenchReportMetricKind,
+  formatter: (value: number) => string,
+  missingValue: ReactNode = "n/a",
+): { detail?: ReactNode; value: ReactNode } {
+  const breakdown = workbenchJobReportMetricBreakdown(report, metric);
+  const details = breakdown.details.filter((entry) => entry.scope !== "total");
+  const valueKind = reportMetricValueKind(breakdown.primary?.value, details);
+  const value = formatMetricValueForKind(breakdown.primary?.value, valueKind, formatter)
+    ?? (valueKind === "perSample" ? formatMetricValueForKind(breakdown.primary?.value, "total", formatter) : undefined)
+    ?? missingValue;
+  const detailLines = details.flatMap((entry): ReportMetricLine[] => {
+    const lineValue = formatMetricValueForKind(entry.value, valueKind, formatter)
+      ?? (valueKind === "perSample" ? formatMetricValueForKind(entry.value, "total", formatter) : undefined);
+    return lineValue ? [{ label: entry.label, value: lineValue }] : [];
+  });
+  return {
+    value,
+    ...(detailLines.length > 0 ? { detail: <ReportMetricLines lines={detailLines} /> } : {}),
+  };
+}
+
+function formatReportMetricTotal(
+  report: WorkbenchJobReport | undefined,
+  metric: WorkbenchReportMetricKind,
+  formatter: (value: number) => string,
+  missingValue = "n/a",
+): string {
+  return formatMetricValueForKind(
+    workbenchJobReportMetricBreakdown(report, metric).total?.value,
+    "total",
+    formatter,
+  ) ?? missingValue;
+}
+
+function reportMetricValueKind(
+  primary: { perSample?: number; total?: number } | undefined,
+  details: readonly { value: { perSample?: number; total?: number } }[],
+): ReportMetricValueKind {
+  if (primary?.perSample !== undefined || details.some((detail) => detail.value.perSample !== undefined)) {
+    return "perSample";
+  }
+  return "total";
+}
+
+function ReportMetricLines({ lines }: { lines: readonly ReportMetricLine[] }) {
+  return (
+    <div className="grid min-w-0 gap-0.5">
+      {lines.map((line) => (
+        <div
+          className="break-words [overflow-wrap:anywhere]"
+          key={`${line.label}:${line.value}`}
+        >
+          <span>{line.label}</span>{" "}
+          <span className="font-mono tabular-nums">{line.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatMetricValueForKind(
+  value: { perSample?: number; total?: number } | undefined,
+  kind: ReportMetricValueKind,
+  formatter: (value: number) => string,
+): string | undefined {
+  const numeric = kind === "perSample" ? value?.perSample : value?.total;
+  const formatted = formatFiniteMetricValue(numeric, formatter);
+  if (!formatted) {
+    return undefined;
+  }
+  return kind === "perSample" ? `${formatted}/sample` : `${formatted} total`;
+}
+
+function formatFiniteMetricValue(
+  value: number | undefined,
+  formatter: (value: number) => string,
+): string | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? formatter(value)
+    : undefined;
 }
 
 function compareOptionalNumber(
@@ -1893,63 +2096,969 @@ function compareText(left: string, right: string): number {
 }
 
 function EvaluationCases({
+  allowMutations,
+  apiBasePath,
+  evaluationId,
   hrefFor,
   onRouteClick,
-  route,
+  refreshSnapshot,
   snapshot,
 }: {
+  allowMutations: boolean;
+  apiBasePath: string;
+  evaluationId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  route: Extract<WorkbenchRoute, { kind: "evaluation" }>;
+  refreshSnapshot: () => void;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const evalSnapshot = selectedEvalSnapshot(snapshot, route.evaluationId);
+  const evalSnapshot = selectedEvalSnapshot(snapshot, evaluationId);
+  const matrixColumns = useMemo(
+    () => evalSnapshot ? buildCaseMatrixColumns(snapshot, evalSnapshot.hash) : [],
+    [evalSnapshot, snapshot],
+  );
   if (!evalSnapshot) {
-    return <EmptyState icon={FileTextIcon} title="No evaluation cases" message="Cases appear after Workbench observes .workbench/cases." variant="hero" size="sm" />;
-  }
-  if (evalSnapshot.cases.length === 0) {
-    return <EmptyState icon={FileTextIcon} title="No cases in this evaluation" message="Add authored cases under .workbench/cases and run Workbench again." variant="hero" size="sm" />;
+    return (
+      <EmptyState
+        icon={FileTextIcon}
+        title="No cases"
+        message="Add a case to start building the evaluation matrix."
+        variant="hero"
+        size="sm"
+      />
+    );
   }
   return (
-    <section className="min-w-0" aria-label="Cases">
+    <EvaluationCaseMatrix
+      apiBasePath={apiBasePath}
+      allowMutations={allowMutations}
+      columns={matrixColumns}
+      evalSnapshot={evalSnapshot}
+      hrefFor={hrefFor}
+      onRouteClick={onRouteClick}
+      refreshSnapshot={refreshSnapshot}
+      snapshot={snapshot}
+    />
+  );
+}
+
+function EvaluationTraceSteps({
+  caseResult,
+  prompt,
+}: {
+  caseResult: WorkbenchRunEvidenceCaseResult | null;
+  prompt: string;
+}) {
+  const steps: Array<{ detail?: string; durationMs?: number; label: string; status?: string }> = [
+    { label: "Task prompt", detail: prompt },
+  ];
+  if (caseResult?.execute) {
+    steps.push({
+      label: "Agent response",
+      status: caseResult.execute.status,
+      durationMs: caseResult.execute.durationMs,
+      detail: caseResult.execute.error,
+    });
+  }
+  if (caseResult?.grade) {
+    steps.push({
+      label: "Grade",
+      status: caseResult.grade.status,
+      durationMs: caseResult.grade.durationMs,
+      detail: caseResult.grade.error,
+    });
+  }
+  if (caseResult) {
+    steps.push({
+      label: "Final output captured",
+      status: caseResult.status,
+      detail: caseResult.error,
+    });
+  }
+  return (
+    <div className="grid min-w-0 gap-2">
+      {steps.map((step) => (
+        <div key={`${step.label}:${step.status ?? ""}`} className="grid min-w-0 gap-1 border-b border-border/60 pb-2 last:border-b-0 last:pb-0">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="size-1.5 rounded-full bg-primary" />
+              <span className="text-sm font-medium text-foreground">{step.label}</span>
+            </div>
+            {step.durationMs !== undefined ? <span className="text-xs text-muted-foreground">{formatDurationMs(step.durationMs)}</span> : null}
+          </div>
+          {step.detail ? (
+            <p className="break-words text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">{step.detail}</p>
+          ) : step.status ? (
+            <p className="text-xs leading-5 text-muted-foreground">{step.status}</p>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface CaseMatrixColumn {
+  agentDetail: string;
+  id: string;
+  evidence?: WorkbenchRunEvidenceView;
+  run?: WorkbenchRun;
+  target: WorkbenchOperationTarget;
+  versionLabel: string;
+}
+
+function EvaluationCaseMatrix({
+  apiBasePath,
+  allowMutations,
+  columns,
+  evalSnapshot,
+  hrefFor,
+  onRouteClick,
+  refreshSnapshot,
+  snapshot,
+}: {
+  apiBasePath: string;
+  allowMutations: boolean;
+  columns: CaseMatrixColumn[];
+  evalSnapshot: WorkbenchEvalSnapshot;
+  hrefFor: (route: WorkbenchRoute) => string;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  refreshSnapshot: () => void;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const allColumnIds = useMemo(() => columns.map(caseMatrixColumnId), [columns]);
+  const [visibleColumnIds, setVisibleColumnIds] = useState<string[]>(allColumnIds);
+  const [selectedCell, setSelectedCell] = useState<{ caseId: string; columnId: string } | null>(null);
+  const [addCaseOpen, setAddCaseOpen] = useState(false);
+
+  useEffect(() => {
+    setVisibleColumnIds((current) => {
+      const retained = current.filter((id) => allColumnIds.includes(id));
+      if (retained.length > 0) {
+        return retained;
+      }
+      return allColumnIds;
+    });
+  }, [allColumnIds]);
+
+  const displayColumns = columns.filter((column) => visibleColumnIds.includes(caseMatrixColumnId(column)));
+  const hiddenColumnId = allColumnIds.find((id) => !visibleColumnIds.includes(id));
+  const selectedColumn = selectedCell
+    ? columns.find((column) => caseMatrixColumnId(column) === selectedCell.columnId) ?? null
+    : null;
+  const selectedCase = selectedCell
+    ? evalSnapshot.cases.find((evalCase) => evalCase.id === selectedCell.caseId) ?? null
+    : null;
+
+  function removeColumn(columnId: string) {
+    setVisibleColumnIds((current) => {
+      if (current.length <= 1) {
+        return current;
+      }
+      return current.filter((id) => id !== columnId);
+    });
+  }
+
+  function revealHiddenColumn() {
+    if (hiddenColumnId) {
+      setVisibleColumnIds((current) => allColumnIds.filter((id) => id === hiddenColumnId || current.includes(id)));
+    }
+  }
+
+  return (
+    <section className="min-w-0" aria-label="Cases matrix">
       <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
-        <Table>
+        <Table className="min-w-[62rem] table-fixed">
           <TableHeader>
-            <TableRow>
-              <TableHead>Case</TableHead>
-              <TableHead>Grading</TableHead>
-              <TableHead>Runs</TableHead>
-              <TableHead>Latest</TableHead>
+            <TableRow className="bg-muted/25 hover:bg-muted/25">
+              <TableHead className="h-16 w-[20rem] px-4 text-sm font-medium">Input</TableHead>
+              {displayColumns.map((column, columnIndex) => (
+                <TableHead
+                  className="h-16 w-[13rem] border-l border-border/70 px-4 align-top whitespace-normal"
+                  key={caseMatrixColumnId(column)}
+                >
+                  <CaseMatrixColumnHeader
+                    canRemove={displayColumns.length > 1}
+                    column={column}
+                    columnIndex={columnIndex}
+                    onRemove={() => removeColumn(caseMatrixColumnId(column))}
+                  />
+                </TableHead>
+              ))}
+              <TableHead className="h-16 w-14 border-l border-border/70 p-0 align-middle">
+                <button
+                  aria-label="Add configuration"
+                  className="flex h-full w-full items-center justify-center text-lg font-medium text-muted-foreground transition-colors hover:bg-muted/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-35"
+                  disabled={!hiddenColumnId}
+                  title={hiddenColumnId ? "Add configuration" : "All configurations shown"}
+                  type="button"
+                  onClick={revealHiddenColumn}
+                >
+                  +
+                </button>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {evalSnapshot.cases.map((evalCase) => {
-              const jobs = jobsForCase(snapshot, evalSnapshot.hash, evalCase.id);
-              const latest = latestJob(jobs);
               const caseRoute = createCaseRoute({ caseId: evalCase.id, evaluationId: evalSnapshot.hash });
               return (
-                <TableRow key={evalCase.id} className="cursor-pointer" onClick={onRouteClick(caseRoute)}>
-                  <TableCell>
-                    <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(caseRoute)} onClick={onRouteClick(caseRoute)}>
-                      {caseDisplayTitle(evalCase)}
-                    </a>
-                    {showCaseSecondaryId(evalCase) ? (
-                      <div className="text-xs text-muted-foreground">{evalCase.id}</div>
-                    ) : null}
+                <TableRow className="hover:bg-transparent" key={evalCase.id}>
+                  <TableCell className="relative h-full p-0 align-top whitespace-normal">
+                    <a
+                      aria-label={`Open ${caseDisplayTitle(evalCase)}`}
+                      className="absolute inset-0 z-10 no-underline transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      href={hrefFor(caseRoute)}
+                      onClick={onRouteClick(caseRoute)}
+                    />
+                    <div className="pointer-events-none relative z-0 min-h-40 px-4 py-5">
+                      <CaseMatrixInputContent evalCase={evalCase} />
+                    </div>
                   </TableCell>
-                  <TableCell>
-                    <GradePlanCompact evalCase={evalCase} />
-                  </TableCell>
-                  <TableCell>{formatCount(jobs.length, "job")}</TableCell>
-                  <TableCell>{latest ? <StatusBadge status={latest.status} /> : <span className="text-muted-foreground">Not run</span>}</TableCell>
+                  {displayColumns.map((column) => (
+                    <TableCell
+                      className="relative h-full border-l border-border/70 p-0 align-top whitespace-normal"
+                      key={`${evalCase.id}:${caseMatrixColumnId(column)}`}
+                    >
+                      <CaseMatrixCell
+                        allowMutations={allowMutations}
+                        caseId={evalCase.id}
+                        column={column}
+                        onInspect={() => setSelectedCell({ caseId: evalCase.id, columnId: caseMatrixColumnId(column) })}
+                      />
+                    </TableCell>
+                  ))}
+                  <TableCell className="border-l border-border/70 p-0 align-top whitespace-normal" />
                 </TableRow>
               );
             })}
+            {allowMutations ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell className="p-0 align-top whitespace-normal">
+                  <CaseMatrixAddCaseControl
+                    onClick={() => setAddCaseOpen(true)}
+                  />
+                </TableCell>
+                {displayColumns.map((column) => (
+                  <TableCell
+                    className="border-l border-border/70 p-0 align-top whitespace-normal"
+                    key={`add-case:${caseMatrixColumnId(column)}`}
+                  />
+                ))}
+                <TableCell className="border-l border-border/70 p-0 align-top whitespace-normal" />
+              </TableRow>
+            ) : null}
           </TableBody>
         </Table>
       </div>
+      {allowMutations ? (
+        <CaseMatrixAddCaseDialog
+          apiBasePath={apiBasePath}
+          open={addCaseOpen}
+          refreshSnapshot={refreshSnapshot}
+          onOpenChange={setAddCaseOpen}
+        />
+      ) : null}
+      {selectedCase && selectedColumn ? (
+        <CaseMatrixCellDialog
+          apiBasePath={apiBasePath}
+          allowMutations={allowMutations}
+          column={selectedColumn}
+          evalCase={selectedCase}
+          evaluationId={evalSnapshot.hash}
+          hrefFor={hrefFor}
+          open={Boolean(selectedCell)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setSelectedCell(null);
+            }
+          }}
+          onRouteClick={onRouteClick}
+          refreshSnapshot={refreshSnapshot}
+          snapshot={snapshot}
+        />
+      ) : null}
     </section>
   );
+}
+
+function CaseMatrixInputContent({ evalCase }: { evalCase: WorkbenchEvalCaseSnapshot }) {
+  return (
+    <div className="grid min-w-0 gap-3">
+      <div className="font-medium text-primary">{caseDisplayTitle(evalCase)}</div>
+      {showCaseSecondaryId(evalCase) ? (
+        <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{evalCase.id}</div>
+      ) : null}
+      {evalCase.description ? (
+        <p className="line-clamp-3 break-words text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">
+          {evalCase.description}
+        </p>
+      ) : evalCase.command ? (
+        <p className="line-clamp-3 break-words text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">
+          {evalCase.command}
+        </p>
+      ) : null}
+      <GradePlanCompact evalCase={evalCase} />
+    </div>
+  );
+}
+
+function CaseMatrixAddCaseControl({
+  onClick,
+}: {
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label="Add case"
+      className="flex h-14 w-full items-center gap-2 px-4 text-left text-sm font-medium text-muted-foreground no-underline transition-colors hover:bg-muted/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      title="Add case"
+      type="button"
+      onClick={onClick}
+    >
+      <span aria-hidden="true" className="text-lg leading-none">+</span>
+      <span>Add case</span>
+    </button>
+  );
+}
+
+function CaseMatrixAddCaseDialog({
+  apiBasePath,
+  open,
+  onOpenChange,
+  refreshSnapshot,
+}: {
+  apiBasePath: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  refreshSnapshot: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [expected, setExpected] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setTitle("");
+      setPrompt("");
+      setExpected("");
+      setError(null);
+      setPending(false);
+    }
+  }, [open]);
+
+  async function submit() {
+    if (!prompt.trim() || pending) {
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      await createEvaluationCase(apiBasePath, {
+        ...(title.trim() ? { title: title.trim() } : {}),
+        prompt: prompt.trim(),
+        ...(expected.trim() ? { expected: expected.trim() } : {}),
+      });
+      refreshSnapshot();
+      onOpenChange(false);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Add case</DialogTitle>
+          <DialogDescription>Create a source-backed case row in this evaluation.</DialogDescription>
+        </DialogHeader>
+        <form
+          className="grid min-w-0 gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          <div className="grid min-w-0 gap-2">
+            <span className="text-sm font-medium text-foreground">Title</span>
+            <input
+              aria-label="Case title"
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              value={title}
+              onChange={(event) => setTitle(event.currentTarget.value)}
+            />
+          </div>
+          <div className="grid min-w-0 gap-2">
+            <span className="text-sm font-medium text-foreground">Prompt</span>
+            <textarea
+              aria-label="Case prompt"
+              className="min-h-32 resize-y rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              value={prompt}
+              onChange={(event) => setPrompt(event.currentTarget.value)}
+            />
+          </div>
+          <div className="grid min-w-0 gap-2">
+            <span className="text-sm font-medium text-foreground">Expected</span>
+            <textarea
+              aria-label="Expected result"
+              className="min-h-20 resize-y rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              value={expected}
+              onChange={(event) => setExpected(event.currentTarget.value)}
+            />
+          </div>
+          {error ? (
+            <div className="rounded-md border border-destructive/30 bg-destructive-soft px-3 py-2 text-sm leading-5 text-destructive">
+              {error}
+            </div>
+          ) : null}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!prompt.trim() || pending}>
+              {pending ? "Adding" : "Add case"}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CaseMatrixCellDialog({
+  apiBasePath,
+  allowMutations,
+  column,
+  evalCase,
+  evaluationId,
+  hrefFor,
+  onOpenChange,
+  onRouteClick,
+  open,
+  refreshSnapshot,
+  snapshot,
+}: {
+  apiBasePath: string;
+  allowMutations: boolean;
+  column: CaseMatrixColumn;
+  evalCase: WorkbenchEvalCaseSnapshot;
+  evaluationId: string;
+  hrefFor: (route: WorkbenchRoute) => string;
+  onOpenChange: (open: boolean) => void;
+  onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
+  open: boolean;
+  refreshSnapshot: () => void;
+  snapshot: WorkbenchInspectionSnapshot;
+}) {
+  const related = useMemo(
+    () => caseMatrixRelatedResults(snapshot, evalCase.id, column),
+    [column, evalCase.id, snapshot],
+  );
+  const current = related[0] ?? null;
+  const canGrade = Boolean(current?.caseResult.execute?.status === "succeeded");
+  const [pending, setPending] = useState<"run" | "eval" | "grade" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const prompt = evalCase.description ?? evalCase.command ?? evalCase.id;
+
+  async function startCellOperation(mode: "run" | "eval" | "grade") {
+    if (pending) {
+      return;
+    }
+    const phases = mode === "run"
+      ? ["execute"] as const
+      : mode === "grade"
+        ? ["grade"] as const
+        : ["execute", "grade"] as const;
+    const request: WorkbenchOperationRequest = {
+      kind: "eval",
+      variant: "local",
+      caseIds: [evalCase.id],
+      targets: [column.target],
+      phases,
+      grader: mode === "run" ? { kind: "none" } : { kind: "evaluation" },
+      samples: 1,
+      ...(mode === "grade" && current?.run ? { gradeOfRunId: current.run.id } : {}),
+    };
+    setPending(mode);
+    setError(null);
+    try {
+      await startWorkbenchOperation(apiBasePath, request);
+      refreshSnapshot();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setPending(null);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>{caseDisplayTitle(evalCase)}</DialogTitle>
+          <DialogDescription>{caseMatrixColumnLabel(column)} / {caseMatrixColumnDetail(column)}</DialogDescription>
+        </DialogHeader>
+        <div className="grid min-w-0 gap-4">
+          {allowMutations ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <Button type="button" size="sm" disabled={Boolean(pending)} onClick={() => void startCellOperation("run")}>
+                <PlayCircleIcon aria-hidden="true" data-icon="inline-start" />
+                {pending === "run" ? "Running" : "Run"}
+              </Button>
+              <Button type="button" size="sm" disabled={Boolean(pending)} onClick={() => void startCellOperation("eval")}>
+                <CheckIcon aria-hidden="true" data-icon="inline-start" />
+                {pending === "eval" ? "Running" : "Run + grade"}
+              </Button>
+              <Button type="button" size="sm" variant="outline" disabled={!canGrade || Boolean(pending)} onClick={() => void startCellOperation("grade")}>
+                {pending === "grade" ? "Grading" : "Grade latest"}
+              </Button>
+            </div>
+          ) : null}
+          {error ? (
+            <div className="rounded-md border border-destructive/30 bg-destructive-soft px-3 py-2 text-sm leading-5 text-destructive">
+              {error}
+            </div>
+          ) : null}
+          {current ? (
+            <div className="grid min-w-0 gap-4 md:grid-cols-[minmax(0,1fr)_16rem]">
+              <section className="grid min-w-0 gap-3 rounded-lg border border-border/70 p-4" aria-label="Current output">
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <CheckIcon aria-hidden="true" className="size-3.5 text-success" />
+                    Final output
+                  </div>
+                  {current.caseResult.score !== undefined ? <Badge variant="outline">{formatQualityMetric(current.caseResult.score)}</Badge> : <StatusBadge status={current.caseResult.status} />}
+                </div>
+                <p className="break-words text-sm leading-6 text-foreground [overflow-wrap:anywhere]">
+                  {caseResultFinalOutput(snapshot, current.caseResult)}
+                </p>
+                <EvaluationTraceSteps caseResult={current.caseResult} prompt={prompt} />
+              </section>
+              <section className="grid h-max min-w-0 gap-2 rounded-lg border border-border/70 p-4" aria-label="Run history">
+                <div className="text-sm font-medium text-foreground">{formatCount(related.length, "run")}</div>
+                <div className="grid min-w-0 gap-2">
+                  {related.map(({ run, caseResult }) => {
+                    const route = createRunCaseRoute({
+                      caseResult,
+                      evaluationId,
+                      phase: defaultRunCasePhase(caseResult),
+                      runId: run.id,
+                      source: "evaluation",
+                      view: "output",
+                    });
+                    return (
+                      <a
+                        className="grid min-w-0 gap-1 rounded-md border border-border/60 px-3 py-2 text-sm no-underline transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        href={hrefFor(route)}
+                        key={`${run.id}:${runCaseResultKey(caseResult)}`}
+                        onClick={onRouteClick(route)}
+                      >
+                        <span className="flex min-w-0 items-center justify-between gap-2">
+                          <StatusBadge status={caseResult.status} />
+                          <span className="text-xs text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</span>
+                        </span>
+                        <span className="truncate text-xs text-muted-foreground">{formatQualityMetric(caseResult.score)}</span>
+                      </a>
+                    );
+                  })}
+                </div>
+              </section>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-border/80 p-6 text-sm text-muted-foreground">
+              This cell has not been run.
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function caseMatrixRelatedResults(
+  snapshot: WorkbenchInspectionSnapshot,
+  caseId: string,
+  column: CaseMatrixColumn,
+): Array<{ run: WorkbenchRun; caseResult: WorkbenchRunEvidenceCaseResult }> {
+  return snapshot.runs
+    .flatMap((run) => {
+      const evidence = buildWorkbenchRunEvidenceView(snapshot, run);
+      return (evidence?.cases ?? [])
+        .filter((caseResult) => caseMatrixCaseResultMatches(caseResult, caseId, column))
+        .map((caseResult) => ({ run, caseResult }));
+    })
+    .sort((left, right) =>
+      (right.run.finishedAt ?? right.run.createdAt).localeCompare(left.run.finishedAt ?? left.run.createdAt) ||
+      right.run.id.localeCompare(left.run.id)
+    );
+}
+
+function caseMatrixCaseResultMatches(
+  caseResult: WorkbenchRunEvidenceCaseResult,
+  caseId: string,
+  column: CaseMatrixColumn,
+): boolean {
+  return caseResult.caseId === caseId &&
+    caseResult.agentName === column.target.agent &&
+    (!column.target.skill || caseResult.skillName === column.target.skill) &&
+    (!column.target.versionId || caseResult.versionId === column.target.versionId);
+}
+
+function CaseMatrixColumnHeader({
+  canRemove,
+  column,
+  columnIndex,
+  onRemove,
+}: {
+  canRemove: boolean;
+  column: CaseMatrixColumn;
+  columnIndex: number;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="relative grid min-w-0 gap-1.5 py-2 pr-7">
+      <button
+        aria-label={`Remove ${caseMatrixColumnLabel(column)}`}
+        className="absolute right-0 top-1 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-35"
+        disabled={!canRemove}
+        title="Remove configuration"
+        type="button"
+        onClick={onRemove}
+      >
+        <XIcon aria-hidden="true" className="size-3.5" />
+      </button>
+      <div className="flex min-w-0 items-center gap-2">
+        <span
+          aria-hidden="true"
+          className={cn("size-2 shrink-0 rounded-full", caseMatrixColumnDotClass(column, columnIndex))}
+        />
+        <span className="min-w-0 break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">
+          {caseMatrixColumnLabel(column)}
+        </span>
+      </div>
+      <div className="min-w-0 break-words text-xs font-normal text-muted-foreground [overflow-wrap:anywhere]">
+        {caseMatrixColumnDetail(column)}
+      </div>
+    </div>
+  );
+}
+
+function CaseMatrixCell({
+  allowMutations,
+  caseId,
+  column,
+  onInspect,
+}: {
+  allowMutations: boolean;
+  caseId: string;
+  column: CaseMatrixColumn;
+  onInspect: () => void;
+}) {
+  const caseResults = column.evidence?.cases.filter((caseResult) => caseResult.caseId === caseId) ?? [];
+  const summary = caseMatrixCellSummary(caseResults);
+  if (!summary) {
+    const content = (
+      <div className="pointer-events-none relative z-0 min-h-40 px-3 py-4">
+        <span className="text-sm text-muted-foreground">Not run</span>
+      </div>
+    );
+    return allowMutations ? (
+      <button
+        aria-label={`Inspect ${caseMatrixColumnLabel(column)} for ${caseId}`}
+        className="absolute inset-0 z-10 grid w-full text-left no-underline transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        type="button"
+        onClick={onInspect}
+      >
+        {content}
+      </button>
+    ) : (
+      <div className="absolute inset-0 grid w-full text-left">
+        {content}
+      </div>
+    );
+  }
+  const latencyMetric = formatReportMetricStack(summary.report, "latency", formatDurationMs);
+  const costMetric = formatReportMetricStack(summary.report, "cost", formatCost, formatReportCost(summary.report, summary.status));
+  return (
+    <button
+      aria-label={`Inspect ${caseMatrixColumnLabel(column)} for ${caseId}`}
+      className="absolute inset-0 z-10 grid w-full text-left no-underline transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      type="button"
+      onClick={onInspect}
+    >
+      <div className="pointer-events-none relative z-0 min-h-40 px-3 py-4">
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <StatusBadge status={summary.status} />
+          <span className="shrink-0 text-xs font-medium text-foreground">{formatQualityMetric(summary.score)}</span>
+        </div>
+        <div className="mt-3 text-xs text-muted-foreground">{formatCaseMatrixCoverage(summary.coverage)}</div>
+        <div className="mt-4 grid min-w-0 grid-cols-2 gap-3 border-t border-border/60 pt-3">
+          <CaseMatrixMetric label="Latency" value={formatCaseMatrixMetricValue(latencyMetric.value)} />
+          <CaseMatrixMetric label="Cost" value={formatCaseMatrixMetricValue(costMetric.value)} />
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function CaseMatrixMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: ReactNode;
+}) {
+  return (
+    <div className="grid min-w-0 gap-1">
+      <div className="text-[11px] leading-none text-muted-foreground">{label}</div>
+      <div className="break-words text-xs font-medium text-foreground [overflow-wrap:anywhere]">{value}</div>
+    </div>
+  );
+}
+
+function formatCaseMatrixCoverage(coverage: WorkbenchSampleCoverage | undefined): string {
+  if (coverage && coverage.planned > 0 && coverage.completed === coverage.planned) {
+    return formatCount(coverage.completed, "sample");
+  }
+  return formatCoverage(coverage);
+}
+
+function formatCaseMatrixMetricValue(value: ReactNode): ReactNode {
+  return typeof value === "string" ? value.replace(/\/sample$/u, "") : value;
+}
+
+function caseMatrixColumnId(column: CaseMatrixColumn): string {
+  return column.id;
+}
+
+function caseMatrixColumnLabel(column: CaseMatrixColumn): string {
+  return column.versionLabel;
+}
+
+function caseMatrixColumnDetail(column: CaseMatrixColumn): string {
+  return column.agentDetail;
+}
+
+function caseMatrixColumnDotClass(column: CaseMatrixColumn, columnIndex: number): string {
+  if (caseMatrixColumnLabel(column).toLowerCase().includes("no skill")) {
+    return "bg-muted-foreground";
+  }
+  return columnIndex === 0 ? "bg-primary" : "bg-success";
+}
+
+function buildCaseMatrixColumns(
+  snapshot: WorkbenchInspectionSnapshot,
+  evaluationId: string,
+): CaseMatrixColumn[] {
+  const runsById = new Map(snapshot.runs.map((run) => [run.id, run]));
+  const results = snapshot.results;
+  if (!results) {
+    return buildFallbackCaseMatrixColumns(snapshot);
+  }
+  const versionsById = new Map(results.versions.map((version) => [version.id, version]));
+  const agentsById = new Map(results.agents.map((agent) => [agent.id, agent]));
+  const seen = new Set<string>();
+  const columns = results.cells.flatMap((cell): CaseMatrixColumn[] => {
+    if (cell.evaluationId !== evaluationId) {
+      return [];
+    }
+    const version = versionsById.get(cell.skillVersionId);
+    const agent = agentsById.get(cell.agentVersionId);
+    if (!version || !agent) {
+      return [];
+    }
+    const target = caseMatrixOperationTargetForResultVersion(snapshot, version, agent);
+    const targetKey = caseMatrixTargetKey(target);
+    if (seen.has(targetKey)) {
+      return [];
+    }
+    seen.add(targetKey);
+    const run = cell.runId ? runsById.get(cell.runId) ?? null : null;
+    const evidence = run ? buildWorkbenchRunEvidenceView(snapshot, run) : null;
+    return [{
+      id: targetKey,
+      versionLabel: version.label,
+      agentDetail: agent.label,
+      target,
+      ...(run ? { run } : {}),
+      ...(evidence ? { evidence } : {}),
+    }];
+  });
+  return columns.length > 0 ? columns : buildFallbackCaseMatrixColumns(snapshot);
+}
+
+export function caseMatrixOperationTargetForResultVersion(
+  snapshot: WorkbenchInspectionSnapshot,
+  version: WorkbenchSkillVersion,
+  agent: WorkbenchAgentVersion,
+): WorkbenchOperationTarget {
+  const source = caseMatrixSkillSourceForResultVersion(snapshot, version);
+  const current = version.current === true || version.id === "current";
+  const versionId = current ? undefined : caseMatrixProjectVersionId(version);
+  return {
+    ...(source ? { skill: source.name } : current ? { skill: snapshot.status.defaultSkill ?? "current" } : {}),
+    ...(versionId ? { versionId } : {}),
+    agent: agent.name,
+  };
+}
+
+function caseMatrixSkillSourceForResultVersion(
+  snapshot: WorkbenchInspectionSnapshot,
+  version: WorkbenchSkillVersion,
+): WorkbenchSkillSource | null {
+  const bundleSource = version.contentHash
+    ? snapshot.skillBundles.find((bundle) => bundle.hash === version.contentHash)?.source
+    : undefined;
+  if (bundleSource) {
+    return bundleSource;
+  }
+  const sourceText = version.source?.trim();
+  if (sourceText) {
+    return snapshot.skillSources.find((source) => source.source === sourceText) ??
+      (sourceText === "none" ? snapshot.skillSources.find((source) => source.kind === "none") ?? null : null);
+  }
+  const defaultSkill = snapshot.status.defaultSkill ?? "current";
+  if (version.current === true || version.id === "current") {
+    return snapshot.skillSources.find((source) => source.name === defaultSkill) ?? null;
+  }
+  return null;
+}
+
+function caseMatrixProjectVersionId(version: WorkbenchSkillVersion): string | undefined {
+  const versionId = version.projectVersionId ?? (version.sourceKind === "local" ? version.id : undefined);
+  return versionId && versionId !== "current" ? versionId : undefined;
+}
+
+function caseMatrixTargetKey(target: WorkbenchOperationTarget): string {
+  return [target.skill ?? "", target.versionId ?? "", target.agent ?? ""].join("\u0000");
+}
+
+function buildFallbackCaseMatrixColumns(snapshot: WorkbenchInspectionSnapshot): CaseMatrixColumn[] {
+  const versionId = snapshot.status.currentVersionId ?? snapshot.versions.at(-1)?.id ?? null;
+  const targetVersionId = versionId && versionId !== "current" ? versionId : null;
+  const versionLabel = versionId
+    ? formatVersionDisplayName(versionId, snapshot.versions, comparisonLabelContext(snapshot))
+    : "Current skill";
+  return snapshot.agents.map((agent) => ({
+    id: `source:${versionId ?? "current"}:${agent.hash}`,
+    versionLabel,
+    agentDetail: formatAgentSnapshotDetail(agent),
+    target: {
+      ...(snapshot.status.defaultSkill ? { skill: snapshot.status.defaultSkill } : {}),
+      ...(targetVersionId ? { versionId: targetVersionId } : {}),
+      agent: agent.agent.name,
+    },
+  }));
+}
+
+function formatAgentSnapshotDetail(agent: WorkbenchAgentSnapshot): string {
+  return agent.agent.model ? `${agent.agent.adapter} / ${agent.agent.model}` : agent.agent.adapter;
+}
+
+interface CaseMatrixCellSummary {
+  status: string;
+  coverage: WorkbenchSampleCoverage | undefined;
+  report: WorkbenchJobReport | undefined;
+  detailResult?: WorkbenchRunEvidenceCaseResult;
+  score?: number;
+}
+
+function caseMatrixCellSummary(
+  caseResults: readonly WorkbenchRunEvidenceCaseResult[],
+): CaseMatrixCellSummary | null {
+  if (caseResults.length === 0) {
+    return null;
+  }
+  const scores = caseResults
+    .map((caseResult) => caseResult.score)
+    .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
+  const score = scores.length === caseResults.length
+    ? Number((scores.reduce((sum, value) => sum + value, 0) / scores.length).toFixed(3))
+    : undefined;
+  return {
+    status: aggregateCaseMatrixStatus(caseResults),
+    coverage: workbenchSampleCoverage(
+      caseResults.filter(caseMatrixResultIsComplete).length,
+      caseResults.length,
+    ),
+    report: combinedCaseMatrixReport(caseResults),
+    ...(caseResults.length === 1 ? { detailResult: caseResults[0]! } : {}),
+    ...(score !== undefined ? { score } : {}),
+  };
+}
+
+function aggregateCaseMatrixStatus(caseResults: readonly WorkbenchRunEvidenceCaseResult[]): string {
+  const statuses = caseResults.map((caseResult) => caseResult.status);
+  if (statuses.includes("failed")) {
+    return "failed";
+  }
+  if (statuses.includes("running")) {
+    return "running";
+  }
+  if (statuses.includes("queued")) {
+    return "queued";
+  }
+  if (statuses.includes("canceled")) {
+    return "canceled";
+  }
+  return statuses[0] ?? "unknown";
+}
+
+function caseMatrixResultIsComplete(caseResult: WorkbenchRunEvidenceCaseResult): boolean {
+  return caseResult.status === "succeeded" || caseResult.score !== undefined;
+}
+
+function combinedCaseMatrixReport(
+  caseResults: readonly WorkbenchRunEvidenceCaseResult[],
+): WorkbenchJobReport | undefined {
+  if (caseResults.length === 0) {
+    return undefined;
+  }
+  const roles = new Map<string, WorkbenchJobReport["roles"][number]>();
+  let jobCount = 0;
+  let totalDurationMs: number | undefined;
+  for (const report of caseResults.map((caseResult) => caseResult.report)) {
+    jobCount += report.jobCount;
+    totalDurationMs = addReportNumber(totalDurationMs, report.totalDurationMs);
+    for (const role of report.roles) {
+      const current = roles.get(role.role);
+      const roleDurationMs = addReportNumber(current?.totalDurationMs, role.totalDurationMs);
+      const roleCostUsd = addReportNumber(current?.costUsd, role.costUsd, 6);
+      roles.set(role.role, {
+        role: role.role,
+        jobCount: (current?.jobCount ?? 0) + role.jobCount,
+        queued: (current?.queued ?? 0) + role.queued,
+        running: (current?.running ?? 0) + role.running,
+        succeeded: (current?.succeeded ?? 0) + role.succeeded,
+        failed: (current?.failed ?? 0) + role.failed,
+        canceled: (current?.canceled ?? 0) + role.canceled,
+        ...(roleDurationMs !== undefined ? { totalDurationMs: roleDurationMs } : {}),
+        ...(roleCostUsd !== undefined ? { costUsd: roleCostUsd } : {}),
+      });
+    }
+  }
+  return {
+    unitCount: caseResults.length,
+    jobCount,
+    ...(totalDurationMs !== undefined ? { totalDurationMs } : {}),
+    roles: [...roles.values()],
+  };
+}
+
+function addReportNumber(
+  current: number | undefined,
+  next: number | undefined,
+  decimals?: number,
+): number | undefined {
+  if (typeof next !== "number" || !Number.isFinite(next)) {
+    return current;
+  }
+  const value = (current ?? 0) + next;
+  return decimals === undefined ? value : Number(value.toFixed(decimals));
 }
 
 function CaseDetail({
@@ -2140,6 +3249,32 @@ function caseDisplayTitle(evalCase: WorkbenchEvalCaseSnapshot): string {
   return title || evalCase.id;
 }
 
+function caseResultFinalOutput(
+  snapshot: WorkbenchInspectionSnapshot,
+  caseResult: WorkbenchRunEvidenceCaseResult,
+): string {
+  const jobId = caseResult.execute?.jobId ?? caseResult.selectedJobId;
+  const job = snapshot.jobs.find((entry) => entry.id === jobId) ?? null;
+  const result = job?.result;
+  const itemText = result?.items?.flatMap((item): string[] => {
+    if (typeof item.summary === "string" && item.summary.trim()) {
+      return [item.summary.trim()];
+    }
+    if (typeof item.body === "string" && item.body.trim()) {
+      return [item.body.trim()];
+    }
+    if (typeof item.value === "string" && item.value.trim()) {
+      return [item.value.trim()];
+    }
+    return [];
+  })[0];
+  return result?.summary?.trim() ||
+    itemText ||
+    result?.error?.trim() ||
+    caseResult.error?.trim() ||
+    "No final output text was captured.";
+}
+
 function showCaseSecondaryId(evalCase: WorkbenchEvalCaseSnapshot): boolean {
   const title = evalCase.title?.trim();
   return Boolean(title && title !== evalCase.id);
@@ -2228,30 +3363,48 @@ function RunsSurface({
           <TableHeader>
             <TableRow>
               <TableHead>Operation</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Version</TableHead>
-              <TableHead>Agent</TableHead>
-              <TableHead>Evaluation</TableHead>
+              <TableHead>Measurement</TableHead>
               <TableHead>Quality</TableHead>
+              <TableHead>Latency</TableHead>
+              <TableHead>Cost</TableHead>
               <TableHead>Updated</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {runs.map((run) => {
               const runRoute = createRunRoute({ runId: run.id, source: "runs" });
+              const runJobs = jobsForRun(run, snapshot.jobs);
+              const report = buildWorkbenchJobReport(runJobs, snapshot.traces);
+              const latencyMetric = formatReportMetricStack(report, "latency", formatDurationMs);
+              const costMetric = formatReportMetricStack(report, "cost", formatCost, formatReportCost(report, run.status));
+              const coverage = workbenchSampleCoverageForJobs(runJobs);
               return (
                 <TableRow key={run.id} className="cursor-pointer" onClick={onRouteClick(runRoute)}>
-                  <TableCell>
+                  <TableCell className="align-top">
                     <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(runRoute)} onClick={onRouteClick(runRoute)}>
                       {runOperationLabel(run)}
                     </a>
+                    <div className="mt-1"><StatusBadge status={run.status} /></div>
                   </TableCell>
-                  <TableCell><StatusBadge status={run.status} /></TableCell>
-                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</TableCell>
-                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)}</TableCell>
-                  <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{formatEvaluationDisplayName(run.evalHash, snapshot.evals)}</TableCell>
-                  <TableCell>{formatScore(runScore(run, snapshot.jobs))}</TableCell>
-                  <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
+                  <TableCell className="align-top">
+                    <div className="break-words font-medium [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</div>
+                    <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)} / {formatEvaluationDisplayName(run.evalHash, snapshot.evals)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">{formatCoverage(coverage)}</div>
+                  </TableCell>
+                  <TableCell className="align-top font-medium">{formatQualityMetric(runScore(run, snapshot.jobs))}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">
+                    <MetricStack
+                      value={latencyMetric.value}
+                      detail={latencyMetric.detail}
+                    />
+                  </TableCell>
+                  <TableCell className="align-top text-muted-foreground">
+                    <MetricStack
+                      value={costMetric.value}
+                      detail={costMetric.detail}
+                    />
+                  </TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
                 </TableRow>
               );
             })}
@@ -2286,10 +3439,15 @@ function RunDetailPage({
   const jobs = jobsForRun(run, snapshot.jobs);
   const evidence = buildWorkbenchRunEvidenceView(snapshot, run) ?? {
     runId: run.id,
-    agents: [],
+    measurements: [],
+    otherWork: [],
     cases: [],
     traceJobs: [],
   };
+  const runReport = buildWorkbenchJobReport(jobs, snapshot.traces);
+  const runLatencyMetric = formatReportMetricStack(runReport, "latency", formatDurationMs);
+  const runCostMetric = formatReportMetricStack(runReport, "cost", formatCost, formatReportCost(runReport, run.status));
+  const runCoverage = workbenchSampleCoverageForJobs(jobs);
   const summaryRoute = createRunRoute({
     runId: run.id,
     source: route.source,
@@ -2355,15 +3513,29 @@ function RunDetailPage({
           <>
             <MetricStrip
               items={[
-                { label: "Score", value: formatScore(runScore(run, jobs)) },
-                { label: "Cases", value: formatRunCaseCoverageSummary(jobs) },
-                { label: "Jobs", value: formatRunJobSummary(jobs) },
-                { label: "Duration", value: formatDurationMs(run.latencyMs) },
-                { label: "Cost", value: formatRunCost(run) },
+                {
+                  label: "Quality",
+                  value: formatQualityMetric(runScore(run, jobs)),
+                },
+                {
+                  label: "Coverage",
+                  value: formatCoverage(runCoverage),
+                },
+                {
+                  label: "Latency",
+                  value: runLatencyMetric.value,
+                  detail: runLatencyMetric.detail,
+                },
+                {
+                  label: "Cost",
+                  value: runCostMetric.value,
+                  detail: runCostMetric.detail,
+                },
               ]}
             />
             {run.error ? <ProblemState icon={CircleAlertIcon} title="Run error" message={run.error} align="start" /> : null}
-            <RunSummaryAgentTable evidence={evidence} />
+            <RunSummaryMeasurementTable evidence={evidence} />
+            <RunSummaryOtherWorkTable evidence={evidence} />
             <RunSummaryCaseTable
               evidence={evidence}
               evaluationId={route.evaluationId}
@@ -2400,43 +3572,92 @@ function RunDetailPage({
   );
 }
 
-function RunSummaryAgentTable({
+function RunSummaryMeasurementTable({
   evidence,
 }: {
   evidence: WorkbenchRunEvidenceView;
 }) {
-  if (evidence.agents.length === 0) {
+  if (evidence.measurements.length === 0) {
     return null;
   }
   return (
-    <SurfaceSection title="Agent results" icon={WorkflowIcon} headingLevel={3} description={formatAgentResultsSummary(evidence)}>
+    <SurfaceSection title="Measurements" icon={WorkflowIcon} headingLevel={3} description={formatMeasurementResultsSummary(evidence)}>
       <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Skill</TableHead>
-              <TableHead>Agent</TableHead>
-              <TableHead>Model</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Cases</TableHead>
-              <TableHead>Jobs</TableHead>
-              <TableHead>Score</TableHead>
+              <TableHead>Measurement</TableHead>
+              <TableHead>Quality</TableHead>
+              <TableHead>Coverage</TableHead>
+              <TableHead>Latency</TableHead>
               <TableHead>Cost</TableHead>
-              <TableHead>Duration</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {evidence.agents.map((agent) => (
-              <TableRow key={runAgentResultKey(agent)}>
-                <TableCell className="align-top font-medium">{formatSkillLabel(agent)}</TableCell>
-                <TableCell className="align-top font-medium">{agent.agentLabel}</TableCell>
-                <TableCell className="align-top text-muted-foreground">{formatAdapterModel(agent)}</TableCell>
-                <TableCell className="align-top"><StatusBadge status={agent.status} /></TableCell>
-                <TableCell className="align-top text-muted-foreground">{agent.completedCases} / {agent.totalCases}</TableCell>
-                <TableCell className="align-top text-muted-foreground">{agent.succeededJobs} / {agent.totalJobs}</TableCell>
-                <TableCell className="align-top">{formatScore(agent.score)}</TableCell>
-                <TableCell className="align-top text-muted-foreground">{formatCost(agent.costUsd)}</TableCell>
-                <TableCell className="align-top text-muted-foreground">{formatDurationMs(agent.durationMs)}</TableCell>
+            {evidence.measurements.map((measurement) => {
+              const latencyMetric = formatReportMetricStack(measurement.report, "latency", formatDurationMs);
+              const costMetric = formatReportMetricStack(measurement.report, "cost", formatCost, formatReportCost(measurement.report, measurement.status));
+              return (
+                <TableRow key={runEvidenceGroupKey(measurement)}>
+                  <TableCell className="align-top">
+                    <div className="font-medium">{formatSkillLabel(measurement)}</div>
+                    <div className="text-xs text-muted-foreground">{measurement.agentLabel} / {formatAdapterModel(measurement)}</div>
+                    <div className="mt-1"><StatusBadge status={measurement.status} /></div>
+                  </TableCell>
+                  <TableCell className="align-top font-medium">{formatQualityMetric(measurement.score)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">{formatCoverage(measurement.coverage)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">
+                    <MetricStack
+                      value={latencyMetric.value}
+                      detail={latencyMetric.detail}
+                    />
+                  </TableCell>
+                  <TableCell className="align-top text-muted-foreground">
+                    <MetricStack
+                      value={costMetric.value}
+                      detail={costMetric.detail}
+                    />
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </SurfaceSection>
+  );
+}
+
+function RunSummaryOtherWorkTable({
+  evidence,
+}: {
+  evidence: WorkbenchRunEvidenceView;
+}) {
+  if (evidence.otherWork.length === 0) {
+    return null;
+  }
+  return (
+    <SurfaceSection title="Other work" icon={WorkflowIcon} headingLevel={3}>
+      <div className="overflow-x-auto rounded-lg border border-border/70 bg-background">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Work</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Latency</TableHead>
+              <TableHead>Cost</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {evidence.otherWork.map((work) => (
+              <TableRow key={runEvidenceGroupKey(work)}>
+                <TableCell className="align-top">
+                  <div className="font-medium">{formatSkillLabel(work)}</div>
+                  <div className="text-xs text-muted-foreground">{work.agentLabel} / {formatAdapterModel(work)}</div>
+                </TableCell>
+                <TableCell className="align-top"><StatusBadge status={work.status} /></TableCell>
+                <TableCell className="align-top text-muted-foreground">{formatReportMetricTotal(work.report, "latency", formatDurationMs)}</TableCell>
+                <TableCell className="align-top text-muted-foreground">{formatReportMetricTotal(work.report, "cost", formatCost, formatReportCost(work.report, work.status))}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -2479,12 +3700,10 @@ function RunSummaryCaseTable({
           <TableHeader>
             <TableRow>
               <TableHead>Case</TableHead>
-              <TableHead>Skill</TableHead>
-              <TableHead>Agent</TableHead>
-              <TableHead>Execute</TableHead>
-              <TableHead>Grade</TableHead>
-              <TableHead>Score</TableHead>
-              <TableHead>Duration</TableHead>
+              <TableHead>Measurement</TableHead>
+              <TableHead>Quality</TableHead>
+              <TableHead>Latency</TableHead>
+              <TableHead>Cost</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -2498,6 +3717,8 @@ function RunSummaryCaseTable({
               });
               const evalCase = casesById.get(caseResult.caseId);
               const title = evalCase ? caseDisplayTitle(evalCase) : caseResult.caseId;
+              const latencyMetric = formatReportMetricStack(caseResult.report, "latency", formatDurationMs);
+              const costMetric = formatReportMetricStack(caseResult.report, "cost", formatCost, formatReportCost(caseResult.report, run.status));
               return (
                 <TableRow key={runCaseResultKey(caseResult)} className="cursor-pointer" onClick={onRouteClick(caseRoute)}>
                   <TableCell className="align-top">
@@ -2511,15 +3732,24 @@ function RunSummaryCaseTable({
                       <div className="text-xs text-muted-foreground">Sample {formatSampleNumber(caseResult.sample)}</div>
                     ) : null}
                   </TableCell>
-                  <TableCell className="align-top font-medium">{formatSkillLabel(caseResult)}</TableCell>
                   <TableCell className="align-top">
-                    <div className="font-medium">{caseResult.agentLabel}</div>
-                    <div className="text-xs text-muted-foreground">{formatAdapterModel(caseResult)}</div>
+                    <div className="font-medium">{formatSkillLabel(caseResult)}</div>
+                    <div className="text-xs text-muted-foreground">{caseResult.agentLabel} / {formatAdapterModel(caseResult)}</div>
+                    <div className="mt-1"><StatusBadge status={caseResult.status} /></div>
                   </TableCell>
-                  <TableCell className="align-top">{formatPhaseBadge(caseResult.execute)}</TableCell>
-                  <TableCell className="align-top">{formatPhaseBadge(caseResult.grade)}</TableCell>
-                  <TableCell className="align-top">{formatScore(caseResult.score)}</TableCell>
-                  <TableCell className="align-top text-muted-foreground">{formatDurationMs(caseResult.durationMs)}</TableCell>
+                  <TableCell className="align-top font-medium">{formatQualityMetric(caseResult.score)}</TableCell>
+                  <TableCell className="align-top text-muted-foreground">
+                    <MetricStack
+                      value={latencyMetric.value}
+                      detail={latencyMetric.detail}
+                    />
+                  </TableCell>
+                  <TableCell className="align-top text-muted-foreground">
+                    <MetricStack
+                      value={costMetric.value}
+                      detail={costMetric.detail}
+                    />
+                  </TableCell>
                 </TableRow>
               );
             })}
@@ -2572,12 +3802,11 @@ function RunTimelineSummary({
 }
 
 function formatRunEvidenceSummary(jobs: readonly WorkbenchJob[]): string {
-  return `${formatRunCaseCoverageSummary(jobs)}; ${formatRunJobSummary(jobs)}`;
+  return formatCoverage(workbenchSampleCoverageForJobs(jobs)).toLowerCase();
 }
 
-function formatAgentResultsSummary(evidence: WorkbenchRunEvidenceView): string {
-  const succeeded = evidence.agents.filter((agent) => agent.status === "succeeded").length;
-  return `${succeeded} / ${evidence.agents.length} measurements succeeded`;
+function formatMeasurementResultsSummary(evidence: WorkbenchRunEvidenceView): string {
+  return formatCount(evidence.measurements.length, "measurement");
 }
 
 function formatEvidenceCaseSummary(evidence: WorkbenchRunEvidenceView): string {
@@ -2601,66 +3830,10 @@ function formatRunCasePhase(phase: WorkbenchRunCasePhase): string {
   return phase === "grade" ? "Grade" : "Execute";
 }
 
-function formatPhaseBadge(phase: WorkbenchRunEvidenceJobPhase | undefined): ReactNode {
-  if (!phase) {
-    return <span className="text-muted-foreground">n/a</span>;
-  }
-  return (
-    <div className="grid gap-1">
-      <StatusBadge status={phase.status} />
-      {phase.dependencyReason ? (
-        <span className="max-w-[16rem] text-xs text-muted-foreground">{phase.dependencyReason}</span>
-      ) : null}
-    </div>
-  );
-}
-
 function formatTraceJobDependencies(job: WorkbenchRunEvidenceTraceJob): string {
   return job.dependencies
     .map((dependency) => dependency.jobId ? `${dependency.name}: ${dependency.jobId}` : dependency.name)
     .join(", ");
-}
-
-function formatRunCaseCoverageSummary(jobs: readonly WorkbenchJob[]): string {
-  const coverage = caseSampleCoverage(jobs);
-  if (coverage.total === 0) {
-    return "no cases";
-  }
-  return `${coverage.completed} / ${coverage.total} covered`;
-}
-
-function formatRunJobSummary(jobs: readonly WorkbenchJob[]): string {
-  if (jobs.length === 0) {
-    return "no jobs";
-  }
-  const succeeded = jobs.filter((job) => job.status === "succeeded").length;
-  return `${succeeded} / ${jobs.length} succeeded`;
-}
-
-function caseSampleCoverage(jobs: readonly WorkbenchJob[]): { completed: number; total: number } {
-  const caseJobs = jobs.filter(isEvalCaseJob);
-  const resultJobs = preferredCaseResultJobs(caseJobs);
-  return {
-    completed: uniqueCaseSampleCount(resultJobs.filter(jobHasCaseResult)),
-    total: uniqueCaseSampleCount(caseJobs),
-  };
-}
-
-function preferredCaseResultJobs(jobs: readonly WorkbenchJob[]): WorkbenchJob[] {
-  const gradeJobs = jobs.filter((job) => job.role === "grade");
-  return gradeJobs.length > 0 ? gradeJobs : [...jobs];
-}
-
-function isEvalCaseJob(job: WorkbenchJob): boolean {
-  return job.caseId !== "current";
-}
-
-function jobHasCaseResult(job: WorkbenchJob): boolean {
-  return job.status === "succeeded" || jobScore(job) !== undefined;
-}
-
-function uniqueCaseSampleCount(jobs: readonly WorkbenchJob[]): number {
-  return new Set(jobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
 }
 
 function runCaseNavLabel(caseResult: WorkbenchRunEvidenceCaseResult): string {
@@ -2715,22 +3888,22 @@ function runCaseRouteMatches(
     caseResult.sample === section.sample;
 }
 
-function runAgentResultKey(
-  agent: Pick<WorkbenchRunEvidenceTraceJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentHash" | "agentName">,
+function runEvidenceGroupKey(
+  group: Pick<WorkbenchRunEvidenceTraceJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentHash" | "agentName">,
 ): string {
   return [
-    agent.versionId,
-    agent.skillName,
-    agent.skillBundleHash,
-    agent.evalHash,
-    agent.agentHash,
-    agent.agentName,
+    group.versionId,
+    group.skillName,
+    group.skillBundleHash,
+    group.evalHash,
+    group.agentHash,
+    group.agentName,
   ].join(":");
 }
 
 function runCaseResultKey(caseResult: WorkbenchRunEvidenceCaseResult): string {
   return [
-    runAgentResultKey(caseResult),
+    runEvidenceGroupKey(caseResult),
     caseResult.caseId,
     caseResult.sample,
   ].join(":");
@@ -2837,9 +4010,9 @@ function CaseResultDetail({
         <FactItem title="Agent" value={agentLabel} />
         <FactItem title="Model" value={adapterModel} />
         <FactItem title="Sample" value={formatSampleNumber(caseResult.sample)} />
-        <FactItem title="Case status" value={<StatusBadge status={caseResult.status} />} />
-        <FactItem title="Case score" value={formatScore(caseResult.score)} />
-        <FactItem title="Case duration" value={formatDurationMs(caseResult.durationMs)} />
+        <FactItem title="Status" value={<StatusBadge status={caseResult.status} />} />
+        <FactItem title="Quality" value={formatQualityMetric(caseResult.score)} />
+        <FactItem title="Latency" value={formatReportMetricStack(caseResult.report, "latency", formatDurationMs).value} />
       </FactGrid>
       {caseResult.error ? <ProblemState icon={CircleAlertIcon} title="Case error" message={caseResult.error} align="start" /> : null}
       <div className="grid min-w-0 gap-4">
@@ -3030,28 +4203,48 @@ function LinkedRunTable({
             <TableHeader>
               <TableRow>
                 <TableHead>Operation</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Version</TableHead>
-                <TableHead>Agent</TableHead>
+                <TableHead>Measurement</TableHead>
                 <TableHead>Quality</TableHead>
+                <TableHead>Latency</TableHead>
+                <TableHead>Cost</TableHead>
                 <TableHead>Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {runs.map((run) => {
                 const runRoute = createRunRoute({ runId: run.id, source, evaluationId });
+                const runJobs = jobsForRun(run, snapshot.jobs);
+                const report = buildWorkbenchJobReport(runJobs, snapshot.traces);
+                const latencyMetric = formatReportMetricStack(report, "latency", formatDurationMs);
+                const costMetric = formatReportMetricStack(report, "cost", formatCost, formatReportCost(report, run.status));
+                const coverage = workbenchSampleCoverageForJobs(runJobs);
                 return (
                   <TableRow key={run.id} className="cursor-pointer" onClick={onRouteClick(runRoute)}>
-                    <TableCell>
+                    <TableCell className="align-top">
                       <a className="font-medium text-primary underline-offset-4 hover:underline" href={hrefFor(runRoute)} onClick={onRouteClick(runRoute)}>
                         {runOperationLabel(run)}
                       </a>
+                      <div className="mt-1"><StatusBadge status={run.status} /></div>
                     </TableCell>
-                    <TableCell><StatusBadge status={run.status} /></TableCell>
-                    <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</TableCell>
-                    <TableCell className="break-words text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)}</TableCell>
-                    <TableCell>{formatScore(runScore(run, snapshot.jobs))}</TableCell>
-                    <TableCell className="text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
+                    <TableCell className="align-top">
+                      <div className="break-words font-medium [overflow-wrap:anywhere]">{runVersionDisplayName(snapshot, run)}</div>
+                      <div className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{runAgentDisplayName(snapshot, run)}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">{formatCoverage(coverage)}</div>
+                    </TableCell>
+                    <TableCell className="align-top font-medium">{formatQualityMetric(runScore(run, snapshot.jobs))}</TableCell>
+                    <TableCell className="align-top text-muted-foreground">
+                      <MetricStack
+                        value={latencyMetric.value}
+                        detail={latencyMetric.detail}
+                      />
+                    </TableCell>
+                    <TableCell className="align-top text-muted-foreground">
+                      <MetricStack
+                        value={costMetric.value}
+                        detail={costMetric.detail}
+                      />
+                    </TableCell>
+                    <TableCell className="align-top text-muted-foreground">{formatTimestamp(run.finishedAt ?? run.createdAt)}</TableCell>
                   </TableRow>
                 );
               })}
@@ -3394,8 +4587,8 @@ function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSna
     return [{
       label: route.view === "cases"
         ? "Cases"
-        : route.view === "source"
-          ? "Source"
+        : route.view === "traces"
+          ? "Traces"
           : "Results",
     }];
   }

@@ -1,16 +1,19 @@
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
 
-import type {
-  WorkbenchAgentVersion,
-  WorkbenchEvalSnapshot,
-  WorkbenchInspectionSnapshot,
-  WorkbenchJob,
-  WorkbenchResultCell,
-  WorkbenchResultEvaluation,
-  WorkbenchResults,
-  WorkbenchRun,
-  WorkbenchSkillVersion,
-  WorkbenchVersion,
+import {
+  workbenchJobReportMetricBreakdown,
+  type WorkbenchAgentVersion,
+  type WorkbenchEvalSnapshot,
+  type WorkbenchInspectionSnapshot,
+  type WorkbenchJob,
+  type WorkbenchJobReport,
+  type WorkbenchResultCell,
+  type WorkbenchResultEvaluation,
+  type WorkbenchResults,
+  type WorkbenchRun,
+  type WorkbenchSampleCoverage,
+  type WorkbenchSkillVersion,
+  type WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 
 import {
@@ -29,6 +32,9 @@ export type ComparisonMetricSemanticRole = "performance" | "speed" | "cost";
 export interface ComparisonMetricDescriptor {
   id: string;
   label: string;
+  displayLabel?: string;
+  valueLabel?: string;
+  testId?: string;
   direction: ComparisonMetricDirection;
   kind: ComparisonMetricKind;
   semanticRole?: ComparisonMetricSemanticRole;
@@ -56,10 +62,11 @@ export interface ComparisonEvidenceRow {
   evidenceLabel: string;
   runId: string | null;
   error?: string;
-  samples?: number;
+  coverage?: WorkbenchSampleCoverage;
   score?: number;
-  latencyMs?: number;
-  costUsd?: number;
+  report?: WorkbenchJobReport;
+  latencyPerSampleMs?: number;
+  costPerSampleUsd?: number;
 }
 
 export interface ComparisonGroupPresentation {
@@ -133,32 +140,52 @@ export interface ComparisonLabelContext {
   publishedVersionId?: string | null;
 }
 
-const METRIC_DESCRIPTORS: ComparisonMetricDescriptor[] = [
+const COMPARISON_METRIC_DESCRIPTORS: readonly ComparisonMetricDescriptor[] = [
   {
     id: "score",
     label: "Score",
+    displayLabel: "Quality",
+    testId: "quality",
     direction: "higher",
     kind: "number",
     semanticRole: "performance",
     primary: true,
   },
   {
-    id: "latencyMs",
-    label: "Latency",
+    id: "latencyPerSampleMs",
+    label: "Latency per sample",
+    displayLabel: "Latency",
+    valueLabel: "Run latency per sample",
+    testId: "latency",
     direction: "lower",
     kind: "duration_ms",
     semanticRole: "speed",
     primary: true,
   },
   {
-    id: "costUsd",
-    label: "Cost",
+    id: "costPerSampleUsd",
+    label: "Cost per sample",
+    displayLabel: "Cost",
+    valueLabel: "Run cost per sample",
+    testId: "cost",
     direction: "lower",
     kind: "currency_usd",
     semanticRole: "cost",
     primary: true,
   },
 ];
+
+export function comparisonMetricDisplayLabel(descriptor: ComparisonMetricDescriptor): string {
+  return descriptor.displayLabel ?? descriptor.label;
+}
+
+export function comparisonMetricValueLabel(descriptor: ComparisonMetricDescriptor): string {
+  return descriptor.valueLabel ?? comparisonMetricDisplayLabel(descriptor);
+}
+
+export function comparisonMetricTestId(descriptor: ComparisonMetricDescriptor): string {
+  return descriptor.testId ?? descriptor.id.replace(/[^a-z0-9]+/giu, "-").toLowerCase();
+}
 
 export function comparisonForSnapshot(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
   return snapshot.results ?? { versions: [], evaluations: [], agents: [], cells: [] };
@@ -311,9 +338,9 @@ export function buildComparisonEvidenceRows({
       const run = cell.runId ? runsById.get(cell.runId) ?? null : null;
       const agent = resolvedAgent ?? agentsById.get(cell.agentVersionId);
       const score = finiteNumber(cell.quality ?? (run ? runScore(run, jobs) : undefined));
-      const latencyMs = finiteNumber(cell.latencyMs);
-      const costUsd = finiteNumber(cell.costUsd);
-      const samples = finiteNumber(cell.samples);
+      const report = cell.report;
+      const latency = workbenchJobReportMetricBreakdown(report, "latency").primary?.value;
+      const cost = workbenchJobReportMetricBreakdown(report, "cost").primary?.value;
       const status = cell.status ?? run?.status;
       const error = cell.error ?? run?.error;
       const ordinal = versionOrdinalById.get(version.id) ?? 1;
@@ -343,10 +370,11 @@ export function buildComparisonEvidenceRows({
         evidenceLabel: formatEvidenceLabel(Boolean(run?.id ?? cell.runId), error),
         runId: run?.id ?? cell.runId ?? null,
         ...(error ? { error } : {}),
-        ...(samples !== undefined ? { samples } : {}),
+        ...(cell.coverage ? { coverage: cell.coverage } : {}),
         ...(score !== undefined ? { score } : {}),
-        ...(latencyMs !== undefined ? { latencyMs } : {}),
-        ...(costUsd !== undefined ? { costUsd } : {}),
+        ...(report ? { report } : {}),
+        ...(finiteNumber(latency?.perSample) !== undefined ? { latencyPerSampleMs: finiteNumber(latency?.perSample) } : {}),
+        ...(finiteNumber(cost?.perSample) !== undefined ? { costPerSampleUsd: finiteNumber(cost?.perSample) } : {}),
       };
     })
   );
@@ -400,7 +428,7 @@ export function formatEvaluationDisplayDetail(
 export function buildComparisonMetricDescriptors(
   rows: readonly ComparisonEvidenceRow[],
 ): ComparisonMetricDescriptor[] {
-  return METRIC_DESCRIPTORS.filter((descriptor) =>
+  return COMPARISON_METRIC_DESCRIPTORS.filter((descriptor) =>
     rows.some((row) => getComparisonMetricValue(row, descriptor) !== undefined)
   );
 }
@@ -408,12 +436,12 @@ export function buildComparisonMetricDescriptors(
 export function buildComparisonTableMetricDescriptors(
   rows?: readonly ComparisonEvidenceRow[],
 ): ComparisonMetricDescriptor[] {
-  const descriptors = METRIC_DESCRIPTORS.filter((descriptor) => descriptor.primary);
+  const descriptors = COMPARISON_METRIC_DESCRIPTORS.filter((descriptor) => descriptor.primary);
   if (!rows) {
     return descriptors;
   }
   return descriptors.filter((descriptor) =>
-    descriptor.id !== "costUsd" ||
+    descriptor.id !== "costPerSampleUsd" ||
     rows.some((row) => getComparisonMetricValue(row, descriptor) !== undefined)
   );
 }
@@ -466,7 +494,7 @@ export function buildComparisonTradeoffPairs(
     .filter((descriptor) => descriptor.id !== performanceMetric.id)
     .map((descriptor) => ({
       key: `${performanceMetric.id}::${descriptor.id}`,
-      label: `${performanceMetric.label} vs ${descriptor.label}`,
+      label: `${comparisonMetricDisplayLabel(performanceMetric)} vs ${comparisonMetricDisplayLabel(descriptor)}`,
       xMetric: descriptor,
       yMetric: performanceMetric,
     }));
@@ -519,7 +547,7 @@ export function formatComparisonTableMetricValue(
   descriptor: ComparisonMetricDescriptor,
 ): string {
   const value = getComparisonMetricValue(row, descriptor);
-  if (descriptor.id === "costUsd" && value === undefined) {
+  if (descriptor.id === "costPerSampleUsd" && value === undefined) {
     return missingCostLabelForStatus(row.statusLabel, Boolean(row.runId));
   }
   return formatComparisonMetricValue(descriptor, value);
@@ -543,11 +571,11 @@ export function getComparisonMetricValue(
   if (descriptor.id === "score") {
     return finiteNumber(row.score);
   }
-  if (descriptor.id === "latencyMs") {
-    return finiteNumber(row.latencyMs);
+  if (descriptor.id === "latencyPerSampleMs") {
+    return finiteNumber(row.latencyPerSampleMs);
   }
-  if (descriptor.id === "costUsd") {
-    return finiteNumber(row.costUsd);
+  if (descriptor.id === "costPerSampleUsd") {
+    return finiteNumber(row.costPerSampleUsd);
   }
   return undefined;
 }
@@ -740,7 +768,7 @@ function formatGradeAdapter(adapter: string): string {
     return "test grader";
   }
   if (adapter === "rubric") {
-    return "rubric grader";
+    return "criteria grader";
   }
   return `${sentenceCaseReadable(adapter, "Custom")} grader`;
 }
@@ -772,8 +800,9 @@ function collapseUnmeasuredComparisonRows(rows: readonly ComparisonEvidenceRow[]
     const measuredRows = groupRows.filter((row) =>
       row.runId ||
       row.score !== undefined ||
-      row.latencyMs !== undefined ||
-      row.costUsd !== undefined
+      row.latencyPerSampleMs !== undefined ||
+      row.costPerSampleUsd !== undefined ||
+      row.report !== undefined
     );
     if (measuredRows.length > 0) {
       visibleRows.push(...measuredRows);

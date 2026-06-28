@@ -21,6 +21,7 @@ interface LocalWorkerRequestPayload {
     dir?: string;
     authToken?: string;
     adapterAuthStoreRoot?: string;
+    homeDir?: string;
   };
   request: WorkbenchOperationRequest;
   startedPath: string;
@@ -44,7 +45,7 @@ interface LocalWorkerLaunch {
 }
 
 export async function startPrivateLocalWorkbenchOperation(input: {
-  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string };
+  core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string; homeDir?: string };
   request: WorkbenchOperationRequest;
 }): Promise<PrivateLocalOperationStart> {
   const root = (await createWorkbenchReadOnlyInspectionSnapshot(input.core)).root;
@@ -62,6 +63,7 @@ export async function startPrivateLocalWorkbenchOperation(input: {
       dir: root,
       ...(input.core.authToken ? { authToken: input.core.authToken } : {}),
       ...(input.core.adapterAuthStoreRoot ? { adapterAuthStoreRoot: input.core.adapterAuthStoreRoot } : {}),
+      ...(input.core.homeDir ? { homeDir: input.core.homeDir } : {}),
     },
     request: input.request,
     startedPath,

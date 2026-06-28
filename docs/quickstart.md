@@ -44,7 +44,7 @@ Create a representative case:
 workbench case draft investor-focus
 ```
 
-Edit `.workbench/cases/investor-focus/case.yaml`. A provider-backed case can be as small as a prompt plus rubric criteria:
+Edit `.workbench/cases/investor-focus/case.yaml`. A provider-backed case can be as small as a prompt plus grading criteria:
 
 ```yaml
 version: 1
@@ -98,7 +98,7 @@ Use `workbench clone OWNER/SKILL ./local-copy` when the recipient needs editable
 ## Next steps
 
 - [Evaluation basics](evals.md) explains the project files.
-- [Cases and rubrics](cases-rubrics.md) explains cases and grading criteria.
+- [Cases and grading](cases-grading.md) explains cases and grading criteria.
 - [Agents and models](agents-models.md) explains agent and model setup.
 - [Improve from evidence](improve.md) explains evidence-driven changes.
 - [Results](track.md) explains scorecards.

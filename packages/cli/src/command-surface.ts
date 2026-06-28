@@ -15,7 +15,6 @@ interface WorkbenchCommandReference {
   example?: string;
   quickHelpGroup?: "taught" | "other";
   fullHelpGroup?: "usage" | "inspect" | "configure" | "share-auth";
-  allHelpUsage?: string;
   docGroup: string;
   flags?: FlagSpec;
   subcommands?: SubcommandFlagSpec;
@@ -53,8 +52,8 @@ const configureDocGroup = "Configure";
 const shareDocGroup = "Share and auth";
 const DOC_GROUP_ORDER = [lifecycleDocGroup, inspectDocGroup, configureDocGroup, shareDocGroup] as const;
 const QUICK_HELP_ORDER = {
-  taught: ["new", "init", "run", "grade", "eval", "improve", "results", "publish", "skills", "install"],
-  other: ["clone", "watch", "cancel", "retry", "versions", "case", "delete"],
+  taught: ["new", "init", "record", "run", "grade", "eval", "improve", "results", "traces", "publish", "skills", "install"],
+  other: ["clone", "watch", "cancel", "retry", "versions", "case", "trace", "delete"],
 } as const;
 
 const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
@@ -95,7 +94,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "run",
       title: "Run",
       summary: "Runs selected cases without grading them.",
-      usage: ["workbench run [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]"],
+      usage: ["workbench run [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]"],
       example: "workbench run -n 3",
       quickHelpGroup: "taught",
       fullHelpGroup: "usage",
@@ -106,7 +105,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "grade",
       title: "Grade",
       summary: "Grades existing execution output without rerunning the skill.",
-      usage: ["workbench grade [--versions all|LIST] [--agents all|LIST] [--cases LIST] [--rerun] [--cloud] [--dry-run] [--json]"],
+      usage: ["workbench grade [--versions all|LIST] [--agents all|LIST] [--cases LIST] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]"],
       example: "workbench grade",
       quickHelpGroup: "taught",
       fullHelpGroup: "usage",
@@ -117,7 +116,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "eval",
       title: "Eval",
       summary: "Runs execution and grading for selected skill versions and agents. Omitted selectors use manifest defaults.",
-      usage: ["workbench eval [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]"],
+      usage: ["workbench eval [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]"],
       example: "workbench eval -n 5",
       quickHelpGroup: "taught",
       fullHelpGroup: "usage",
@@ -128,7 +127,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "results",
       title: "Results",
       summary: "Shows recorded eval results for selected skill versions and agents.",
-      usage: ["workbench results [--versions all|LIST] [--agents all|LIST] [--json]"],
+      usage: ["workbench results [--versions all|LIST] [--agents all|LIST] [--dir DIR] [--json]"],
       example: "workbench results --agents all",
       quickHelpGroup: "taught",
       fullHelpGroup: "usage",
@@ -136,10 +135,32 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       flags: { ...PROJECT_FLAGS, ...HELP_FLAG, agents: "string", versions: "string" },
     },
     {
+      id: "record",
+      title: "Record",
+      summary: "Turns native live trace capture plugins on, off, or reports status.",
+      usage: ["workbench record on|off|status [--hosts codex,claude] [--json]"],
+      example: "workbench record on",
+      quickHelpGroup: "taught",
+      fullHelpGroup: "usage",
+      docGroup: lifecycleDocGroup,
+      flags: { ...COMMON_FLAGS, ...HELP_FLAG, hosts: "string" },
+    },
+    {
+      id: "traces",
+      title: "Traces",
+      summary: "Lists live, imported, and eval trace evidence.",
+      usage: ["workbench traces [--dir DIR] [--json]"],
+      example: "workbench traces",
+      quickHelpGroup: "taught",
+      fullHelpGroup: "inspect",
+      docGroup: inspectDocGroup,
+      flags: { ...PROJECT_FLAGS, ...HELP_FLAG },
+    },
+    {
       id: "improve",
       title: "Improve",
       summary: "Creates one improved skill version from evidence. Select exactly one version and one agent.",
-      usage: ["workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]"],
+      usage: ["workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--dir DIR] [--json]"],
       example: "workbench improve --budget 1 -n 1",
       quickHelpGroup: "taught",
       fullHelpGroup: "usage",
@@ -262,7 +283,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "log",
       title: "Log",
       summary: "Shows recent versions and runs.",
-      usage: ["workbench log [--runs|--versions] [--json]"],
+      usage: ["workbench log [--runs|--versions] [--dir DIR] [--json]"],
       example: "workbench log --runs",
       fullHelpGroup: "inspect",
       docGroup: inspectDocGroup,
@@ -283,8 +304,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "show",
       title: "Show",
       summary: "Shows a Workbench object, lists files for file-backed objects, or prints one file.",
-      usage: ["workbench show REF [--json]", "workbench show REF:PATH [--json]"],
-      allHelpUsage: "workbench show REF[:PATH] [--json]",
+      usage: ["workbench show REF [--dir DIR] [--json]", "workbench show REF:PATH [--dir DIR] [--json]"],
       example: "workbench show run_abc12345:result.json",
       fullHelpGroup: "inspect",
       docGroup: inspectDocGroup,
@@ -294,7 +314,7 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "diff",
       title: "Diff",
       summary: "Shows changed files between two Workbench package versions.",
-      usage: ["workbench diff [A..B] [--json]"],
+      usage: ["workbench diff [A..B] [--dir DIR] [--json]"],
       example: "workbench diff 26059f9a..eac5699c",
       fullHelpGroup: "inspect",
       docGroup: inspectDocGroup,
@@ -304,28 +324,39 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       id: "switch",
       title: "Switch",
       summary: "Switches the working skill source to a recorded Workbench version.",
-      usage: ["workbench switch VERSION [--json]"],
+      usage: ["workbench switch VERSION [--dry-run] [--yes] [--dir DIR] [--json]"],
       example: "workbench switch 26059f9a",
       fullHelpGroup: "inspect",
       docGroup: inspectDocGroup,
-      flags: { ...PROJECT_FLAGS, ...HELP_FLAG },
+      flags: { ...PROJECT_FLAGS, ...HELP_FLAG, "dry-run": "boolean", yes: "boolean" },
     },
     {
       id: "case",
       title: "Case",
-      summary: "Creates a draft eval case. Local and command-backed projects also get a tests/test.sh harness.",
-      usage: ["workbench case draft [ID] [--dir DIR] [--json]"],
-      example: "workbench case draft case-001",
+      summary: "Creates draft eval cases or promotes captured terminal trace evidence with input into a normal case.",
+      usage: ["workbench case draft [ID] [--dir DIR] [--json]", "workbench case promote TRACE_ID --id CASE_ID [--dir DIR] [--json]"],
+      example: "workbench case promote tr_123 --id ignored-format",
       quickHelpGroup: "other",
       fullHelpGroup: "inspect",
       docGroup: configureDocGroup,
-      flags: { ...PROJECT_FLAGS, ...HELP_FLAG },
+      flags: { ...PROJECT_FLAGS, ...HELP_FLAG, id: "string" },
+    },
+    {
+      id: "trace",
+      title: "Trace",
+      summary: "Reviews trace evidence; failed and deferred reviews require --expected before promotion.",
+      usage: ["workbench trace review TRACE_ID --pass|--fail|--defer [--note TEXT] [--tag TAG]... [--expected TEXT] [--dir DIR] [--json]"],
+      example: "workbench trace review tr_123 --fail --tag formatting",
+      quickHelpGroup: "other",
+      fullHelpGroup: "inspect",
+      docGroup: inspectDocGroup,
+      flags: { ...PROJECT_FLAGS, ...HELP_FLAG, pass: "boolean", fail: "boolean", defer: "boolean", note: "string", tag: "repeat-string", expected: "string" },
     },
     {
       id: "open",
       title: "Open",
       summary: "Serves the local Workbench UI.",
-      usage: ["workbench open [--host HOST] [--port PORT] [--no-open]"],
+      usage: ["workbench open [--host HOST] [--port PORT] [--dir DIR] [--no-open]"],
       example: "workbench open --no-open",
       fullHelpGroup: "inspect",
       docGroup: inspectDocGroup,
@@ -336,11 +367,10 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       title: "Agent",
       summary: "Lists, adds, or removes eval agent configurations.",
       usage: [
-        "workbench agent list [--json]",
-        "workbench agent add NAME --adapter X [--model M] [--with k=v]... [--json]",
-        "workbench agent rm NAME [--json]",
+        "workbench agent list [--dir DIR] [--json]",
+        "workbench agent add NAME --adapter X [--model M] [--with k=v]... [--dir DIR] [--json]",
+        "workbench agent rm NAME [--dir DIR] [--json]",
       ],
-      allHelpUsage: "workbench agent add NAME --adapter X [--model M] [--with k=v]... | list | rm NAME [--json]",
       example: "workbench agent add claude --adapter claude --model sonnet",
       fullHelpGroup: "configure",
       docGroup: configureDocGroup,
@@ -392,7 +422,6 @@ const WORKBENCH_COMMANDS: readonly WorkbenchCommandReference[] = [
       title: "Sync",
       summary: "Synchronizes local evidence and version objects with a Workbench remote.",
       usage: ["workbench sync [REMOTE] [--dry-run] [--dir DIR] [--json]"],
-      allHelpUsage: "workbench sync [REMOTE] [--dry-run] [--json]",
       example: "workbench sync cloud --dry-run",
       fullHelpGroup: "share-auth",
       docGroup: shareDocGroup,
@@ -574,7 +603,7 @@ function quickHelpUsage(group: "taught" | "other"): string[] {
 function allHelpUsage(group: NonNullable<WorkbenchCommandReference["fullHelpGroup"]>): string[] {
   return WORKBENCH_COMMAND_SURFACE.commands
     .filter((command) => command.fullHelpGroup === group)
-    .map((command) => command.allHelpUsage ?? command.usage[0]!);
+    .flatMap((command) => command.usage);
 }
 
 function commandHelpDescription(entry: WorkbenchCommandReference): string[] {

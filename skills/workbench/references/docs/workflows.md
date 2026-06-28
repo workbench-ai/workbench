@@ -13,10 +13,11 @@ Most workflows follow the same loop: author source, run or grade cases, inspect 
 | Edit someone else's skill | `workbench clone` | Editable source in a fresh Workbench project. |
 | Add evals to an existing skill | `workbench init` | Existing `SKILL.md` plus Workbench controls. |
 | Build an eval interactively | `workbench run` then `workbench grade` | Prompt output and judgment evidence you can iterate on separately. |
-| Review quality | `workbench eval` then `workbench results` | Score, latency, cost, and run evidence by version and agent. |
+| Review quality | `workbench eval` then `workbench results` | Quality, coverage, latency, cost, and run evidence by version and agent. |
 | Improve from evidence | `workbench improve` | Candidate source plus proof eval before switching. |
 | Run hosted | `--cloud` | The same run graph executed by Workbench Cloud. |
 | Inspect evidence | `workbench show` | Source, run, job, trace, artifact, or file evidence. |
+| Capture live skill use | `workbench record on` | Plugin-captured live traces that can be reviewed or promoted to cases. |
 
 ## Create and publish a skill
 
@@ -89,7 +90,7 @@ Workbench keeps eval source under `.workbench/**`, separate from installable pac
 .workbench/environment/Dockerfile
 ```
 
-A minimal provider-backed case is prompt plus rubric criteria:
+A minimal provider-backed case is prompt plus grading criteria:
 
 ```yaml
 version: 1
@@ -204,8 +205,26 @@ workbench show RUN_ID
 workbench show JOB_ID
 workbench show RUN_ID:cases/investor-focus/output/result.json
 workbench diff <base-version-id>..<improved-version-id>
-workbench switch <version-id>
+workbench switch <version-id> --dry-run
+workbench switch <version-id> --yes
 workbench open
 ```
 
-`status` shows the next useful command. `log` shows recent versions and runs. `versions` lists recorded package versions. `show` reads project files, version files, run summaries, job evidence, trace artifacts, and exact `REF:PATH` file content. `open` serves the browser UI over the same inspection data.
+`status` shows the next useful command. `log` shows recent versions and runs. `versions` lists recorded package versions. `show` reads project files, version files, run summaries, job evidence, trace artifacts, and exact `REF:PATH` file content. `switch --dry-run` previews a version restore, and `switch --yes` applies it after review. `open` serves the browser UI over the same inspection data.
+
+## Capture live skill use
+
+Turn on native host tracing, use a Workbench-managed skill in an agent host, then inspect or promote the captured trace:
+
+```bash
+workbench record on
+workbench traces
+workbench show TRACE_ID
+workbench case promote TRACE_ID --id case-001
+```
+
+`record on` manages Workbench's Codex and Claude Code trace plugins through the hosts' plugin commands. Host hooks write to Workbench's local spool, and `traces` compacts claimed skill turns into normal trace records. The shipped plugins record explicit leading `$skill` invocations; the generic hook also accepts exact host skill-claim events when a host integration emits them. Unrelated host turns are discarded. Workbench does not import provider session history implicitly; promotion creates a normal authored case under `.workbench/cases/` only after the trace is captured, terminal, and has captured input.
+
+When a trace is reviewed as failed or deferred, add `--expected` with the corrected outcome before promotion so the case captures the intended behavior rather than the bad response.
+
+Codex must be new enough to support `codex plugin add/list`, and Codex must load user plugin config for the trace hook to run. If Codex asks whether to trust the Workbench hook, approve it only after verifying the plugin source.

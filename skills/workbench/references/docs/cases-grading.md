@@ -1,6 +1,6 @@
-# Cases and rubrics
+# Cases and grading
 
-Cases define workflow inputs. Rubrics define the criteria that turn case output into graded evidence.
+Cases define workflow inputs. Grading defines how case output becomes grade evidence.
 
 [Evaluation basics](evals.md) explains the source model. [Agents and models](agents-models.md) explains the agent configuration that executes the cases.
 
@@ -17,13 +17,13 @@ Cases live under `.workbench/cases/<case-id>`. Case authoring happens in files:
 .workbench/cases/investor-focus/tests/test.sh
 ```
 
-Provider-backed drafts need a prompt and `grade.with.criteria` before Workbench can record judgment evidence. Local or command-backed drafts also need a top-level `command` in `case.yaml` or an executable `tests/test.sh`. Draft placeholders block launch until the required fields are filled: `run` requires a real prompt, while `grade` and `eval` also require real grade criteria.
+Provider-backed drafts need a prompt and `grade.with.criteria` before Workbench can record judgment evidence. Local or command-backed drafts also need a top-level `command` in `case.yaml` or an executable `tests/test.sh`. Draft placeholders block launch until the required fields are filled: `run` requires a real prompt, while `grade` and `eval` also require real grading criteria.
 
 The generated shell harness starts with score `0` until edited, so local and command-backed projects do not record perfect draft evidence.
 
 ## Global grading
 
-Define shared grading config in `.workbench/eval.yaml`:
+Define shared grading config in `.workbench/eval.yaml`. `adapter: rubric` is one grading mode, not a top-level product object:
 
 ```yaml
 version: 1
@@ -43,7 +43,7 @@ Criteria match by stable `id`. A case criterion with the same id overrides the g
 
 ## Provider-backed cases
 
-A provider-backed case can be just a prompt plus rubric criteria:
+A provider-backed case can be just a prompt plus grading criteria:
 
 ```yaml
 version: 1
@@ -89,4 +89,4 @@ workbench show JOB_ID
 workbench show RUN_ID:cases/investor-focus/output/result.json
 ```
 
-Prefer a small number of decision-useful cases over many vague prompts. When an eval is perfect but the skill is still weak, add sharper cases or stricter criteria before improving source.
+Prefer a small number of decision-useful cases over many vague prompts. When an eval is perfect but the skill is still weak, add sharper cases or stricter grading criteria before improving source.

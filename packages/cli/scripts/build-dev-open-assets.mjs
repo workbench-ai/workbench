@@ -7,6 +7,7 @@ import { build } from "esbuild";
 import postcss from "postcss";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const productRoot = path.resolve(packageRoot, "../..");
 const outdir = path.join(packageRoot, "dist", "dev-open");
 const fontOutdir = path.join(outdir, "fonts");
 const workspaceSourceAliases = new Map([
@@ -45,6 +46,10 @@ await fs.writeFile(path.join(outdir, "client.css"), await copyStylesheetAssets({
   toDir: fontOutdir,
 }));
 
+await copyDirectory(path.join(productRoot, "plugins"), path.join(packageRoot, "dist", "plugins"));
+await copyDirectory(path.join(productRoot, ".agents"), path.join(packageRoot, "dist", ".agents"));
+await copyDirectory(path.join(productRoot, ".claude-plugin"), path.join(packageRoot, "dist", ".claude-plugin"));
+
 async function copyStylesheetAssets({ css, fromDir, toDir }) {
   const refs = new Map();
   for (const match of css.matchAll(/url\((["']?)(?!data:|https?:|\/)([^"')]+)\1\)/gu)) {
@@ -82,4 +87,9 @@ function workspaceSourceAliasPlugin() {
       }));
     },
   };
+}
+
+async function copyDirectory(source, destination) {
+  await fs.rm(destination, { recursive: true, force: true });
+  await fs.cp(source, destination, { recursive: true });
 }

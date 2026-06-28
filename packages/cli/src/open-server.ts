@@ -4,6 +4,8 @@ import type { Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import YAML from "yaml";
+
 import {
   createWorkbenchActionCapabilities,
   createWorkbenchReadOnlyInspectionSnapshot,
@@ -29,11 +31,18 @@ import {
   isWorkbenchAuthoredControlPath,
   isWorkbenchPackageSourcePath,
   isWorkbenchRuntimeMetadataPath,
+  normalizeWorkbenchSkillName,
   normalizeWorkbenchSourcePath,
   parseWorkbenchCaseFileOwnerId,
   workbenchInspectionFileOwnerKindFromRouteSegment,
+  type Json,
+  type WorkbenchCaseMutationRequest,
+  type WorkbenchCaseMutationResponse,
   type WorkbenchInspectionFileOwnerKind,
+  type WorkbenchOperationGrader,
+  type WorkbenchOperationPhase,
   type WorkbenchOperationRequest,
+  type WorkbenchOperationTarget,
 } from "@workbench-ai/workbench-contract";
 import {
   startPrivateLocalWorkbenchOperation,
@@ -42,6 +51,7 @@ import {
 export interface StartWorkbenchOpenServerOptions {
   dir?: string;
   authToken?: string;
+  homeDir?: string;
   host?: string;
   port?: number;
 }
@@ -62,10 +72,20 @@ export async function startWorkbenchOpenServer(
   const sourceWatcher = await startSourceWatcher({
     dir: options.dir,
     authToken: options.authToken,
+    homeDir: options.homeDir,
     signal: shutdown.signal,
   });
   const server = createServer((request, response) => {
-    void handleRequest({ request, response, assetRoot, assetVersion, dir: options.dir, authToken: options.authToken, signal: shutdown.signal });
+    void handleRequest({
+      request,
+      response,
+      assetRoot,
+      assetVersion,
+      dir: options.dir,
+      authToken: options.authToken,
+      homeDir: options.homeDir,
+      signal: shutdown.signal,
+    });
   });
   const sockets = new Set<Socket>();
   let closePromise: Promise<void> | undefined;
@@ -111,6 +131,7 @@ export async function startWorkbenchOpenServer(
 async function startSourceWatcher(options: {
   dir?: string;
   authToken?: string;
+  homeDir?: string;
   signal: AbortSignal;
 }): Promise<FSWatcher | null> {
   const root = path.resolve(options.dir ?? process.cwd());
@@ -129,6 +150,7 @@ async function startSourceWatcher(options: {
       void notifyWorkbenchReadOnlyInspectionChanged({
         dir: root,
         authToken: options.authToken,
+        homeDir: options.homeDir,
       }).catch(() => undefined);
     }, 120);
   };
@@ -203,6 +225,7 @@ async function handleRequest({
   assetVersion,
   dir,
   authToken,
+  homeDir,
   signal,
 }: {
   request: IncomingMessage;
@@ -211,14 +234,21 @@ async function handleRequest({
   assetVersion: string;
   dir?: string;
   authToken?: string;
+  homeDir?: string;
   signal: AbortSignal;
 }): Promise<void> {
   try {
     const requestSignal = requestAbortSignal(signal, request);
     const url = new URL(request.url ?? "/", "http://workbench.local");
     if (url.pathname === "/api/snapshot") {
-      const envelope = await createInspectionSnapshotEnvelope({ dir, authToken });
+      const envelope = await createInspectionSnapshotEnvelope({ dir, authToken, homeDir });
       sendText(response, 200, `${JSON.stringify(envelope, null, 2)}\n`, "application/json; charset=utf-8");
+      return;
+    }
+    if (url.pathname === "/api/evaluation/cases" && request.method === "POST") {
+      const mutation = await readCaseMutationRequest(request);
+      const result = await writeEvaluationCase({ dir, authToken, homeDir, mutation });
+      sendText(response, 200, `${JSON.stringify(result, null, 2)}\n`, "application/json; charset=utf-8");
       return;
     }
     if (url.pathname === "/api/operations/preview" && request.method === "POST") {
@@ -226,6 +256,7 @@ async function handleRequest({
       const preview = await previewLocalWorkbenchOperation({
         dir,
         authToken,
+        homeDir,
         request: operationRequest,
       });
       sendText(response, 200, `${JSON.stringify(preview, null, 2)}\n`, "application/json; charset=utf-8");
@@ -234,7 +265,7 @@ async function handleRequest({
     if (url.pathname === "/api/operations" && request.method === "POST") {
       const operationRequest = await readOperationRequest(request);
       const started = await startPrivateLocalWorkbenchOperation({
-        core: { dir, authToken },
+        core: { dir, authToken, homeDir },
         request: operationRequest,
       });
       sendText(response, 200, `${JSON.stringify(started.snapshot, null, 2)}\n`, "application/json; charset=utf-8");
@@ -244,6 +275,7 @@ async function handleRequest({
       const notice = await waitForWorkbenchReadOnlyInspectionNotice({
         dir,
         authToken,
+        homeDir,
         cursor: url.searchParams.get("cursor") ?? undefined,
         timeoutMs: parseInspectionWaitTimeout(url.searchParams.get("timeoutMs")),
         signal: requestSignal,
@@ -257,6 +289,7 @@ async function handleRequest({
         response,
         dir,
         authToken,
+        homeDir,
         cursor: url.searchParams.get("cursor") ?? undefined,
         signal: requestSignal,
       });
@@ -269,7 +302,7 @@ async function handleRequest({
         sendText(response, 400, `${JSON.stringify({ message: "run is required" })}\n`, "application/json; charset=utf-8");
         return;
       }
-      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken });
+      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken, homeDir });
       const detail = workbenchJobEvidenceForSnapshot(snapshot, {
         runId,
         jobId: jobEvidenceRoute.jobId,
@@ -283,7 +316,7 @@ async function handleRequest({
     }
     const fileRoute = parseInspectionFileApiPath(url.pathname);
     if (fileRoute) {
-      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken });
+      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir, authToken, homeDir });
       const content = inspectionFileContentForSnapshot(snapshot, fileRoute);
       if (!content) {
         sendText(response, 404, `${JSON.stringify({ message: "File not found" })}\n`, "application/json; charset=utf-8");
@@ -309,6 +342,10 @@ async function handleRequest({
     if (signal.aborted || response.destroyed || response.writableEnded) {
       return;
     }
+    if (error instanceof WorkbenchUserError) {
+      sendText(response, 400, `${JSON.stringify({ message: error.message })}\n`, "application/json; charset=utf-8");
+      return;
+    }
     sendText(response, 500, `${error instanceof Error ? error.message : String(error)}\n`, "text/plain; charset=utf-8");
   }
 }
@@ -328,6 +365,7 @@ function requestAbortSignal(signal: AbortSignal, request: IncomingMessage): Abor
 async function createInspectionSnapshotEnvelope(options: {
   dir?: string;
   authToken?: string;
+  homeDir?: string;
 }): Promise<WorkbenchInspectionSnapshotEnvelope> {
   // Read the cursor first so an envelope can be stale-but-refreshable, never fresh-but-silent.
   const cursor = await readWorkbenchReadOnlyInspectionCursor(options);
@@ -343,32 +381,189 @@ async function createInspectionSnapshotEnvelope(options: {
   };
 }
 
+async function readCaseMutationRequest(request: IncomingMessage): Promise<WorkbenchCaseMutationRequest> {
+  const body = await readJsonObject(request);
+  if ("caseId" in body) {
+    throw new WorkbenchUserError("Case creation derives case ids from the title or prompt.");
+  }
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  if (!prompt) {
+    throw new WorkbenchUserError("Case prompt cannot be empty.");
+  }
+  const metadata = body.metadata === undefined ? undefined : body.metadata as Json;
+  return {
+    ...(typeof body.title === "string" && body.title.trim() ? { title: body.title.trim() } : {}),
+    prompt,
+    ...(typeof body.expected === "string" && body.expected.trim() ? { expected: body.expected.trim() } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
+  };
+}
+
+async function writeEvaluationCase(options: {
+  dir?: string;
+  authToken?: string;
+  homeDir?: string;
+  mutation: WorkbenchCaseMutationRequest;
+}): Promise<WorkbenchCaseMutationResponse> {
+  const root = path.resolve(options.dir ?? process.cwd());
+  const baseId = normalizeWorkbenchSkillName(options.mutation.title ?? options.mutation.prompt.slice(0, 60)) || "case";
+  for (let suffix = 1; ; suffix += 1) {
+    const caseId = suffix === 1 ? baseId : `${baseId}-${suffix}`;
+    const relativePath = path.join("cases", caseId, "case.yaml").replace(/\\/gu, "/");
+    const absolutePath = path.join(root, ".workbench", relativePath);
+    const record: Record<string, Json> = {
+      version: 1,
+      id: caseId,
+      ...(options.mutation.title ? { title: options.mutation.title } : {}),
+      prompt: options.mutation.prompt,
+      ...(options.mutation.expected ? { expected: options.mutation.expected } : {}),
+      ...(options.mutation.metadata !== undefined ? { metadata: options.mutation.metadata } : {}),
+    };
+    try {
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await fs.writeFile(absolutePath, YAML.stringify(record), { encoding: "utf8", flag: "wx" });
+      await notifyWorkbenchReadOnlyInspectionChanged({
+        dir: root,
+        authToken: options.authToken,
+        homeDir: options.homeDir,
+      }).catch(() => undefined);
+      return {
+        caseId,
+        path: relativePath,
+      };
+    } catch (error) {
+      if (isFileAlreadyExistsError(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function isFileAlreadyExistsError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "EEXIST");
+}
+
 async function readOperationRequest(request: IncomingMessage): Promise<WorkbenchOperationRequest> {
   const body = await readJsonObject(request);
-  const kind = body.kind === "run" || body.kind === "grade" || body.kind === "eval" || body.kind === "improve"
-    ? body.kind
-    : null;
-  if (!kind) {
-    throw new WorkbenchUserError("Operation kind must be run, grade, eval, or improve.");
+  if (body.kind === "improve") {
+    const target = readOptionalOperationTarget(body.target);
+    const samples = readPositiveInteger(body.samples);
+    const budget = readPositiveInteger(body.budget);
+    return {
+      kind: "improve",
+      variant: "local",
+      ...(target ? { target } : {}),
+      ...(typeof body.versionId === "string" && body.versionId.trim() ? { versionId: body.versionId.trim() } : {}),
+      ...(typeof body.evalHash === "string" && body.evalHash.trim() ? { evalHash: body.evalHash.trim() } : {}),
+      ...(samples ? { samples } : {}),
+      ...(budget ? { budget } : {}),
+      ...(Array.isArray(body.evidenceTraceIds)
+        ? { evidenceTraceIds: readStringArray(body.evidenceTraceIds) }
+        : {}),
+      ...(typeof body.retryOfRunId === "string" && body.retryOfRunId.trim() ? { retryOfRunId: body.retryOfRunId.trim() } : {}),
+    };
+  }
+  if (body.kind !== "eval") {
+    throw new WorkbenchUserError("Operation kind must be eval or improve.");
+  }
+  const phases = readOperationPhases(body.phases);
+  const samples = readPositiveInteger(body.samples);
+  const caseIds = Array.isArray(body.caseIds) ? readStringArray(body.caseIds) : [];
+  if (caseIds.length === 0) {
+    throw new WorkbenchUserError("Eval operations must include at least one case.");
   }
   return {
-    kind,
+    kind: "eval",
     variant: "local",
-    ...(typeof body.versionId === "string" && body.versionId.trim() ? { versionId: body.versionId.trim() } : {}),
-    ...(typeof body.evalHash === "string" && body.evalHash.trim() ? { evalHash: body.evalHash.trim() } : {}),
-    ...(typeof body.skill === "string" && body.skill.trim() ? { skill: body.skill.trim() } : {}),
-    ...(typeof body.agent === "string" && body.agent.trim() ? { agent: body.agent.trim() } : {}),
-    ...(Array.isArray(body.caseIds)
-      ? { caseIds: body.caseIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) }
-      : {}),
-    ...(readPositiveInteger(body.samples) ? { samples: readPositiveInteger(body.samples) } : {}),
-    ...(body.rerun === true && (kind === "run" || kind === "grade" || kind === "eval") ? { rerun: true } : {}),
-    ...(kind === "improve" && readPositiveInteger(body.budget) ? { budget: readPositiveInteger(body.budget) } : {}),
-    ...(Array.isArray(body.evidenceTraceIds)
-      ? { evidenceTraceIds: body.evidenceTraceIds.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) }
-      : {}),
+    caseIds,
+    targets: readOperationTargets(body.targets),
+    phases,
+    grader: readOperationGrader(body.grader, phases),
+    ...(samples ? { samples } : {}),
+    ...(body.rerun === true ? { rerun: true } : {}),
+    ...(typeof body.gradeOfRunId === "string" && body.gradeOfRunId.trim() ? { gradeOfRunId: body.gradeOfRunId.trim() } : {}),
     ...(typeof body.retryOfRunId === "string" && body.retryOfRunId.trim() ? { retryOfRunId: body.retryOfRunId.trim() } : {}),
   };
+}
+
+function readOperationTargets(value: unknown): WorkbenchOperationTarget[] {
+  if (!Array.isArray(value)) {
+    throw new WorkbenchUserError("Eval operation targets must be an array.");
+  }
+  const targets = value.map((entry) => readOperationTarget(entry));
+  if (targets.length === 0) {
+    throw new WorkbenchUserError("Eval operation targets must include at least one configuration.");
+  }
+  return targets;
+}
+
+function readOptionalOperationTarget(value: unknown): WorkbenchOperationTarget | undefined {
+  return asJsonRecord(value) ? readOperationTarget(value) : undefined;
+}
+
+function readOperationTarget(value: unknown): WorkbenchOperationTarget {
+  const target = asJsonRecord(value);
+  if (!target) {
+    throw new WorkbenchUserError("Operation target must be an object.");
+  }
+  const skill = readOptionalOperationTargetString(target.skill, "Operation target skill");
+  const versionId = readOptionalOperationTargetString(target.versionId, "Operation target versionId");
+  const agent = readOptionalOperationTargetString(target.agent, "Operation target agent");
+  return {
+    ...(skill ? { skill } : {}),
+    ...(versionId ? { versionId } : {}),
+    ...(agent ? { agent } : {}),
+  };
+}
+
+function readOptionalOperationTargetString(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    throw new WorkbenchUserError(`${label} must be a non-empty string.`);
+  }
+  return value.trim();
+}
+
+function readOperationPhases(value: unknown): WorkbenchOperationPhase[] {
+  if (!Array.isArray(value)) {
+    throw new WorkbenchUserError("Eval operation phases must be an array.");
+  }
+  const phases: WorkbenchOperationPhase[] = [];
+  for (const entry of value) {
+    if ((entry === "execute" || entry === "grade") && !phases.includes(entry)) {
+      phases.push(entry);
+    }
+  }
+  if (phases.length === 0) {
+    throw new WorkbenchUserError("Eval operation phases must include execute or grade.");
+  }
+  return phases;
+}
+
+function readOperationGrader(value: unknown, phases: readonly WorkbenchOperationPhase[]): WorkbenchOperationGrader {
+  const grader = asJsonRecord(value);
+  if (!grader) {
+    return phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" };
+  }
+  if (grader.kind === "none" || grader.kind === "evaluation") {
+    return { kind: grader.kind };
+  }
+  throw new WorkbenchUserError("Eval operation grader must be none or evaluation.");
+}
+
+function readStringArray(value: readonly unknown[]): string[] {
+  return [...new Set(value
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    .map((entry) => entry.trim()))];
+}
+
+function asJsonRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 async function readJsonObject(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -400,6 +595,7 @@ async function sendStateEventStream({
   response,
   dir,
   authToken,
+  homeDir,
   cursor,
   signal,
 }: {
@@ -407,6 +603,7 @@ async function sendStateEventStream({
   response: ServerResponse;
   dir?: string;
   authToken?: string;
+  homeDir?: string;
   cursor?: string;
   signal: AbortSignal;
 }): Promise<void> {
@@ -424,6 +621,7 @@ async function sendStateEventStream({
     const notice = await waitForWorkbenchReadOnlyInspectionNotice({
       dir,
       authToken,
+      homeDir,
       cursor: currentCursor,
       timeoutMs: 25_000,
       signal,

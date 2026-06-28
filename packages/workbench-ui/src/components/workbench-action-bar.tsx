@@ -46,26 +46,6 @@ export function WorkbenchActionBar({
     <div className="flex shrink-0 flex-wrap items-center gap-2">
       {!sourceOnly ? (
         <>
-          {actions.run.enabled ? (
-            <OperationPopover
-              apiBasePath={apiBasePath}
-              capability={actions.run}
-              onOperationStarted={onOperationStarted}
-              operationKey="run"
-              previewOpen={operationPreview ? operationPreview.openOperation === "run" : undefined}
-              title="Run"
-            />
-          ) : null}
-          {actions.grade.enabled ? (
-            <OperationPopover
-              apiBasePath={apiBasePath}
-              capability={actions.grade}
-              onOperationStarted={onOperationStarted}
-              operationKey="grade"
-              previewOpen={operationPreview ? operationPreview.openOperation === "grade" : undefined}
-              title="Grade"
-            />
-          ) : null}
           <OperationPopover
             apiBasePath={apiBasePath}
             capability={actions.improve}
@@ -96,7 +76,7 @@ export function WorkbenchActionBar({
   );
 }
 
-export type WorkbenchOperationPreviewName = "run" | "grade" | "improve" | "evaluate";
+export type WorkbenchOperationPreviewName = "improve" | "evaluate";
 
 export interface WorkbenchOperationPreviewState {
   openOperation?: WorkbenchOperationPreviewName | null;
@@ -126,7 +106,7 @@ function OperationPopover({
 }) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const [samples, setSamples] = useState(String(capability.defaultRequest.samples ?? 1));
-  const [budget, setBudget] = useState(String(capability.defaultRequest.budget ?? 1));
+  const [budget, setBudget] = useState(String(capability.defaultRequest.kind === "improve" ? capability.defaultRequest.budget ?? 1 : 1));
   const [uncontrolledPending, setUncontrolledPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const open = previewOpen ?? uncontrolledOpen;
@@ -238,11 +218,22 @@ function OperationPopover({
 }
 
 function OperationSummary({ request }: { request: WorkbenchOperationRequest }) {
+  const targets = request.kind === "eval"
+    ? request.targets
+    : request.target ? [request.target] : [];
+  const skills = [...new Set(targets.flatMap((target) => target.skill ? [target.skill] : []))];
+  const agents = [...new Set(targets.flatMap((target) => target.agent ? [target.agent] : []))];
+  const versionIds = [...new Set([
+    ...(request.kind === "improve" && request.versionId ? [request.versionId] : []),
+    ...targets.flatMap((target) => target.versionId ? [target.versionId] : []),
+  ])];
   const items = [
-    request.versionId ? ["Version", request.versionId] : null,
-    request.evalHash ? ["Evaluation", request.evalHash] : null,
-    request.skill ? ["Skill", request.skill] : null,
-    request.agent ? ["Agent", request.agent] : null,
+    versionIds.length > 0 ? ["Version", versionIds.join(", ")] : null,
+    request.kind === "improve" && request.evalHash ? ["Evaluation", request.evalHash] : null,
+    request.kind === "eval" ? ["Cases", request.caseIds.length > 0 ? `${request.caseIds.length} cases` : "No cases"] : null,
+    request.kind === "eval" ? ["Phases", request.phases.join(" + ")] : null,
+    skills.length > 0 ? ["Skill", skills.join(", ")] : null,
+    agents.length > 0 ? ["Agent", agents.join(", ")] : null,
   ].filter((entry): entry is [string, string] => Boolean(entry));
   if (items.length === 0) {
     return null;

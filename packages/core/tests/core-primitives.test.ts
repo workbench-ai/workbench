@@ -8,6 +8,7 @@ import {
   createWorkbenchRunSnapshot,
   resolveWorkbenchRunRetryPlan,
   runWorkbenchExecutionDag,
+  workbenchOperationCliEquivalent,
   type WorkbenchInspectionSnapshot,
   type WorkbenchJob,
   type WorkbenchRun,
@@ -18,6 +19,33 @@ import {
   type CompileExecutionGraphInput,
 } from "../src/execution-graph.ts";
 import type { GenericRunSpec } from "../src/generic-spec.ts";
+import type { WorkbenchOperationPhase, WorkbenchOperationRequest } from "@workbench-ai/workbench-contract";
+
+function evalOperationRequest(options: {
+  variant?: "local" | "cloud";
+  versionId?: string;
+  evalHash?: string;
+  skill?: string;
+  agent?: string;
+  caseIds?: readonly string[];
+  samples?: number;
+  phases?: readonly WorkbenchOperationPhase[];
+} = {}): WorkbenchOperationRequest {
+  const phases = options.phases ?? ["execute", "grade"];
+  return {
+    kind: "eval",
+    variant: options.variant ?? "local",
+    caseIds: options.caseIds ?? [],
+    targets: [{
+      ...(options.versionId ? { versionId: options.versionId } : {}),
+      ...(options.skill ? { skill: options.skill } : {}),
+      ...(options.agent ? { agent: options.agent } : {}),
+    }],
+    phases,
+    grader: phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
+    ...(options.samples !== undefined ? { samples: options.samples } : {}),
+  };
+}
 
 describe("workbench execution DAG scheduler", () => {
   test("starts independent jobs concurrently up to host capacity", async () => {
@@ -283,6 +311,25 @@ describe("workbench execution DAG scheduler", () => {
       .toThrow(/invalid operationPlan.samples/u);
   });
 
+  test("operation CLI equivalents preserve literal default and current selectors", () => {
+    const omitted: WorkbenchOperationRequest = {
+      kind: "eval",
+      variant: "local",
+      caseIds: [],
+      targets: [{}],
+      phases: ["execute", "grade"],
+      grader: { kind: "evaluation" },
+      samples: 1,
+    };
+    const explicit: WorkbenchOperationRequest = {
+      ...omitted,
+      targets: [{ skill: "current", agent: "default" }],
+    };
+
+    expect(workbenchOperationCliEquivalent(omitted)).toBe("workbench eval");
+    expect(workbenchOperationCliEquivalent(explicit)).toBe("workbench eval --versions current --agents default");
+  });
+
   test("projects run snapshots with job-backed measurements", () => {
     const run: WorkbenchRun = {
       id: "run_matrix",
@@ -327,35 +374,33 @@ describe("workbench execution DAG scheduler", () => {
       }),
     ];
 
-    const snapshot = createWorkbenchRunSnapshot({
-      kind: "eval",
-      variant: "local",
+    const snapshot = createWorkbenchRunSnapshot(evalOperationRequest({
       versionId: "v_matrix",
       evalHash: "eval_hash",
       skill: "current",
       agent: "default,patcher",
       samples: 1,
-    }, [run], { jobs });
+    }), [run], { jobs });
 
     expect(snapshot.measurements).toEqual([
       expect.objectContaining({
         runId: "run_matrix",
         agentName: "default",
         score: 0.4,
-        samples: 1,
+        coverage: { completed: 1, planned: 1 },
       }),
       expect.objectContaining({
         runId: "run_matrix",
         agentName: "patcher",
         score: 0.9,
-        samples: 1,
+        coverage: { completed: 1, planned: 1 },
       }),
     ]);
   });
 
-  test("averages job-backed run measurement latency by sampled runner work", () => {
+  test("reports sampled work through generic report metrics", () => {
     const run: WorkbenchRun = {
-      id: "run_sampled_latency",
+      id: "run_sampled_report",
       kind: "eval",
       versionId: "v_sampled",
       skillName: "current",
@@ -403,25 +448,93 @@ describe("workbench execution DAG scheduler", () => {
       }),
     ];
 
-    const snapshot = createWorkbenchRunSnapshot({
-      kind: "eval",
-      variant: "local",
+    const snapshot = createWorkbenchRunSnapshot(evalOperationRequest({
       versionId: "v_sampled",
       evalHash: "eval_hash",
       skill: "current",
       agent: "default",
       samples: 2,
-    }, [run], { jobs });
+    }), [run], { jobs });
 
     expect(snapshot.measurements).toEqual([
       expect.objectContaining({
-        runId: "run_sampled_latency",
+        runId: "run_sampled_report",
         agentName: "default",
         score: 0.5,
-        samples: 2,
-        latencyMs: 50,
+        coverage: { completed: 2, planned: 2 },
+        report: expect.objectContaining({
+          unitCount: 2,
+          roles: expect.arrayContaining([
+            expect.objectContaining({
+              role: "execute",
+              totalDurationMs: 100,
+            }),
+          ]),
+        }),
       }),
     ]);
+  });
+
+  test("reports running job elapsed from the snapshot observation time", () => {
+    const run: WorkbenchRun = {
+      id: "run_live_report",
+      kind: "eval",
+      versionId: "v_live",
+      skillName: "current",
+      skillBundleHash: "bundle_hash",
+      evalHash: "eval_hash",
+      agentName: "default",
+      agentHash: "agent_default",
+      status: "running",
+      jobIds: ["job_live_execute"],
+      traceIds: [],
+      createdAt: "2026-06-16T00:00:00.000Z",
+      operationPlan: {
+        kind: "eval",
+        variant: "local",
+        versionId: "v_live",
+        evalHash: "eval_hash",
+        skills: ["current"],
+        agents: ["default"],
+        samples: 1,
+      },
+    };
+    const jobs: WorkbenchJob[] = [
+      {
+        id: "job_live_execute",
+        runId: run.id,
+        kind: run.kind,
+        role: "execute",
+        versionId: run.versionId,
+        skillName: run.skillName,
+        skillBundleHash: run.skillBundleHash,
+        evalHash: run.evalHash,
+        agentName: run.agentName,
+        agentHash: run.agentHash,
+        caseId: "case-001",
+        sample: 0,
+        status: "running",
+        artifactIds: [],
+        traceIds: [],
+        createdAt: "2026-06-16T00:00:00.000Z",
+        startedAt: "2026-06-16T00:00:02.000Z",
+      },
+    ];
+
+    const snapshot = createWorkbenchRunSnapshot(evalOperationRequest({
+      versionId: "v_live",
+      evalHash: "eval_hash",
+      skill: "current",
+      agent: "default",
+      samples: 1,
+    }), [run], {
+      jobs,
+      now: "2026-06-16T00:00:12.000Z",
+    });
+
+    expect(snapshot.progress.elapsedMs).toBe(12_000);
+    expect(snapshot.report.elapsedMs).toBe(10_000);
+    expect(snapshot.measurements[0]?.report?.elapsedMs).toBe(10_000);
   });
 
   test("terminal failed and canceled run snapshots do not point back to themselves", () => {
@@ -441,22 +554,14 @@ describe("workbench execution DAG scheduler", () => {
       finishedAt: "2026-06-16T00:00:01.000Z",
     };
 
-    const failed = createWorkbenchRunSnapshot({
-      kind: "eval",
-      variant: "local",
+    const request = evalOperationRequest({
       versionId: "v001",
       evalHash: "eval_hash",
       skill: "current",
       agent: "default",
-    }, [base]);
-    const canceled = createWorkbenchRunSnapshot({
-      kind: "eval",
-      variant: "local",
-      versionId: "v001",
-      evalHash: "eval_hash",
-      skill: "current",
-      agent: "default",
-    }, [{ ...base, status: "canceled" }]);
+    });
+    const failed = createWorkbenchRunSnapshot(request, [base]);
+    const canceled = createWorkbenchRunSnapshot(request, [{ ...base, status: "canceled" }]);
 
     expect(failed).not.toHaveProperty("next");
     expect(canceled).not.toHaveProperty("next");
@@ -480,14 +585,12 @@ describe("workbench execution DAG scheduler", () => {
       finishedAt: "2026-06-16T00:00:01.000Z",
     };
 
-    const snapshot = createWorkbenchRunSnapshot({
-      kind: "eval",
-      variant: "local",
+    const snapshot = createWorkbenchRunSnapshot(evalOperationRequest({
       versionId: "v001",
       evalHash: "eval_hash",
       skill: "current",
       agent: "strict",
-    }, [run]);
+    }), [run]);
 
     expect(snapshot.next).toBe("workbench results --agents strict");
   });
@@ -509,17 +612,14 @@ describe("workbench execution DAG scheduler", () => {
       finishedAt: "2026-06-21T00:00:01.000Z",
     };
 
-    const snapshot = createWorkbenchRunSnapshot({
-      kind: "run",
-      variant: "local",
+    const snapshot = createWorkbenchRunSnapshot(evalOperationRequest({
       versionId: "v001",
       evalHash: "eval_hash",
-      skill: "current",
-      agent: "default",
       caseIds: ["investor-focus"],
-    }, [run]);
+      phases: ["execute"],
+    }), [run]);
 
-    expect(snapshot.next).toBe("workbench grade --agents default --cases investor-focus");
+    expect(snapshot.next).toBe("workbench grade --cases investor-focus");
   });
 
   test("local web operation defaults keep CLI current-source semantics", () => {
@@ -539,11 +639,15 @@ describe("workbench execution DAG scheduler", () => {
     expect(local.run.defaultRequest).not.toHaveProperty("versionId");
     expect(local.grade.defaultRequest).not.toHaveProperty("versionId");
     expect(local.improve.defaultRequest).not.toHaveProperty("versionId");
+    expect(local.eval.defaultRequest.kind === "eval" ? local.eval.defaultRequest.targets[0] : undefined).not.toHaveProperty("skill");
+    expect(local.eval.defaultRequest.kind === "eval" ? local.eval.defaultRequest.targets[0] : undefined).not.toHaveProperty("agent");
     expect(cloud.run.enabled).toBe(true);
     expect(cloud.grade.enabled).toBe(true);
-    expect(cloud.run.defaultRequest.versionId).toBe("v_current");
-    expect(cloud.grade.defaultRequest.versionId).toBe("v_current");
-    expect(cloud.eval.defaultRequest.versionId).toBe("v_current");
+    expect(cloud.run.defaultRequest.kind === "eval" ? cloud.run.defaultRequest.targets[0]?.versionId : undefined).toBe("v_current");
+    expect(cloud.grade.defaultRequest.kind === "eval" ? cloud.grade.defaultRequest.targets[0]?.versionId : undefined).toBe("v_current");
+    expect(cloud.eval.defaultRequest.kind === "eval" ? cloud.eval.defaultRequest.targets[0]?.versionId : undefined).toBe("v_current");
+    expect(cloud.eval.defaultRequest.kind === "eval" ? cloud.eval.defaultRequest.targets[0] : undefined).not.toHaveProperty("skill");
+    expect(cloud.eval.defaultRequest.kind === "eval" ? cloud.eval.defaultRequest.targets[0] : undefined).not.toHaveProperty("agent");
     expect(cloud.improve.defaultRequest.versionId).toBe("v_current");
     expect(local.improve.enabled).toBe(false);
     expect(local.improve.disabledReason).toMatch(/needs graded below-perfect/u);

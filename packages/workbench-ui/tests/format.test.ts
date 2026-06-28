@@ -16,7 +16,7 @@ import {
   formatCount,
   formatDurationMs,
   formatList,
-  formatRunCost,
+  formatReportCost,
   formatScore,
   formatStatus,
   formatTimestamp,
@@ -50,11 +50,23 @@ describe("format helpers", () => {
     expect(formatCost(undefined)).toBe("n/a");
   });
 
-  test("formatRunCost explains missing usage states", () => {
-    expect(formatRunCost({ id: "run_cost", status: "succeeded", costUsd: 0.0123 })).toBe("$0.01");
-    expect(formatRunCost({ id: "run_failed", status: "failed" })).toBe("Failed before usage");
-    expect(formatRunCost({ id: "run_no_usage", status: "succeeded" })).toBe("Not reported");
-    expect(formatRunCost(null)).toBe("Not tested");
+  test("formatReportCost explains missing usage states", () => {
+    expect(formatReportCost({
+      unitCount: 1,
+      jobCount: 1,
+      roles: [{
+        role: "execute",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        costUsd: 0.0123,
+      }],
+    }, "succeeded")).toBe("$0.01");
+    expect(formatReportCost(undefined, "failed")).toBe("Failed before usage");
+    expect(formatReportCost(undefined, "succeeded")).toBe("Not reported");
   });
 
   test("treats run.jobIds as run-owned evidence", () => {

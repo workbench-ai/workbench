@@ -333,24 +333,61 @@ export type WorkbenchRunLocation = "local" | "cloud";
 export type WorkbenchRunStatus = "queued" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type WorkbenchArtifactKind = "file" | "directory" | "log" | "result";
-export type WorkbenchOperationKind = "run" | "grade" | "eval" | "improve";
+export type WorkbenchOperationKind = "eval" | "improve";
 export type WorkbenchOperationVariant = WorkbenchRunLocation;
 export type WorkbenchJobRole = "execute" | "grade" | "improve" | string;
+export type WorkbenchOperationPhase = "execute" | "grade";
 
-export interface WorkbenchOperationRequest {
-  kind: WorkbenchOperationKind;
+export interface WorkbenchOperationTarget {
+  skill?: string;
+  versionId?: string;
+  agent?: string;
+}
+
+export type WorkbenchOperationGrader =
+  | { kind: "none" }
+  | { kind: "evaluation" };
+
+export interface WorkbenchEvalOperationRequest {
+  kind: "eval";
   variant: WorkbenchOperationVariant;
   runId?: string;
-  versionId?: string;
-  evalHash?: string;
-  skill?: string;
-  agent?: string;
-  caseIds?: readonly string[];
+  caseIds: readonly string[];
+  targets: readonly WorkbenchOperationTarget[];
+  phases: readonly WorkbenchOperationPhase[];
+  grader?: WorkbenchOperationGrader;
   samples?: number;
   rerun?: boolean;
+  gradeOfRunId?: string;
+  retryOfRunId?: string;
+}
+
+export interface WorkbenchImproveOperationRequest {
+  kind: "improve";
+  variant: WorkbenchOperationVariant;
+  runId?: string;
+  target?: WorkbenchOperationTarget;
+  versionId?: string;
+  evalHash?: string;
+  samples?: number;
   budget?: number;
   evidenceTraceIds?: readonly string[];
   retryOfRunId?: string;
+}
+
+export type WorkbenchOperationRequest = WorkbenchEvalOperationRequest | WorkbenchImproveOperationRequest;
+
+export interface WorkbenchCaseMutationRequest {
+  title?: string;
+  prompt: string;
+  expected?: string;
+  metadata?: Json;
+}
+
+export interface WorkbenchCaseMutationResponse {
+  caseId: string;
+  path: string;
+  evaluationHash?: string;
 }
 
 export interface WorkbenchOperationSelection {
@@ -361,6 +398,10 @@ export interface WorkbenchOperationSelection {
 export interface WorkbenchOperationPreview {
   kind: WorkbenchOperationKind;
   variant: WorkbenchOperationVariant;
+  caseIds?: readonly string[];
+  targets?: readonly WorkbenchOperationTarget[];
+  phases?: readonly WorkbenchOperationPhase[];
+  grader?: WorkbenchOperationGrader;
   canStart: boolean;
   versionId?: string;
   evalHash?: string;
@@ -412,14 +453,16 @@ export interface WorkbenchRunProgressSummary {
   active?: WorkbenchActiveJobSummary;
   partialScore?: number;
   evidenceCount?: number;
-  costUsd?: number;
   elapsedMs: number;
   lastProgressAt?: string;
 }
 
 export interface WorkbenchOperationPlanSummary {
-  kind: WorkbenchOperationKind;
+  kind: WorkbenchRunKind;
   variant: WorkbenchOperationVariant;
+  targets?: readonly WorkbenchOperationTarget[];
+  phases?: readonly WorkbenchOperationPhase[];
+  grader?: WorkbenchOperationGrader;
   versionId?: string;
   evalHash?: string;
   skills: readonly string[];
@@ -429,6 +472,11 @@ export interface WorkbenchOperationPlanSummary {
   rerun?: boolean;
   budget?: number;
   retryOfRunId?: string;
+}
+
+export interface WorkbenchSampleCoverage {
+  completed: number;
+  planned: number;
 }
 
 export interface WorkbenchMeasurementSummary {
@@ -441,9 +489,8 @@ export interface WorkbenchMeasurementSummary {
   runId: string;
   status: WorkbenchRunStatus;
   score?: number;
-  samples?: number;
-  costUsd?: number;
-  latencyMs?: number;
+  coverage?: WorkbenchSampleCoverage;
+  report?: WorkbenchJobReport;
   error?: string;
 }
 
@@ -456,6 +503,7 @@ export interface WorkbenchRunSnapshot {
   phase: WorkbenchRunPhase;
   plan: WorkbenchOperationPlanSummary;
   progress: WorkbenchRunProgressSummary;
+  report: WorkbenchJobReport;
   measurements: readonly WorkbenchMeasurementSummary[];
   result?: {
     score?: number;
@@ -505,8 +553,6 @@ export interface WorkbenchRun {
   agentHash: string;
   status: WorkbenchRunStatus;
   operationPlan?: WorkbenchOperationPlanSummary;
-  costUsd?: number;
-  latencyMs?: number;
   jobIds?: string[];
   traceIds: string[];
   createdAt: string;
@@ -551,6 +597,26 @@ export interface WorkbenchJob {
   finishedAt?: string;
   durationMs?: number;
   error?: string;
+}
+
+export interface WorkbenchJobRoleReport {
+  role: WorkbenchJobRole;
+  jobCount: number;
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  canceled: number;
+  totalDurationMs?: number;
+  costUsd?: number;
+}
+
+export interface WorkbenchJobReport {
+  unitCount: number;
+  jobCount: number;
+  elapsedMs?: number;
+  totalDurationMs?: number;
+  roles: readonly WorkbenchJobRoleReport[];
 }
 
 export interface WorkbenchJobAdapterSummary {
@@ -598,6 +664,61 @@ export interface WorkbenchArtifact {
   files: SurfaceSnapshotFile[];
 }
 
+export type WorkbenchTraceOrigin = "live" | "eval" | "imported";
+export type WorkbenchTraceCaptureStatus = "capturing" | "captured" | "discarded";
+export type WorkbenchTraceExecutionStatus = "running" | "completed" | "failed" | "canceled" | "unknown";
+export type WorkbenchTraceGradeStatus = "ungraded" | "graded";
+export type WorkbenchTraceReviewStatus = "unreviewed" | "passed" | "failed" | "deferred";
+export type WorkbenchTracePromotionStatus = "none" | "promoted";
+
+export interface WorkbenchTraceLifecycleStatus {
+  capture: WorkbenchTraceCaptureStatus;
+  execution: WorkbenchTraceExecutionStatus;
+  grade: WorkbenchTraceGradeStatus;
+  review: WorkbenchTraceReviewStatus;
+  promotion: WorkbenchTracePromotionStatus;
+}
+
+export interface WorkbenchTraceSource {
+  host?: string;
+  sessionId?: string;
+  turnId?: string;
+  workspaceRoot?: string;
+  command?: string;
+}
+
+export interface WorkbenchTraceSubject {
+  type: "skill" | "case" | "agent" | "version" | "run" | "job";
+  id: string;
+  versionId?: string;
+  confidence?: "exact" | "claimed" | "inferred";
+  activation?: "workbench-owned" | "host-skill" | "explicit-invocation" | "manual" | "unknown";
+}
+
+export interface WorkbenchTraceLink {
+  type: "run" | "job" | "case" | "version" | "agent" | "result" | "trace" | "promotion";
+  id: string;
+}
+
+export interface WorkbenchTraceInput {
+  prompt?: string;
+  attachments?: SurfaceSnapshotFile[];
+}
+
+export interface WorkbenchTraceOutput {
+  assistantText?: string;
+  finalMessageId?: string;
+}
+
+export interface WorkbenchTraceReview {
+  status: WorkbenchTraceReviewStatus;
+  note?: string;
+  tags?: string[];
+  expected?: string;
+  reviewedAt?: string;
+  reviewer?: string;
+}
+
 export interface WorkbenchTrace {
   id: string;
   runId: string;
@@ -612,6 +733,151 @@ export interface WorkbenchTrace {
   request: Json;
   result: Json;
   files: SurfaceSnapshotFile[];
+  protocol?: "workbench.trace.v1";
+  origin?: WorkbenchTraceOrigin;
+  updatedAt?: string;
+  source?: WorkbenchTraceSource;
+  status?: WorkbenchTraceLifecycleStatus;
+  subjects?: WorkbenchTraceSubject[];
+  links?: WorkbenchTraceLink[];
+  input?: WorkbenchTraceInput;
+  output?: WorkbenchTraceOutput;
+  spans?: WorkbenchTraceSpan[];
+  events?: WorkbenchTraceEvent[];
+  usage?: UsageSummary;
+  artifacts?: SurfaceSnapshotFile[];
+  review?: WorkbenchTraceReview;
+  resultIds?: string[];
+}
+
+export type WorkbenchTracePromotionBlockerCode =
+  | "trace_not_captured"
+  | "trace_not_terminal"
+  | "trace_prompt_required"
+  | "trace_expected_required";
+
+export type WorkbenchTracePromotionReadiness =
+  | { ok: true }
+  | {
+      ok: false;
+      code: WorkbenchTracePromotionBlockerCode;
+      message: string;
+      reviewStatus?: WorkbenchTraceReviewStatus;
+    };
+
+export interface WorkbenchTraceProjection {
+  lifecycleStatus: string;
+  reviewStatus: WorkbenchTraceReviewStatus;
+  promotionStatus: WorkbenchTracePromotionStatus;
+  prompt: string | null;
+  output: string | null;
+  promotionReadiness: WorkbenchTracePromotionReadiness;
+}
+
+export function workbenchTraceProjection(trace: WorkbenchTrace): WorkbenchTraceProjection {
+  return {
+    lifecycleStatus: workbenchTraceLifecycleStatus(trace),
+    reviewStatus: workbenchTraceReviewStatus(trace),
+    promotionStatus: trace.status?.promotion ?? "none",
+    prompt: workbenchTracePrompt(trace),
+    output: workbenchTraceOutputText(trace),
+    promotionReadiness: workbenchTracePromotionReadiness(trace),
+  };
+}
+
+export function workbenchTraceLifecycleStatus(trace: WorkbenchTrace): string {
+  if (trace.status) {
+    return `${trace.status.capture}/${trace.status.execution}/${trace.status.grade}`;
+  }
+  const result = traceObjectValue(trace.result);
+  return typeof result?.status === "string" && result.status.trim()
+    ? result.status.trim()
+    : "unknown";
+}
+
+export function workbenchTraceReviewStatus(trace: WorkbenchTrace): WorkbenchTraceReviewStatus {
+  const explicitReviewStatus = trace.review?.status;
+  const lifecycleReviewStatus = trace.status?.review;
+  return explicitReviewStatus && explicitReviewStatus !== "unreviewed"
+    ? explicitReviewStatus
+    : lifecycleReviewStatus ?? explicitReviewStatus ?? "unreviewed";
+}
+
+export function workbenchTracePrompt(trace: WorkbenchTrace): string | null {
+  const inputPrompt = trimmedTraceString(trace.input?.prompt);
+  if (inputPrompt) {
+    return inputPrompt;
+  }
+  const request = traceObjectValue(trace.request);
+  const requestInput = traceObjectValue(request?.input);
+  const requestInputPrompt = trimmedTraceString(requestInput?.prompt);
+  if (requestInputPrompt) {
+    return requestInputPrompt;
+  }
+  const requestPrompt = trimmedTraceString(request?.prompt);
+  if (requestPrompt) {
+    return requestPrompt;
+  }
+  const promptEvent = trace.events?.find((event) => typeof event.attributes.prompt === "string");
+  return trimmedTraceString(promptEvent?.attributes.prompt);
+}
+
+export function workbenchTraceOutputText(trace: WorkbenchTrace): string | null {
+  const assistantText = trimmedTraceString(trace.output?.assistantText);
+  if (assistantText) {
+    return assistantText;
+  }
+  const result = traceObjectValue(trace.result);
+  const resultOutput = traceObjectValue(result?.output);
+  const resultAssistantText = trimmedTraceString(resultOutput?.assistantText);
+  if (resultAssistantText) {
+    return resultAssistantText;
+  }
+  return trimmedTraceString(result?.summary);
+}
+
+export function workbenchTracePromotionReadiness(trace: WorkbenchTrace): WorkbenchTracePromotionReadiness {
+  if (trace.status?.capture && trace.status.capture !== "captured") {
+    return {
+      ok: false,
+      code: "trace_not_captured",
+      message: `Trace ${trace.id} is ${trace.status.capture}; promotion requires a captured trace.`,
+    };
+  }
+  if (trace.status?.execution === "running") {
+    return {
+      ok: false,
+      code: "trace_not_terminal",
+      message: `Trace ${trace.id} is still running; promotion requires a terminal trace.`,
+    };
+  }
+  if (!workbenchTracePrompt(trace)) {
+    return {
+      ok: false,
+      code: "trace_prompt_required",
+      message: `Trace ${trace.id} has no captured prompt; promotion requires trace input.`,
+    };
+  }
+  const reviewStatus = workbenchTraceReviewStatus(trace);
+  if ((reviewStatus === "failed" || reviewStatus === "deferred") && !trimmedTraceString(trace.review?.expected)) {
+    return {
+      ok: false,
+      code: "trace_expected_required",
+      message: `Trace ${trace.id} is reviewed as ${reviewStatus}; promotion requires an explicit expected correction.`,
+      reviewStatus,
+    };
+  }
+  return { ok: true };
+}
+
+function traceObjectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function trimmedTraceString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 export interface WorkbenchLineageEdge {
@@ -832,9 +1098,8 @@ export interface WorkbenchResultCell {
   runId?: string;
   status?: WorkbenchRunStatus;
   quality?: number;
-  samples?: number;
-  costUsd?: number;
-  latencyMs?: number;
+  coverage?: WorkbenchSampleCoverage;
+  report?: WorkbenchJobReport;
   error?: string;
 }
 

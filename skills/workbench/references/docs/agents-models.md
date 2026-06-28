@@ -2,7 +2,7 @@
 
 Configure the agent, model label, and provider auth profile that Workbench uses for evals.
 
-[Cases and rubrics](cases-rubrics.md) defines grading criteria. [Results](track.md) shows model and agent outcomes after a run.
+[Cases and grading](cases-grading.md) defines grading criteria. [Results](track.md) shows model and agent outcomes after a run.
 
 ## Agent source
 

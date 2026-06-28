@@ -1,9 +1,10 @@
 import { describe, expect, test } from "vitest";
 
-import type {
-  WorkbenchJob,
-  WorkbenchRun,
-  WorkbenchRunSnapshot,
+import {
+  workbenchJobReportTotalCostUsd,
+  type WorkbenchJob,
+  type WorkbenchRun,
+  type WorkbenchRunSnapshot,
 } from "@workbench-ai/workbench-contract";
 
 import {
@@ -63,7 +64,7 @@ describe("Workbench CLI progress projection", () => {
       },
     });
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench eval: running, jobs 2/3 complete, remaining 1, scored 1, partial score 1.000, failed 1, active case=case-001 sample=2 job=job_a_1, elapsed 42s.");
+      .toBe("workbench eval: running, jobs 2/3 complete, remaining 1, scored 1, partial score 1.000, failed 1, active case=case-001 sample=2 job=job_a_1, wall time 42s.");
   });
 
   test("projects concrete evidence and usage facts", () => {
@@ -71,13 +72,14 @@ describe("Workbench CLI progress projection", () => {
       command: "eval",
       location: "local",
       phase: "running",
-      runs: [run({ id: "run_usage", status: "running", costUsd: 0.1234 })],
+      runs: [run({ id: "run_usage", status: "running" })],
       jobs: [
         job({
           id: "job_done",
           runId: "run_usage",
           status: "succeeded",
           score: 0.5,
+          usageCostUsd: 0.1234,
           artifactIds: ["artifact_1"],
           traceIds: ["trace_1"],
           finishedAt: "2026-06-15T00:00:05.000Z",
@@ -102,16 +104,19 @@ describe("Workbench CLI progress projection", () => {
       canceled: 0,
       partialScore: 0.5,
       evidenceCount: 4,
-      costUsd: 0.1234,
       elapsedMs: 10_000,
     });
+    expect(workbenchJobReportTotalCostUsd(snapshot.report)).toBe(0.1234);
     expect(formatProgressSummary(snapshot)).toContain("partial score 0.500");
     expect(formatProgressSummary(snapshot)).toContain("evidence 4");
-    expect(formatProgressSummary(snapshot)).toContain("usage cost=$0.12");
+    expect(formatProgressSummary(snapshot)).toContain("cost=$0.12 total");
     expect(formatProgressSummary({
       ...snapshot,
-      progress: { ...snapshot.progress, costUsd: 0.004 },
-    })).toContain("usage cost=$0");
+      report: {
+        ...snapshot.report,
+        roles: snapshot.report.roles.map((role) => role.costUsd === undefined ? role : { ...role, costUsd: 0.004 }),
+      },
+    })).toContain("cost=$0 total");
   });
 
   test("keeps eval progress planned totals stable before grade jobs exist", () => {
@@ -156,7 +161,7 @@ describe("Workbench CLI progress projection", () => {
     expect(formatProgressSnapshot(snapshot)).toContain("remaining 10");
   });
 
-  test("uses durable finish time for terminal elapsed duration", () => {
+  test("uses durable finish time for terminal wall time", () => {
     const startedAt = Date.parse("2026-06-15T00:00:00.000Z");
     const snapshot = expectSnapshot(runProgressSnapshotFromRuns({
       command: "watch",
@@ -190,7 +195,7 @@ describe("Workbench CLI progress projection", () => {
         lastProgressAt: "2026-06-15T00:02:00.000Z",
       },
     });
-    expect(formatProgressSnapshot(snapshot)).toContain("elapsed 2m");
+    expect(formatProgressSnapshot(snapshot)).toContain("wall time 2m");
   });
 
   test("keeps failed and canceled counts separate in human progress", () => {
@@ -216,7 +221,7 @@ describe("Workbench CLI progress projection", () => {
       canceled: 1,
     });
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench eval: running, jobs 1/1 complete, failed 0, canceled 1, elapsed 15s.");
+      .toBe("workbench eval: running, jobs 1/1 complete, failed 0, canceled 1, wall time 15s.");
   });
 
   test("omits empty evidence from human progress", () => {
@@ -264,7 +269,7 @@ describe("Workbench CLI progress projection", () => {
       },
     });
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench improve: proof eval running, jobs 0/1 complete, remaining 1, failed 0, elapsed 8s.");
+      .toBe("workbench improve: proof eval running, jobs 0/1 complete, remaining 1, failed 0, wall time 8s.");
   });
 
   test("renders only meaningful changes and heartbeat intervals", () => {
@@ -282,6 +287,7 @@ describe("Workbench CLI progress projection", () => {
     const unchanged = {
       ...queued,
       progress: { ...queued.progress, elapsedMs: 20_000 },
+      report: { ...queued.report, elapsedMs: 20_000 },
     };
     const heartbeat = {
       ...queued,
@@ -313,13 +319,13 @@ describe("Workbench CLI progress projection", () => {
     renderer.render(complete);
 
     expect(stream.value).toBe([
-      "workbench eval: queued on Workbench Cloud, jobs 0/1 complete, remaining 1, failed 0, elapsed 0s.",
+      "workbench eval: queued on Workbench Cloud, jobs 0/1 complete, remaining 1, failed 0, wall time 0s.",
       "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch run_cloud.",
-      "workbench eval: queued on Workbench Cloud, jobs 0/1 complete, remaining 1, failed 0, elapsed 1m.",
+      "workbench eval: queued on Workbench Cloud, jobs 0/1 complete, remaining 1, failed 0, wall time 1m.",
       "workbench eval: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch run_cloud.",
-      "workbench eval: running, jobs 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_cloud, elapsed 1m 1s.",
+      "workbench eval: running, jobs 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_cloud, wall time 1m 1s.",
       "workbench eval: press Ctrl-C to detach; resume with workbench watch run_cloud.",
-      "workbench eval: complete, jobs 1/1 complete, scored 1, failed 0, elapsed 1m 20s.",
+      "workbench eval: complete, jobs 1/1 complete, scored 1, failed 0, wall time 1m 20s.",
       "",
     ].join("\n"));
   });
@@ -380,9 +386,9 @@ describe("Workbench CLI progress projection", () => {
     renderer.render(heartbeat);
 
     expect(stream.value).toBe([
-      "workbench eval: running, jobs 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_local, elapsed 0s.",
+      "workbench eval: running, jobs 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_local, wall time 0s.",
       "workbench eval: inspect current evidence with workbench show run_local.",
-      "workbench eval: running, jobs 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_local, elapsed 1m.",
+      "workbench eval: running, jobs 0/1 complete, remaining 1, failed 0, active case=case-001 sample=1 job=job_local, wall time 1m.",
       "workbench eval: inspect current evidence with workbench show run_local.",
       "",
     ].join("\n"));
@@ -401,7 +407,7 @@ describe("Workbench CLI progress projection", () => {
 
     expect(snapshot.phase).toBe("syncing");
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench eval: sync with Workbench Cloud, jobs 1/1 complete, scored 1, failed 0, elapsed 1m 30s.");
+      .toBe("workbench eval: sync with Workbench Cloud, jobs 1/1 complete, scored 1, failed 0, wall time 1m 30s.");
   });
 
   test("uses proof jobs for terminal improve sync counters", () => {
@@ -429,7 +435,7 @@ describe("Workbench CLI progress projection", () => {
       },
     });
     expect(formatProgressSnapshot(snapshot))
-      .toBe("workbench improve: sync with Workbench Cloud, jobs 1/1 complete, scored 1, failed 0, elapsed 1m 30s.");
+      .toBe("workbench improve: sync with Workbench Cloud, jobs 1/1 complete, scored 1, failed 0, wall time 1m 30s.");
   });
 });
 
@@ -456,10 +462,10 @@ function run(overrides: Partial<WorkbenchRun>): WorkbenchRun {
   };
 }
 
-type ProgressJobOverrides = Partial<WorkbenchJob> & { score?: number };
+type ProgressJobOverrides = Partial<WorkbenchJob> & { score?: number; usageCostUsd?: number };
 
 function job(overrides: ProgressJobOverrides): WorkbenchJob {
-  const { score, ...rest } = overrides;
+  const { score, usageCostUsd, ...rest } = overrides;
   return {
     id: "job_1",
     runId: "run_1",
@@ -477,7 +483,12 @@ function job(overrides: ProgressJobOverrides): WorkbenchJob {
     artifactIds: [],
     traceIds: [],
     createdAt: "2026-06-15T00:00:00.000Z",
-    ...(score !== undefined ? { result: { items: [{ kind: "score" as const, score, value: score }] } } : {}),
+    ...(score !== undefined || usageCostUsd !== undefined ? {
+      result: {
+        ...(usageCostUsd !== undefined ? { usage: { total: { costUsd: usageCostUsd } } } : {}),
+        ...(score !== undefined ? { items: [{ kind: "score" as const, score, value: score }] } : {}),
+      },
+    } : {}),
     ...rest,
   };
 }

@@ -2,17 +2,21 @@ import type {
   WorkbenchInspectionSnapshot,
   WorkbenchJob,
   WorkbenchJobDependency,
+  WorkbenchJobReport,
+  WorkbenchJobRoleReport,
   WorkbenchJobRole,
   WorkbenchJobStatus,
   WorkbenchRun,
   WorkbenchRunStatus,
+  WorkbenchSampleCoverage,
   WorkbenchTrace,
   UsageSummary,
 } from "./index";
 
 export interface WorkbenchRunEvidenceView {
   runId: string;
-  agents: WorkbenchRunEvidenceAgentResult[];
+  measurements: WorkbenchRunEvidenceMeasurementResult[];
+  otherWork: WorkbenchRunEvidenceOtherWorkResult[];
   cases: WorkbenchRunEvidenceCaseResult[];
   traceJobs: WorkbenchRunEvidenceTraceJob[];
 }
@@ -34,13 +38,21 @@ export interface WorkbenchRunEvidenceAgentIdentity extends WorkbenchRunEvidenceS
   model?: string;
 }
 
-export interface WorkbenchRunEvidenceAgentResult extends WorkbenchRunEvidenceAgentIdentity {
+export interface WorkbenchRunEvidenceMeasurementResult extends WorkbenchRunEvidenceAgentIdentity {
   status: WorkbenchRunStatus;
   score?: number;
-  costUsd?: number;
-  durationMs?: number;
-  completedCases: number;
-  totalCases: number;
+  report: WorkbenchJobReport;
+  coverage: WorkbenchSampleCoverage;
+  succeededJobs: number;
+  totalJobs: number;
+  failedJobs: number;
+  canceledJobs: number;
+  errors: string[];
+}
+
+export interface WorkbenchRunEvidenceOtherWorkResult extends WorkbenchRunEvidenceAgentIdentity {
+  status: WorkbenchRunStatus;
+  report: WorkbenchJobReport;
   succeededJobs: number;
   totalJobs: number;
   failedJobs: number;
@@ -56,7 +68,7 @@ export interface WorkbenchRunEvidenceCaseResult extends WorkbenchRunEvidenceAgen
   execute?: WorkbenchRunEvidenceJobPhase;
   grade?: WorkbenchRunEvidenceJobPhase;
   score?: number;
-  durationMs?: number;
+  report: WorkbenchJobReport;
   error?: string;
   dependencyReason?: string;
 }
@@ -94,6 +106,437 @@ export interface WorkbenchRunEvidenceJobDependency {
 type WorkbenchRunEvidenceResultCell = NonNullable<WorkbenchInspectionSnapshot["results"]>["cells"][number];
 type WorkbenchRunEvidenceResultVersion = NonNullable<WorkbenchInspectionSnapshot["results"]>["versions"][number];
 
+export function workbenchSampleCoverage(
+  completed: number | undefined,
+  planned: number | undefined,
+): WorkbenchSampleCoverage | undefined {
+  const plannedCount = normalizeCoverageCount(planned);
+  if (plannedCount === undefined || plannedCount === 0) {
+    return undefined;
+  }
+  const completedCount = normalizeCoverageCount(completed) ?? 0;
+  return { completed: completedCount, planned: plannedCount };
+}
+
+export function workbenchSampleCoverageForJobs(
+  jobs: readonly WorkbenchJob[],
+): WorkbenchSampleCoverage | undefined {
+  const caseJobs = jobs.filter((job) => job.caseId !== "current");
+  const resultJobs = preferredSampleResultJobs(caseJobs);
+  return workbenchSampleCoverage(
+    uniqueCaseSampleCount(resultJobs.filter(jobHasSampleResult)),
+    uniqueCaseSampleCount(caseJobs),
+  );
+}
+
+export function workbenchSampleCoverageTotal(
+  coverages: readonly (WorkbenchSampleCoverage | undefined)[],
+): WorkbenchSampleCoverage | undefined {
+  const present = coverages.filter((coverage): coverage is WorkbenchSampleCoverage => coverage !== undefined);
+  if (present.length === 0) {
+    return undefined;
+  }
+  return workbenchSampleCoverage(
+    present.reduce((sum, coverage) => sum + coverage.completed, 0),
+    present.reduce((sum, coverage) => sum + coverage.planned, 0),
+  );
+}
+
+function normalizeCoverageCount(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function preferredSampleResultJobs(jobs: readonly WorkbenchJob[]): readonly WorkbenchJob[] {
+  const gradeJobs = jobs.filter((job) => job.role === "grade");
+  return gradeJobs.length > 0 ? gradeJobs : jobs;
+}
+
+function jobHasSampleResult(job: WorkbenchJob): boolean {
+  return job.status === "succeeded" || jobScore(job) !== undefined;
+}
+
+function uniqueCaseSampleCount(jobs: readonly Pick<WorkbenchJob, "caseId" | "sample">[]): number {
+  return new Set(jobs.map((job) => `${job.caseId}\0${job.sample}`)).size;
+}
+
+export interface WorkbenchJobReportOptions {
+  unitKey?: (job: WorkbenchJob) => string | undefined;
+  now?: string;
+}
+
+export interface WorkbenchReportMetricValue {
+  total?: number;
+  perSample?: number;
+}
+
+export interface WorkbenchReportRoleMetricSummary {
+  role: WorkbenchJobRole;
+  jobCount: number;
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  canceled: number;
+  latency?: WorkbenchReportMetricValue;
+  cost?: WorkbenchReportMetricValue;
+}
+
+export interface WorkbenchReportMetricSummary {
+  sampleCount: number;
+  latency?: WorkbenchReportMetricValue;
+  cost?: WorkbenchReportMetricValue;
+  roles: WorkbenchReportRoleMetricSummary[];
+}
+
+export type WorkbenchReportMetricKind = "latency" | "cost";
+export type WorkbenchReportMetricScope = "run" | "grade" | "total";
+
+export interface WorkbenchReportScopedMetric {
+  scope: WorkbenchReportMetricScope;
+  label: string;
+  role?: WorkbenchJobRole;
+  value: WorkbenchReportMetricValue;
+}
+
+export interface WorkbenchReportMetricBreakdown {
+  sampleCount: number;
+  primary?: WorkbenchReportScopedMetric;
+  run?: WorkbenchReportScopedMetric;
+  grade?: WorkbenchReportScopedMetric;
+  total?: WorkbenchReportScopedMetric;
+  details: WorkbenchReportScopedMetric[];
+}
+
+export function buildWorkbenchJobReport(
+  jobs: readonly WorkbenchJob[],
+  traces: readonly WorkbenchTrace[] = [],
+  options: WorkbenchJobReportOptions = {},
+): WorkbenchJobReport {
+  const unitKeys = new Set<string>();
+  const roles = new Map<WorkbenchJobRole, WorkbenchJob[]>();
+  for (const job of jobs) {
+    const unitKey = options.unitKey?.(job) ?? defaultJobReportUnitKey(job);
+    if (unitKey) {
+      unitKeys.add(unitKey);
+    }
+    const role = normalizedJobReportRole(job);
+    const roleGroup = roles.get(role);
+    if (roleGroup) {
+      roleGroup.push(job);
+    } else {
+      roles.set(role, [job]);
+    }
+  }
+
+  const roleReports = [...roles.entries()]
+    .map(([role, roleJobs]) => buildWorkbenchJobRoleReport(role, roleJobs, traces))
+    .sort(compareRoleReports);
+  const totalDurationMs = sumDefinedNumbers(roleReports.map((role) => role.totalDurationMs));
+  const elapsedMs = elapsedMsForJobs(jobs, options.now);
+  return {
+    unitCount: unitKeys.size,
+    jobCount: jobs.length,
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(totalDurationMs !== undefined ? { totalDurationMs } : {}),
+    roles: roleReports,
+  };
+}
+
+export function workbenchJobReportRole(
+  report: WorkbenchJobReport | undefined,
+  role: WorkbenchJobRole,
+): WorkbenchJobRoleReport | undefined {
+  return report?.roles.find((entry) => entry.role === role);
+}
+
+export function workbenchJobReportTotalCostUsd(report: WorkbenchJobReport | undefined): number | undefined {
+  return report ? sumCosts(report.roles.map((role) => role.costUsd)) : undefined;
+}
+
+export function workbenchJobReportMetricSummary(
+  report: WorkbenchJobReport | undefined,
+): WorkbenchReportMetricSummary {
+  const sampleCount = report?.unitCount ?? 0;
+  const latency = durationMetric(report?.totalDurationMs, sampleCount);
+  const cost = costMetric(workbenchJobReportTotalCostUsd(report), sampleCount);
+  return {
+    sampleCount,
+    ...(latency ? { latency } : {}),
+    ...(cost ? { cost } : {}),
+    roles: (report?.roles ?? []).map((role) => {
+      const roleLatency = durationMetric(role.totalDurationMs, sampleCount);
+      const roleCost = costMetric(role.costUsd, sampleCount);
+      return {
+        role: role.role,
+        jobCount: role.jobCount,
+        queued: role.queued,
+        running: role.running,
+        succeeded: role.succeeded,
+        failed: role.failed,
+        canceled: role.canceled,
+        ...(roleLatency ? { latency: roleLatency } : {}),
+        ...(roleCost ? { cost: roleCost } : {}),
+      };
+    }),
+  };
+}
+
+export function workbenchJobReportMetricBreakdown(
+  report: WorkbenchJobReport | undefined,
+  kind: WorkbenchReportMetricKind,
+): WorkbenchReportMetricBreakdown {
+  const summary = workbenchJobReportMetricSummary(report);
+  const runRole = summary.roles.find((role) => role.role !== "grade");
+  const run = scopedMetric("run", "run", metricValueForRole(runRole, kind), runRole?.role);
+  const gradeRole = summary.roles.find((role) => role.role === "grade");
+  const grade = scopedMetric("grade", "grade", metricValueForRole(gradeRole, kind), gradeRole?.role);
+  const total = scopedMetric("total", "eval total", metricValueForSummary(summary, kind));
+  const primary = runRole ? run : total ?? grade;
+  const details = dedupeScopedMetrics([grade, total], primary);
+  return {
+    sampleCount: summary.sampleCount,
+    ...(primary ? { primary } : {}),
+    ...(run ? { run } : {}),
+    ...(grade ? { grade } : {}),
+    ...(total ? { total } : {}),
+    details,
+  };
+}
+
+function metricValueForSummary(
+  summary: WorkbenchReportMetricSummary,
+  kind: WorkbenchReportMetricKind,
+): WorkbenchReportMetricValue | undefined {
+  return kind === "latency" ? summary.latency : summary.cost;
+}
+
+function metricValueForRole(
+  role: WorkbenchReportRoleMetricSummary | undefined,
+  kind: WorkbenchReportMetricKind,
+): WorkbenchReportMetricValue | undefined {
+  return kind === "latency" ? role?.latency : role?.cost;
+}
+
+function scopedMetric(
+  scope: WorkbenchReportMetricScope,
+  label: string,
+  value: WorkbenchReportMetricValue | undefined,
+  role?: WorkbenchJobRole,
+): WorkbenchReportScopedMetric | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return {
+    scope,
+    label,
+    ...(role ? { role } : {}),
+    value,
+  };
+}
+
+function dedupeScopedMetrics(
+  candidates: readonly (WorkbenchReportScopedMetric | undefined)[],
+  primary: WorkbenchReportScopedMetric | undefined,
+): WorkbenchReportScopedMetric[] {
+  const details: WorkbenchReportScopedMetric[] = [];
+  for (const candidate of candidates) {
+    if (!candidate || (primary && sameMetricValue(candidate.value, primary.value))) {
+      continue;
+    }
+    if (details.some((detail) => sameMetricValue(detail.value, candidate.value))) {
+      continue;
+    }
+    details.push(candidate);
+  }
+  return details;
+}
+
+function sameMetricValue(left: WorkbenchReportMetricValue, right: WorkbenchReportMetricValue): boolean {
+  return left.total === right.total && left.perSample === right.perSample;
+}
+
+function durationMetric(total: number | undefined, sampleCount: number): WorkbenchReportMetricValue | undefined {
+  if (total === undefined) {
+    return undefined;
+  }
+  return {
+    total,
+    ...(sampleCount > 0 ? { perSample: Math.round(total / sampleCount) } : {}),
+  };
+}
+
+function costMetric(total: number | undefined, sampleCount: number): WorkbenchReportMetricValue | undefined {
+  if (total === undefined) {
+    return undefined;
+  }
+  return {
+    total,
+    ...(sampleCount > 0 ? { perSample: Number((total / sampleCount).toFixed(6)) } : {}),
+  };
+}
+
+function buildWorkbenchJobRoleReport(
+  role: WorkbenchJobRole,
+  jobs: readonly WorkbenchJob[],
+  traces: readonly WorkbenchTrace[],
+): WorkbenchJobRoleReport {
+  const statusCounts = jobStatusCounts(jobs);
+  const durations = jobs.map((job) => job.durationMs).filter((duration): duration is number => duration !== undefined);
+  const totalDurationMs = sumDefinedNumbers(durations);
+  const costUsd = sumCosts(jobs.map((job) => jobReportCostFromJob(role, job, traces)));
+  return {
+    role,
+    jobCount: jobs.length,
+    ...statusCounts,
+    ...(totalDurationMs !== undefined ? {
+      totalDurationMs,
+    } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
+function jobStatusCounts(jobs: readonly WorkbenchJob[]): Record<WorkbenchJobStatus, number> {
+  const counts = { queued: 0, running: 0, succeeded: 0, failed: 0, canceled: 0 };
+  for (const job of jobs) {
+    counts[job.status] += 1;
+  }
+  return counts;
+}
+
+function defaultJobReportUnitKey(job: WorkbenchJob): string {
+  return [
+    job.versionId,
+    job.skillName,
+    job.skillBundleHash,
+    job.evalHash,
+    job.agentName,
+    job.agentHash,
+    job.caseId,
+    job.sample,
+  ].join("\0");
+}
+
+function normalizedJobReportRole(job: Pick<WorkbenchJob, "role">): WorkbenchJobRole {
+  return job.role ?? "execute";
+}
+
+function compareRoleReports(left: WorkbenchJobRoleReport, right: WorkbenchJobRoleReport): number {
+  return roleOrder(left.role) - roleOrder(right.role) ||
+    left.role.localeCompare(right.role, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function elapsedMsForJobs(jobs: readonly WorkbenchJob[], nowIso: string | undefined): number | undefined {
+  if (jobs.length === 0) {
+    return undefined;
+  }
+  const startedAt = minTimestamp(jobs.map((job) => job.startedAt ?? job.createdAt));
+  const observedAt = maxTimestamp(jobs.map((job) =>
+    job.finishedAt ?? (job.status === "running" ? nowIso : undefined) ?? job.startedAt ?? job.createdAt
+  ));
+  return startedAt !== undefined && observedAt !== undefined
+    ? Math.max(0, observedAt - startedAt)
+    : undefined;
+}
+
+function minTimestamp(values: readonly (string | undefined)[]): number | undefined {
+  const timestamps = values.map(timestampMs).filter((value): value is number => value !== undefined);
+  return timestamps.length > 0 ? Math.min(...timestamps) : undefined;
+}
+
+function maxTimestamp(values: readonly (string | undefined)[]): number | undefined {
+  const timestamps = values.map(timestampMs).filter((value): value is number => value !== undefined);
+  return timestamps.length > 0 ? Math.max(...timestamps) : undefined;
+}
+
+function timestampMs(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+function sumDefinedNumbers(values: readonly (number | undefined)[]): number | undefined {
+  const numbers = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return numbers.length > 0 ? numbers.reduce((sum, value) => sum + value, 0) : undefined;
+}
+
+function sumCosts(values: readonly (number | undefined)[]): number | undefined {
+  const total = sumDefinedNumbers(values);
+  return total === undefined ? undefined : Number(total.toFixed(6));
+}
+
+function jobReportCostFromJob(
+  role: WorkbenchJobRole,
+  job: WorkbenchJob,
+  traces: readonly WorkbenchTrace[],
+): number | undefined {
+  const jobCost = jobReportCostFromUsage(role, job.result?.usage);
+  if (jobCost !== undefined) {
+    return jobCost;
+  }
+  const traceIds = new Set(job.traceIds);
+  const traceCosts = traces
+    .filter((trace) => traceIds.has(trace.id) || trace.jobId === job.id)
+    .map((trace) => jobReportCostFromUsage(role, usageFromTraceResult(trace.result)));
+  return sumCosts(traceCosts);
+}
+
+function jobReportCostFromUsage(role: WorkbenchJobRole, usage: UsageSummary | undefined): number | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const scopedCost = jobReportScopedUsageCost(role, usage);
+  if (validUsageCost(scopedCost)) {
+    return roundedUsageCost(scopedCost);
+  }
+  if (jobReportRoleHasScopedUsage(role) && usageHasRoleScopedCost(usage)) {
+    return undefined;
+  }
+  const totalCost = usage.total?.costUsd;
+  return validUsageCost(totalCost)
+    ? roundedUsageCost(totalCost)
+    : undefined;
+}
+
+function jobReportScopedUsageCost(role: WorkbenchJobRole, usage: UsageSummary): number | undefined {
+  if (role === "execute" || role === "runner") {
+    return usage.runner?.costUsd;
+  }
+  if (role === "grade" || role === "engine") {
+    return usage.engine?.costUsd;
+  }
+  if (role === "improve" || role === "improver") {
+    return usage.improver?.costUsd;
+  }
+  return undefined;
+}
+
+function jobReportRoleHasScopedUsage(role: WorkbenchJobRole): boolean {
+  return role === "execute" ||
+    role === "runner" ||
+    role === "grade" ||
+    role === "engine" ||
+    role === "improve" ||
+    role === "improver";
+}
+
+function usageHasRoleScopedCost(usage: UsageSummary): boolean {
+  return validUsageCost(usage.runner?.costUsd) ||
+    validUsageCost(usage.engine?.costUsd) ||
+    validUsageCost(usage.improver?.costUsd);
+}
+
+function validUsageCost(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function roundedUsageCost(value: number): number {
+  return Number(value.toFixed(6));
+}
+
 export function buildWorkbenchRunEvidenceView(
   snapshot: WorkbenchInspectionSnapshot,
   runOrId: WorkbenchRun | string,
@@ -108,8 +551,9 @@ export function buildWorkbenchRunEvidenceView(
   const jobs = jobsForRunEvidence(snapshot, run);
   const traceJobs = jobs.map((job) => traceJobForEvidence(snapshot, job)).sort(compareTraceJobs);
   const cases = caseResultsForEvidence(snapshot, jobs).sort(compareCaseResults);
-  const agents = agentResultsForEvidence(snapshot, run, jobs, cases).sort(compareAgentResults);
-  return { runId: run.id, agents, cases, traceJobs };
+  const measurements = measurementResultsForEvidence(snapshot, run, jobs, cases).sort(compareMeasurementResults);
+  const otherWork = otherWorkResultsForEvidence(snapshot, run, jobs).sort(compareOtherWorkResults);
+  return { runId: run.id, measurements, otherWork, cases, traceJobs };
 }
 
 function jobsForRunEvidence(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): WorkbenchJob[] {
@@ -151,7 +595,12 @@ function caseResultsForEvidence(
   const groups = new Map<string, WorkbenchJob[]>();
   for (const job of jobs.filter((entry) => entry.caseId !== "current")) {
     const key = caseResultKey(job);
-    groups.set(key, [...(groups.get(key) ?? []), job]);
+    const groupJobs = groups.get(key);
+    if (groupJobs) {
+      groupJobs.push(job);
+    } else {
+      groups.set(key, [job]);
+    }
   }
 
   const cases: WorkbenchRunEvidenceCaseResult[] = [];
@@ -166,7 +615,7 @@ function caseResultsForEvidence(
     const execute = executeJob ? jobPhase(executeJob, sorted) : undefined;
     const grade = gradeJob ? jobPhase(gradeJob, sorted) : undefined;
     const score = grade?.score ?? execute?.score ?? jobScore(selected);
-    const durationMs = caseDurationMs(sorted);
+    const report = buildWorkbenchJobReport(sorted, snapshot.traces);
     const error = executeJob?.status === "failed" && executeJob.error
       ? executeJob.error
       : gradeJob?.error ?? executeJob?.error;
@@ -180,7 +629,7 @@ function caseResultsForEvidence(
       ...(execute ? { execute } : {}),
       ...(grade ? { grade } : {}),
       ...(score !== undefined ? { score } : {}),
-      ...(durationMs !== undefined ? { durationMs } : {}),
+      report,
       ...(error ? { error } : {}),
       ...(dependencyReason ? { dependencyReason } : {}),
     });
@@ -188,20 +637,25 @@ function caseResultsForEvidence(
   return cases;
 }
 
-function agentResultsForEvidence(
+function measurementResultsForEvidence(
   snapshot: WorkbenchInspectionSnapshot,
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
   cases: readonly WorkbenchRunEvidenceCaseResult[],
-): WorkbenchRunEvidenceAgentResult[] {
+): WorkbenchRunEvidenceMeasurementResult[] {
   const jobGroups = new Map<string, WorkbenchJob[]>();
-  for (const job of jobs) {
+  for (const job of jobs.filter(isMeasuredSampleJob)) {
     const key = measurementKeyFromJob(job);
-    jobGroups.set(key, [...(jobGroups.get(key) ?? []), job]);
+    const groupJobs = jobGroups.get(key);
+    if (groupJobs) {
+      groupJobs.push(job);
+    } else {
+      jobGroups.set(key, [job]);
+    }
   }
 
   const resultCells = (snapshot.results?.cells ?? []).filter((cell) => cell.runId === run.id);
-  const agents: WorkbenchRunEvidenceAgentResult[] = [];
+  const measurements: WorkbenchRunEvidenceMeasurementResult[] = [];
   for (const groupJobs of jobGroups.values()) {
     const identitySource = groupJobs[0];
     if (!identitySource) {
@@ -209,21 +663,25 @@ function agentResultsForEvidence(
     }
     const identity = agentIdentityForJob(snapshot, identitySource);
     const agentCases = cases.filter((entry) => sameMeasurementAgent(entry, identity));
+    if (agentCases.length === 0) {
+      continue;
+    }
     const cell = resultCellForIdentity(resultCells, identity);
     const caseScores = agentCases
       .map((entry) => entry.score)
       .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
     const score = cell?.quality ?? average(caseScores);
-    const costUsd = cell?.costUsd ?? sumRunnerCosts(groupJobs, snapshot.traces);
-    const durationMs = cell?.latencyMs ?? sumRunnerDurations(groupJobs);
-    agents.push({
+    const report = buildWorkbenchJobReport(groupJobs, snapshot.traces);
+    const coverage = workbenchSampleCoverage(agentCases.filter(caseHasResult).length, agentCases.length);
+    if (!coverage) {
+      continue;
+    }
+    measurements.push({
       ...identity,
       status: agentStatus(groupJobs, run.status),
       ...(score !== undefined ? { score } : {}),
-      ...(costUsd !== undefined ? { costUsd } : {}),
-      ...(durationMs !== undefined ? { durationMs } : {}),
-      completedCases: agentCases.filter(caseHasResult).length,
-      totalCases: agentCases.length,
+      report,
+      coverage,
       succeededJobs: groupJobs.filter((job) => job.status === "succeeded").length,
       totalJobs: groupJobs.length,
       failedJobs: groupJobs.filter((job) => job.status === "failed").length,
@@ -231,7 +689,47 @@ function agentResultsForEvidence(
       errors: uniqueStrings(groupJobs.flatMap((job) => job.error ? [job.error] : [])),
     });
   }
-  return agents;
+  return measurements;
+}
+
+function otherWorkResultsForEvidence(
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+  jobs: readonly WorkbenchJob[],
+): WorkbenchRunEvidenceOtherWorkResult[] {
+  const jobGroups = new Map<string, WorkbenchJob[]>();
+  for (const job of jobs.filter((entry) => !isMeasuredSampleJob(entry))) {
+    const key = measurementKeyFromJob(job);
+    const groupJobs = jobGroups.get(key);
+    if (groupJobs) {
+      groupJobs.push(job);
+    } else {
+      jobGroups.set(key, [job]);
+    }
+  }
+
+  const work: WorkbenchRunEvidenceOtherWorkResult[] = [];
+  for (const groupJobs of jobGroups.values()) {
+    const identitySource = groupJobs[0];
+    if (!identitySource) {
+      continue;
+    }
+    work.push({
+      ...agentIdentityForJob(snapshot, identitySource),
+      status: agentStatus(groupJobs, run.status),
+      report: buildWorkbenchJobReport(groupJobs, snapshot.traces),
+      succeededJobs: groupJobs.filter((job) => job.status === "succeeded").length,
+      totalJobs: groupJobs.length,
+      failedJobs: groupJobs.filter((job) => job.status === "failed").length,
+      canceledJobs: groupJobs.filter((job) => job.status === "canceled").length,
+      errors: uniqueStrings(groupJobs.flatMap((job) => job.error ? [job.error] : [])),
+    });
+  }
+  return work;
+}
+
+function isMeasuredSampleJob(job: Pick<WorkbenchJob, "caseId">): boolean {
+  return job.caseId !== "current";
 }
 
 function agentIdentityForJob(
@@ -344,56 +842,6 @@ function caseHasResult(entry: WorkbenchRunEvidenceCaseResult): boolean {
   return entry.status === "succeeded" || entry.score !== undefined;
 }
 
-function caseDurationMs(jobs: readonly WorkbenchJob[]): number | undefined {
-  return sumDurations(jobs);
-}
-
-function sumDurations(jobs: readonly Pick<WorkbenchJob, "durationMs">[]): number | undefined {
-  const values = jobs
-    .map((job) => job.durationMs)
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
-}
-
-function sumRunnerCosts(
-  jobs: readonly WorkbenchJob[],
-  traces: readonly WorkbenchTrace[],
-): number | undefined {
-  const values = jobs
-    .filter(isRunnerJob)
-    .map((job) => runnerCostFromJob(job, traces))
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (values.length === 0) {
-    return undefined;
-  }
-  return Number(values.reduce((sum, value) => sum + value, 0).toFixed(6));
-}
-
-function runnerCostFromJob(
-  job: WorkbenchJob,
-  traces: readonly WorkbenchTrace[],
-): number | undefined {
-  const jobCost = runnerCostFromUsage(job.result?.usage);
-  if (jobCost !== undefined) {
-    return jobCost;
-  }
-  const traceIds = new Set(job.traceIds);
-  const traceCosts = traces
-    .filter((trace) => traceIds.has(trace.id) || trace.jobId === job.id)
-    .map((trace) => runnerCostFromUsage(usageFromTraceResult(trace.result)))
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  return traceCosts.length > 0
-    ? Number(traceCosts.reduce((sum, value) => sum + value, 0).toFixed(6))
-    : undefined;
-}
-
-function runnerCostFromUsage(usage: UsageSummary | undefined): number | undefined {
-  const cost = usage?.runner?.costUsd ?? usage?.total?.costUsd;
-  return typeof cost === "number" && Number.isFinite(cost) && cost >= 0
-    ? Number(cost.toFixed(6))
-    : undefined;
-}
-
 function usageFromTraceResult(result: WorkbenchTrace["result"]): UsageSummary | undefined {
   if (!result || typeof result !== "object" || Array.isArray(result)) {
     return undefined;
@@ -402,10 +850,6 @@ function usageFromTraceResult(result: WorkbenchTrace["result"]): UsageSummary | 
   return usage && typeof usage === "object" && !Array.isArray(usage)
     ? usage as UsageSummary
     : undefined;
-}
-
-function sumRunnerDurations(jobs: readonly WorkbenchJob[]): number | undefined {
-  return sumDurations(jobs.filter(isRunnerJob));
 }
 
 function resultCellForIdentity(
@@ -434,10 +878,6 @@ function sameMeasurementAgent(
     left.skillName === right.skillName &&
     left.skillBundleHash === right.skillBundleHash &&
     left.evalHash === right.evalHash;
-}
-
-function isRunnerJob(job: Pick<WorkbenchJob, "role">): boolean {
-  return job.role !== "grade";
 }
 
 function average(values: readonly number[]): number | undefined {
@@ -483,7 +923,13 @@ function compareJobs(left: WorkbenchJob, right: WorkbenchJob): number {
     left.id.localeCompare(right.id);
 }
 
-function compareAgentResults(left: WorkbenchRunEvidenceAgentResult, right: WorkbenchRunEvidenceAgentResult): number {
+function compareMeasurementResults(left: WorkbenchRunEvidenceMeasurementResult, right: WorkbenchRunEvidenceMeasurementResult): number {
+  return compareSkillIdentity(left, right) ||
+    left.agentLabel.localeCompare(right.agentLabel, undefined, { numeric: true, sensitivity: "base" }) ||
+    left.agentHash.localeCompare(right.agentHash);
+}
+
+function compareOtherWorkResults(left: WorkbenchRunEvidenceOtherWorkResult, right: WorkbenchRunEvidenceOtherWorkResult): number {
   return compareSkillIdentity(left, right) ||
     left.agentLabel.localeCompare(right.agentLabel, undefined, { numeric: true, sensitivity: "base" }) ||
     left.agentHash.localeCompare(right.agentHash);

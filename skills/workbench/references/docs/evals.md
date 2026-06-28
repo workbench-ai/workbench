@@ -2,7 +2,7 @@
 
 Use evals to decide whether a skill performs its workflow well enough to ship. Define the grading standard under `.workbench/**`; Workbench records versions, runs, jobs, traces, artifacts, scores, and lineage around it.
 
-See [Cases and rubrics](cases-rubrics.md) for case authoring, [Agents and models](agents-models.md) for agent setup, and [File formats](file-formats.md) for Office, PDF, and other file artifacts. [Common workflows](workflows.md) maps tasks to command paths.
+See [Cases and grading](cases-grading.md) for case authoring, [Agents and models](agents-models.md) for agent setup, and [File formats](file-formats.md) for Office, PDF, and other file artifacts. [Common workflows](workflows.md) maps tasks to command paths.
 
 ## Mental model
 
@@ -46,6 +46,8 @@ workbench results
 
 `eval --dry-run` previews selectors, cases, samples, package source status, environment file, reusable evidence, and launch checks without writing state. Real `run`, `grade`, and `eval` use the same launch checks.
 
+Live traces use the same evidence object as eval traces. `workbench record on` enables Workbench's native Codex and Claude Code trace plugins, `workbench traces` compacts claimed skill turns from pending plugin-spooled events, and `workbench case promote TRACE_ID --id CASE_ID` turns a reviewed live trace into a normal case.
+
 ## Skill instructions
 
 Keep the skill package self-contained. Workbench-published source follows the [Agent Skills package](https://agentskills.io/specification) shape, so `SKILL.md` points to the scripts, references, and assets the agent needs.
@@ -54,7 +56,7 @@ The installable skill package stays outside `.workbench/**`. The eval source mea
 
 ## Next steps
 
-- [Cases and rubrics](cases-rubrics.md) explains case files, global grading, case-specific criteria, shell tests, and draft gates.
+- [Cases and grading](cases-grading.md) explains case files, global grading, case-specific criteria, shell tests, and draft gates.
 - [Agents and models](agents-models.md) explains `.workbench/agents.yaml`, model labels, auth profiles, selectors, and samples.
 - [File formats](file-formats.md) explains runtime tools and grading checks for Office, PDF, and similar artifacts.
 - [Results](track.md) explains how to read recorded eval outcomes.

@@ -10,7 +10,7 @@ The core runtime and CLI remain the canonical source of truth for Workbench beha
 
 | If you are changing... | Start here | Cross-check |
 | --- | --- | --- |
-| Authored project files | [Source and eval shape](#source-and-eval-shape) | [Evaluation basics](evals.md) and [Cases and rubrics](cases-rubrics.md) |
+| Authored project files | [Source and eval shape](#source-and-eval-shape) | [Evaluation basics](evals.md) and [Cases and grading](cases-grading.md) |
 | CLI commands or JSON output | [Command surface](#command-surface) | [CLI reference](cli.md) and [Common workflows](workflows.md) |
 | Run, grade, eval, improve, or results behavior | [Execution and evidence](#execution-and-evidence) | [Agents and models](agents-models.md), [Improve from evidence](improve.md), and [Results](track.md) |
 | Cloud sync, publishing, install, or ownership | [Remotes, publishing, and installation](#remotes-publishing-and-installation) | [Publish](share.md), [Install and clone](install-clone.md), and [Skill packages](skills.md) |
@@ -34,7 +34,7 @@ The core runtime and CLI remain the canonical source of truth for Workbench beha
 - Case: one representative workflow input.
 - Agent: one runtime configuration, such as adapter, model label, auth profile, and adapter config.
 - Run: one user-started eval, improve, or retry attempt. Matrix detail lives in jobs and result summaries, not in several launch results the user has to manage.
-- Trace: evidence produced by a run.
+- Trace: observed execution evidence produced by a live host session, an eval case run, or an explicit import.
 - Lineage: parent-child relationships between package versions.
 - Remote: a Workbench object endpoint used for versions, runs, trace progress, traces, artifacts, and refs.
 - Namespace: a Workbench Cloud owner slug. A namespace can be a user or an organization and appears in URLs as `/skills/OWNER/SKILL`.
@@ -129,9 +129,17 @@ grade:
         description: Produces a decision-useful earnings prep note.
 ```
 
-`.workbench/eval.yaml` owns global grade configuration. Each `.workbench/cases/*/case.yaml` can add `grade.with` overrides for that case. For the built-in `rubric` adapter, criteria merge by stable `id`: global criteria apply to every case, a case criterion with the same `id` overrides the global criterion for that case, and new case-only ids append. The browser renders each case's resolved adapter-generic grade plan under `Evaluation > Cases` and on the case detail page.
+`.workbench/eval.yaml` owns global grade configuration. A runnable authored case is defined only by `.workbench/cases/<case-id>/case.yaml`; other files under `.workbench/cases/` are support files until they live under a case directory with that canonical descriptor. Each case descriptor can add `grade.with` overrides for that case. For the built-in `rubric` grading adapter, criteria merge by stable `id`: global criteria apply to every case, a case criterion with the same `id` overrides the global criterion for that case, and new case-only ids append. The browser renders each case's resolved adapter-generic grade plan in the `Evaluation > Cases` matrix and on the case detail page.
 
 Workbench core runs the selected measured skill with the selected agent, then invokes the grade adapter against the completed workspace, public case files, private case files, traces, and output artifacts. Graders such as `tests` and `rubric` own judgment and score result items only. Provider-backed agents such as `codex` and `claude` own `skill.run` only. Engine adapters such as Harbor still own their own `engine.resolve` and `grade.run` behavior when used as external engines, but the first-party skill-eval path does not wrap agent execution inside the built-in Workbench engine.
+
+### Live trace capture
+
+`workbench record on` enables Workbench's own native Codex and Claude Code trace plugins through official host plugin commands. It writes Workbench-owned recording config under `~/.workbench/traces/recording.json` and reports the local spool path under `~/.workbench/traces/spool/events.jsonl`. It must not directly edit `~/.claude/settings.json`, `~/.claude/settings.local.json`, `~/.codex/config.toml`, or provider history directories as part of capture setup. If a requested host cannot install or enable the Workbench plugin, the command fails with the host command the operator can run. `workbench record off` disables Workbench's local recording config to stop durable capture, then fails loudly if a requested host plugin or marketplace cannot be removed through the official host plugin command; it must not report success while a requested Workbench plugin teardown failed.
+
+Host plugins call the hidden `workbench trace-hook --host HOST --event EVENT` entrypoint. The hook normalizes the payload into one generic spool event and returns success so tracing cannot break the host turn. The core runtime owns only generic spool kinds such as prompt, claim, stop, discard, and event; host-specific parsing stays at the CLI/plugin edge. A live prompt/stop pair becomes a trace record only when the turn has a durable skill claim. The shipped native plugins create that claim from an explicit leading `$skill` invocation; host integrations can also emit an exact `claim` event when the host provides a real skill activation signal. Ambient host turns and incidental `$skill` mentions in ordinary text are discarded during compaction. `workbench traces`, `workbench show TRACE_ID`, review, and promotion compact pending spool events before reading trace records.
+
+`workbench traces` lists live, imported, and eval-produced trace evidence. CLI and web trace views use the same contract projection for lifecycle, review, promotion, prompt, and output fields. Workbench does not scan provider session histories such as `~/.codex/sessions` or `~/.claude/projects` as a hidden side effect. A trace can be ungraded or graded, unreviewed or human-reviewed, and can be promoted into a normal authored case with `workbench case promote TRACE_ID --id CASE_ID` only after it is captured, terminal, and has captured input. Failed or deferred reviews require an explicit corrected `--expected` before promotion.
 
 ### Package boundary
 
@@ -149,29 +157,36 @@ workbench new DIR [--agent codex|claude|command|local] [--model MODEL] [--auth P
 workbench init [--agent codex|claude|command|local] [--model MODEL] [--auth PROFILE] [--json]
 workbench clone OWNER/SKILL[@VERSION]|URL DIR [--json]
 workbench status [--dir DIR] [--json]
-workbench log [--runs|--versions] [--json]
+workbench log [--runs|--versions] [--dir DIR] [--json]
 workbench versions [--dir DIR] [--json]
-workbench show REF[:PATH] [--json]
-workbench switch VERSION [--dir DIR] [--json]
+workbench show REF[:PATH] [--dir DIR] [--json]
+workbench switch VERSION [--dry-run] [--yes] [--dir DIR] [--json]
 workbench diff [A..B] [--dir DIR] [--json]
-workbench run [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]
-workbench grade [--versions all|LIST] [--agents all|LIST] [--cases LIST] [--rerun] [--cloud] [--dry-run] [--json]
-workbench eval [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--json]
-workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--json]
+workbench run [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]
+workbench grade [--versions all|LIST] [--agents all|LIST] [--cases LIST] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]
+workbench eval [--versions all|LIST] [--agents all|LIST] [--cases LIST] [-n N|--samples N] [--rerun] [--cloud] [--dry-run] [--dir DIR] [--json]
+workbench record on|off|status [--hosts codex,claude] [--json]
+workbench traces [--dir DIR] [--json]
+workbench trace review TRACE_ID --pass|--fail|--defer [--note TEXT] [--tag TAG]... [--expected TEXT] [--dir DIR] [--json]
+workbench case draft CASE_ID [--dir DIR] [--json]
+workbench case promote TRACE_ID --id CASE_ID [--dir DIR] [--json]
+workbench improve [--versions LIST] [--agents LIST] [--budget N] [-n N|--samples N] [--cloud] [--dry-run] [--dir DIR] [--json]
 workbench watch RUN_ID [--dir DIR] [--json]
 workbench cancel RUN_ID [--dir DIR] [--json]
 workbench retry RUN_ID [--dir DIR] [--json]
-workbench results [--versions all|LIST] [--agents all|LIST] [--json]
+workbench results [--versions all|LIST] [--agents all|LIST] [--dir DIR] [--json]
 workbench publish [VERSION] [--as OWNER/SKILL] [--private|--team|--public] [--dry-run] [--dir DIR] [--json]
 workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]
 workbench delete OWNER/SKILL|URL [--dry-run] [--yes] [--json]
 workbench skills [--target codex|claude] [--scope folder|global] [--dir DIR] [--json]
 workbench install SOURCE [--target codex|claude] [--scope folder|global] [--dir DIR] [--yes] [--dry-run] [--json] [-- SKILLS_ARGS...]
-workbench agent add NAME --adapter X [--model M] [--with k=v]... | list | rm NAME [--json]
+workbench agent list [--dir DIR] [--json]
+workbench agent add NAME --adapter X [--model M] [--with k=v]... [--dir DIR] [--json]
+workbench agent rm NAME [--dir DIR] [--json]
 workbench login [PROVIDER] [--method METHOD] [--profile P] [--base-url URL] [--start-only|--wait] [--timeout N] [--no-open] [--local-only] [--json]
 workbench logout [PROVIDER] [--json]
 workbench sync [REMOTE] [--dir DIR] [--dry-run] [--json]
-workbench open [--host HOST] [--port PORT] [--no-open]
+workbench open [--host HOST] [--port PORT] [--dir DIR] [--no-open]
 workbench help [COMMAND] [--all]
 ```
 
@@ -223,7 +238,7 @@ Local reusable terminal jobs appear in `cachedJobIds`; `cachedRunIds` is provena
 
 ### Progress output
 
-The launch contract is one `workbench.run.v1` snapshot; version, agent, case, sample, execute, and grade details appear in `progress` and `measurements`. During long-running non-cached work, CLI progress is derived from normalized run and job state and written sparsely to stderr with phase, planned/completed/scored/remaining work, clearly labeled partial score, failures and cancellations, active job, evidence count, reported usage cost, elapsed time, and heartbeat. It does not show ETA.
+The launch contract is one `workbench.run.v1` snapshot; version, agent, case, sample, execute, and grade details appear in `progress` and `measurements`. During long-running non-cached work, CLI progress is derived from normalized run and job state and written sparsely to stderr with phase, planned/completed/scored/remaining work, clearly labeled partial score, failures and cancellations, active job, evidence count, total reported cost, wall time, and heartbeat. It does not show ETA.
 
 In `--json` mode, stdout remains one final schema-tagged document containing one run snapshot; after a durable accepted run id exists, stderr progress JSON Lines are `workbench.run.v1` snapshots for that run. Pre-accept hosted JSON progress is suppressed until Workbench Cloud accepts the run; if setup failure clears the temporary local handle, the final error may include `subject.correlationRunId`, which is not watchable or showable, but must not expose a top-level durable `runId`.
 
@@ -275,7 +290,7 @@ Isolated validation can pass `--profile-root DIR` to read provider-native state 
 
 Workbench records the proposed improved version plus proof execute and proof grade jobs. Proof runs use the ordinary eval pipeline, eval hash, case set, samples, grade adapter contract, and selected agent. If the improve adapter cannot create a patch, or the proof eval fails at the adapter/runtime layer, `improve` fails clearly; a proof eval failure still leaves the candidate version and proof run available for inspection and results.
 
-Workbench switches to the improved version only when the proof run succeeds and beats the incumbent for the same eval agent and eval hash, and the switched output points to a higher-sample rerun before publish when the proof was small. Hosted `improve --cloud` validates local target and evidence before hosted plan checks, Cloud auto-linking, sync, or scheduling, then follows the same local materialization rule after terminal Cloud evidence syncs back and reconciles the same Cloud remote once more after a promoted local switch; if the local current version changed while the hosted run was in flight, Workbench refuses to overwrite it and leaves `workbench switch VERSION` as the explicit resolution.
+Workbench switches to the improved version only when the proof run succeeds and beats the incumbent for the same eval agent and eval hash, and the switched output points to a higher-sample rerun before publish when the proof was small. Hosted `improve --cloud` validates local target and evidence before hosted plan checks, Cloud auto-linking, sync, or scheduling, then follows the same local materialization rule after terminal Cloud evidence syncs back and reconciles the same Cloud remote once more after a promoted local switch; if the local current version changed while the hosted run was in flight, Workbench refuses to overwrite it and leaves `workbench switch VERSION --dry-run` as the explicit resolution preview.
 
 ### Run watch, cancel, and retry
 
@@ -287,7 +302,7 @@ Known-run lifecycle operations are top-level commands. `watch RUN_ID` follows lo
 
 In `--json` mode, lifecycle commands return one command envelope with `run: WorkbenchRunSnapshot`; they do not expose separate command-level `result`, `progress`, or `jobs` structures. `run` is output-only execution, not a read verb and not an object-exchange verb.
 
-`switch` is the explicit command that materializes an older or alternate version into the working folder. It does not invoke Git.
+`switch` is the explicit command that materializes an older or alternate version into the working folder. It does not invoke Git. `switch --dry-run` reports added, changed, and removed package-source files without writing them. A real `switch` refuses to overwrite local package source that is not represented by any saved Workbench version; pass `--yes` only after reviewing the dry-run preview.
 
 ### Results
 
@@ -299,7 +314,7 @@ If the current selected version has no recorded evidence, human output says so e
 
 Result cells prefer the terminal run with the most case/sample evidence, using recency only as a tie-breaker, and still carry run status and error when no numeric score exists. Failed evals with public result-file scores still show those scores; runtime failures with no result file render as failed evidence with `n/a`. Canceled partial evals keep their canceled status and sample coverage but do not expose a completed quality score or `status.runs.lastScore`.
 
-Human latency output is per selected result cell from matching runner or execute job duration, averaged per sample for multi-sample runs, while stored run evidence keeps aggregate timing. Cost is also per selected result cell when matching runner or execute usage exists, including multi-agent comparison runs; grader duration and usage stay in run evidence and are not copied into row cells. When matching runner evidence does not exist, latency and cost stay `n/a`.
+Human results output reports the same primary metric vocabulary as the browser: Quality, Coverage, Latency, and Cost. Quality is a numeric score only, not a pass/fail classification. Coverage is completed samples over planned samples. JSON result cells and run measurement summaries expose coverage as `{ completed, planned }`; requested operation sample counts remain in operation plans as `samples`. Latency and Cost show totals plus per-sample values using the same sample denominator. Execute, grade, improve, and other role totals stay in run/job evidence drilldown rather than becoming role-specific result columns.
 
 ## Remotes, publishing, and installation
 
@@ -401,7 +416,7 @@ Published source visibility does not grant project evidence access. `private` so
 
 `workbench open` serves the local Workbench UI from a read-only inspection snapshot as a foreground server; the CLI prints the actual bound URL and a `Press Ctrl-C to stop` hint, then closes the server and exits `0` when the user presses Ctrl-C. `--port` accepts integers from 0 through 65535, and port 0 asks the OS for an ephemeral port.
 
-The browser reads live package files, authored evaluation source, and durable object state through `WorkbenchInspectionSnapshotEnvelope` and starts local run/grade/eval/improve through `/api/operations` using the same operation request vocabulary as CLI scheduling. Local operation requests start the private local-worker path; they do not shell out to `workbench`. The local endpoint returns a `workbench.run.v1` snapshot once durable run state exists, while the worker continues the run and writes durable state until terminal state.
+The browser reads live package files, authored evaluation source, and durable object state through `WorkbenchInspectionSnapshotEnvelope` and starts local eval/improve operations through `/api/operations` using the same operation request vocabulary as CLI scheduling. Eval-like requests carry `caseIds`, targets, phases, and grader; CLI-friendly run, grade, and eval commands lower into that shape before planning. Inline browser case creation writes real `.workbench/cases/<case-id>/case.yaml` files before those cases are run, with the local server deriving a unique case id from the title or prompt. Local operation requests start the private local-worker path; they do not shell out to `workbench`. The local endpoint returns a `workbench.run.v1` snapshot once durable run state exists, while the worker continues the run and writes durable state until terminal state.
 
 Local browser routes watch authored source and Workbench control files; changing `SKILL.md`, authored assets, cases, agents, eval controls, or `.workbench/environment/Dockerfile` sends a state notice so the UI refetches without requiring a package snapshot. Local and hosted browser routes return `WorkbenchInspectionSnapshotEnvelope` from `/snapshot`, then deliver `WorkbenchStateNotice` invalidations through `/state/stream` or `/state/wait`; the UI refetches the envelope on `changed` or `reset`, treats `progress` as focused trace evidence freshness, and does not depend on active-work polling.
 
@@ -409,7 +424,7 @@ Automatic live refetches are quiet; the global refreshing indicator is reserved 
 
 `workbench status` is the active attention read and includes active runs with compact concrete progress plus `workbench watch RUN_ID` as the causal next command when a known run is still queued or running. `workbench log` and `workbench show` read inspection state without taking the project write lock; path-only `show` reads live package and authored evaluation files, while `show REF:PATH` reads historical source or run/job evidence content. Timeline commands are summary-first and omit file content.
 
-`workbench show RUN_ID` summarizes run facts, the same progress snapshot and evidence count used by watch/status, failure groups, `Agent results`, paired `Case results`, and lower-priority `Trace jobs` before listing runnable `workbench show RUN_ID:PATH` commands for canonical evidence files, but it does not watch, sync, cancel, retry, or point failed/canceled runs back to the same show command.
+`workbench show RUN_ID` summarizes run facts, the same progress snapshot and evidence count used by watch/status, failure groups, `Measurements`, non-measurement `Other work`, paired `Case results`, and lower-priority `Trace jobs` before listing runnable `workbench show RUN_ID:PATH` commands for canonical evidence files, but it does not watch, sync, cancel, retry, or point failed/canceled runs back to the same show command.
 
 Agent and case evidence rows are keyed by measured skill plus agent, so multi-skill or multi-version matrix runs do not merge same-agent case/sample rows. Public run/job sample labels are one-based like live progress in human and command JSON projections; raw stored job objects keep zero-based sample indexes.
 
@@ -431,7 +446,7 @@ The primary web surfaces are `Files`, `Evaluation`, and `Runs`. `Files` is the d
 
 The shared header shows the Workbench brand, optional hosted account controls, snapshot freshness, refresh, and a compact active-work badge such as `No active runs`, `1 running`, or `1 running, 2 queued`. The skill header renders the canonical `OWNER/SKILL` handle when known, uses the same handle for copy and acquisition actions, falls back to the package frontmatter name only when no handle exists, shows source visibility when hosted, and renders an action bar driven entirely by `WorkbenchActionCapabilities`.
 
-Full-access local pages show `Run`, `Grade`, `Evaluate`, `Improve`, and `Use skill` popovers. Full-access hosted pages expose hosted `Run`, `Grade`, `Evaluate`, `Improve`, and acquisition when the Cloud host can start those operation kinds. Operation popovers submit `WorkbenchOperationRequest` objects to the host operation endpoint and navigate to the returned run route.
+Full-access local and hosted pages show `Evaluate`, `Improve`, and `Use skill` popovers when those actions are available. Evaluation execution is started through `Evaluate`; the header does not expose separate global `Run` or `Grade` controls. Operation popovers submit `WorkbenchOperationRequest` objects to the host operation endpoint and navigate to the returned run route.
 
 `Use skill` remains acquisition: it copies install or editable-source commands for remote/source contexts and does not pretend a hosted page can write to a user's filesystem. Source-only Cloud pages do not expose run/grade/eval/improve mutations; they expose acquisition options only.
 
@@ -441,21 +456,23 @@ Full-access local pages show `Run`, `Grade`, `Evaluate`, `Improve`, and `Use ski
 
 ### Evaluation
 
-`Evaluation` has `Results`, `Source`, and `Cases`. `Results` is the quality decision surface and the browser counterpart to `workbench results`. It renders one selected evaluation at a time, with exact package version labels, state badges such as `Current` or `Published`, score/average-latency/cost columns, primary metric bars, and score tradeoff charts.
+`Evaluation` has `Results`, `Cases`, and `Traces`. `Results` is the quality decision surface and the browser counterpart to `workbench results`. It renders one selected evaluation at a time, with exact package version labels, state badges such as `Current` or `Published`, Quality, Coverage, Latency, and Cost columns, primary metric bars, and quality tradeoff charts. Results are a read-only projection over real evaluated cases and configurations.
 
 The selected evaluation appears above the table with case count and grader type; if multiple eval definitions exist, a single selector switches the grading scope. Evaluation snapshots have required `createdAt`, `updatedAt`, `gradeAdapter`, and typed `cases` metadata. The selector orders options by `createdAt`, assigns `Evaluation N` from that order, defaults to the newest option, and marks that same option `Latest`; older evaluations show `Created DATE` plus case count and grader type. `updatedAt` records when the authored eval source was observed but does not reorder evaluation history.
 
 The current active package version, no-skill version, alternate pinned versions, and prior scored local versions are rows in the same scorecard rather than separate page modes, but rows from different evaluations are not ranked together by default. Failed rows show `Failed` and a concise error summary while still opening the run evidence.
 
-The scorecard labels unique case/sample coverage as `Cases`; underlying execute/grade job completion belongs in run details and progress, not the results table. Eval job phases must not inflate the case count, and aggregate run, grader duration, or grader cost must not be copied into per-agent result rows. If no visible rows have recorded runner cost, the web scorecard omits the cost column and explains missing cost in run details as failed before usage, not reported, or not tested. CLI `workbench results --versions ...` remains the scriptable version-axis results surface.
+The scorecard labels completed and planned samples as `Coverage`; underlying execute/grade job completion belongs in run details and progress, not the results table. Eval job phases must not inflate the sample count, and role-specific timing or cost must not be copied into per-agent result columns. If no visible rows have recorded cost, the web scorecard omits the cost column and explains missing cost in run details as failed before usage, not reported, or not tested. CLI `workbench results --versions ...` remains the scriptable version-axis results surface.
 
-`Source` uses the same repository-style folder navigator as `Files` for authored evaluation files: `eval.yaml` and `agents.yaml` appear at the root, while `environment/` and `cases/` are navigable folders. `Cases` lists authored cases for the selected evaluation and case detail pages show definition files plus linked run evidence when the viewer has full project access.
+`Cases` is the editable case-by-configuration matrix for the selected evaluation. Rows are authored cases, columns are configurations, and each output cell is one clickable unit for running, grading, and inspecting related output and traces. Empty cells render `Not run`. Column visibility is view-scoped; the inline `+` reveals another existing configuration in the comparison, the `x` removes a visible column from the comparison, and the bottom `+ Add case` creates a real authored case row. Execute-only attempts can be graded later with the current grading config by submitting a grade phase against the existing attempt.
+
+`Traces` is the trace inbox for live, imported, and eval-produced evidence. It shows capture, execution, grading, review, and promotion status; linked run/case/version context; and input and output previews. Trace detail and the CLI expose the promotion action that creates a normal authored case from trace evidence. Case detail pages show definition files plus linked run evidence when the viewer has full project access.
 
 ### Runs
 
 `Runs` shows active and completed runs/jobs from the snapshot. Active jobs appear first, followed by completed runs in reverse chronology.
 
-Run detail pages are full skill-scoped pages under `Evaluation` or `Runs`, not contextual inspectors. They show status, score, evaluation, measured skill, agent, case/sample coverage, job completion, latency, cost, start time, improved-output version when present, copyable run commands, run error, `Agent results`, paired `Case results` with execute and grade phases on one row, selected phase output files, and timelines backed by interpreted execution trace detail.
+Run detail pages are full skill-scoped pages under `Evaluation` or `Runs`, not contextual inspectors. They show status, Quality, Coverage, Latency, Cost, evaluation, measured skill, agent, start time, improved-output version when present, copyable run commands, run error, `Measurements`, non-measurement `Other work`, paired `Case results`, selected phase output files, and timelines backed by interpreted execution trace detail. Execute, grade, and improve role details appear inside case and job drilldown, not as primary run summary columns.
 
 Browser run pages select one case result by measured skill, case, agent, and sample using `case`, `agent`, `skill`, `bundle`, and `version` query fields; inside that page, `Execute` and `Grade` phase tabs choose the job type, and `Trace` and `Output` evidence tabs choose the selected phase's evidence. Case outcome facts stay separate from the selected phase's status, score, duration, and error so a failed grade does not masquerade as a failed execute trace.
 

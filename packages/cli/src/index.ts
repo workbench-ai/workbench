@@ -8,8 +8,10 @@ import { gzipSync } from "node:zlib";
 import {
   addWorkbenchRemote,
   addWorkbenchAgent,
+  appendWorkbenchTraceSpoolEvent,
   codexAuthJsonHasUsableToken,
   codexDeviceAuthLoginCommand,
+  compactWorkbenchTraceSpool,
   resultsWorkbench,
   createWorkbenchRunId,
   createWorkbenchRunSnapshotForRun,
@@ -18,13 +20,18 @@ import {
   clearDeletedWorkbenchCloudProjectLocalState,
   diffWorkbenchVersions,
   createNewWorkbenchSkillProject,
+  createWorkbenchTraceRecord,
   initExistingWorkbenchSkillProject,
   initializeHydratedWorkbenchSkillProject,
+  listWorkbenchTraceRecords,
   listWorkbenchAgents,
   listWorkbenchVersions,
   localWorkbenchAdapterAuthStore,
   parseWorkbenchAdapterAuthTarget,
   quoteShellArg,
+  readWorkbenchTraceRecord,
+  readWorkbenchTraceRecordingConfig,
+  reviewWorkbenchTrace,
   hasWorkbenchLocalHostedRunHandle,
   hasWorkbenchLocalRunCancellationRequest,
   prepareWorkbenchCloudEvalRequest,
@@ -58,6 +65,13 @@ import {
   workbenchStatusSnapshot,
   workbenchAuthorEvalCaseCommand,
   workbenchDraftEvalCaseFiles,
+  workbenchTraceSpoolPath,
+  workbenchTraceOutputText,
+  workbenchTraceProjection,
+  workbenchTracePromotionReadiness,
+  workbenchTracePrompt,
+  writeWorkbenchTraceRecord,
+  writeWorkbenchTraceRecordingConfig,
   codedErrorFromUnknown,
   WorkbenchCodedError,
   WORKBENCH_AUTHOR_EVAL_CASE_COMMAND,
@@ -70,6 +84,7 @@ import {
   type WorkbenchAdapterAuthTarget,
   type WorkbenchArtifact,
   type WorkbenchResults,
+  type WorkbenchSwitchResult,
   type WorkbenchInspectionSnapshotEnvelope,
   type WorkbenchInspectionSnapshot,
   type WorkbenchJob,
@@ -78,8 +93,6 @@ import {
   type WorkbenchLaunchReadiness,
   type WorkbenchLaunchReadinessIssue,
   type WorkbenchOperationRequest,
-  type WorkbenchPreparedCloudEvalRequest,
-  type WorkbenchPreparedCloudImproveRequest,
   type WorkbenchMeasurementSummary,
   type WorkbenchRunSnapshot,
   type WorkbenchRunRetryPlan,
@@ -90,16 +103,30 @@ import {
   type WorkbenchStatus,
   type WorkbenchStateNotice,
   type WorkbenchTrace,
+  type WorkbenchTraceReviewStatus,
   type WorkbenchVersion,
 } from "@workbench-ai/workbench-core";
 import {
+  reconcileTraceHostPlugins,
+  traceHostPluginStatus,
+  workbenchTraceHookCommand,
+  type TraceHostPluginResult,
+} from "./trace-recording/host-plugins.ts";
+import {
   buildWorkbenchRunEvidenceView,
+  buildWorkbenchJobReport,
   isWorkbenchPackageSourcePath,
   normalizeWorkbenchSkillName,
-  type WorkbenchRunEvidenceAgentResult,
+  workbenchJobReportMetricBreakdown,
+  workbenchSampleCoverageTotal,
+  type WorkbenchJobReport,
+  type WorkbenchReportMetricKind,
+  type WorkbenchRunEvidenceMeasurementResult,
+  type WorkbenchRunEvidenceOtherWorkResult,
   type WorkbenchRunEvidenceCaseResult,
   type WorkbenchRunEvidenceTraceJob,
   type WorkbenchRunEvidenceView,
+  type WorkbenchSampleCoverage,
 } from "@workbench-ai/workbench-contract";
 import { emitError, emitResult } from "./output.js";
 import {
@@ -152,6 +179,7 @@ import {
 export interface CliIo {
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean };
 }
 
 interface ParsedArgs {
@@ -199,6 +227,18 @@ export async function runCli(argv: readonly string[], io: CliIo = {
     }
     if (!command) {
       return await handleStatus(parsed, io);
+    }
+    if (command === "trace-hook") {
+      return await handleTraceHook(parsed, io);
+    }
+    if (command === "record") {
+      return await handleRecord(parsed, io);
+    }
+    if (command === "traces") {
+      return await handleTraces(parsed, io);
+    }
+    if (command === "trace") {
+      return await handleTrace(parsed, io);
     }
     if (command === "login") {
       return await handleLogin(parsed, io);
@@ -318,7 +358,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
         deltas: deltas as unknown as Json,
         next: next as Json,
       }, parsed, io, () => [
-        formatRunSnapshot(snapshot, completed.run),
+        formatRunSnapshot(snapshot),
         ...formatEvalCoverageLines(coverage),
         ...formatEvalDeltaLines(deltas),
         ...formatCompletedJobReferenceLines(command, completed.jobs),
@@ -374,8 +414,25 @@ export async function runCli(argv: readonly string[], io: CliIo = {
     }
     if (command === "switch") {
       const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.", "workbench switch VERSION");
-      const version = await switchWorkbenchVersion(versionRef, core);
-      return output(versionSummary(version), parsed, io, () => `Switched to ${displayRef(version.id)}.`);
+      rejectExtraInput(parsed, {
+        maxPositionals: 2,
+        message: "workbench switch accepts one VERSION argument.",
+        remediation: "workbench switch VERSION",
+      });
+      const result = await switchWorkbenchVersion(versionRef, {
+        ...core,
+        dryRun: parsed.flags["dry-run"] === true,
+        overwrite: parsed.flags.yes === true,
+      });
+      const next = switchNextCommand(parsed, versionRef, result);
+      return emitResult("workbench.cli.switch.v1", {
+        version: versionSummary(result.version),
+        changes: result.changes as unknown as Json,
+        dryRun: result.dryRun,
+        requiresOverwrite: result.requiresOverwrite,
+        unchanged: result.unchanged,
+        next: next as Json,
+      }, parsed, io, () => formatSwitchResult(result, next));
     }
     if (command === "versions") {
       rejectExtraInput(parsed, {
@@ -555,6 +612,7 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       const server = await startWorkbenchOpenServer({
         dir: dirFlag(parsed),
         authToken: core.authToken,
+        homeDir: process.env.HOME,
         host: stringFlag(parsed, "host"),
         port: portFlag(parsed, "port"),
       });
@@ -744,12 +802,25 @@ function evalOperationRequest(
   variant: "local" | "cloud" = "local",
   kind: "run" | "grade" | "eval" = "eval",
 ): WorkbenchOperationRequest {
+  const skill = stringFlag(parsed, "versions");
+  const agent = stringFlag(parsed, "agents");
+  const caseIds = stringListFlag(parsed, "cases") ?? [];
+  const phases = kind === "run"
+    ? ["execute"] as const
+    : kind === "grade"
+      ? ["grade"] as const
+      : ["execute", "grade"] as const;
+  const grades = kind !== "run";
   return {
-    kind,
+    kind: "eval",
     variant,
-    ...(stringFlag(parsed, "versions") ? { skill: stringFlag(parsed, "versions") } : {}),
-    ...(stringFlag(parsed, "agents") ? { agent: stringFlag(parsed, "agents") } : {}),
-    ...(stringListFlag(parsed, "cases") ? { caseIds: stringListFlag(parsed, "cases") } : {}),
+    caseIds,
+    targets: [{
+      ...(skill ? { skill } : {}),
+      ...(agent ? { agent } : {}),
+    }],
+    phases,
+    grader: grades ? { kind: "evaluation" } : { kind: "none" },
     ...(intFlag(parsed, "samples") ? { samples: intFlag(parsed, "samples") } : {}),
     ...(parsed.flags.rerun === true ? { rerun: true } : {}),
   };
@@ -759,14 +830,22 @@ async function assertLocalEvalLaunchReadiness(
   core: CliCoreOptions,
   request: WorkbenchOperationRequest,
 ): Promise<void> {
+  if (request.kind !== "eval") {
+    return;
+  }
+  const skill = request.targets.flatMap((target) => target.skill ? [target.skill] : []).join(",") || undefined;
+  const agent = request.targets.flatMap((target) => target.agent ? [target.agent] : []).join(",") || undefined;
   const preview = await previewWorkbenchEval({
     ...core,
-    version: request.versionId,
-    skill: request.skill,
-    agent: request.agent,
+    skill,
+    agent,
     caseIds: request.caseIds,
     samples: request.samples,
-    kind: request.kind,
+    kind: request.phases.includes("grade") && !request.phases.includes("execute")
+      ? "grade"
+      : request.phases.includes("grade")
+        ? "eval"
+        : "run",
     rerun: request.rerun,
     cloud: false,
   });
@@ -784,11 +863,17 @@ async function assertLocalEvalLaunchReadiness(
 }
 
 function improveOperationRequest(parsed: ParsedArgs, variant: "local" | "cloud" = "local"): WorkbenchOperationRequest {
+  const skill = stringFlag(parsed, "versions");
+  const agent = stringFlag(parsed, "agents");
   return {
     kind: "improve",
     variant,
-    ...(stringFlag(parsed, "versions") ? { skill: stringFlag(parsed, "versions") } : {}),
-    ...(stringFlag(parsed, "agents") ? { agent: stringFlag(parsed, "agents") } : {}),
+    ...(skill || agent ? {
+      target: {
+        ...(skill ? { skill } : {}),
+        ...(agent ? { agent } : {}),
+      },
+    } : {}),
     ...(intFlag(parsed, "samples") ? { samples: intFlag(parsed, "samples") } : {}),
     ...(intFlag(parsed, "budget") ? { budget: intFlag(parsed, "budget") } : {}),
   };
@@ -800,17 +885,42 @@ function retryOperationRequest(
   retryOfRunId: string,
   runId?: string,
 ): WorkbenchOperationRequest {
+  if (retryPlan.kind === "improve") {
+    return {
+      kind: "improve",
+      variant,
+      ...(runId ? { runId } : {}),
+      versionId: retryPlan.baseVersionId,
+      target: {
+        versionId: retryPlan.baseVersionId,
+        skill: retryPlan.skillName,
+        agent: retryPlan.agentName,
+      },
+      samples: retryPlan.samples,
+      budget: retryPlan.budget,
+      retryOfRunId,
+    };
+  }
+  const phases = retryPlan.kind === "run"
+    ? ["execute"] as const
+    : retryPlan.kind === "grade"
+      ? ["grade"] as const
+      : ["execute", "grade"] as const;
+  const grades = retryPlan.kind !== "run";
   return {
-    kind: retryPlan.kind,
+    kind: "eval",
     variant,
     ...(runId ? { runId } : {}),
-    versionId: retryPlan.kind === "improve" ? retryPlan.baseVersionId : retryPlan.versionId,
-    skill: retryPlan.skillName,
-    agent: retryPlan.agentName,
-    ...(retryPlan.kind !== "improve" && retryPlan.caseIds ? { caseIds: retryPlan.caseIds } : {}),
+    caseIds: retryPlan.caseIds ?? [],
+    targets: [{
+      versionId: retryPlan.versionId,
+      skill: retryPlan.skillName,
+      agent: retryPlan.agentName,
+    }],
+    phases,
+    grader: grades ? { kind: "evaluation" } : { kind: "none" },
     samples: retryPlan.samples,
-    ...(retryPlan.kind !== "improve" ? { rerun: true } : {}),
-    ...(retryPlan.kind === "improve" ? { budget: retryPlan.budget } : {}),
+    rerun: true,
     retryOfRunId,
   };
 }
@@ -818,7 +928,7 @@ function retryOperationRequest(
 async function localRunStateForSnapshot(
   core: { dir?: string; authToken?: string },
   snapshot: WorkbenchRunSnapshot,
-): Promise<{ run: WorkbenchRun; jobs: WorkbenchJob[] }> {
+): Promise<{ run: WorkbenchRun; jobs: WorkbenchJob[]; traces: WorkbenchTrace[] }> {
   const inspection = await createWorkbenchReadOnlyInspectionSnapshot(core);
   const run = inspection.runs.find((entry) => entry.id === snapshot.id);
   if (!run) {
@@ -828,7 +938,7 @@ async function localRunStateForSnapshot(
       exitCode: 1,
     });
   }
-  return { run, jobs: jobsForRuns(inspection, [run.id]) };
+  return { run, jobs: jobsForRuns(inspection, [run.id]), traces: inspection.traces };
 }
 
 interface LocalRunTerminalResult {
@@ -868,7 +978,7 @@ async function waitForLocalRunTerminal(input: {
         });
       }
       const jobs = jobsForRuns(inspection, [run.id]);
-      const baseRunSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+      const baseRunSnapshot = createWorkbenchRunSnapshotForRun(run, jobs, { traces: inspection.traces });
       const terminal = isTerminalRun(run);
       const progressNext = terminal && input.command === "eval" && run.status === "succeeded"
         ? await evalSuccessNextCommand(input.core, [run])
@@ -1181,12 +1291,17 @@ function operationNextCommand(command: "run" | "grade" | "eval" | "improve", par
 
 function operationTransitionNextCommand(command: "grade" | "eval", parsed: ParsedArgs, cloud: boolean): string {
   const request = operationRequestFromParsed(command, parsed, cloud);
+  if (request.kind !== "eval") {
+    return workbenchOperationCliEquivalent(request);
+  }
+  const phases = command === "grade" ? ["grade"] as const : ["execute", "grade"] as const;
   return workbenchOperationCliEquivalent({
-    kind: command,
+    kind: "eval",
     variant: request.variant,
-    ...(request.skill ? { skill: request.skill } : {}),
-    ...(request.agent ? { agent: request.agent } : {}),
-    ...(request.caseIds?.length ? { caseIds: request.caseIds } : {}),
+    caseIds: request.caseIds,
+    targets: request.targets,
+    phases,
+    grader: { kind: "evaluation" },
     ...(request.samples !== undefined ? { samples: request.samples } : {}),
   });
 }
@@ -1316,7 +1431,7 @@ async function handleRunWatch(parsed: ParsedArgs, io: CliIo): Promise<number> {
       startedAtMs: timestampMs(run.createdAt) ?? Date.now(),
       next: runProgressNextCommand(run) ?? undefined,
     });
-    const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+    const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs, { traces: snapshot.traces });
     const next = runWatchResultNextCommand(run);
     return emitRunTerminalResult("workbench.cli.run-watch.v1", {
       run: runSnapshotResultJson(runSnapshot),
@@ -1359,7 +1474,7 @@ async function handleLocalRunWatch(
     });
     renderer.render(progress, { force: isTerminalRun(run), command: "watch" });
     if (isTerminalRun(run)) {
-      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs, { traces: snapshot.traces });
       const next = runWatchResultNextCommand(run);
       return emitRunTerminalResult("workbench.cli.run-watch.v1", {
         run: runSnapshotResultJson(runSnapshot),
@@ -1396,7 +1511,7 @@ async function handleCloudRunWatch(
       interrupt,
       renderer,
       remote: context.remote,
-      run: createWorkbenchRunSnapshotForRun(run, jobsForRuns(snapshot, [run.id])),
+      run: createWorkbenchRunSnapshotForRun(run, jobsForRuns(snapshot, [run.id]), { traces: snapshot.traces }),
       source: context.source,
       skillId: context.skillId,
       initialSync: {
@@ -1414,7 +1529,7 @@ async function handleCloudRunWatch(
         next: `workbench watch ${run.id}`,
       }, parsed, io, () => `Detached from run ${displayRef(run.id)}.\nnext: workbench watch ${run.id}`, 130);
     }
-    const { run: watchedRun, jobs } = await localRunStateForSnapshot(context.core, completed.run);
+    const { run: watchedRun, jobs, traces } = await localRunStateForSnapshot(context.core, completed.run);
     const latest = await createWorkbenchReadOnlyInspectionSnapshot(context.core);
     const progress = runProgressSnapshotForInspection({
       command: "watch",
@@ -1425,7 +1540,7 @@ async function handleCloudRunWatch(
       startedAtMs: timestampMs(watchedRun.createdAt) ?? Date.now(),
       next: runProgressNextCommand(watchedRun) ?? undefined,
     });
-    const runSnapshot = createWorkbenchRunSnapshotForRun(watchedRun, jobs);
+    const runSnapshot = createWorkbenchRunSnapshotForRun(watchedRun, jobs, { traces: traces.length > 0 ? traces : latest.traces });
     const next = runWatchResultNextCommand(watchedRun);
     return emitRunTerminalResult("workbench.cli.run-watch.v1", {
       run: runSnapshotResultJson(runSnapshot),
@@ -1462,7 +1577,7 @@ async function handleLocalHostedRunWatch(
     });
     renderer.render(progress, { force: terminal, command: "watch" });
     if (terminal) {
-      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+      const runSnapshot = createWorkbenchRunSnapshotForRun(run, jobs, { traces: snapshot.traces });
       const next = runWatchResultNextCommand(run);
       return emitRunTerminalResult("workbench.cli.run-watch.v1", {
         run: runSnapshotResultJson(runSnapshot),
@@ -1540,7 +1655,9 @@ async function handleRunCancel(parsed: ParsedArgs, io: CliIo): Promise<number> {
     ].join("\n"));
   }
   const result = await requestLocalWorkbenchRunCancellation({ ...core, runId: run.id, reason: "user_requested" });
-  const runSnapshot = createWorkbenchRunSnapshotForRun(result.run, jobsForRuns(snapshot, [result.run.id]));
+  const runSnapshot = createWorkbenchRunSnapshotForRun(result.run, jobsForRuns(snapshot, [result.run.id]), {
+    traces: snapshot.traces,
+  });
   return emitResult("workbench.cli.run-cancel.v1", {
     run: runSnapshotResultJson(runSnapshot),
     requestedAt: result.requestedAt,
@@ -1721,8 +1838,8 @@ async function retryCloudRun(
         next: `workbench watch ${completed.run.id}`,
       }, parsed, io, () => `Detached from retry ${displayRef(completed.run.id)}.\nnext: workbench watch ${completed.run.id}`, 130);
     }
-    const { run: retryRun, jobs } = await localRunStateForSnapshot(remoteContext.core, completed.run);
-    const runSnapshot = createWorkbenchRunSnapshotForRun(retryRun, jobs);
+    const { run: retryRun, jobs, traces } = await localRunStateForSnapshot(remoteContext.core, completed.run);
+    const runSnapshot = createWorkbenchRunSnapshotForRun(retryRun, jobs, { traces });
     return emitRetryResult(parsed, io, run, [retryRun], runSnapshot, {
       remote: remoteContext.remote.name,
       url: remoteContext.remote.url,
@@ -1841,7 +1958,7 @@ function emitRetryResult(
     next: first ? runWatchNextCommand(first) as Json : "workbench log --runs",
   }, parsed, io, () => [
     `Retried ${displayRef(oldRun.id)}${first ? ` as ${displayRef(first.id)}` : ""}.`,
-    formatRunSnapshot(runSnapshot, first),
+    formatRunSnapshot(runSnapshot),
     ...(first ? [`next: ${runWatchNextCommand(first)}`] : []),
   ].join("\n"), code);
 }
@@ -1962,7 +2079,7 @@ function formatRunWatchResult(
   const failed = jobs.filter((job) => job.status === "failed").length;
   const canceled = jobs.filter((job) => job.status === "canceled").length;
   return [
-    progress ? formatRunSnapshot(progress, run) : formatRun(run),
+    progress ? formatRunSnapshot(progress) : formatRun(run),
     ...(progress ? [`progress=${formatProgressSummary(progress)}`] : []),
     `jobs=${jobs.length} failed=${failed}${canceled > 0 ? ` canceled=${canceled}` : ""}`,
     ...(next ? [`next: ${next}`] : []),
@@ -1993,6 +2110,22 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
     return output(session, parsed, io, () => formatSessionDetail(session));
   }
   const [objectRef, requestedPath] = splitShowRef(ref);
+  const traceSnapshot = requestedPath ? null : await optionalInspectionSnapshot(parsed);
+  if (!requestedPath) {
+    const snapshotTrace = snapshotObjectByRef(traceSnapshot?.traces ?? [], objectRef, "trace");
+    if (snapshotTrace) {
+      return output(traceRecordDetail(snapshotTrace), parsed, io, () => formatTraceRecordDetail(snapshotTrace));
+    }
+    if (!traceSnapshot) {
+      await compactWorkbenchTraceSpool({ homeDir: process.env.HOME });
+      const runtimeTrace = await readWorkbenchTraceRecord(objectRef, {
+        homeDir: process.env.HOME,
+      });
+      if (runtimeTrace) {
+        return output(traceRecordDetail(runtimeTrace), parsed, io, () => formatTraceRecordDetail(runtimeTrace));
+      }
+    }
+  }
   if (requestedPath) {
     if (objectRef === "current") {
       throw new WorkbenchCodedError("usage", `Use a path directly for live project files: workbench show ${requestedPath}`, {
@@ -2009,7 +2142,7 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
     const value = await showWorkbenchRef(ref, core);
     return output(value, parsed, io, () => formatShow(value));
   }
-  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const snapshot = traceSnapshot ?? await createWorkbenchReadOnlyInspectionSnapshot(core);
   const version = snapshotVersionByRef(snapshot, objectRef);
   if (version) {
     return output(fileListing("version", version.id, version.files), parsed, io, () => formatFileListing("version", version.id, version.files));
@@ -2032,7 +2165,7 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
       : undefined;
     const evidenceOwnerRef = selection.run?.id ?? (selection.jobs.length === 1 ? selection.jobs[0]!.id : objectRef);
     return output({
-      ...(selection.run ? { run: runSummary(selection.run, [], selection.jobs) } : {}),
+      ...(selection.run ? { run: runSummary(selection.run, [], selection.jobs, snapshot.traces) } : {}),
       jobs: selection.jobs.map(jobEvidenceSummary),
       ...(progress ? { progress: progress as unknown as Json } : {}),
       failures: runFailureGroups(selection.jobs, ["failed"]) as unknown as Json,
@@ -2047,8 +2180,7 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
   }
   const trace = snapshotObjectByRef(snapshot.traces, objectRef, "trace");
   if (trace) {
-    const files = trace.files.filter(isUserFacingTraceEvidenceFile);
-    return output(fileListing("trace", trace.id, files), parsed, io, () => formatFileListing("trace", trace.id, files));
+    return output(traceRecordDetail(trace), parsed, io, () => formatTraceRecordDetail(trace));
   }
   const artifact = snapshotObjectByRef(snapshot.artifacts, objectRef, "artifact");
   if (artifact) {
@@ -2879,11 +3011,221 @@ async function handleSkills(parsed: ParsedArgs, io: CliIo): Promise<number> {
   return emitResult("workbench.cli.skills.v2", installedInventoryToJson(inventory), parsed, io, (format) => formatInstalledInventory(inventory, format));
 }
 
+async function handleRecord(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const action = optionalPositional(parsed, 1) ?? "status";
+  if (action !== "on" && action !== "off" && action !== "status") {
+    throw new WorkbenchCodedError("usage", `Unsupported record command: ${action}`, {
+      remediation: "workbench record on|off|status",
+      exitCode: 2,
+    });
+  }
+  rejectExtraInput(parsed, {
+    maxPositionals: 2,
+    message: "workbench record accepts only on|off|status.",
+    remediation: "workbench record on",
+  });
+  const hosts = stringListFlag(parsed, "hosts") ?? ["codex", "claude"];
+  const command = workbenchTraceHookCommand();
+  const before = await readWorkbenchTraceRecordingConfig({ homeDir: process.env.HOME });
+  const pluginResults = action === "status"
+    ? await traceHostPluginStatus(hosts)
+    : await reconcileTraceHostPlugins(action === "on", hosts, { command, homeDir: process.env.HOME });
+  const failures = recordPluginFailures(action, pluginResults);
+  if (failures.length > 0) {
+    if (action === "off") {
+      await writeWorkbenchTraceRecordingConfig({
+        enabled: false,
+        hosts,
+        command,
+      }, { homeDir: process.env.HOME });
+    }
+    throw new WorkbenchCodedError(recordPluginFailureCode(action), recordPluginFailureMessage(action), {
+      remediation: failures.map((failure) => failure.command).find(Boolean) ?? `workbench record ${action} --hosts ${hosts.join(",")}`,
+      subject: { hosts, pluginResults: pluginResults as unknown as Json },
+      exitCode: 2,
+    });
+  }
+  const config = action === "status"
+    ? before
+    : await writeWorkbenchTraceRecordingConfig({
+        enabled: action === "on",
+        hosts,
+        command,
+      }, { homeDir: process.env.HOME });
+  return emitResult("workbench.cli.record.v1", {
+    config: config as unknown as Json,
+    pluginResults: pluginResults as unknown as Json,
+    spool: workbenchTraceSpoolPath({ homeDir: process.env.HOME }),
+    next: config.enabled ? "workbench traces" : "workbench record on",
+  }, parsed, io, () => formatRecordStatus(config, pluginResults));
+}
+
+function recordPluginFailures(
+  action: "on" | "off" | "status",
+  pluginResults: readonly TraceHostPluginResult[],
+): TraceHostPluginResult[] {
+  if (action === "status") {
+    return [];
+  }
+  return pluginResults.filter((result) =>
+    result.state === "error" ||
+    result.state === "unavailable" ||
+    result.state === "unsupported"
+  );
+}
+
+function recordPluginFailureCode(action: "on" | "off" | "status"): string {
+  return action === "off" ? "trace_plugin_teardown_failed" : "trace_plugin_unavailable";
+}
+
+function recordPluginFailureMessage(action: "on" | "off" | "status"): string {
+  return action === "off"
+    ? "Workbench trace recording could not remove every requested host plugin."
+    : "Workbench trace recording could not enable every requested host plugin.";
+}
+
+async function handleTraces(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  rejectExtraInput(parsed, {
+    maxPositionals: 1,
+    message: "workbench traces does not accept refs or paths.",
+    remediation: "workbench traces",
+  });
+  const snapshot = await optionalInspectionSnapshot(parsed);
+  const traces = snapshot
+    ? snapshot.traces
+    : await listHomeTraceRecords();
+  return emitResult("workbench.cli.traces.v1", {
+    traces: traces.map(traceSummary) as unknown as Json,
+    next: traces.length > 0 ? `workbench show ${traces[0]!.id}` : "workbench record on",
+  }, parsed, io, () => formatTraceList(traces));
+}
+
+async function handleTrace(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const subcommand = requiredPositional(parsed, 1, "workbench trace requires review.", "workbench trace review TRACE_ID --pass");
+  if (subcommand !== "review") {
+    throw new WorkbenchCodedError("usage", `Unsupported trace command: ${subcommand}`, {
+      remediation: "workbench trace review TRACE_ID --pass",
+      exitCode: 2,
+    });
+  }
+  const traceId = requiredPositional(parsed, 2, "workbench trace review requires TRACE_ID.", "workbench trace review TRACE_ID --pass");
+  rejectExtraInput(parsed, {
+    maxPositionals: 3,
+    message: "workbench trace review accepts one trace id.",
+    remediation: "workbench trace review TRACE_ID --pass",
+  });
+  const status = traceReviewStatusFromFlags(parsed);
+  const snapshot = await optionalInspectionSnapshot(parsed);
+  const trace = await findTraceForCli(traceId, snapshot);
+  if (!trace) {
+    throw new WorkbenchCodedError("trace_not_found", `Trace not found: ${traceId}`, {
+      remediation: "workbench traces",
+      subject: { traceId },
+      exitCode: 2,
+    });
+  }
+  const reviewedTrace = reviewWorkbenchTrace(trace, {
+    status,
+    note: stringFlag(parsed, "note"),
+    tags: repeatStringFlag(parsed, "tag"),
+    expected: stringFlag(parsed, "expected"),
+    reviewer: os.userInfo().username,
+  });
+  const persistedTrace = await writeWorkbenchTraceRecord(reviewedTrace, {
+    homeDir: process.env.HOME,
+    ...(snapshot?.root ? { projectRoot: snapshot.root } : {}),
+  });
+  return emitResult("workbench.cli.trace-review.v1", {
+    trace: traceSummary(persistedTrace),
+    next: `workbench show ${persistedTrace.id}`,
+  }, parsed, io, () => [
+    `Reviewed ${displayRef(persistedTrace.id)}: ${status}.`,
+    `next: workbench show ${persistedTrace.id}`,
+  ].join("\n"));
+}
+
+async function handleTraceHook(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  try {
+    const host = stringFlag(parsed, "host") ?? "agent";
+    const event = stringFlag(parsed, "event") ?? optionalPositional(parsed, 1) ?? "event";
+    const config = await readWorkbenchTraceRecordingConfig({ homeDir: process.env.HOME });
+    if (!config.enabled || !config.hosts.includes(host)) {
+      io.stdout.write("{}\n");
+      return 0;
+    }
+    const payloadText = await readStdinText(io.stdin);
+    const payload = parseHookPayload(payloadText);
+    const source = traceSourceFromHook(host, payload);
+    const claimedSkill = stringFlag(parsed, "claim-skill");
+    if (claimedSkill) {
+      await appendWorkbenchTraceSpoolEvent({
+        kind: "claim",
+        source,
+        subject: {
+          type: "skill",
+          id: claimedSkill,
+          confidence: "exact",
+          activation: "host-skill",
+        },
+        message: "skill claim",
+        attributes: hookAttributes(payload),
+        at: hookTimestamp(payload),
+      }, { homeDir: process.env.HOME });
+    } else if (isPromptHookEvent(event, payload)) {
+      const prompt = hookPrompt(payload);
+      await appendWorkbenchTraceSpoolEvent({
+        kind: "prompt",
+        source,
+        input: prompt ? { prompt } : undefined,
+        subject: prompt ? skillSubjectFromPrompt(prompt) : undefined,
+        message: "user prompt",
+        attributes: hookAttributes(payload),
+        at: hookTimestamp(payload),
+      }, { homeDir: process.env.HOME });
+    } else if (isStopHookEvent(event, payload)) {
+      const assistantText = hookAssistantText(payload) ?? await assistantTextFromTranscript(payload);
+      await appendWorkbenchTraceSpoolEvent({
+        kind: "stop",
+        source,
+        output: assistantText ? { assistantText } : undefined,
+        status: hookStopStatus(payload),
+        message: event,
+        attributes: hookAttributes(payload),
+        at: hookTimestamp(payload),
+      }, { homeDir: process.env.HOME });
+    } else if (event === "Discard") {
+      await appendWorkbenchTraceSpoolEvent({
+        kind: "discard",
+        source,
+        message: event,
+        attributes: hookAttributes(payload),
+        at: hookTimestamp(payload),
+      }, { homeDir: process.env.HOME });
+    } else {
+      await appendWorkbenchTraceSpoolEvent({
+        kind: "event",
+        source,
+        message: event,
+        attributes: { ...hookAttributes(payload), kind: hookEventKind(payload) },
+        at: hookTimestamp(payload),
+      }, { homeDir: process.env.HOME });
+    }
+    io.stdout.write("{}\n");
+    return 0;
+  } catch {
+    io.stdout.write("{}\n");
+    return 0;
+  }
+}
+
 async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const subcommand = requiredPositional(parsed, 1, "workbench case requires draft.");
+  const subcommand = requiredPositional(parsed, 1, "workbench case requires draft|promote.");
+  if (subcommand === "promote") {
+    return await handleCasePromote(parsed, io);
+  }
   if (subcommand !== "draft") {
     throw new WorkbenchCodedError("usage", `Unsupported case command: ${subcommand}`, {
-      remediation: "workbench case draft",
+      remediation: "workbench case draft | workbench case promote TRACE_ID --id CASE_ID",
       exitCode: 2,
     });
   }
@@ -2928,6 +3270,76 @@ async function handleCase(parsed: ParsedArgs, io: CliIo): Promise<number> {
   }, parsed, io, () => [
     `Drafted eval case ${caseId}.`,
     ...files.map((file) => `  ${file.path}`),
+    `next: ${next}`,
+  ].join("\n"));
+}
+
+async function handleCasePromote(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const traceId = requiredPositional(parsed, 2, "workbench case promote requires TRACE_ID.", "workbench case promote TRACE_ID --id CASE_ID");
+  rejectExtraInput(parsed, {
+    maxPositionals: 3,
+    message: "workbench case promote accepts one trace id.",
+    remediation: "workbench case promote TRACE_ID --id case-001",
+  });
+  const caseId = stringFlag(parsed, "id");
+  if (!caseId) {
+    throw new WorkbenchCodedError("usage", "workbench case promote requires --id CASE_ID.", {
+      remediation: `workbench case promote ${traceId} --id case-001`,
+      exitCode: 2,
+    });
+  }
+  assertDraftCaseId(caseId);
+  const core = await coreOptions(parsed);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+  const trace = await findTraceForCli(traceId, snapshot);
+  if (!trace) {
+    throw new WorkbenchCodedError("trace_not_found", `Trace not found: ${traceId}`, {
+      remediation: "workbench traces",
+      subject: { traceId },
+      exitCode: 2,
+    });
+  }
+  const prompt = assertTracePromotable(trace);
+  const file = promotedCaseFile(caseId, trace, prompt);
+  const target = path.join(snapshot.root, file.path);
+  if (await pathExists(target)) {
+    throw new WorkbenchCodedError("case_exists", `Eval case file already exists: ${file.path}`, {
+      remediation: `workbench case promote ${trace.id} --id ${nextEvalCaseId(snapshot, new Set([caseId]))}`,
+      subject: { caseId, path: file.path },
+      exitCode: 2,
+    });
+  }
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, file.content, "utf8");
+  const promotedTrace = {
+    ...trace,
+    updatedAt: new Date().toISOString(),
+    status: {
+      capture: trace.status?.capture ?? "captured",
+      execution: trace.status?.execution ?? "completed",
+      grade: trace.status?.grade ?? "ungraded",
+      review: trace.status?.review ?? trace.review?.status ?? "unreviewed",
+      promotion: "promoted" as const,
+    },
+    links: dedupeTraceLinks([
+      ...(trace.links ?? []),
+      { type: "promotion" as const, id: caseId },
+      { type: "case" as const, id: caseId },
+    ]),
+  };
+  await writeWorkbenchTraceRecord(promotedTrace, {
+    homeDir: process.env.HOME,
+    projectRoot: snapshot.root,
+  });
+  const next = `workbench show ${caseId}`;
+  return emitResult("workbench.cli.case-promote.v1", {
+    caseId,
+    trace: traceSummary(promotedTrace),
+    files: [file.path] as unknown as Json,
+    next,
+  }, parsed, io, () => [
+    `Promoted ${displayRef(trace.id)} to eval case ${caseId}.`,
+    `  ${file.path}`,
     `next: ${next}`,
   ].join("\n"));
 }
@@ -3109,9 +3521,9 @@ async function handleCloudEvalLike(command: CloudEvalLikeCommand, parsed: Parsed
       ...(next ? [`next: ${next}`] : []),
     ].filter(Boolean).join("\n"));
   }
-  const { run, jobs } = await localRunStateForSnapshot(started.core, started.run);
+  const { run, jobs, traces } = await localRunStateForSnapshot(started.core, started.run);
   const runs = [run];
-  const snapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+  const snapshot = createWorkbenchRunSnapshotForRun(run, jobs, { traces });
   const artifactIds = await artifactIdsByRunId(started.core, runs);
   const failedRuns = runs.filter((entry) => entry.status === "failed" || entry.status === "canceled");
   const coverage = await evalCoverageSummaries(started.core, runs);
@@ -3130,7 +3542,7 @@ async function handleCloudEvalLike(command: CloudEvalLikeCommand, parsed: Parsed
     cloud: cloudExecutionSummary(started),
   }, parsed, io, () => [
     `Completed hosted ${command} on ${started.remote.url}.`,
-    formatRunSnapshot(snapshot, run),
+    formatRunSnapshot(snapshot),
     ...formatEvalCoverageLines(coverage),
     ...formatEvalDeltaLines(deltas),
     ...(next ? [`next: ${next}`] : []),
@@ -3151,8 +3563,8 @@ async function handleCloudImprove(parsed: ParsedArgs, io: CliIo): Promise<number
       ...(next ? [`next: ${next}`] : []),
     ].filter(Boolean).join("\n"));
   }
-  const { run, jobs } = await localRunStateForSnapshot(started.core, started.run);
-  const snapshot = createWorkbenchRunSnapshotForRun(run, jobs);
+  const { run, jobs, traces } = await localRunStateForSnapshot(started.core, started.run);
+  const snapshot = createWorkbenchRunSnapshotForRun(run, jobs, { traces });
   const runs = [run];
   const failedRuns = runs.filter((entry) => entry.status === "failed" || entry.status === "canceled");
   if (failedRuns.length > 0) {
@@ -3180,7 +3592,7 @@ async function handleCloudImprove(parsed: ParsedArgs, io: CliIo): Promise<number
     cloud: cloudExecutionSummary(started),
   }, parsed, io, () => [
     `Completed hosted improve on ${started.remote.url}.`,
-    formatRunSnapshot(snapshot, run),
+    formatRunSnapshot(snapshot),
     ...(switchedVersion ? [`Switched local source to ${displayRef(switchedVersion.id)}.`] : []),
     ...(next ? [`next: ${next}`] : []),
   ].filter(Boolean).join("\n"));
@@ -3405,16 +3817,17 @@ async function startCloudExecution(command: CloudOperationCommand, parsed: Parse
           rerun: parsed.flags.rerun === true,
         }), () => renderCloudProgress("preflight", [prescheduledRun]))
       : preparedImproveRequest!;
-    if (requestWithoutRunId.versionId !== preview.versionId) {
-      throw new WorkbenchCodedError("source_changed", `Source changed while preparing hosted ${command}.`, {
-        remediation: `workbench ${command} --cloud`,
-        subject: {
-          plannedVersionId: preview.versionId,
-          preparedVersionId: requestWithoutRunId.versionId,
-        },
-        exitCode: 1,
-      });
-    }
+    const preparedVersionId = cloudOperationVersionId(requestWithoutRunId);
+	    if (preparedVersionId !== preview.versionId) {
+	      throw new WorkbenchCodedError("source_changed", `Source changed while preparing hosted ${command}.`, {
+	        remediation: `workbench ${command} --cloud`,
+	        subject: {
+	          ...(preview.versionId !== undefined ? { plannedVersionId: preview.versionId } : {}),
+	          ...(preparedVersionId !== undefined ? { preparedVersionId } : {}),
+	        },
+	        exitCode: 1,
+	      });
+	    }
     const request = { ...requestWithoutRunId, runId };
     const syncBefore = await cloudPreScheduleStepWithLocalCancel(
       command,
@@ -3443,7 +3856,7 @@ async function startCloudExecution(command: CloudOperationCommand, parsed: Parse
         `workbench ${command}: scheduling hosted run`,
         async () => await apiRequest<WorkbenchRunSnapshot>(
           `/api/workbench/skills/${encodeURIComponent(skillId)}/workbench/operations`,
-          { method: "POST", body: cloudExecutionRequestBody(command, request), signal },
+          { method: "POST", body: request, signal },
           source.baseUrl,
         ),
         {
@@ -3496,12 +3909,12 @@ async function startCloudExecution(command: CloudOperationCommand, parsed: Parse
     return {
       core,
       remote,
-      skillId,
-      run: completed.run,
-      ...(completed.detached ? { detached: true } : {}),
-      startVersionId: request.versionId,
-      source,
-      sync: {
+	      skillId,
+	      run: completed.run,
+	      ...(completed.detached ? { detached: true } : {}),
+	      ...(preparedVersionId !== undefined ? { startVersionId: preparedVersionId } : {}),
+	      source,
+	      sync: {
         before: { pushed: syncBefore.pushed, pulled: syncBefore.pulled, upToDate: syncBefore.upToDate },
         after: { pushed: completed.sync.pushed, pulled: completed.sync.pulled, upToDate: completed.sync.upToDate },
       },
@@ -4265,6 +4678,7 @@ function runProgressSnapshotForInspection(input: {
     phase: input.phase,
     runs: input.runs,
     jobs: jobsForRuns(input.snapshot, runIds),
+    traces: input.snapshot.traces,
     evidence: {
       ...progressEvidenceCountsForRunIds(input.snapshot, runIds),
       ...(input.evidence ?? {}),
@@ -4366,8 +4780,8 @@ async function switchHostedImproveVersionIfPromoted(started: StartedCloudExecuti
       exitCode: 1,
     });
   }
-  const version = await switchWorkbenchVersion(outputVersionId, started.core);
-  return version;
+  const result = await switchWorkbenchVersion(outputVersionId, started.core);
+  return result.version;
 }
 
 async function fetchCloudObjectRefs(started: StartedCloudExecution): Promise<Record<string, string>> {
@@ -4479,33 +4893,12 @@ async function resolveCloudSkillId(source: ParsedWorkbenchInstallSource, signal?
   return skill.id;
 }
 
-function cloudExecutionRequestBody(
-  command: CloudOperationCommand,
-  request: WorkbenchPreparedCloudEvalRequest | WorkbenchPreparedCloudImproveRequest,
-): Record<string, Json | undefined> {
-  const base = {
-    kind: command,
-    variant: "cloud",
-    runId: request.runId,
-    versionId: request.versionId,
-    skill: request.skill,
-    agent: request.agent,
-    caseIds: "caseIds" in request && request.caseIds ? [...request.caseIds] : undefined,
-    samples: request.samples,
-  };
-  if (command !== "improve") {
-    const evalRequest = request as WorkbenchPreparedCloudEvalRequest;
-    return {
-      ...base,
-      ...(evalRequest.rerun === true ? { rerun: true } : {}),
-    };
+function cloudOperationVersionId(request: WorkbenchOperationRequest): string | undefined {
+  if (request.kind === "improve") {
+    return request.versionId ?? request.target?.versionId;
   }
-  const improveRequest = request as WorkbenchPreparedCloudImproveRequest;
-  return {
-    ...base,
-    budget: improveRequest.budget,
-    evidenceTraceIds: improveRequest.evidenceTraceIds,
-  };
+  const versions = [...new Set(request.targets.flatMap((target) => target.versionId ? [target.versionId] : []))];
+  return versions.length === 1 ? versions[0] : undefined;
 }
 
 function createPrescheduledCloudRun(input: {
@@ -4723,8 +5116,6 @@ async function runEvidenceFingerprints(core: { dir?: string; authToken?: string 
 function runEvidenceFingerprint(run: WorkbenchRun): string {
   return JSON.stringify({
     status: run.status,
-    costUsd: run.costUsd,
-    latencyMs: run.latencyMs,
     jobIds: run.jobIds ?? [],
     traceIds: run.traceIds,
     finishedAt: run.finishedAt,
@@ -6328,7 +6719,7 @@ function flagSpecForParsedPrefix(
 }
 
 function addFlag(flags: Record<string, string | boolean | string[]>, name: string, value: string | boolean): void {
-  if (name === "with") {
+  if (name === "with" || name === "tag") {
     const existing = flags[name];
     flags[name] = Array.isArray(existing)
       ? [...existing, String(value)]
@@ -6371,6 +6762,17 @@ function stringListFlag(parsed: ParsedArgs, name: string): string[] | undefined 
   return [...new Set(entries)];
 }
 
+function repeatStringFlag(parsed: ParsedArgs, name: string): string[] | undefined {
+  const value = parsed.flags[name];
+  if (Array.isArray(value)) {
+    return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))];
+  }
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+  return undefined;
+}
+
 function intFlag(parsed: ParsedArgs, name: string): number | undefined {
   const value = stringFlag(parsed, name);
   if (!value) {
@@ -6393,6 +6795,365 @@ function portFlag(parsed: ParsedArgs, name: string): number | undefined {
     throw new WorkbenchUserError(`--${name} must be an integer between 0 and 65535.`);
   }
   return parsedValue;
+}
+
+async function optionalInspectionSnapshot(parsed: ParsedArgs): Promise<WorkbenchInspectionSnapshot | null> {
+  try {
+    return await createWorkbenchReadOnlyInspectionSnapshot(await coreOptions(parsed));
+  } catch {
+    return null;
+  }
+}
+
+async function findTraceForCli(traceId: string, snapshot?: WorkbenchInspectionSnapshot | null): Promise<WorkbenchTrace | null> {
+  const snapshotTrace = snapshotObjectByRef(snapshot?.traces ?? [], traceId, "trace");
+  if (snapshotTrace) {
+    return snapshotTrace;
+  }
+  if (snapshot) {
+    return null;
+  }
+  await compactWorkbenchTraceSpool({ homeDir: process.env.HOME });
+  return await readWorkbenchTraceRecord(traceId, { homeDir: process.env.HOME });
+}
+
+function traceReviewStatusFromFlags(parsed: ParsedArgs): WorkbenchTraceReviewStatus {
+  const selected = [
+    parsed.flags.pass === true ? "passed" : null,
+    parsed.flags.fail === true ? "failed" : null,
+    parsed.flags.defer === true ? "deferred" : null,
+  ].filter((entry): entry is WorkbenchTraceReviewStatus => entry !== null);
+  if (selected.length !== 1) {
+    throw new WorkbenchCodedError("usage", "workbench trace review requires exactly one of --pass, --fail, or --defer.", {
+      remediation: "workbench trace review TRACE_ID --pass",
+      exitCode: 2,
+    });
+  }
+  return selected[0]!;
+}
+
+async function listHomeTraceRecords(): Promise<WorkbenchTrace[]> {
+  await compactWorkbenchTraceSpool({ homeDir: process.env.HOME });
+  return await listWorkbenchTraceRecords({
+    homeDir: process.env.HOME,
+    includeCandidates: true,
+  });
+}
+
+function dedupeTraceLinks(links: readonly NonNullable<WorkbenchTrace["links"]>[number][]): NonNullable<WorkbenchTrace["links"]> {
+  const byKey = new Map<string, NonNullable<WorkbenchTrace["links"]>[number]>();
+  for (const link of links) {
+    byKey.set(`${link.type}:${link.id}`, link);
+  }
+  return [...byKey.values()];
+}
+
+function assertTracePromotable(trace: WorkbenchTrace): string {
+  const readiness = workbenchTracePromotionReadiness(trace);
+  if (!readiness.ok) {
+    throw new WorkbenchCodedError(
+      readiness.code,
+      readiness.message,
+      {
+        remediation: readiness.code === "trace_expected_required" && readiness.reviewStatus
+          ? `workbench trace review ${trace.id} --${readiness.reviewStatus === "failed" ? "fail" : "defer"} --expected "Correct expected outcome"`
+          : `workbench show ${trace.id}`,
+        subject: {
+          traceId: trace.id,
+          status: trace.status as unknown as Json,
+          ...(readiness.reviewStatus ? { review: readiness.reviewStatus } : {}),
+        },
+        exitCode: 2,
+      },
+    );
+  }
+  const prompt = workbenchTracePrompt(trace);
+  if (!prompt) {
+    throw new WorkbenchCodedError("trace_prompt_required", `Trace ${trace.id} has no captured prompt; promotion requires trace input.`, {
+      remediation: `workbench show ${trace.id}`,
+      subject: { traceId: trace.id },
+      exitCode: 2,
+    });
+  }
+  return prompt;
+}
+
+function promotedCaseFile(caseId: string, trace: WorkbenchTrace, prompt: string): SurfaceSnapshotFile {
+  const expected = trace.review?.expected?.trim() || workbenchTraceOutputText(trace) || undefined;
+  const reviewNote = trace.review?.note;
+  const tags = trace.review?.tags ?? [];
+  const lines = [
+    "version: 1",
+    `id: ${caseId}`,
+    `title: ${yamlQuoted(`Promoted from ${trace.id}`)}`,
+    "prompt: |",
+    ...indentBlock(prompt),
+    ...(expected ? ["expected: |", ...indentBlock(expected)] : []),
+    ...(reviewNote || tags.length > 0
+      ? [
+          "metadata:",
+          `  trace: ${yamlQuoted(trace.id)}`,
+          ...(reviewNote ? ["  review_note: |", ...indentBlock(reviewNote, 4)] : []),
+          ...(tags.length > 0 ? ["  tags:", ...tags.map((tag) => `    - ${yamlQuoted(tag)}`)] : []),
+        ]
+      : [`metadata: { trace: ${yamlQuoted(trace.id)} }`]),
+    "grade:",
+    "  with:",
+    "    criteria:",
+    "      - id: acceptance",
+    "        description: The response satisfies the expected correction or reviewed outcome for this promoted trace.",
+  ];
+  return {
+    path: `.workbench/cases/${caseId}/case.yaml`,
+    content: `${lines.join("\n")}\n`,
+  };
+}
+
+function indentBlock(value: string, spaces = 2): string[] {
+  const prefix = " ".repeat(spaces);
+  const lines = value.replace(/\r\n/gu, "\n").split("\n");
+  return (lines.length > 0 ? lines : [""]).map((line) => `${prefix}${line}`);
+}
+
+function yamlQuoted(value: string): string {
+  return JSON.stringify(value);
+}
+
+function formatTraceList(traces: readonly WorkbenchTrace[]): string {
+  if (traces.length === 0) {
+    return ["No traces.", "next: workbench record on"].join("\n");
+  }
+  return [
+    renderTable(traces, [
+      { header: "trace", cell: (trace) => displayRef(trace.id) },
+      { header: "origin", cell: (trace) => trace.origin ?? "eval" },
+      { header: "status", cell: (trace) => workbenchTraceProjection(trace).lifecycleStatus },
+      { header: "review", cell: (trace) => workbenchTraceProjection(trace).reviewStatus },
+      { header: "skill", cell: (trace) => trace.skillName },
+      { header: "agent", cell: (trace) => trace.agentName },
+      { header: "created", cell: (trace) => traceTimestamp(trace.createdAt) },
+    ]),
+    `next: workbench show ${traces[0]!.id}`,
+  ].join("\n");
+}
+
+function formatRecordStatus(
+  config: Awaited<ReturnType<typeof readWorkbenchTraceRecordingConfig>>,
+  pluginResults: readonly TraceHostPluginResult[],
+): string {
+  return [
+    `Trace recording: ${config.enabled ? "on" : "off"}`,
+    `hosts=${config.hosts.length > 0 ? config.hosts.join(",") : "none"}`,
+    `spool=${workbenchTraceSpoolPath({ homeDir: process.env.HOME })}`,
+    ...(config.command ? [`command=${config.command}`] : []),
+    ...pluginResults.map((result) => `plugin: ${result.detail}${result.command ? `; next: ${result.command}` : ""}`),
+    `next: ${config.enabled ? "workbench traces" : "workbench record on"}`,
+  ].join("\n");
+}
+
+function traceTimestamp(value: string): string {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().replace(/\.\d{3}Z$/u, "Z") : value;
+}
+
+async function readTextFileIfExists(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (unknownErrorCode(error) === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function readStdinText(stdin: NodeJS.ReadableStream & { isTTY?: boolean } = process.stdin): Promise<string> {
+  if (stdin.isTTY) {
+    return "";
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function parseHookPayload(text: string): Record<string, unknown> {
+  if (!text.trim()) {
+    return {};
+  }
+  const parsed = JSON.parse(text) as unknown;
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+}
+
+function traceSourceFromHook(host: string, payload: Record<string, unknown>): NonNullable<WorkbenchTrace["source"]> {
+  const cwd = stringHookField(payload, ["cwd", "project_dir", "workspace", "workspaceRoot"]) ??
+    process.env.CLAUDE_PROJECT_DIR ??
+    process.env.PWD ??
+    process.cwd();
+  const sessionId = stringHookField(payload, ["session_id", "sessionId", "conversation_id", "conversationId"]) ??
+    process.env.CLAUDE_CODE_SESSION_ID ??
+    process.env.CODEX_SESSION_ID ??
+    "session";
+  const turnId = stringHookField(payload, ["turn_id", "turnId", "message_id", "messageId", "transcript_path"]) ??
+    `${Date.now()}`;
+  return {
+    host,
+    sessionId,
+    turnId,
+    workspaceRoot: cwd,
+  };
+}
+
+function isPromptHookEvent(event: string, payload: Record<string, unknown>): boolean {
+  return event === "UserPromptSubmit" || stringHookField(payload, ["hook_event_name", "hookEventName", "event"]) === "UserPromptSubmit";
+}
+
+function isStopHookEvent(event: string, payload: Record<string, unknown>): boolean {
+  const payloadEvent = stringHookField(payload, ["hook_event_name", "hookEventName", "event"]);
+  return event === "Stop" || event === "turn-ended" || payloadEvent === "Stop" || payloadEvent === "SubagentStop";
+}
+
+function hookPrompt(payload: Record<string, unknown>): string | undefined {
+  return stringHookField(payload, ["prompt", "message", "user_prompt", "userPrompt"]);
+}
+
+function skillSubjectFromPrompt(prompt: string): NonNullable<WorkbenchTrace["subjects"]>[number] | undefined {
+  const explicit = prompt.match(/^\s*\$([A-Za-z0-9_.:-]+)/u);
+  if (explicit?.[1]) {
+    return {
+      type: "skill",
+      id: explicit[1],
+      confidence: "exact",
+      activation: "explicit-invocation",
+    };
+  }
+  return undefined;
+}
+
+function hookAssistantText(payload: Record<string, unknown>): string | undefined {
+  return stringHookField(payload, ["last_assistant_message", "lastAssistantMessage", "assistant_response", "assistantResponse", "response"]);
+}
+
+async function assistantTextFromTranscript(payload: Record<string, unknown>): Promise<string | undefined> {
+  const transcriptPath = stringHookField(payload, ["transcript_path", "transcriptPath"]);
+  if (!transcriptPath) {
+    return undefined;
+  }
+  const text = await readTextFileIfExists(transcriptPath);
+  if (!text) {
+    return undefined;
+  }
+  const lines = text.trim().split(/\r?\n/u).reverse();
+  for (const line of lines) {
+    const record = parseJsonRecord(line);
+    const message = asRecord(record?.message);
+    const role = typeof message?.role === "string" ? message.role : typeof record?.role === "string" ? record.role : undefined;
+    if (role !== "assistant") {
+      continue;
+    }
+    const content = message?.content ?? record?.content;
+    const extracted = assistantTextFromContent(content);
+    if (extracted) {
+      return extracted;
+    }
+  }
+  return undefined;
+}
+
+function assistantTextFromContent(content: unknown): string | undefined {
+  if (typeof content === "string" && content.trim()) {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  const text = content
+    .map((entry) => {
+      const record = asRecord(entry);
+      return typeof record?.text === "string" ? record.text : undefined;
+    })
+    .filter((entry): entry is string => Boolean(entry?.trim()))
+    .join("\n");
+  return text.trim() || undefined;
+}
+
+function hookStopStatus(payload: Record<string, unknown>): "completed" | "failed" | "canceled" | "unknown" {
+  const status = stringHookField(payload, ["status", "stop_status", "stopStatus"]);
+  if (status === "failed" || status === "canceled" || status === "completed") {
+    return status;
+  }
+  return "completed";
+}
+
+function hookEventKind(payload: Record<string, unknown>): "status" | "message" | "output" | "usage" | "error" | "note" {
+  const kind = stringHookField(payload, ["kind", "type"]);
+  return kind === "error" ? "error" : kind === "usage" ? "usage" : kind === "output" ? "output" : "note";
+}
+
+function hookAttributes(payload: Record<string, unknown>): Record<string, Json> {
+  const attributes: Record<string, Json> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    const json = jsonFromUnknown(value, key);
+    if (json !== undefined) {
+      attributes[key] = json;
+    }
+  }
+  return attributes;
+}
+
+function hookTimestamp(payload: Record<string, unknown>): string | undefined {
+  const timestamp = stringHookField(payload, ["timestamp", "created_at", "createdAt"]);
+  if (!timestamp) {
+    return undefined;
+  }
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined;
+}
+
+function shouldRedactHookField(key: string): boolean {
+  return /token|secret|api[_-]?key|authorization|password/iu.test(key);
+}
+
+function stringHookField(payload: Record<string, unknown>, names: readonly string[]): string | undefined {
+  for (const name of names) {
+    const value = payload[name];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function jsonFromUnknown(value: unknown, key?: string): Json | undefined {
+  if (key && shouldRedactHookField(key)) {
+    return "[redacted]";
+  }
+  if (typeof value === "number") {
+    return Number.isNaN(value) ? undefined : value;
+  }
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const entries = value.map((entry) => jsonFromUnknown(entry)).filter((entry): entry is Json => entry !== undefined);
+    return entries;
+  }
+  if (value && typeof value === "object") {
+    const record: Record<string, Json> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      const json = jsonFromUnknown(nested, key);
+      if (json !== undefined) {
+        record[key] = json;
+      }
+    }
+    return record;
+  }
+  return undefined;
+}
+
+function unknownErrorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : undefined;
 }
 
 function optionalPositional(parsed: ParsedArgs, index: number): string | undefined {
@@ -6951,7 +7712,7 @@ function emitEvalFailure(
   }
   io.stdout.write([
     message,
-    formatRunSnapshot(snapshot, failedRuns[0]),
+    formatRunSnapshot(snapshot),
     ...formatEvalCoverageLines(coverage),
     ...formatEvalDeltaLines(deltas),
     ...(next ? [`next: ${next}`] : []),
@@ -6959,8 +7720,16 @@ function emitEvalFailure(
   return 1;
 }
 
-function runSummary(run: WorkbenchRun, artifactIds: readonly string[], jobs: readonly WorkbenchJob[] = []): Json {
+function runSummary(
+  run: WorkbenchRun,
+  artifactIds: readonly string[],
+  jobs: readonly WorkbenchJob[] = [],
+  traces: readonly WorkbenchTrace[] = [],
+): Json {
   const score = scoredRunValue(run, jobs);
+  const report = jobs.length > 0
+    ? buildWorkbenchJobReport(jobs, traces, { now: run.finishedAt ?? new Date().toISOString() })
+    : undefined;
   return {
     id: run.id,
     kind: run.kind,
@@ -6976,7 +7745,7 @@ function runSummary(run: WorkbenchRun, artifactIds: readonly string[], jobs: rea
     ...(run.cancelRequestedAt ? { cancelRequestedAt: run.cancelRequestedAt } : {}),
     ...(run.lastProgressAt ? { lastProgressAt: run.lastProgressAt } : {}),
     ...(score !== undefined ? { score } : {}),
-    ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
+    ...(report ? { report: report as unknown as Json } : {}),
     ...(run.error ? { error: run.error } : {}),
     ...(run.jobIds ? { jobIds: run.jobIds } : {}),
     traceIds: run.traceIds,
@@ -7335,11 +8104,8 @@ async function liveEvalCaseSummary(root: string): Promise<LiveEvalCaseSummary> {
       continue;
     }
     const caseId = entry.name;
-    const casePath = await firstExistingPath([
-      path.join(casesDir, caseId, "case.yaml"),
-      path.join(casesDir, caseId, "case.yml"),
-    ]);
-    if (!casePath) {
+    const casePath = path.join(casesDir, caseId, "case.yaml");
+    if (!await fs.stat(casePath).then((stat) => stat.isFile(), () => false)) {
       continue;
     }
     caseIds.add(caseId);
@@ -7353,15 +8119,6 @@ async function liveEvalCaseSummary(root: string): Promise<LiveEvalCaseSummary> {
     workflow,
     caseIds,
   };
-}
-
-async function firstExistingPath(paths: readonly string[]): Promise<string | null> {
-  for (const filePath of paths) {
-    if (await fs.stat(filePath).then((stat) => stat.isFile(), () => false)) {
-      return filePath;
-    }
-  }
-  return null;
 }
 
 async function statusWithCausalNext(
@@ -7872,7 +8629,9 @@ function snapshotObjectByRef<T extends { id: string }>(
   if (!normalized) {
     return undefined;
   }
-  const candidates = entries.filter((entry) => objectRefMatches(entry.id, normalized));
+  const candidates = entries
+    .filter((entry) => objectRefMatches(entry.id, normalized))
+    .sort((left, right) => left.id.localeCompare(right.id));
   if (candidates.length > 1) {
     throw new WorkbenchCodedError("ref_ambiguous", `${capitalize(kind)} ref is ambiguous: ${ref}. Candidates: ${displayCandidateRefs(candidates.map((entry) => entry.id)).slice(0, 8).join(", ")}.`, {
       subject: { ref, candidates: candidates.map((entry) => entry.id).slice(0, 20) },
@@ -8093,7 +8852,7 @@ function formatRunEvidenceSummary(
   const cancellations = runFailureGroups(jobs, ["canceled"]);
   const evidence = buildWorkbenchRunEvidenceView(snapshot, run);
   return [
-    progress ? formatRunSnapshot(progress, run) : formatRun(run),
+    progress ? formatRunSnapshot(progress) : formatRun(run),
     `location=${run.location ?? "local"}${run.retryOfRunId ? ` retry_of=${displayRef(run.retryOfRunId)}` : ""}${run.outputVersionId ? ` output=${displayRef(run.outputVersionId)}` : ""}`,
     ...(progress ? [`Progress: ${formatProgressSummary(progress)}`] : []),
     ...(run.error ? [`error=${singleLine(run.error)}`] : []),
@@ -8111,8 +8870,11 @@ function formatRunEvidenceSummary(
 
 function formatRunEvidenceView(evidence: WorkbenchRunEvidenceView): string[] {
   return [
-    ...(evidence.agents.length > 0
-      ? ["Agent results:", ...evidence.agents.map(formatEvidenceAgentResult)]
+    ...(evidence.measurements.length > 0
+      ? ["Measurements:", ...evidence.measurements.map(formatEvidenceMeasurementResult)]
+      : []),
+    ...(evidence.otherWork.length > 0
+      ? ["Other work:", ...evidence.otherWork.map(formatEvidenceOtherWorkResult)]
       : []),
     ...(evidence.cases.length > 0
       ? ["Case results:", ...evidence.cases.map(formatEvidenceCaseResult)]
@@ -8120,20 +8882,33 @@ function formatRunEvidenceView(evidence: WorkbenchRunEvidenceView): string[] {
   ];
 }
 
-function formatEvidenceAgentResult(agent: WorkbenchRunEvidenceAgentResult): string {
+function formatEvidenceMeasurementResult(measurement: WorkbenchRunEvidenceMeasurementResult): string {
   return [
     "  ",
-    agent.agentLabel,
-    `skill=${agent.skillLabel}`,
-    `agent=${agent.agentName}`,
-    `model=${formatEvidenceModel(agent)}`,
-    agent.status,
-    `cases=${agent.completedCases}/${agent.totalCases}`,
-    `jobs=${agent.succeededJobs}/${agent.totalJobs}`,
-    `score=${formatOptionalScore(agent.score)}`,
-    `cost=${agent.costUsd === undefined ? "n/a" : formatCostUsd(agent.costUsd)}`,
-    `duration=${formatOptionalDuration(agent.durationMs)}`,
-    agent.errors.length > 0 ? `error=${singleLine(agent.errors[0]!)}` : undefined,
+    measurement.agentLabel,
+    `skill=${measurement.skillLabel}`,
+    `agent=${measurement.agentName}`,
+    `model=${formatEvidenceModel(measurement)}`,
+    measurement.status,
+    `coverage=${formatCoverageCli(measurement.coverage)}`,
+    `quality=${formatQualityCli(measurement.score)}`,
+    ...formatReportMetricCliParts(measurement.report),
+    measurement.errors.length > 0 ? `error=${singleLine(measurement.errors[0]!)}` : undefined,
+  ].filter(Boolean).join("\t");
+}
+
+function formatEvidenceOtherWorkResult(work: WorkbenchRunEvidenceOtherWorkResult): string {
+  return [
+    "  ",
+    work.agentLabel,
+    `skill=${work.skillLabel}`,
+    `agent=${work.agentName}`,
+    `model=${formatEvidenceModel(work)}`,
+    work.status,
+    `jobs=${work.succeededJobs}/${work.totalJobs}`,
+    `latency=${formatReportLatencyCli(work.report, { includePerSample: false })}`,
+    `cost=${formatReportCostCli(work.report, { includePerSample: false })}`,
+    work.errors.length > 0 ? `error=${singleLine(work.errors[0]!)}` : undefined,
   ].filter(Boolean).join("\t");
 }
 
@@ -8148,8 +8923,8 @@ function formatEvidenceCaseResult(result: WorkbenchRunEvidenceCaseResult): strin
     `status=${result.status}`,
     `execute=${formatEvidencePhase(result.execute)}`,
     `grade=${formatEvidencePhase(result.grade)}`,
-    `score=${formatOptionalScore(result.score)}`,
-    `duration=${formatOptionalDuration(result.durationMs)}`,
+    `quality=${formatQualityCli(result.score)}`,
+    ...formatReportMetricCliParts(result.report),
     result.dependencyReason ? `dependency=${singleLine(result.dependencyReason)}` : undefined,
     result.error ? `error=${singleLine(result.error)}` : undefined,
     `show=workbench show ${result.selectedJobId}`,
@@ -8289,6 +9064,85 @@ function formatOptionalDuration(durationMs: number | undefined): string {
   return durationMs === undefined ? "n/a" : `${durationMs}ms`;
 }
 
+function formatReportMetricCliParts(report: WorkbenchJobReport | undefined): string[] {
+  return [
+    `latency=${formatReportLatencyCli(report, { includeContext: true })}`,
+    `cost=${formatReportCostCli(report, { includeContext: true })}`,
+  ];
+}
+
+function formatReportLatencyCli(
+  report: WorkbenchJobReport | undefined,
+  options: ReportMetricCliOptions = {},
+): string {
+  return formatReportMetricCli(report, "latency", formatOptionalDuration, options);
+}
+
+function formatReportCostCli(
+  report: WorkbenchJobReport | undefined,
+  options: ReportMetricCliOptions = {},
+): string {
+  return formatReportMetricCli(report, "cost", formatCostUsd, options);
+}
+
+type ReportMetricCliOptions = {
+  includeContext?: boolean;
+  includePerSample?: boolean;
+};
+
+type ReportMetricValueKind = "perSample" | "total";
+
+function formatReportMetricCli(
+  report: WorkbenchJobReport | undefined,
+  metric: WorkbenchReportMetricKind,
+  formatter: (value: number) => string,
+  options: ReportMetricCliOptions = {},
+): string {
+  const includePerSample = options.includePerSample ?? true;
+  const breakdown = workbenchJobReportMetricBreakdown(report, metric);
+  const valueKind: ReportMetricValueKind = includePerSample && (
+    breakdown.primary?.value.perSample !== undefined ||
+    breakdown.details.some((detail) => detail.value.perSample !== undefined)
+  )
+    ? "perSample"
+    : "total";
+  const primary = formatReportMetricCliValue(breakdown.primary?.value, valueKind, formatter)
+    ?? (valueKind === "perSample" ? formatReportMetricCliValue(breakdown.primary?.value, "total", formatter) : undefined)
+    ?? "n/a";
+  if (!options.includeContext) {
+    return primary;
+  }
+  const details = breakdown.details.flatMap((detail): string[] => {
+    const value = formatReportMetricCliValue(detail.value, valueKind, formatter)
+      ?? (valueKind === "perSample" ? formatReportMetricCliValue(detail.value, "total", formatter) : undefined);
+    return value ? [`${detail.label} ${value}`] : [];
+  });
+  return [primary, ...details].join("; ");
+}
+
+function formatReportMetricCliValue(
+  value: { perSample?: number; total?: number } | undefined,
+  kind: ReportMetricValueKind,
+  formatter: (value: number) => string,
+): string | undefined {
+  const numeric = kind === "perSample" ? value?.perSample : value?.total;
+  if (numeric === undefined) {
+    return undefined;
+  }
+  return kind === "perSample" ? `${formatter(numeric)}/sample` : `${formatter(numeric)} total`;
+}
+
+function formatCoverageCli(coverage: WorkbenchSampleCoverage | undefined): string {
+  if (!coverage || !Number.isFinite(coverage.planned) || coverage.planned <= 0) {
+    return "n/a";
+  }
+  return `${coverage.completed}/${coverage.planned} samples`;
+}
+
+function formatQualityCli(score: number | undefined): string {
+  return score === undefined ? "n/a" : `score ${score.toFixed(3)}`;
+}
+
 function runFailureGroups(
   jobs: readonly WorkbenchJob[],
   statuses: readonly WorkbenchJob["status"][] = ["failed", "canceled"],
@@ -8398,7 +9252,7 @@ function formatEvidenceHighlights(highlights: readonly EvidenceHighlight[]): str
       continue;
     }
     const score = highlight.score === undefined ? "n/a" : highlight.score.toFixed(3);
-    lines.push(`Rubric ${highlight.path}: score=${score}${highlight.summary ? ` summary=${highlight.summary}` : ""}`);
+    lines.push(`Grading ${highlight.path}: score=${score}${highlight.summary ? ` summary=${highlight.summary}` : ""}`);
     for (const criterion of highlight.criteria) {
       lines.push(`  ${criterion.id ?? "criterion"} score=${criterion.score === undefined ? "n/a" : criterion.score.toFixed(3)}${criterion.rationale ? ` rationale=${criterion.rationale}` : ""}`);
     }
@@ -9129,6 +9983,57 @@ function versionSummary(version: WorkbenchVersion): Json {
   };
 }
 
+function switchNextCommand(
+  parsed: ParsedArgs,
+  versionRef: string,
+  result: WorkbenchSwitchResult,
+): string | null {
+  if (!result.dryRun) {
+    return null;
+  }
+  return switchApplyCommand(parsed, versionRef, result.requiresOverwrite);
+}
+
+function switchApplyCommand(parsed: ParsedArgs, versionRef: string, includeYes: boolean): string {
+  const args = ["workbench", "switch", quoteShellArg(versionRef)];
+  if (includeYes) {
+    args.push("--yes");
+  }
+  const dir = dirFlag(parsed);
+  if (dir) {
+    args.push("--dir", quoteShellArg(dir));
+  }
+  return args.join(" ");
+}
+
+function formatSwitchResult(result: WorkbenchSwitchResult, next: string | null): string {
+  const action = result.dryRun
+    ? `Would switch to ${displayRef(result.version.id)} (dry run made no changes).`
+    : `Switched to ${displayRef(result.version.id)}.`;
+  return [
+    action,
+    formatSwitchChangeSummary(result),
+    result.requiresOverwrite
+      ? result.dryRun
+        ? "Would require --yes because local package source has unsaved edits."
+        : "Overwrote modified local package source because --yes was provided."
+      : undefined,
+    ...(next ? [`next: ${next}`] : []),
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function formatSwitchChangeSummary(result: WorkbenchSwitchResult): string {
+  if (result.unchanged) {
+    return "Package source already matches the target version.";
+  }
+  const parts = [
+    `${result.changes.added.length} added`,
+    `${result.changes.changed.length} changed`,
+    `${result.changes.removed.length} removed`,
+  ];
+  return `Package source changes: ${parts.join(", ")}.`;
+}
+
 function formatAgents(agents: readonly WorkbenchAgent[], format: HumanFormatOptions): string {
   if (agents.length === 0) {
     return "No agents.";
@@ -9159,22 +10064,14 @@ function formatRun(run: WorkbenchRun): string {
     `skill=${run.skillName}`,
     `agent=${run.agentName}`,
     `score=${score}`,
-    ...latencySummaryParts(run.latencyMs, run.requestedSamples),
   ].join("\t");
 }
 
-function formatRunSnapshot(
-  snapshot: WorkbenchRunSnapshot,
-  run?: Pick<WorkbenchRun, "latencyMs" | "requestedSamples">,
-): string {
+function formatRunSnapshot(snapshot: WorkbenchRunSnapshot): string {
   const progress = snapshot.progress.planned > 0
     ? `${snapshot.progress.completed}/${snapshot.progress.planned}`
     : "n/a";
   const scoreValue = snapshot.result?.score ?? snapshot.progress.partialScore;
-  const score = scoreValue === undefined ? "n/a" : scoreValue.toFixed(3);
-  const cost = snapshot.progress.costUsd === undefined ? "n/a" : formatCostUsd(snapshot.progress.costUsd);
-  const singleMeasurement = snapshot.measurements.length === 1 ? snapshot.measurements[0] : undefined;
-  const latencyParts = snapshotLatencySummaryParts(snapshot, run ?? singleMeasurement);
   const header = [
     displayRef(snapshot.id),
     snapshot.kind,
@@ -9184,13 +10081,14 @@ function formatRunSnapshot(
     `scored=${snapshot.progress.scored}`,
     `failed=${snapshot.progress.failed}`,
     `canceled=${snapshot.progress.canceled}`,
-    `score=${score}`,
-    `cost=${cost}`,
-    ...latencyParts,
+    `quality=${formatQualityCli(scoreValue)}`,
+    `coverage=${formatRunSnapshotCoverage(snapshot)}`,
+    `latency=${formatReportLatencyCli(snapshot.report)}`,
+    `cost=${formatReportCostCli(snapshot.report)}`,
+    `wall_time=${formatOptionalDuration(snapshot.progress.elapsedMs)}`,
   ].join("\t");
   const measurements = snapshot.measurements.length > 1
     ? snapshot.measurements.map((measurement) => {
-        const measurementScore = measurement.score === undefined ? "n/a" : measurement.score.toFixed(3);
         return [
           "  measurement",
           `run=${displayRef(measurement.runId)}`,
@@ -9198,41 +10096,21 @@ function formatRunSnapshot(
           `skill=${measurement.skillName}`,
           `agent=${measurement.agentName}`,
           measurement.status,
-          `score=${measurementScore}`,
-          `samples=${measurement.samples ?? "n/a"}`,
-          ...latencySummaryParts(measurement.latencyMs, measurement.samples),
+          `quality=${formatQualityCli(measurement.score)}`,
+          `coverage=${formatMeasurementSummaryCoverage(measurement)}`,
+          ...formatReportMetricCliParts(measurement.report),
         ].join("\t");
       })
     : [];
   return [header, ...measurements].join("\n");
 }
 
-function snapshotLatencySummaryParts(
-  snapshot: WorkbenchRunSnapshot,
-  source: Pick<WorkbenchRun, "latencyMs" | "requestedSamples"> | WorkbenchRunSnapshot["measurements"][number] | undefined,
-): string[] {
-  if (!source || source.latencyMs === undefined) {
-    return [];
-  }
-  const samples = "requestedSamples" in source
-    ? source.requestedSamples
-    : "samples" in source
-      ? source.samples ?? snapshot.progress.planned
-      : snapshot.progress.planned;
-  return latencySummaryParts(source.latencyMs, samples);
+function formatRunSnapshotCoverage(snapshot: WorkbenchRunSnapshot): string {
+  return formatCoverageCli(workbenchSampleCoverageTotal(snapshot.measurements.map((measurement) => measurement.coverage)));
 }
 
-function latencySummaryParts(latencyMs: number | undefined, samples: number | undefined): string[] {
-  if (latencyMs === undefined) {
-    return ["latency=n/a"];
-  }
-  if (samples !== undefined && samples > 1) {
-    return [
-      `total_latency=${latencyMs}ms`,
-      `avg_latency=${Math.round(latencyMs / samples)}ms`,
-    ];
-  }
-  return [`latency=${latencyMs}ms`];
+function formatMeasurementSummaryCoverage(measurement: WorkbenchMeasurementSummary): string {
+  return formatCoverageCli(measurement.coverage);
 }
 
 function formatJob(job: WorkbenchJob): string {
@@ -9277,23 +10155,19 @@ function formatResults(
         { header: "status", cell: (cell, options) => styleStatus(cell.status ?? "unknown", options) },
         {
           header: "quality",
-          align: "right",
-          cell: (cell) => cell.quality === undefined ? "n/a" : cell.quality.toFixed(3),
+          cell: (cell) => formatQualityCli(cell.quality),
         },
         {
-          header: "samples",
-          align: "right",
-          cell: (cell) => cell.samples === undefined ? "n/a" : String(cell.samples),
-        },
-        {
-          header: "cost",
-          align: "right",
-          cell: (cell) => cell.costUsd === undefined ? "n/a" : formatCostUsd(cell.costUsd),
+          header: "coverage",
+          cell: (cell) => formatCoverageCli(cell.coverage),
         },
         {
           header: "latency",
-          align: "right",
-          cell: (cell) => cell.latencyMs === undefined ? "n/a" : `${cell.latencyMs}ms`,
+          cell: (cell) => formatReportLatencyCli(cell.report),
+        },
+        {
+          header: "cost",
+          cell: (cell) => formatReportCostCli(cell.report),
         },
         { header: "run", cell: (cell) => cell.runId ? displayRef(cell.runId) : "n/a" },
       ], format)];
@@ -9447,6 +10321,48 @@ function shortObjectId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 
+function traceRecordDetail(trace: WorkbenchTrace): Json {
+  const files = trace.files.filter(isUserFacingTraceEvidenceFile);
+  const projection = workbenchTraceProjection(trace);
+  return {
+    ...(traceSummary(trace) as Record<string, Json>),
+    ...(trace.source ? { source: trace.source as unknown as Json } : {}),
+    ...(trace.status ? { status: trace.status as unknown as Json } : {}),
+    ...(trace.review ? { review: trace.review as unknown as Json } : {}),
+    ...(trace.subjects ? { subjects: trace.subjects as unknown as Json } : {}),
+    ...(trace.links ? { links: trace.links as unknown as Json } : {}),
+    ...(projection.prompt ? { prompt: projection.prompt } : {}),
+    ...(projection.output ? { output: projection.output } : {}),
+    files: files.map((file) => fileSummary(file, showFileRef(trace.id, file.path))),
+    next: projection.promotionStatus === "promoted"
+      ? "workbench results"
+      : `workbench case promote ${trace.id} --id case-001`,
+  };
+}
+
+function formatTraceRecordDetail(trace: WorkbenchTrace): string {
+  const files = trace.files.filter(isUserFacingTraceEvidenceFile);
+  const projection = workbenchTraceProjection(trace);
+  const next = projection.promotionStatus === "promoted"
+    ? "workbench results"
+    : `workbench case promote ${trace.id} --id case-001`;
+  return [
+    `${displayRef(trace.id)}\torigin=${trace.origin ?? "eval"}\tstatus=${projection.lifecycleStatus}\treview=${projection.reviewStatus}`,
+    `run=${displayRef(trace.runId)}\tjob=${trace.jobId ? displayRef(trace.jobId) : "n/a"}\tversion=${displayRef(trace.versionId)}\tskill=${trace.skillName}\tagent=${trace.agentName}`,
+    ...(trace.source?.host || trace.source?.sessionId || trace.source?.turnId
+      ? [`source=${[trace.source.host, trace.source.sessionId, trace.source.turnId].filter(Boolean).join("/")}`]
+      : []),
+    ...(projection.prompt ? ["", "Input:", ...previewBlock(projection.prompt, 1200, 12).split("\n")] : []),
+    ...(projection.output ? ["", "Output:", ...previewBlock(projection.output, 1200, 12).split("\n")] : []),
+    ...(trace.review?.expected ? ["", "Expected:", ...previewBlock(trace.review.expected, 1200, 12).split("\n")] : []),
+    "",
+    `files=${files.length}`,
+    ...files.slice(0, 10).map((file) => `  ${showFileRef(trace.id, file.path)}`),
+    ...(files.length > 10 ? [`  ... ${files.length - 10} more`] : []),
+    `next: ${next}`,
+  ].join("\n");
+}
+
 function formatTrace(trace: WorkbenchTrace): string {
   const result = asRecord(trace.result);
   const status = typeof result?.status === "string" ? result.status : undefined;
@@ -9464,16 +10380,21 @@ function formatTrace(trace: WorkbenchTrace): string {
 
 function traceSummary(trace: WorkbenchTrace): Json {
   const result = asRecord(trace.result);
-  const status = typeof result?.status === "string" ? result.status : undefined;
+  const projection = workbenchTraceProjection(trace);
+  const status = trace.status || typeof result?.status === "string" ? projection.lifecycleStatus : undefined;
   return {
     id: trace.id,
+    ...(trace.protocol ? { protocol: trace.protocol } : {}),
+    ...(trace.origin ? { origin: trace.origin } : {}),
     runId: trace.runId,
     ...(trace.jobId ? { jobId: trace.jobId } : {}),
     versionId: trace.versionId,
     skillName: trace.skillName,
     agentName: trace.agentName,
     createdAt: trace.createdAt,
+    ...(trace.updatedAt ? { updatedAt: trace.updatedAt } : {}),
     ...(status ? { status } : {}),
+    ...(trace.review?.status ? { review: projection.reviewStatus } : {}),
     ...(status === "succeeded" && typeof result?.score === "number" ? { score: result.score } : {}),
     ...(typeof result?.error === "string" ? { error: singleLine(result.error) } : {}),
     fileCount: trace.files.length,

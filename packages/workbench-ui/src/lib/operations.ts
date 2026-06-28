@@ -1,4 +1,6 @@
 import type {
+  WorkbenchCaseMutationRequest,
+  WorkbenchCaseMutationResponse,
   WorkbenchOperationRequest,
   WorkbenchRunSnapshot,
 } from "@workbench-ai/workbench-contract";
@@ -25,6 +27,25 @@ export async function startWorkbenchOperation(
     throw new Error("Workbench operation endpoint returned an unsupported response.");
   }
   return started;
+}
+
+export async function createEvaluationCase(
+  apiBasePath: string,
+  request: WorkbenchCaseMutationRequest,
+): Promise<WorkbenchCaseMutationResponse> {
+  const response = await fetch(`${apiBasePath}/evaluation/cases`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response));
+  }
+  const created = await response.json() as WorkbenchCaseMutationResponse;
+  if (!created.caseId || !created.path) {
+    throw new Error("Workbench case endpoint returned an unsupported response.");
+  }
+  return created;
 }
 
 export function routeForWorkbenchRunSnapshot(started: WorkbenchRunSnapshot): WorkbenchRoute {

@@ -1,8 +1,10 @@
-import type {
-  Json,
-  WorkbenchAgent,
-  WorkbenchJob,
-  WorkbenchRun,
+import {
+  workbenchJobReportTotalCostUsd,
+  type Json,
+  type WorkbenchAgent,
+  type WorkbenchJobReport,
+  type WorkbenchJob,
+  type WorkbenchRun,
 } from "@workbench-ai/workbench-contract";
 
 export function shortId(value: string | null | undefined, length = 12): string {
@@ -63,14 +65,15 @@ export function formatCost(value: number | null | undefined): string {
     : "n/a";
 }
 
-export function formatRunCost(run: Pick<WorkbenchRun, "costUsd" | "status" | "id"> | null | undefined): string {
-  if (!run) {
-    return "Not tested";
+export function formatReportCost(
+  report: WorkbenchJobReport | null | undefined,
+  status?: string | null,
+): string {
+  const costUsd = workbenchJobReportTotalCostUsd(report ?? undefined);
+  if (costUsd !== undefined) {
+    return formatCost(costUsd);
   }
-  if (typeof run.costUsd === "number" && Number.isFinite(run.costUsd)) {
-    return formatCost(run.costUsd);
-  }
-  return run.status === "failed" || run.status === "canceled"
+  return status === "failed" || status === "canceled"
     ? "Failed before usage"
     : "Not reported";
 }

@@ -37,8 +37,8 @@ const SCORE: ComparisonMetricDescriptor = {
 };
 
 const COST: ComparisonMetricDescriptor = {
-  id: "costUsd",
-  label: "Cost",
+  id: "costPerSampleUsd",
+  label: "Cost per sample",
   direction: "lower",
   kind: "currency_usd",
   semanticRole: "cost",
@@ -130,14 +130,14 @@ describe("comparison metric helpers", () => {
       latest: option.isLatest,
     }))).toEqual([
       { id: "eval_one", label: "Evaluation 1", detail: "2 cases / test grader", latest: false },
-      { id: "eval_two", label: "Evaluation 2", detail: "3 cases / rubric grader", latest: true },
+      { id: "eval_two", label: "Evaluation 2", detail: "3 cases / criteria grader", latest: true },
     ]);
     expect(defaultEvaluationIdForScorecard(options)).toBe("eval_two");
   });
 
   test("uses run evidence as score fallback without copying aggregate row metrics", () => {
     const results = resultsFixture([
-      resultCell({ skillVersionId: "v002", runId: "run_eval", quality: undefined, latencyMs: undefined }),
+      resultCell({ skillVersionId: "v002", runId: "run_eval", quality: undefined, report: undefined }),
     ]);
     const groups = buildComparisonGroups(results);
     const rows = buildComparisonEvidenceRows({
@@ -154,31 +154,29 @@ describe("comparison metric helpers", () => {
         run({
           id: "run_eval",
           versionId: "v002",
-          latencyMs: 1200,
-          costUsd: 0.034,
         }),
       ],
     });
 
     expect(rows[0]?.score).toBe(0.88);
-    expect(rows[0]?.latencyMs).toBeUndefined();
-    expect(rows[0]?.costUsd).toBeUndefined();
+    expect(rows[0]?.latencyPerSampleMs).toBeUndefined();
+    expect(rows[0]?.costPerSampleUsd).toBeUndefined();
     expect(rows[0]?.statusLabel).toBe("Succeeded");
   });
 
-  test("does not copy aggregate run cost into agent result rows", () => {
+  test("uses report cost from agent result rows", () => {
     const results = resultsFixture([
       resultCell({
         skillVersionId: "v002",
         agentVersionId: "agent_codex",
         runId: "run_eval",
-        costUsd: 0.12,
+        report: jobReport({ costUsd: 0.12 }),
       }),
       resultCell({
         skillVersionId: "v002",
         agentVersionId: "agent_claude",
         runId: "run_eval",
-        costUsd: undefined,
+        report: undefined,
       }),
     ]);
     const rows = buildComparisonEvidenceRows({
@@ -188,14 +186,104 @@ describe("comparison metric helpers", () => {
         run({
           id: "run_eval",
           versionId: "v002",
-          costUsd: 0.34,
         }),
       ],
     });
 
-    expect(rows.map((row) => ({ agent: row.agentHash, cost: row.costUsd }))).toEqual([
+    expect(rows.map((row) => ({ agent: row.agentHash, cost: row.costPerSampleUsd }))).toEqual([
       { agent: "agent_claude", cost: undefined },
       { agent: "agent_codex", cost: 0.12 },
+    ]);
+  });
+
+  test("summarizes report latency from the run role without promoting grade cost", () => {
+    const results = resultsFixture([
+      resultCell({
+        report: {
+          unitCount: 1,
+          jobCount: 2,
+          totalDurationMs: 1200,
+          roles: [{
+            role: "execute",
+            jobCount: 1,
+            queued: 0,
+            running: 0,
+            succeeded: 1,
+            failed: 0,
+            canceled: 0,
+            totalDurationMs: 900,
+          }, {
+            role: "grade",
+            jobCount: 1,
+            queued: 0,
+            running: 0,
+            succeeded: 1,
+            failed: 0,
+            canceled: 0,
+            totalDurationMs: 300,
+            costUsd: 0.91,
+          }],
+        },
+      }),
+    ]);
+
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups: buildComparisonGroups(results),
+      runs: [run({ id: "run_eval", versionId: "v001" })],
+    });
+
+    expect(rows[0]?.latencyPerSampleMs).toBe(900);
+    expect(rows[0]?.costPerSampleUsd).toBeUndefined();
+  });
+
+  test("summarizes grade-only report timing and cost with the same metrics", () => {
+    const results = resultsFixture([
+      resultCell({
+        report: {
+          unitCount: 1,
+          jobCount: 1,
+          totalDurationMs: 300,
+          roles: [{
+            role: "grade",
+            jobCount: 1,
+            queued: 0,
+            running: 0,
+            succeeded: 1,
+            failed: 0,
+            canceled: 0,
+            totalDurationMs: 300,
+            costUsd: 0.91,
+          }],
+        },
+      }),
+    ]);
+
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups: buildComparisonGroups(results),
+      runs: [run({ id: "run_eval", versionId: "v001" })],
+    });
+
+    expect(rows[0]?.latencyPerSampleMs).toBe(300);
+    expect(rows[0]?.costPerSampleUsd).toBe(0.91);
+  });
+
+  test("labels non-execute result timing with the generic latency metric", () => {
+    const results = resultsFixture([
+      resultCell({ report: jobReport({ role: "improve", totalMs: 700, costUsd: 0.12 }) }),
+    ]);
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups: buildComparisonGroups(results),
+      runs: [run({ id: "run_eval", versionId: "v001" })],
+    });
+
+    expect(rows[0]?.latencyPerSampleMs).toBe(700);
+    expect(rows[0]?.costPerSampleUsd).toBe(0.12);
+    expect(buildComparisonTableMetricDescriptors(rows).map((entry) => [entry.id, entry.label])).toContainEqual([
+      "latencyPerSampleMs",
+      "Latency per sample",
     ]);
   });
 
@@ -216,6 +304,23 @@ describe("comparison metric helpers", () => {
     });
 
     expect(rows[0]?.statusLabel).toBe("Canceled");
+  });
+
+  test("preserves zero completed coverage", () => {
+    const results = resultsFixture([
+      resultCell({
+        coverage: { completed: 0, planned: 2 },
+        quality: undefined,
+        status: "running",
+      }),
+    ]);
+    const rows = buildComparisonEvidenceRows({
+      agents: results.agents,
+      groups: buildComparisonGroups(results),
+      runs: [run({ id: "run_eval", versionId: "v001", status: "running" })],
+    });
+
+    expect(rows[0]?.coverage).toEqual({ completed: 0, planned: 2 });
   });
 
   test("builds metric chart rows grouped by result version", () => {
@@ -241,23 +346,23 @@ describe("comparison metric helpers", () => {
 
   test("only shows the cost metric column when cost data exists", () => {
     const noCost = rowsFor(resultsFixture([
-      resultCell({ skillVersionId: "v001", costUsd: undefined }),
+      resultCell({ skillVersionId: "v001", report: jobReport() }),
     ]));
     const withCost = rowsFor(resultsFixture([
-      resultCell({ skillVersionId: "v001", costUsd: undefined }),
-      resultCell({ skillVersionId: "v002", costUsd: 0.12 }),
+      resultCell({ skillVersionId: "v001", report: jobReport() }),
+      resultCell({ skillVersionId: "v002", report: jobReport({ costUsd: 0.12 }) }),
     ]));
 
     expect(buildComparisonTableMetricDescriptors(noCost).map((entry) => entry.id)).toEqual([
       "score",
-      "latencyMs",
+      "latencyPerSampleMs",
     ]);
     expect(buildComparisonTableMetricDescriptors(withCost).map((entry) => entry.id)).toEqual([
       "score",
-      "latencyMs",
-      "costUsd",
+      "latencyPerSampleMs",
+      "costPerSampleUsd",
     ]);
-    const missingCostRow = withCost.find((row) => row.costUsd === undefined);
+    const missingCostRow = withCost.find((row) => row.costPerSampleUsd === undefined);
     expect(missingCostRow ? formatComparisonTableMetricValue(missingCostRow, COST) : null).toBe("Not reported");
   });
 
@@ -277,7 +382,7 @@ describe("comparison metric helpers", () => {
     expect(formatSkillDisplayName("current", { defaultSkill: "current" })).toBe("Active skill");
     expect(formatSkillDisplayName("no-skill")).toBe("No skill baseline");
     expect(formatEvaluationDisplayName("eval_two", evals)).toBe("Evaluation 2");
-    expect(formatEvaluationDisplayDetail("eval_two", evals)).toBe("3 cases / rubric grader");
+    expect(formatEvaluationDisplayDetail("eval_two", evals)).toBe("3 cases / criteria grader");
   });
 });
 
@@ -317,9 +422,30 @@ function resultCell(overrides: Partial<WorkbenchResultCell> = {}): WorkbenchResu
     runId: "run_eval",
     status: "succeeded",
     quality: 0.7,
-    latencyMs: 900,
-    samples: 2,
+    report: jobReport({ totalMs: 900 }),
+    coverage: { completed: 2, planned: 2 },
     ...overrides,
+  };
+}
+
+function jobReport(options: { costUsd?: number; totalMs?: number; role?: string } = {}) {
+  const totalMs = options.totalMs ?? 900;
+  const role = options.role ?? "execute";
+  return {
+    unitCount: 1,
+    jobCount: 1,
+    totalDurationMs: totalMs,
+    roles: [{
+      role,
+      jobCount: 1,
+      queued: 0,
+      running: 0,
+      succeeded: 1,
+      failed: 0,
+      canceled: 0,
+      totalDurationMs: totalMs,
+      ...(options.costUsd !== undefined ? { costUsd: options.costUsd } : {}),
+    }],
   };
 }
 

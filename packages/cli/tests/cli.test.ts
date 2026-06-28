@@ -1,4 +1,4 @@
-import { Writable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { spawn, spawnSync } from "node:child_process";
 import { get } from "node:http";
 import { promises as fs } from "node:fs";
@@ -16,10 +16,13 @@ import {
   WORKBENCH_COMMAND_SURFACE,
 } from "../src/command-surface.ts";
 import {
+  buildWorkbenchJobReport,
   normalizeWorkbenchSkillName,
-  workbenchCaseFileOwnerId,
-  type WorkbenchProjectState,
-} from "@workbench-ai/workbench-contract";
+	  workbenchCaseFileOwnerId,
+	  workbenchSampleCoverageForJobs,
+	  type WorkbenchOperationPhase,
+	  type WorkbenchProjectState,
+	} from "@workbench-ai/workbench-contract";
 import {
   addWorkbenchRemote,
   createWorkbenchVersionRuntimeSnapshot,
@@ -51,10 +54,17 @@ class MemoryWritable extends Writable {
   }
 }
 
-async function invoke(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+async function invoke(
+  args: string[],
+  options: { stdin?: string } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
   const stdout = new MemoryWritable();
   const stderr = new MemoryWritable();
-  const code = await runCli(args, { stdout, stderr });
+  const code = await runCli(args, {
+    stdout,
+    stderr,
+    ...(options.stdin !== undefined ? { stdin: Readable.from([options.stdin]) } : {}),
+  });
   return { code, stdout: stdout.value, stderr: stderr.value };
 }
 
@@ -110,6 +120,7 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
   );
   const scored = runJobs.filter((job) => jobScore(job) !== undefined);
   const score = averageScores(scored.map(jobScore));
+  const coverage = workbenchSampleCoverageForJobs(runJobs);
   return {
     schema: "workbench.run.v1",
     id: run.id,
@@ -140,10 +151,10 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
       canceled: runJobs.filter((job) => job.status === "canceled").length,
       ...(run.status !== "succeeded" && score !== undefined ? { partialScore: score } : {}),
       evidenceCount: run.traceIds.length + (run.jobIds?.length ?? 0),
-      ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
       elapsedMs: 0,
       lastProgressAt: run.lastProgressAt ?? run.finishedAt ?? run.createdAt,
     },
+    report: buildWorkbenchJobReport(runJobs),
     measurements: [{
       versionId: run.versionId,
       skillName: run.skillName,
@@ -154,9 +165,8 @@ function runSnapshotFixture(run: WorkbenchRun, jobs: readonly WorkbenchJob[] = [
       runId: run.id,
       status: run.status,
       ...(score !== undefined ? { score } : {}),
-      ...(run.requestedSamples !== undefined ? { samples: run.requestedSamples } : {}),
-      ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
-      ...(run.latencyMs !== undefined ? { latencyMs: run.latencyMs } : {}),
+      ...(coverage ? { coverage } : {}),
+      ...(runJobs.length > 0 ? { report: buildWorkbenchJobReport(runJobs) } : {}),
       ...(run.error ? { error: run.error } : {}),
     }],
     ...(score !== undefined || run.outputVersionId || run.error ? {
@@ -204,6 +214,71 @@ function averageScores(values: readonly (number | undefined)[]): number | undefi
 function requestRunId(body: Record<string, unknown>): string {
   expect(body.runId).toEqual(expect.stringMatching(/^run_/u));
   return body.runId as string;
+}
+
+function expectHostedEvalOperation(
+  body: Record<string, unknown>,
+  options: {
+    versionId: string;
+    agent?: string;
+    skill?: string;
+    samples?: number;
+    rerun?: boolean;
+    phases?: readonly WorkbenchOperationPhase[];
+    caseIds?: readonly string[];
+    retryOfRunId?: string;
+  },
+): void {
+  const phases = [...(options.phases ?? ["execute", "grade"] as const)];
+  expect(body).toMatchObject({
+    kind: "eval",
+    variant: "cloud",
+    caseIds: [...(options.caseIds ?? [])],
+    targets: [expect.objectContaining({
+      versionId: options.versionId,
+      ...(options.skill !== undefined ? { skill: options.skill } : {}),
+      agent: options.agent ?? "default",
+    })],
+    phases,
+    grader: { kind: phases.includes("grade") ? "evaluation" : "none" },
+    samples: options.samples ?? 1,
+    ...(options.rerun === true ? { rerun: true } : {}),
+    ...(options.retryOfRunId !== undefined ? { retryOfRunId: options.retryOfRunId } : {}),
+  });
+  expect(body).not.toHaveProperty("versionId");
+  expect(body).not.toHaveProperty("agent");
+  expect(body).not.toHaveProperty("evalHash");
+  expect(body).not.toHaveProperty("skillBundleHash");
+  expect(body).not.toHaveProperty("agentHash");
+}
+
+function expectHostedImproveOperation(
+  body: Record<string, unknown>,
+  options: {
+    versionId: string;
+    agent: string;
+    skill?: string;
+    samples?: number;
+    budget?: number;
+  },
+): void {
+  expect(body).toMatchObject({
+    kind: "improve",
+    variant: "cloud",
+    versionId: options.versionId,
+    target: {
+      versionId: options.versionId,
+      ...(options.skill !== undefined ? { skill: options.skill } : {}),
+      agent: options.agent,
+    },
+    samples: options.samples ?? 1,
+    budget: options.budget ?? 1,
+  });
+  expect(body).not.toHaveProperty("agent");
+  expect(body).not.toHaveProperty("evalHash");
+  expect(body).not.toHaveProperty("skillBundleHash");
+  expect(body).not.toHaveProperty("agentHash");
+  expect(body).not.toHaveProperty("evidenceTraceIds");
 }
 
 function cloudOrganizationSkillFixture(ownerSlug = "alice", name = "cloud-skill"): Record<string, unknown> {
@@ -489,6 +564,9 @@ describe("workbench skill-first CLI", () => {
     const allHelpSurface = await invoke(["help", "--all"]);
     expect(allHelpSurface.code).toBe(0);
     expect(allHelpSurface.stdout).toContain("workbench unpublish VERSION [--dry-run] [--dir DIR] [--json]");
+    expect(allHelpSurface.stdout).toContain("workbench switch VERSION [--dry-run] [--yes] [--dir DIR] [--json]");
+    expect(allHelpSurface.stdout).toContain("workbench agent add NAME --adapter X [--model M] [--with k=v]... [--dir DIR] [--json]");
+    expect(allHelpSurface.stdout).toContain("workbench sync [REMOTE] [--dry-run] [--dir DIR] [--json]");
     expect(allHelpSurface.stdout).toContain("Examples:");
     expect(allHelpSurface.stdout).toContain("workbench publish --as OWNER/SKILL --private");
     expect(allHelpSurface.stdout).toContain("workbench install SOURCE [--target codex|claude]");
@@ -528,6 +606,14 @@ describe("workbench skill-first CLI", () => {
       message: "Unsupported flag --samples for workbench grade.",
     });
 
+    const prunedCaseAlias = await invoke(["run", "--case", "case-001", "--json"]);
+    expect(prunedCaseAlias.code).toBe(2);
+    expect(stdoutJson(prunedCaseAlias)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Unsupported flag --case for workbench run.",
+    });
+
     expect(help.stdout.trim()).toBe(renderWorkbenchHelp());
     expect(allHelp.stdout.trim()).toBe(renderWorkbenchHelpAll());
     expect(runHelp.stdout.trim()).toBe(renderWorkbenchCommandHelp("run"));
@@ -535,6 +621,7 @@ describe("workbench skill-first CLI", () => {
     const generatedReference = renderWorkbenchCliReference();
     expect(generatedReference).toContain("#### `workbench agent`");
     expect(generatedReference).toContain("`--cloud`");
+    expect(generatedReference).not.toContain("`--case VALUE`");
     expect(generatedReference).not.toContain("Cloud and auth");
     const gradeReference = generatedReference.slice(
       generatedReference.indexOf("#### `workbench grade`"),
@@ -1199,7 +1286,7 @@ describe("workbench skill-first CLI", () => {
           expect.objectContaining({
             runId: "run_active",
             status: "running",
-            samples: 2,
+            coverage: { completed: 1, planned: 2 },
           }),
         ],
       },
@@ -1275,7 +1362,7 @@ describe("workbench skill-first CLI", () => {
         measurements: [
           expect.objectContaining({
             status: "succeeded",
-            samples: 1,
+            coverage: { completed: 1, planned: 1 },
           }),
         ],
       },
@@ -1328,7 +1415,7 @@ describe("workbench skill-first CLI", () => {
     const contextualResults = await invoke(["results", "--agents", "strict", "--dir", root]);
     expect(contextualResults.code, contextualResults.stdout || contextualResults.stderr).toBe(0);
     expect(contextualResults.stdout).toMatch(new RegExp(`${expectedLocalSkillLabel(root, 0).replace(/0$/u, "\\d+")} · Current`, "u"));
-    expect(contextualResults.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+samples\s+cost\s+latency\s+run/mu);
+    expect(contextualResults.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
     expect(contextualResults.stdout).toMatch(/\bstrict\s+succeeded\b/u);
 
     const resultsJson = await invoke(["results", "--versions", "all", "--agents", "all", "--dir", root, "--json"]);
@@ -1364,7 +1451,7 @@ describe("workbench skill-first CLI", () => {
     expect(stdoutJson<{ next: string }>(retried).next).toBe("workbench results --agents strict");
   });
 
-  test("results derive per-agent cost and latency from matching runner work in comparison runs", async () => {
+  test("results summarize per-agent latency and cost in comparison runs", async () => {
     const root = await makeTempRoot("workbench-cli-results-agent-metrics-");
     expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
     await writePassingCaseTest(root);
@@ -1387,8 +1474,8 @@ describe("workbench skill-first CLI", () => {
       const gradeTraceId = `trace_comparison_costs_grade_${agent.name}`;
       const runnerCostUsd = index === 0 ? 0.11 : 0.22;
       const graderCostUsd = index === 0 ? 0.91 : 0.92;
-      const runnerLatencyMs = index === 0 ? 400 : 800;
-      const graderLatencyMs = index === 0 ? 3400 : 3800;
+      const runnerDurationMs = index === 0 ? 400 : 800;
+      const graderDurationMs = index === 0 ? 3400 : 3800;
       return {
         agent,
         agentHash: hashJson(agent),
@@ -1397,9 +1484,9 @@ describe("workbench skill-first CLI", () => {
         gradeJobId,
         gradeTraceId,
         graderCostUsd,
-        graderLatencyMs,
+        graderDurationMs,
         runnerCostUsd,
-        runnerLatencyMs,
+        runnerDurationMs,
         score: index === 0 ? 0.5 : 1,
       };
     });
@@ -1416,7 +1503,6 @@ describe("workbench skill-first CLI", () => {
       agentName: "all",
       agentHash: "all",
       status: "succeeded",
-      costUsd: 2.16,
       jobIds: jobs.flatMap((job) => [job.executeJobId, job.gradeJobId]),
       traceIds: jobs.flatMap((job) => [job.executeTraceId, job.gradeTraceId]),
       createdAt,
@@ -1442,7 +1528,7 @@ describe("workbench skill-first CLI", () => {
         createdAt,
         startedAt: createdAt,
         finishedAt,
-        durationMs: job.runnerLatencyMs,
+        durationMs: job.runnerDurationMs,
       }, null, 2)}\n`);
       await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${job.gradeJobId}.json`), `${JSON.stringify({
         id: job.gradeJobId,
@@ -1464,7 +1550,7 @@ describe("workbench skill-first CLI", () => {
         createdAt,
         startedAt: createdAt,
         finishedAt,
-        durationMs: job.graderLatencyMs,
+        durationMs: job.graderDurationMs,
       }, null, 2)}\n`);
       await fs.writeFile(path.join(root, ".workbench", "objects", "trace", `${job.executeTraceId}.json`), `${JSON.stringify({
         id: job.executeTraceId,
@@ -1508,10 +1594,105 @@ describe("workbench skill-first CLI", () => {
     const results = await invoke(["results", "--agents", "all", "--dir", root, "--json"]);
     expect(results.code, results.stdout || results.stderr).toBe(0);
     const cells = stdoutJson<{
-      result: { cells: Array<{ runId?: string; costUsd?: number; latencyMs?: number }> };
+      result: {
+        cells: Array<{
+          runId?: string;
+          report?: Record<string, unknown> & {
+            roles: Array<{ role: string; costUsd?: number; totalDurationMs?: number }>;
+          };
+        }>;
+      };
     }>(results).result.cells.filter((cell) => cell.runId === runId);
-    expect(cells.map((cell) => cell.costUsd).sort()).toEqual([0.11, 0.22]);
-    expect(cells.map((cell) => cell.latencyMs).sort((left, right) => (left ?? 0) - (right ?? 0))).toEqual([400, 800]);
+    const executeRoles = cells.map((cell) => cell.report?.roles.find((role) => role.role === "execute"));
+    expect(executeRoles.map((role) => role?.costUsd).sort()).toEqual([0.11, 0.22]);
+    expect(executeRoles.map((role) => role?.totalDurationMs).sort((left, right) => (left ?? 0) - (right ?? 0))).toEqual([400, 800]);
+    expect(cells.every((cell) => cell.report && !("costUsd" in cell.report))).toBe(true);
+
+    const humanResults = await invoke(["results", "--agents", "all", "--dir", root]);
+    expect(humanResults.code, humanResults.stdout || humanResults.stderr).toBe(0);
+    expect(humanResults.stdout).toContain("$0.11/sample");
+    expect(humanResults.stdout).toContain("$0.22/sample");
+    expect(humanResults.stdout).toContain("400ms/sample");
+    expect(humanResults.stdout).toContain("800ms/sample");
+
+    const shown = await invoke(["show", runId, "--dir", root, "--json"]);
+    expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+    const shownResult = stdoutJson<{
+      result: {
+        run?: { report?: { roles: Array<{ role: string; costUsd?: number }> } };
+        progress?: { report?: { roles: Array<{ role: string; costUsd?: number }> } };
+      };
+    }>(shown).result;
+    const showRunRoles = shownResult.run?.report?.roles ?? [];
+    const showProgressRoles = shownResult.progress?.report?.roles ?? [];
+    expect(showRunRoles.find((role) => role.role === "execute")?.costUsd).toBe(0.33);
+    expect(showRunRoles.find((role) => role.role === "grade")?.costUsd).toBe(1.83);
+    expect(showProgressRoles.find((role) => role.role === "execute")?.costUsd).toBe(0.33);
+    expect(showProgressRoles.find((role) => role.role === "grade")?.costUsd).toBe(1.83);
+  });
+
+  test("results labels non-execute work with generic latency columns", async () => {
+    const root = await makeTempRoot("workbench-cli-results-role-average-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    await writePassingCaseTest(root);
+
+    const version = await reconcileCurrentWorkbenchVersion({ dir: root });
+    const agents = await listWorkbenchAgents({ dir: root });
+    const runtime = await createWorkbenchVersionRuntimeSnapshot(version, { controlRoot: root, agents });
+    const skill = runtime.skillBundles[0];
+    const agent = runtime.selectedAgents[0];
+    if (!skill || !agent) {
+      throw new Error("Expected a skill bundle and selected agent.");
+    }
+    const agentHash = hashJson(agent);
+    const createdAt = "2026-06-10T20:00:00.000Z";
+    const finishedAt = "2026-06-10T20:00:01.000Z";
+    const runId = "run_improve_timing";
+    const jobId = "job_improve_timing";
+    await fs.mkdir(path.join(root, ".workbench", "objects", "run"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench", "objects", "job"), { recursive: true });
+    await fs.writeFile(path.join(root, ".workbench", "objects", "run", `${runId}.json`), `${JSON.stringify({
+      id: runId,
+      kind: "eval",
+      versionId: version.id,
+      skillName: skill.skillName,
+      skillBundleHash: skill.hash,
+      evalHash: runtime.evalSnapshot.hash,
+      agentName: agent.name,
+      agentHash,
+      status: "succeeded",
+      jobIds: [jobId],
+      traceIds: [],
+      createdAt,
+      finishedAt,
+    }, null, 2)}\n`);
+    await fs.writeFile(path.join(root, ".workbench", "objects", "job", `${jobId}.json`), `${JSON.stringify({
+      id: jobId,
+      runId,
+      kind: "eval",
+      versionId: version.id,
+      skillName: skill.skillName,
+      skillBundleHash: skill.hash,
+      evalHash: runtime.evalSnapshot.hash,
+      agentName: agent.name,
+      agentHash,
+      caseId: "case-001",
+      sample: 0,
+      status: "succeeded",
+      role: "improve",
+      result: { items: [{ kind: "score", score: 1, value: 1 }] },
+      artifactIds: [],
+      traceIds: [],
+      createdAt,
+      startedAt: createdAt,
+      finishedAt,
+      durationMs: 700,
+    }, null, 2)}\n`);
+
+    const results = await invoke(["results", "--dir", root]);
+    expect(results.code, results.stdout || results.stderr).toBe(0);
+    expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
+    expect(results.stdout).toContain("700ms/sample");
   });
 
   test("results keep historical evidence distinct when current source has not run", async () => {
@@ -1656,7 +1837,7 @@ describe("workbench skill-first CLI", () => {
 
     const shown = await invoke(["show", evaluatedJson.run.id, "--dir", root]);
     expect(shown.code, shown.stdout || shown.stderr).toBe(0);
-    expect(shown.stdout).toContain("Agent results:");
+    expect(shown.stdout).toContain("Measurements:");
     expect(shown.stdout).toContain("Case results:");
     expect(shown.stdout).toContain("Trace jobs:");
     expect(shown.stdout).toContain("jobs=");
@@ -1765,16 +1946,16 @@ describe("workbench skill-first CLI", () => {
     const results = await invoke(["results", "--dir", root, "--json"]);
 
     expect(results.code, results.stdout || results.stderr).toBe(0);
-    expect(stdoutJson<{ result: { cells: Array<{ runId?: string; status?: string; quality?: number; samples?: number }> } }>(results).result.cells)
+    expect(stdoutJson<{ result: { cells: Array<{ runId?: string; status?: string; quality?: number; coverage?: { completed: number; planned: number } }> } }>(results).result.cells)
       .toEqual(expect.arrayContaining([
-        expect.objectContaining({ runId: run.id, status: "canceled", samples: 2 }),
+        expect.objectContaining({ runId: run.id, status: "canceled", coverage: { completed: 1, planned: 2 } }),
       ]));
     const canceledCell = stdoutJson<{ result: { cells: Array<{ runId?: string; quality?: number }> } }>(results)
       .result.cells.find((cell) => cell.runId === run.id);
     expect(canceledCell).not.toHaveProperty("quality");
     const human = await invoke(["results", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toMatch(/\bcanceled\s+n\/a\s+2\b/u);
+    expect(human.stdout).toMatch(/\bcanceled\s+n\/a\s+1\/2 samples\b/u);
     const status = await invoke(["status", "--dir", root, "--json"]);
     expect(status.code, status.stdout || status.stderr).toBe(0);
     expect(stdoutJson<{ runs: { lastStatus?: string; lastScore?: number } }>(status).runs).toMatchObject({
@@ -1800,12 +1981,30 @@ describe("workbench skill-first CLI", () => {
       message: "Unsupported flag --profile for workbench improve.",
     });
 
+    for (const command of ["run", "grade", "eval"] as const) {
+      const directTraceGrade = await invoke([command, "--traces", "tr_123", "--json"]);
+      expect(directTraceGrade.code).toBe(2);
+      expect(stdoutJson(directTraceGrade)).toMatchObject({
+        ok: false,
+        code: "usage",
+        message: `Unsupported flag --traces for workbench ${command}.`,
+      });
+    }
+
     const valuedBoolean = await invoke(["eval", "--preview=false", "--json"]);
     expect(valuedBoolean.code).toBe(2);
     expect(stdoutJson(valuedBoolean)).toMatchObject({
       ok: false,
       code: "usage",
       message: "Unsupported flag --preview for workbench eval.",
+    });
+
+    const traceHost = await invoke(["trace", "review", "tr_123", "--pass", "--host", "codex", "--json"]);
+    expect(traceHost.code).toBe(2);
+    expect(stdoutJson(traceHost)).toMatchObject({
+      ok: false,
+      code: "usage",
+      message: "Unsupported flag --host for workbench trace.",
     });
 
     const unknownCommand = await invoke(["bogus", "--json"]);
@@ -1850,6 +2049,175 @@ describe("workbench skill-first CLI", () => {
       code: "usage",
       message: "Unsupported flag --adapter for workbench agent.",
     });
+  });
+
+  test("record on preflights every requested host before mutating host plugin state", async () => {
+    const home = await makeTempRoot("workbench-cli-record-preflight-home-");
+    const bin = path.join(await makeTempRoot("workbench-cli-record-preflight-bin-"), "bin");
+    const marker = path.join(home, "claude-mutated.txt");
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(path.join(bin, "claude"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"validate\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"marketplace\" ] && [ \"$3\" = \"list\" ]; then printf '[]'; exit 0; fi",
+      `if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ] && [ "$3" = "add" ]; then echo marketplace >> ${JSON.stringify(marker)}; exit 0; fi`,
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"list\" ]; then printf '[]'; exit 0; fi",
+      `if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then echo install >> ${JSON.stringify(marker)}; exit 0; fi`,
+      "echo unexpected claude \"$@\" >&2",
+      "exit 1",
+      "",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(bin, "codex"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"add\" ] && [ \"$3\" = \"--help\" ]; then echo unsupported >&2; exit 1; fi",
+      "echo unexpected codex \"$@\" >&2",
+      "exit 1",
+      "",
+    ].join("\n"), "utf8");
+    await fs.chmod(path.join(bin, "claude"), 0o755);
+    await fs.chmod(path.join(bin, "codex"), 0o755);
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("PATH", bin);
+
+    const enabled = await invoke(["record", "on", "--hosts", "claude,codex", "--json"]);
+
+    expect(enabled.code).toBe(2);
+    expect(stdoutJson(enabled)).toMatchObject({
+      ok: false,
+      code: "trace_plugin_unavailable",
+      message: "Workbench trace recording could not enable every requested host plugin.",
+      subject: {
+        hosts: ["claude", "codex"],
+        pluginResults: [
+          expect.objectContaining({ host: "claude", state: "available" }),
+          expect.objectContaining({ host: "codex", state: "unsupported" }),
+        ],
+      },
+    });
+    await expect(fs.readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(path.join(home, ".workbench", "traces", "recording.json"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("record on rolls back host plugins when a later enable step fails", async () => {
+    const home = await makeTempRoot("workbench-cli-record-rollback-home-");
+    const bin = path.join(await makeTempRoot("workbench-cli-record-rollback-bin-"), "bin");
+    const marker = path.join(home, "host-mutations.txt");
+    const claudeState = path.join(home, "claude-installed");
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(path.join(bin, "claude"), [
+      "#!/bin/sh",
+      `MARKER=${JSON.stringify(marker)}`,
+      `STATE=${JSON.stringify(claudeState)}`,
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"validate\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"marketplace\" ] && [ \"$3\" = \"list\" ]; then printf '[]'; exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"marketplace\" ] && [ \"$3\" = \"add\" ]; then echo claude-marketplace-add >> \"$MARKER\"; exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"marketplace\" ] && [ \"$3\" = \"remove\" ]; then echo claude-marketplace-remove >> \"$MARKER\"; exit 0; fi",
+      "INSTALLED=; if [ -f \"$STATE\" ]; then IFS= read -r INSTALLED < \"$STATE\"; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"list\" ]; then if [ \"$INSTALLED\" = \"installed\" ]; then printf '[{\"id\":\"workbench-trace-claude-code@workbench-trace\",\"enabled\":true}]'; else printf '[]'; fi; exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"install\" ]; then echo claude-install >> \"$MARKER\"; printf installed > \"$STATE\"; exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"uninstall\" ]; then echo claude-uninstall >> \"$MARKER\"; printf removed > \"$STATE\"; exit 0; fi",
+      "echo unexpected claude \"$@\" >&2",
+      "exit 1",
+      "",
+    ].join("\n"), "utf8");
+    await fs.writeFile(path.join(bin, "codex"), [
+      "#!/bin/sh",
+      `MARKER=${JSON.stringify(marker)}`,
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"add\" ] && [ \"$3\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"list\" ]; then printf '[]'; exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"marketplace\" ] && [ \"$3\" = \"remove\" ]; then echo codex-marketplace-remove >> \"$MARKER\"; exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"marketplace\" ] && [ \"$3\" = \"add\" ]; then echo codex-marketplace-add >> \"$MARKER\"; echo add failed >&2; exit 1; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"remove\" ] && [ \"$3\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"remove\" ]; then echo codex-plugin-remove >> \"$MARKER\"; exit 0; fi",
+      "echo unexpected codex \"$@\" >&2",
+      "exit 1",
+      "",
+    ].join("\n"), "utf8");
+    await fs.chmod(path.join(bin, "claude"), 0o755);
+    await fs.chmod(path.join(bin, "codex"), 0o755);
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("PATH", bin);
+
+    const enabled = await invoke(["record", "on", "--hosts", "claude,codex", "--json"]);
+    const body = stdoutJson<{
+      subject: { pluginResults: Array<{ host: string; state: string; detail: string }> };
+    }>(enabled);
+
+    expect(enabled.code).toBe(2);
+    expect(body.subject.pluginResults).toEqual(expect.arrayContaining([
+      expect.objectContaining({ host: "claude", state: "enabled" }),
+      expect.objectContaining({ host: "codex", state: "error" }),
+      expect.objectContaining({ host: "claude", state: "removed", detail: expect.stringContaining("rollback after failed record on") }),
+    ]));
+    const markerText = await fs.readFile(marker, "utf8");
+    expect(markerText).toContain("claude-install");
+    expect(markerText).toContain("codex-marketplace-add");
+    expect(markerText).toContain("codex-plugin-remove");
+    expect(markerText).toContain("claude-uninstall");
+    expect(markerText).toContain("claude-marketplace-remove");
+    await expect(fs.readFile(path.join(home, ".workbench", "traces", "recording.json"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("record off fails truthfully when a requested host plugin cannot be removed", async () => {
+    const home = await makeTempRoot("workbench-cli-record-off-failure-home-");
+    const bin = path.join(await makeTempRoot("workbench-cli-record-off-failure-bin-"), "bin");
+    const marker = path.join(home, "codex-mutations.txt");
+    await fs.mkdir(bin, { recursive: true });
+    await fs.mkdir(path.join(home, ".workbench", "traces"), { recursive: true });
+    await fs.writeFile(path.join(home, ".workbench", "traces", "recording.json"), JSON.stringify({
+      schema: "workbench.trace-recording.v1",
+      enabled: true,
+      hosts: ["codex"],
+      updatedAt: "2026-06-11T00:00:00.000Z",
+      command: "workbench trace-hook --managed workbench-trace",
+    }));
+    await fs.writeFile(path.join(bin, "codex"), [
+      "#!/bin/sh",
+      `MARKER=${JSON.stringify(marker)}`,
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"remove\" ] && [ \"$3\" = \"--help\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"remove\" ]; then echo plugin-remove-failed >> \"$MARKER\"; echo permission denied >&2; exit 1; fi",
+      "if [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"marketplace\" ] && [ \"$3\" = \"remove\" ]; then echo marketplace-remove >> \"$MARKER\"; exit 0; fi",
+      "echo unexpected codex \"$@\" >&2",
+      "exit 1",
+      "",
+    ].join("\n"), "utf8");
+    await fs.chmod(path.join(bin, "codex"), 0o755);
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("PATH", bin);
+
+    const disabled = await invoke(["record", "off", "--hosts", "codex", "--json"]);
+
+    expect(disabled.code).toBe(2);
+    expect(stdoutJson(disabled)).toMatchObject({
+      ok: false,
+      code: "trace_plugin_teardown_failed",
+      message: "Workbench trace recording could not remove every requested host plugin.",
+      subject: {
+        hosts: ["codex"],
+        pluginResults: [
+          expect.objectContaining({
+            host: "codex",
+            state: "error",
+            detail: expect.stringContaining("failed to remove Workbench plugin"),
+            command: "codex plugin remove workbench-trace-codex@workbench-trace",
+          }),
+        ],
+      },
+    });
+    expect(await fs.readFile(marker, "utf8")).toContain("plugin-remove-failed");
+    const config = JSON.parse(await fs.readFile(path.join(home, ".workbench", "traces", "recording.json"), "utf8")) as {
+      enabled: boolean;
+      hosts: string[];
+    };
+    expect(config.enabled).toBe(false);
+    expect(config.hosts).toEqual(["codex"]);
   });
 
   test("validates flag value kinds per command", async () => {
@@ -3766,6 +4134,50 @@ describe("workbench skill-first CLI", () => {
       });
   });
 
+  test("switch previews and refuses unsaved source overwrites unless --yes is explicit", async () => {
+    const root = await makeTempRoot("workbench-cli-switch-guard-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const versionId = await currentVersionIdFor(root);
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nUnsaved switch edit.\n");
+
+    const dryRun = await invoke(["switch", versionId, "--dry-run", "--dir", root, "--json"]);
+    expect(dryRun.code, dryRun.stdout || dryRun.stderr).toBe(0);
+    const dryRunPayload = stdoutJson<{
+      schema: string;
+      dryRun: boolean;
+      requiresOverwrite: boolean;
+      changes: { changed: string[] };
+      next: string | null;
+    }>(dryRun);
+    expect(dryRunPayload).toMatchObject({
+      schema: "workbench.cli.switch.v1",
+      dryRun: true,
+      requiresOverwrite: true,
+      changes: { changed: ["SKILL.md"] },
+    });
+    expect(dryRunPayload.next).toContain("--yes");
+    expect(await fs.readFile(path.join(root, "SKILL.md"), "utf8")).toContain("Unsaved switch edit.");
+
+    const refused = await invoke(["switch", versionId, "--dir", root, "--json"]);
+    expect(refused.code).toBe(1);
+    expect(stdoutJson(refused)).toMatchObject({
+      ok: false,
+      code: "worktree_changed",
+      remediation: `workbench switch ${versionId} --yes`,
+    });
+    expect(await fs.readFile(path.join(root, "SKILL.md"), "utf8")).toContain("Unsaved switch edit.");
+
+    const switched = await invoke(["switch", versionId, "--yes", "--dir", root, "--json"]);
+    expect(switched.code, switched.stdout || switched.stderr).toBe(0);
+    expect(stdoutJson<{ schema: string; version: { id: string }; requiresOverwrite: boolean }>(switched))
+      .toMatchObject({
+        schema: "workbench.cli.switch.v1",
+        version: { id: versionId },
+        requiresOverwrite: true,
+      });
+    expect(await fs.readFile(path.join(root, "SKILL.md"), "utf8")).not.toContain("Unsaved switch edit.");
+  });
+
   test("status switches forward instead of publishing when current source is older than the published Cloud version", async () => {
     const root = await makeTempRoot("workbench-cli-status-published-descendant-");
     const configPath = path.join(await makeTempRoot("workbench-cli-config-"), "config.json");
@@ -4359,7 +4771,7 @@ describe("workbench skill-first CLI", () => {
 
     const shownRun = await invoke(["show", runId, "--dir", root]);
     expect(shownRun.code, shownRun.stdout || shownRun.stderr).toBe(0);
-    expect(shownRun.stdout.split("\n")[0]).toContain("score=n/a");
+    expect(shownRun.stdout.split("\n")[0]).toContain("quality=n/a");
     expect(shownRun.stdout).toContain("next: workbench grade --agents default --cases investor-focus");
     expect(shownRun.stdout).not.toContain("next: workbench results");
 
@@ -4459,7 +4871,7 @@ describe("workbench skill-first CLI", () => {
 
     const shownGrade = await invoke(["show", gradeId, "--dir", root]);
     expect(shownGrade.code, shownGrade.stdout || shownGrade.stderr).toBe(0);
-    expect(shownGrade.stdout.split("\n")[0]).toContain("score=1.000");
+    expect(shownGrade.stdout.split("\n")[0]).toContain("quality=score 1.000");
     const shownGradeJson = await invoke(["show", gradeId, "--dir", root, "--json"]);
     expect(shownGradeJson.code, shownGradeJson.stdout || shownGradeJson.stderr).toBe(0);
     expect(stdoutJson<{ result?: { run?: { score?: number }; progress?: { result?: { score?: number } } } }>(shownGradeJson)).toMatchObject({
@@ -4663,7 +5075,6 @@ describe("workbench skill-first CLI", () => {
       agentHash: "agent_hash",
       status: "succeeded",
       requestedSamples: 5,
-      latencyMs: 4219,
       jobIds: ["job_surface"],
       traceIds: ["trace_job_surface"],
       createdAt,
@@ -4783,8 +5194,10 @@ describe("workbench skill-first CLI", () => {
     expect(longJobHuman.stdout).not.toContain("job_mqf3nijg\tcase=");
     const traceListing = await invoke(["show", "trace_job_surface", "--dir", root]);
     expect(traceListing.code, traceListing.stdout || traceListing.stderr).toBe(0);
-    expect(traceListing.stdout).toContain("trace\ttrace_job");
-    expect(traceListing.stdout).toContain("workbench show trace_job_surface:stderr.log");
+    expect(traceListing.stdout).toContain("trace_job_surf");
+    expect(traceListing.stdout).toContain("status=succeeded");
+    expect(traceListing.stdout).toContain("trace_job_surface:stderr.log");
+    expect(traceListing.stdout).toContain("next: workbench case promote trace_job_surface --id case-001");
     await fs.writeFile(path.join(root, ".workbench", "objects", "trace", "trace_job_orphan.json"), JSON.stringify({
       id: "trace_job_orphan",
       runId: "run_surface",
@@ -4813,7 +5226,7 @@ describe("workbench skill-first CLI", () => {
       message: "Workbench object not found: job_orphan",
     });
 
-    const listing = stdoutJson<{ result: { progress: { schema: string; progress: { planned: number; completed: number; scored: number; evidenceCount: number; costUsd?: number } }; highlights: Array<{ kind: string; preview?: string; ref?: string; score?: number }>; files: Array<{ path: string; ref?: string }> } }>(
+    const listing = stdoutJson<{ result: { progress: { schema: string; progress: { planned: number; completed: number; scored: number; evidenceCount: number }; report: unknown }; highlights: Array<{ kind: string; preview?: string; ref?: string; score?: number }>; files: Array<{ path: string; ref?: string }> } }>(
       await invoke(["show", "run_surface", "--dir", root, "--json"]),
     );
     expect(listing.result.progress).toMatchObject({
@@ -4859,8 +5272,7 @@ describe("workbench skill-first CLI", () => {
     expect(paths.some((entry) => entry.includes("/traces/") && entry.endsWith("/result.json"))).toBe(false);
     const human = await invoke(["show", "run_surface", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toContain("\ttotal_latency=4219ms\tavg_latency=844ms");
-    expect(human.stdout).not.toContain("\tlatency=4219ms");
+    expect(human.stdout).toContain("\tquality=score 1.000\tcoverage=1/1 samples\tlatency=0ms/sample\tcost=n/a\twall_time=0ms");
     expect(human.stdout).toContain("Progress: complete, jobs 2/2 complete, scored 2, failed 0");
     expect(human.stdout).toContain("evidence 3");
     expect(human.stdout).toContain("evidence\trun=run_surface\tjobs=job_surface\tstatus=succeeded");
@@ -4869,9 +5281,680 @@ describe("workbench skill-first CLI", () => {
     expect(human.stdout).toContain("Output cases/case-001/jobs/job_surface/skill-summary.md:");
     expect(human.stdout).toContain("Provider answer line one.");
     expect(human.stdout).toContain("Session cases/case-001/jobs/job_surface/agent-session.json: codex:session-surface");
-    expect(human.stdout).toContain("Rubric cases/case-001/jobs/job_surface/rubric-scorecard.json: score=0.750 summary=Useful answer.");
+    expect(human.stdout).toContain("Grading cases/case-001/jobs/job_surface/rubric-scorecard.json: score=0.750 summary=Useful answer.");
     expect(human.stdout).toContain("workbench show run_surface:cases/case-001/jobs/job_surface/result.json");
     expect(human.stdout).not.toContain("job:run_surface:job_surface");
+  });
+
+  test("trace review accepts repeated tag values and updates project trace evidence", async () => {
+    const root = await makeTempRoot("workbench-cli-trace-review-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const traceRoot = path.join(root, ".workbench", "traces", "records");
+    await fs.mkdir(traceRoot, { recursive: true });
+    await fs.writeFile(path.join(traceRoot, "trace_review.json"), JSON.stringify({
+      id: "trace_review",
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      runId: "session-review",
+      versionId: "unknown",
+      skillName: "unknown",
+      agentName: "claude",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:00.000Z",
+      source: {
+        host: "claude",
+        sessionId: "session-review",
+        turnId: "turn-review",
+        cwd: root,
+      },
+      status: {
+        capture: "captured",
+        execution: "completed",
+        grade: "ungraded",
+        review: "unreviewed",
+        promotion: "none",
+      },
+      input: { prompt: "Review this trace." },
+      output: { final: "Reviewed." },
+      review: { status: "unreviewed" },
+      files: [],
+    }));
+
+    const reviewed = await invoke([
+      "trace",
+      "review",
+      "trace_review",
+      "--pass",
+      "--tag",
+      "formatting",
+      "--tag",
+      "accuracy",
+      "--expected",
+      "The trace should capture review metadata.",
+      "--dir",
+      root,
+      "--json",
+    ]);
+    expect(reviewed.code, reviewed.stdout || reviewed.stderr).toBe(0);
+    expect(stdoutJson<{ trace: { id: string; review: string } }>(reviewed)).toMatchObject({
+      trace: { id: "trace_review", review: "passed" },
+    });
+
+    const stored = JSON.parse(await fs.readFile(path.join(traceRoot, "trace_review.json"), "utf8")) as {
+      status: { review: string };
+      review: { status: string; tags: string[]; expected: string };
+    };
+    expect(stored.status.review).toBe("passed");
+    expect(stored.review).toMatchObject({
+      status: "passed",
+      tags: ["formatting", "accuracy"],
+      expected: "The trace should capture review metadata.",
+    });
+  });
+
+  test("trace review materializes eval snapshot traces into project trace records", async () => {
+    const root = await makeTempRoot("workbench-cli-trace-review-snapshot-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const objectTraceRoot = path.join(root, ".workbench", "objects", "trace");
+    const recordTraceRoot = path.join(root, ".workbench", "traces", "records");
+    await fs.mkdir(objectTraceRoot, { recursive: true });
+    await fs.writeFile(path.join(objectTraceRoot, "trace_snapshot_review.json"), JSON.stringify({
+      id: "trace_snapshot_review",
+      runId: "run_snapshot_review",
+      jobId: "job_snapshot_review",
+      versionId: "v_snapshot",
+      skillName: "current",
+      skillBundleHash: "bundle_snapshot",
+      evalHash: "eval_snapshot",
+      agentName: "default",
+      agentHash: "agent_snapshot",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:00.000Z",
+      request: { input: { prompt: "Snapshot prompt." } },
+      result: { status: "succeeded", summary: "Snapshot output." },
+      files: [],
+    }));
+
+    const listedBefore = stdoutJson<{ traces: Array<{ id: string; review?: string }> }>(
+      await invoke(["traces", "--dir", root, "--json"]),
+    );
+    expect(listedBefore.traces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "trace_snapshot_review" }),
+    ]));
+
+    const reviewed = await invoke([
+      "trace",
+      "review",
+      "trace_snapshot_review",
+      "--fail",
+      "--tag",
+      "snapshot",
+      "--note",
+      "Reviewing eval evidence should persist a project trace record.",
+      "--dir",
+      root,
+      "--json",
+    ]);
+    expect(reviewed.code, reviewed.stdout || reviewed.stderr).toBe(0);
+    expect(stdoutJson<{ trace: { id: string; review: string } }>(reviewed)).toMatchObject({
+      trace: { id: "trace_snapshot_review", review: "failed" },
+    });
+
+    const stored = JSON.parse(await fs.readFile(path.join(recordTraceRoot, "trace_snapshot_review.json"), "utf8")) as {
+      origin: string;
+      status: { capture: string; execution: string; review: string };
+      review: { status: string; note: string; tags: string[] };
+      request: { input?: { prompt?: string } };
+    };
+    expect(stored.origin).toBe("eval");
+    expect(stored.status.capture).toBe("captured");
+    expect(stored.status.execution).toBe("completed");
+    expect(stored.status.review).toBe("failed");
+    expect(stored.review).toMatchObject({
+      status: "failed",
+      note: "Reviewing eval evidence should persist a project trace record.",
+      tags: ["snapshot"],
+    });
+    expect(stored.request.input?.prompt).toBe("Snapshot prompt.");
+
+    const listedAfter = stdoutJson<{ traces: Array<{ id: string; review?: string }> }>(
+      await invoke(["traces", "--dir", root, "--json"]),
+    );
+    expect(listedAfter.traces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "trace_snapshot_review", review: "failed" }),
+    ]));
+    const shown = await invoke(["show", "trace_snapshot_review", "--dir", root]);
+    expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+    expect(shown.stdout).toContain("review=failed");
+    expect(shown.stdout).toContain("Snapshot prompt.");
+  });
+
+  test("case promote writes project trace state and prefers project records over home duplicates", async () => {
+    const home = await makeTempRoot("workbench-cli-trace-promote-home-");
+    vi.stubEnv("HOME", home);
+    const root = await makeTempRoot("workbench-cli-trace-promote-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const projectTraceRoot = path.join(root, ".workbench", "traces", "records");
+    const homeTraceRoot = path.join(home, ".workbench", "traces", "records");
+    await fs.mkdir(projectTraceRoot, { recursive: true });
+    await fs.mkdir(homeTraceRoot, { recursive: true });
+    const baseTrace = {
+      id: "trace_promote",
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      runId: "session-promote",
+      versionId: "unknown",
+      skillName: "workbench",
+      skillBundleHash: "unknown",
+      agentName: "codex",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:00.000Z",
+      source: {
+        host: "codex",
+        sessionId: "session-promote",
+        turnId: "turn-promote",
+        workspaceRoot: root,
+      },
+      status: {
+        capture: "captured",
+        execution: "completed",
+        grade: "ungraded",
+        review: "unreviewed",
+        promotion: "none",
+      },
+      review: { status: "unreviewed" },
+      files: [],
+      resultIds: [],
+    };
+    await fs.writeFile(path.join(homeTraceRoot, "trace_promote.json"), JSON.stringify({
+      ...baseTrace,
+      input: { prompt: "Home prompt should not be promoted." },
+      output: { assistantText: "Home output should not be promoted." },
+    }));
+    await fs.writeFile(path.join(projectTraceRoot, "trace_promote.json"), JSON.stringify({
+      ...baseTrace,
+      input: { prompt: "Project prompt should be promoted." },
+      output: { assistantText: "Project output should be promoted." },
+    }));
+
+    const promoted = await invoke(["case", "promote", "trace_promote", "--id", "promoted-case", "--dir", root, "--json"]);
+    expect(promoted.code, promoted.stdout || promoted.stderr).toBe(0);
+    expect(stdoutJson<{ caseId: string; trace: { id: string; status: string } }>(promoted)).toMatchObject({
+      caseId: "promoted-case",
+      trace: {
+        id: "trace_promote",
+        status: "captured/completed/ungraded",
+      },
+    });
+
+    const caseText = await fs.readFile(path.join(root, ".workbench", "cases", "promoted-case", "case.yaml"), "utf8");
+    expect(caseText).toContain("Project prompt should be promoted.");
+    expect(caseText).toContain("Project output should be promoted.");
+    expect(caseText).not.toContain("Home prompt should not be promoted.");
+    const projectStored = JSON.parse(await fs.readFile(path.join(projectTraceRoot, "trace_promote.json"), "utf8")) as {
+      status: { promotion: string };
+      links: Array<{ type: string; id: string }>;
+    };
+    expect(projectStored.status.promotion).toBe("promoted");
+    expect(projectStored.links).toEqual(expect.arrayContaining([
+      { type: "promotion", id: "promoted-case" },
+      { type: "case", id: "promoted-case" },
+    ]));
+    const homeStored = JSON.parse(await fs.readFile(path.join(homeTraceRoot, "trace_promote.json"), "utf8")) as {
+      status: { promotion: string };
+    };
+    expect(homeStored.status.promotion).toBe("none");
+
+    const shown = await invoke(["show", "trace_promote", "--dir", root]);
+    expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+    expect(shown.stdout).toContain("Project prompt should be promoted.");
+    expect(shown.stdout).not.toContain("Home prompt should not be promoted.");
+    expect(shown.stdout).toContain("next: workbench results");
+  });
+
+  test("case promote rejects unfinished candidate traces", async () => {
+    const home = await makeTempRoot("workbench-cli-trace-promote-candidate-home-");
+    vi.stubEnv("HOME", home);
+    const root = await makeTempRoot("workbench-cli-trace-promote-candidate-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const candidateRoot = path.join(root, ".workbench", "traces", "candidates");
+    await fs.mkdir(candidateRoot, { recursive: true });
+    await fs.writeFile(path.join(candidateRoot, "trace_candidate.json"), JSON.stringify({
+      id: "trace_candidate",
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      runId: "session-candidate",
+      versionId: "unknown",
+      skillName: "workbench",
+      skillBundleHash: "unknown",
+      agentName: "codex",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:00.000Z",
+      source: {
+        host: "codex",
+        sessionId: "session-candidate",
+        turnId: "turn-candidate",
+        workspaceRoot: root,
+      },
+      status: {
+        capture: "capturing",
+        execution: "running",
+        grade: "ungraded",
+        review: "unreviewed",
+        promotion: "none",
+      },
+      input: { prompt: "$workbench Do not promote until stop." },
+      request: { input: { prompt: "$workbench Do not promote until stop." } },
+      result: { status: "running" },
+      review: { status: "unreviewed" },
+      files: [],
+      resultIds: [],
+    }));
+
+    const rejected = await invoke(["case", "promote", "trace_candidate", "--id", "candidate-promoted", "--dir", root, "--json"]);
+    expect(rejected.code).toBe(2);
+    expect(stdoutJson(rejected)).toMatchObject({
+      ok: false,
+      code: "trace_not_captured",
+      message: "Trace trace_candidate is capturing; promotion requires a captured trace.",
+    });
+    await expect(fs.readFile(path.join(root, ".workbench", "cases", "candidate-promoted", "case.yaml"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("case promote rejects traces without captured input", async () => {
+    const root = await makeTempRoot("workbench-cli-trace-promote-no-prompt-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const traceRoot = path.join(root, ".workbench", "traces", "records");
+    await fs.mkdir(traceRoot, { recursive: true });
+    await fs.writeFile(path.join(traceRoot, "trace_without_prompt.json"), JSON.stringify({
+      id: "trace_without_prompt",
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      runId: "session-without-prompt",
+      versionId: "unknown",
+      skillName: "workbench",
+      skillBundleHash: "unknown",
+      agentName: "codex",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:00.000Z",
+      status: {
+        capture: "captured",
+        execution: "completed",
+        grade: "ungraded",
+        review: "unreviewed",
+        promotion: "none",
+      },
+      request: {},
+      result: { status: "completed" },
+      review: { status: "unreviewed" },
+      files: [],
+      resultIds: [],
+    }));
+
+    const rejected = await invoke(["case", "promote", "trace_without_prompt", "--id", "missing-input", "--dir", root, "--json"]);
+    expect(rejected.code).toBe(2);
+    expect(stdoutJson(rejected)).toMatchObject({
+      ok: false,
+      code: "trace_prompt_required",
+      message: "Trace trace_without_prompt has no captured prompt; promotion requires trace input.",
+    });
+    await expect(fs.readFile(path.join(root, ".workbench", "cases", "missing-input", "case.yaml"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("case promote requires explicit expected correction for failed reviewed traces", async () => {
+    const root = await makeTempRoot("workbench-cli-trace-promote-failed-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+    const traceRoot = path.join(root, ".workbench", "traces", "records");
+    await fs.mkdir(traceRoot, { recursive: true });
+    await fs.writeFile(path.join(traceRoot, "trace_failed_review.json"), JSON.stringify({
+      id: "trace_failed_review",
+      protocol: "workbench.trace.v1",
+      origin: "live",
+      runId: "session-failed-review",
+      versionId: "unknown",
+      skillName: "workbench",
+      skillBundleHash: "unknown",
+      agentName: "codex",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:00.000Z",
+      source: {
+        host: "codex",
+        sessionId: "session-failed-review",
+        turnId: "turn-failed-review",
+        workspaceRoot: root,
+      },
+      status: {
+        capture: "captured",
+        execution: "completed",
+        grade: "ungraded",
+        review: "failed",
+        promotion: "none",
+      },
+      input: { prompt: "Fix the broken answer." },
+      output: { assistantText: "Bad answer that must not become expected." },
+      review: { status: "failed", note: "Missed the required correction." },
+      files: [],
+      resultIds: [],
+    }));
+
+    const rejected = await invoke(["case", "promote", "trace_failed_review", "--id", "failed-promoted", "--dir", root, "--json"]);
+    expect(rejected.code).toBe(2);
+    expect(stdoutJson(rejected)).toMatchObject({
+      ok: false,
+      code: "trace_expected_required",
+      message: "Trace trace_failed_review is reviewed as failed; promotion requires an explicit expected correction.",
+    });
+    await expect(fs.readFile(path.join(root, ".workbench", "cases", "failed-promoted", "case.yaml"), "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+
+    const reviewed = await invoke([
+      "trace",
+      "review",
+      "trace_failed_review",
+      "--fail",
+      "--expected",
+      "Corrected answer that should become expected.",
+      "--dir",
+      root,
+      "--json",
+    ]);
+    expect(reviewed.code, reviewed.stdout || reviewed.stderr).toBe(0);
+    const promoted = await invoke(["case", "promote", "trace_failed_review", "--id", "failed-promoted", "--dir", root, "--json"]);
+    expect(promoted.code, promoted.stdout || promoted.stderr).toBe(0);
+    const caseText = await fs.readFile(path.join(root, ".workbench", "cases", "failed-promoted", "case.yaml"), "utf8");
+    expect(caseText).toContain("Corrected answer that should become expected.");
+    expect(caseText).not.toContain("Bad answer that must not become expected.");
+  });
+
+  test("traces compacts plugin spool events without importing Codex session transcripts", async () => {
+    const home = await makeTempRoot("workbench-cli-spool-trace-home-");
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const traceRoot = path.join(home, ".workbench", "traces");
+      await fs.mkdir(path.join(traceRoot, "spool"), { recursive: true });
+      await fs.writeFile(path.join(home, ".workbench", "traces", "recording.json"), JSON.stringify({
+        schema: "workbench.trace-recording.v1",
+        enabled: true,
+        hosts: ["codex"],
+        updatedAt: "2026-06-11T00:00:00.000Z",
+      }));
+      const source = {
+        host: "codex",
+        sessionId: "codex-session",
+        turnId: "codex-turn",
+        workspaceRoot: "/tmp/workbench-codex",
+      };
+      await fs.writeFile(path.join(traceRoot, "spool", "events.jsonl"), [
+        JSON.stringify({
+          schema: "workbench.trace-spool.v1",
+          id: "sp_claim",
+          at: "2026-06-11T00:00:01.000Z",
+          source,
+          kind: "claim",
+          message: "skill claim",
+          subject: {
+            type: "skill",
+            id: "workbench",
+            confidence: "exact",
+            activation: "host-skill",
+          },
+        }),
+        JSON.stringify({
+          schema: "workbench.trace-spool.v1",
+          id: "sp_prompt",
+          at: "2026-06-11T00:00:02.000Z",
+          source,
+          kind: "prompt",
+          message: "user prompt",
+          input: { prompt: "$workbench Capture this Codex trace." },
+        }),
+        JSON.stringify({
+          schema: "workbench.trace-spool.v1",
+          id: "sp_stop",
+          at: "2026-06-11T00:00:03.000Z",
+          source,
+          kind: "stop",
+          message: "Stop",
+          output: { assistantText: "Codex trace captured." },
+          status: "completed",
+        }),
+        "",
+      ].join("\n"));
+      const sessionDir = path.join(home, ".codex", "sessions", "2026", "06", "11");
+      await fs.mkdir(sessionDir, { recursive: true });
+      await fs.writeFile(path.join(sessionDir, "rollout-2026-06-11T00-00-01-session.jsonl"), [
+        JSON.stringify({
+          timestamp: "2026-06-11T00:00:01.000Z",
+          type: "session_meta",
+          payload: {
+            id: "codex-session",
+            timestamp: "2026-06-11T00:00:01.000Z",
+            cwd: "/tmp/workbench-codex",
+            source: "cli",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-11T00:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "codex-turn",
+            model: "gpt-5.4-mini",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-11T00:00:03.000Z",
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: "$workbench Capture this Codex trace.",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-11T00:00:04.000Z",
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "Codex trace captured.",
+            phase: "final_answer",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-06-11T00:00:05.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              last_token_usage: {
+                input_tokens: 10,
+                cached_input_tokens: 2,
+                output_tokens: 3,
+                reasoning_output_tokens: 1,
+                total_tokens: 13,
+              },
+            },
+          },
+        }),
+        "",
+      ].join("\n"));
+
+      const traces = await invoke(["traces", "--json"]);
+      expect(traces.code, traces.stdout || traces.stderr).toBe(0);
+      const parsed = stdoutJson<{ traces: Array<{ id: string; agentName: string; skillName: string; status: string }> }>(traces);
+      expect(parsed.traces.some((trace) => trace.id.startsWith("tr_codex_"))).toBe(false);
+      const imported = parsed
+        .traces.find((trace) => trace.agentName === "codex");
+      expect(imported).toMatchObject({
+        skillName: "workbench",
+        status: "captured/completed/ungraded",
+      });
+      const stored = JSON.parse(await fs.readFile(path.join(traceRoot, "records", `${imported!.id}.json`), "utf8")) as {
+        createdAt: string;
+        updatedAt: string;
+        spans?: Array<{ started_at: string; ended_at: string | null }>;
+      };
+      expect(stored.createdAt).toBe("2026-06-11T00:00:01.000Z");
+      expect(stored.updatedAt).toBe("2026-06-11T00:00:03.000Z");
+      expect(stored.spans?.[0]).toMatchObject({
+        started_at: "2026-06-11T00:00:01.000Z",
+        ended_at: "2026-06-11T00:00:03.000Z",
+      });
+      const shown = await invoke(["show", imported!.id]);
+      expect(shown.code, shown.stdout || shown.stderr).toBe(0);
+      expect(shown.stdout).toContain("$workbench Capture this Codex trace.");
+      expect(shown.stdout).toContain("Codex trace captured.");
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
+
+  test("traces discards unclaimed host turns instead of recording ambient conversations", async () => {
+    const home = await makeTempRoot("workbench-cli-unclaimed-trace-home-");
+    vi.stubEnv("HOME", home);
+    await fs.mkdir(path.join(home, ".workbench", "traces"), { recursive: true });
+    await fs.writeFile(path.join(home, ".workbench", "traces", "recording.json"), JSON.stringify({
+      schema: "workbench.trace-recording.v1",
+      enabled: true,
+      hosts: ["codex"],
+      updatedAt: "2026-06-11T00:00:00.000Z",
+    }));
+    const source = {
+      session_id: "ambient-session",
+      turn_id: "ambient-turn",
+      cwd: "/tmp/workbench-ambient",
+    };
+
+    const promptHook = await invoke(["trace-hook", "--host", "codex", "--event", "UserPromptSubmit"], {
+      stdin: JSON.stringify({
+        ...source,
+        timestamp: "2026-06-11T00:00:01.000Z",
+        prompt: "Explain why `$workbench` appears in this sentence without invoking it.",
+      }),
+    });
+    expect(promptHook.code, promptHook.stdout || promptHook.stderr).toBe(0);
+    const stopHook = await invoke(["trace-hook", "--host", "codex", "--event", "Stop"], {
+      stdin: JSON.stringify({
+        ...source,
+        timestamp: "2026-06-11T00:00:02.000Z",
+        response: "This was not a Workbench skill turn.",
+      }),
+    });
+    expect(stopHook.code, stopHook.stdout || stopHook.stderr).toBe(0);
+
+    const traces = await invoke(["traces", "--json"]);
+    expect(traces.code, traces.stdout || traces.stderr).toBe(0);
+    expect(stdoutJson<{ traces: unknown[] }>(traces).traces).toEqual([]);
+    await expect(fs.readdir(path.join(home, ".workbench", "traces", "records")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readdir(path.join(home, ".workbench", "traces", "candidates")))
+      .resolves.toEqual([]);
+  });
+
+  test("trace hook recursively redacts sensitive payload fields before records are written", async () => {
+    const home = await makeTempRoot("workbench-cli-trace-hook-redaction-");
+    vi.stubEnv("HOME", home);
+    await fs.mkdir(path.join(home, ".workbench", "traces"), { recursive: true });
+    await fs.writeFile(path.join(home, ".workbench", "traces", "recording.json"), JSON.stringify({
+      schema: "workbench.trace-recording.v1",
+      enabled: true,
+      hosts: ["codex"],
+      updatedAt: "2026-06-11T00:00:00.000Z",
+    }));
+    const source = {
+      session_id: "redact-session",
+      turn_id: "redact-turn",
+      cwd: "/tmp/workbench-redact",
+    };
+    const promptHook = await invoke(["trace-hook", "--host", "codex", "--event", "UserPromptSubmit"], {
+      stdin: JSON.stringify({
+        ...source,
+        timestamp: "2026-06-11T00:00:01.000Z",
+        prompt: "$workbench Redact this trace.",
+      }),
+    });
+    expect(promptHook.code, promptHook.stdout || promptHook.stderr).toBe(0);
+    const claimHook = await invoke(["trace-hook", "--host", "codex", "--event", "SkillUse", "--claim-skill", "workbench"], {
+      stdin: JSON.stringify({
+        ...source,
+        timestamp: "2026-06-11T00:00:01.500Z",
+      }),
+    });
+    expect(claimHook.code, claimHook.stdout || claimHook.stderr).toBe(0);
+    const stopHook = await invoke(["trace-hook", "--host", "codex", "--event", "Stop"], {
+      stdin: JSON.stringify({
+        ...source,
+        timestamp: "2026-06-11T00:00:02.000Z",
+        response: "Redaction complete.",
+        token: "top-secret-token",
+        headers: {
+          authorization: "Bearer nested-secret",
+          nested: {
+            api_key: "nested-api-key",
+            safe: "kept",
+          },
+        },
+        messages: [
+          {
+            password: "hidden-password",
+            value: "visible",
+          },
+        ],
+      }),
+    });
+    expect(stopHook.code, stopHook.stdout || stopHook.stderr).toBe(0);
+
+    const traces = await invoke(["traces", "--json"]);
+    expect(traces.code, traces.stdout || traces.stderr).toBe(0);
+    const recordDir = path.join(home, ".workbench", "traces", "records");
+    const entries = (await fs.readdir(recordDir)).filter((entry) => entry.endsWith(".json"));
+    expect(entries).toHaveLength(1);
+    const record = JSON.parse(await fs.readFile(path.join(recordDir, entries[0]!), "utf8")) as {
+      createdAt: string;
+      updatedAt: string;
+      output: { assistantText: string };
+      subjects?: Array<{ id: string; confidence?: string; activation?: string }>;
+      spans?: Array<{ started_at: string; ended_at: string | null }>;
+      events: Array<{ message: string; attributes: Record<string, unknown> }>;
+    };
+    expect(record.createdAt).toBe("2026-06-11T00:00:01.000Z");
+    expect(record.updatedAt).toBe("2026-06-11T00:00:02.000Z");
+    expect(record.spans?.[0]).toMatchObject({
+      started_at: "2026-06-11T00:00:01.000Z",
+      ended_at: "2026-06-11T00:00:02.000Z",
+    });
+    expect(record.output.assistantText).toBe("Redaction complete.");
+    expect(record.subjects).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "workbench",
+        confidence: "exact",
+        activation: "explicit-invocation",
+      }),
+    ]));
+    const stopEvent = record.events.find((event) => event.message === "Stop");
+    expect(stopEvent?.attributes).toMatchObject({
+      response: "Redaction complete.",
+      token: "[redacted]",
+      headers: {
+        authorization: "[redacted]",
+        nested: {
+          api_key: "[redacted]",
+          safe: "kept",
+        },
+      },
+      messages: [
+        {
+          password: "[redacted]",
+          value: "visible",
+        },
+      ],
+    });
   });
 
   test("show keeps genuinely distinct run evidence suffixes ambiguous", async () => {
@@ -5072,7 +6155,7 @@ describe("workbench skill-first CLI", () => {
 
     const human = await invoke(["show", "run_failed", "--dir", root]);
     expect(human.code, human.stdout || human.stderr).toBe(0);
-    expect(human.stdout).toContain("Agent results:");
+    expect(human.stdout).toContain("Measurements:");
     expect(human.stdout).toContain("Case results:");
     expect(human.stdout).toContain("Trace jobs:");
     expect(human.stdout).not.toContain("Jobs:");
@@ -5685,15 +6768,12 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({ versionId, agent: "default", samples: 1 });
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = { ...remotePack, runs: [withRunId(runningRun, hostedRunId)], jobs: [withJobRunId(runningJob, hostedRunId)] };
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedEvalOperation(body, { versionId });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = { ...remotePack, runs: [withRunId(runningRun, hostedRunId)], jobs: [withJobRunId(runningJob, hostedRunId)] };
         return jsonResponse(runSnapshotFixture(withRunId(runningRun, hostedRunId), [withJobRunId(runningJob, hostedRunId)]));
       }
       return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
@@ -5709,8 +6789,8 @@ describe("workbench skill-first CLI", () => {
       expect(result.stderr).not.toContain("waiting for a hosted worker");
       expect(result.stderr).toContain(`resume with workbench watch ${hostedRunId}`);
       expect(result.stderr).toContain("workbench eval: sync with Workbench Cloud");
-      expect(result.stderr.match(/workbench eval: running, jobs 0\/1 complete, remaining 1, failed 0, (?:evidence \d+, )?elapsed \d+s\./gu)).toHaveLength(1);
-      expect(result.stderr.match(/workbench eval: complete, jobs 1\/1 complete, scored 1, failed 0, (?:evidence \d+, )?elapsed \d+s\./gu)).toHaveLength(1);
+      expect(result.stderr.match(/workbench eval: running, jobs 0\/1 complete, remaining 1, failed 0, (?:evidence \d+, )?wall time \d+s\./gu)).toHaveLength(1);
+      expect(result.stderr.match(/workbench eval: complete, jobs 1\/1 complete, scored 1, failed 0, (?:evidence \d+, )?wall time \d+s\./gu)).toHaveLength(1);
       expect(result.stderr).not.toContain("synced cloud while waiting");
       expect(objectReadsAfterStart).toBe(1);
       expect(waitCursors.slice(0, 2)).toEqual(["cloud:1", "cloud:1:1"]);
@@ -5822,10 +6902,18 @@ describe("workbench skill-first CLI", () => {
       operationPlan: {
         kind: "eval",
         variant: "cloud",
+        targets: [{
+          versionId,
+          skill: "current",
+          agent: "default",
+        }],
+        phases: ["execute", "grade"],
+        grader: { kind: "evaluation" },
         versionId,
         evalHash: "eval_preaccept",
         skills: ["current"],
         agents: ["default"],
+        caseIds: ["case-001"],
         samples: 1,
       },
     };
@@ -5900,10 +6988,18 @@ describe("workbench skill-first CLI", () => {
       operationPlan: {
         kind: "eval",
         variant: "cloud",
+        targets: [{
+          versionId,
+          skill: "current",
+          agent: "default",
+        }],
+        phases: ["execute", "grade"],
+        grader: { kind: "evaluation" },
         versionId,
         evalHash: "eval_preaccept",
         skills: ["current"],
         agents: ["default"],
+        caseIds: ["case-001"],
         samples: 1,
       },
     };
@@ -5940,9 +7036,14 @@ describe("workbench skill-first CLI", () => {
         expect(body).toMatchObject({
           kind: "eval",
           variant: "cloud",
-          versionId,
-          skill: "current",
-          agent: "default",
+          caseIds: ["case-001"],
+          targets: [{
+            versionId,
+            skill: "current",
+            agent: "default",
+          }],
+          phases: ["execute", "grade"],
+          grader: { kind: "evaluation" },
           samples: 1,
           rerun: true,
           retryOfRunId: canceledRun.id,
@@ -7002,7 +8103,6 @@ describe("workbench skill-first CLI", () => {
       ...runningRun,
       status: "succeeded",
       traceIds: ["trace_cloud"],
-      latencyMs: 2000,
       finishedAt,
     };
     const succeededJob = {
@@ -7091,15 +8191,12 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({ versionId, agent: "default", samples: 1, rerun: true });
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = {
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedEvalOperation(body, { versionId, rerun: true });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = {
           ...remotePack,
           runs: [withRunId(runningRun, hostedRunId)],
           jobs: [withJobRunId(runningJob, hostedRunId)],
@@ -7259,12 +8356,12 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({ versionId, agent: "default", samples: 1 });
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = mergeObjectPacks(remotePack, {
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedEvalOperation(body, { versionId });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = mergeObjectPacks(remotePack, {
           ...emptyObjectPack(createdAt),
           runs: [withRunId(runningRun, hostedRunId)],
           jobs: [withJobRunId(runningJob, hostedRunId)],
@@ -7395,15 +8492,15 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({ kind: command, versionId, agent: "default", samples: 1 });
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = mergeObjectPacks(remotePack, {
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedEvalOperation(body, {
+	          versionId,
+	          phases: command === "run" ? ["execute"] : ["grade"],
+	        });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = mergeObjectPacks(remotePack, {
           ...emptyObjectPack(createdAt),
           runs: [withRunId(runningRun, hostedRunId)],
           jobs: [withJobRunId(runningJob, hostedRunId)],
@@ -7558,15 +8655,12 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({ versionId, agent: "default", samples: 1 });
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = {
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedEvalOperation(body, { versionId });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = {
           ...remotePack,
           runs: [withRunId(runningRun, hostedRunId)],
           jobs: [withJobRunId(runningJob, hostedRunId)],
@@ -7778,16 +8872,12 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_autolink", ownerSlug, name: skillName } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_autolink/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({ versionId, samples: 1 });
-        expect(body).not.toHaveProperty("agent");
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = mergeObjectPacks(remotePack, {
+	      if (url.pathname === "/api/workbench/skills/skill_autolink/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedEvalOperation(body, { versionId });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = mergeObjectPacks(remotePack, {
           ...emptyObjectPack(createdAt),
           runs: [withRunId(runningRun, hostedRunId)],
         });
@@ -7940,21 +9030,12 @@ describe("workbench skill-first CLI", () => {
       if (url.pathname === "/api/workbench/skills/skill_cloud/objects" && method === "PUT") {
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({
-          versionId: prepared.versionId,
-          agent: "patcher",
-          samples: 1,
-          budget: 1,
-        });
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        expect(body).not.toHaveProperty("evidenceTraceIds");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = { ...remotePack, runs: [withRunId(runningRun, hostedRunId)] };
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedImproveOperation(body, { versionId: prepared.versionId, agent: "patcher" });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = { ...remotePack, runs: [withRunId(runningRun, hostedRunId)] };
         return jsonResponse(runSnapshotFixture(withRunId(runningRun, hostedRunId)));
       }
       return jsonResponse({ message: `Unexpected ${method} ${url.pathname}` }, 404);
@@ -8142,21 +9223,12 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({
-          versionId: prepared.versionId,
-          agent: "patcher",
-          samples: 1,
-          budget: 1,
-        });
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        expect(body).not.toHaveProperty("evidenceTraceIds");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = mergeObjectPacks(remotePack, {
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedImproveOperation(body, { versionId: prepared.versionId, agent: "patcher" });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = mergeObjectPacks(remotePack, {
           ...emptyObjectPack(createdAt),
           runs: [withRunId(runningRun, hostedRunId)],
         });
@@ -8584,21 +9656,12 @@ describe("workbench skill-first CLI", () => {
         remotePack = mergeObjectPacks(remotePack, body.objectPack ?? emptyObjectPack(createdAt));
         return jsonResponse({ skill: { id: "skill_cloud", ownerSlug: "alice", name: "cloud-skill" } });
       }
-      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        expect(body).toMatchObject({
-          versionId: prepared.versionId,
-          agent: "patcher",
-          samples: 1,
-          budget: 1,
-        });
-        expect(body).not.toHaveProperty("evalHash");
-        expect(body).not.toHaveProperty("skillBundleHash");
-        expect(body).not.toHaveProperty("agentHash");
-        expect(body).not.toHaveProperty("evidenceTraceIds");
-        hostedRunId = requestRunId(body);
-        started = true;
-        remotePack = mergeObjectPacks(remotePack, {
+	      if (url.pathname === "/api/workbench/skills/skill_cloud/workbench/operations" && method === "POST") {
+	        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+	        expectHostedImproveOperation(body, { versionId: prepared.versionId, agent: "patcher" });
+	        hostedRunId = requestRunId(body);
+	        started = true;
+	        remotePack = mergeObjectPacks(remotePack, {
           ...emptyObjectPack(createdAt),
           runs: [withRunId(runningRun, hostedRunId)],
         });
@@ -10659,7 +11722,6 @@ describe("workbench skill-first CLI", () => {
       agentName: "default",
       agentHash: "agent_hash",
       status: "failed",
-      latencyMs: 1000,
       jobIds: ["job_evidence"],
       traceIds: ["trace_evidence"],
       createdAt: evidenceCreatedAt,
@@ -10799,6 +11861,92 @@ describe("workbench skill-first CLI", () => {
     }
   });
 
+  test("open case creation writes the canonical case file without preserving stale descriptor layouts", async () => {
+    const root = await makeTempRoot("workbench-cli-open-case-create-");
+    expect((await invoke(["new", root, "--agent", "local"])).code).toBe(0);
+    const casesRoot = path.join(root, ".workbench", "cases");
+    await fs.rm(casesRoot, { recursive: true, force: true });
+    await fs.mkdir(casesRoot, { recursive: true });
+    await fs.writeFile(path.join(casesRoot, "duplicate.yaml"), [
+      "version: 1",
+      "id: duplicate",
+      "prompt: stale direct descriptor",
+      "",
+    ].join("\n"));
+    const server = await startWorkbenchOpenServer({ dir: root });
+    try {
+      const response = await fetch(new URL("/api/evaluation/cases", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Duplicate",
+          prompt: "Canonical case created from the matrix.",
+        }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        caseId: "duplicate",
+        path: "cases/duplicate/case.yaml",
+      });
+      await expect(fs.readFile(path.join(casesRoot, "duplicate", "case.yaml"), "utf8"))
+        .resolves.toContain("prompt: Canonical case created from the matrix.");
+
+      const duplicateResponse = await fetch(new URL("/api/evaluation/cases", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Duplicate",
+          prompt: "Second canonical case with the same title.",
+        }),
+      });
+      expect(duplicateResponse.status).toBe(200);
+      await expect(duplicateResponse.json()).resolves.toEqual({
+        caseId: "duplicate-2",
+        path: "cases/duplicate-2/case.yaml",
+      });
+      await expect(fs.readFile(path.join(casesRoot, "duplicate", "case.yaml"), "utf8"))
+        .resolves.toContain("prompt: Canonical case created from the matrix.");
+      await expect(fs.readFile(path.join(casesRoot, "duplicate-2", "case.yaml"), "utf8"))
+        .resolves.toContain("prompt: Second canonical case with the same title.");
+
+      const staleIdResponse = await fetch(new URL("/api/evaluation/cases", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          caseId: "duplicate",
+          prompt: "This must not overwrite the canonical case.",
+        }),
+      });
+      expect(staleIdResponse.status).toBe(400);
+      await expect(staleIdResponse.json()).resolves.toEqual({
+        message: "Case creation derives case ids from the title or prompt.",
+      });
+      await expect(fs.readFile(path.join(casesRoot, "duplicate", "case.yaml"), "utf8"))
+        .resolves.toContain("prompt: Canonical case created from the matrix.");
+
+      const snapshotResponse = await fetch(new URL("/api/snapshot", server.url));
+      expect(snapshotResponse.status).toBe(200);
+      const envelope = await snapshotResponse.json() as {
+        snapshot: {
+          evals: Array<{ cases: Array<{ id: string; path: string }> }>;
+        };
+      };
+      const cases = envelope.snapshot.evals.flatMap((entry) => entry.cases);
+      expect(cases.map((entry) => ({ id: entry.id, path: entry.path }))).toEqual([
+        {
+          id: "duplicate",
+          path: "cases/duplicate/case.yaml",
+        },
+        {
+          id: "duplicate-2",
+          path: "cases/duplicate-2/case.yaml",
+        },
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
   dockerTest("open operation starts a worker-backed local run before completion", async () => {
     const root = await makeTempRoot("workbench-cli-open-operation-");
     expect((await invoke(["new", root, "--agent", "local"])).code).toBe(0);
@@ -10809,7 +11957,13 @@ describe("workbench skill-first CLI", () => {
       const response = await fetch(new URL("/api/operations", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ kind: "eval" }),
+        body: JSON.stringify({
+          kind: "eval",
+          caseIds: ["case-001"],
+          targets: [{ agent: "default" }],
+          phases: ["execute", "grade"],
+          grader: { kind: "evaluation" },
+        }),
       });
       const elapsedMs = Date.now() - startedAt;
       expect(response.status).toBe(200);
@@ -11764,9 +12918,9 @@ describe("workbench skill-first CLI", () => {
     expect(improvePayload).toMatchObject({ promoted: false, switched: false, outputScore: 0 });
 
     const results = await invoke(["results", "--dir", root, "--agents", "patcher"]);
-    expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+samples\s+cost\s+latency\s+run/mu);
+    expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
     expect(results.stdout).toMatch(/\bpatcher\s+succeeded\b/u);
-    expect(results.stdout).toMatch(/\bsucceeded\s+0\.000\b/u);
+    expect(results.stdout).toMatch(/\bsucceeded\s+score 0\.000\b/u);
     const resultsJson = await invoke(["results", "--dir", root, "--agents", "patcher", "--json"]);
     const resultsPayload = stdoutJson<{
       result: {
@@ -12044,6 +13198,7 @@ async function seedFailedImproveEvidence(
   } = {},
 ): Promise<{
   prepared: WorkbenchPreparedCloudEvalRequest & {
+    versionId: string;
     evalHash: string;
     skill: string;
     skillBundleHash: string;
@@ -12057,10 +13212,10 @@ async function seedFailedImproveEvidence(
   const durableVersion = await reconcileCurrentWorkbenchVersion({ dir: root });
   const request = {
     ...plannedRequest,
-    versionId: durableVersion.id,
+    targets: plannedRequest.targets.map((target) => ({ ...target, versionId: durableVersion.id })),
   };
   const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root });
-  const version = snapshot.versions.find((entry) => entry.id === request.versionId) ?? durableVersion;
+  const version = snapshot.versions.find((entry) => entry.id === durableVersion.id) ?? durableVersion;
   if (!version) {
     throw new Error("Expected seeded version.");
   }
@@ -12073,6 +13228,7 @@ async function seedFailedImproveEvidence(
   }
   const prepared = {
     ...request,
+    versionId: durableVersion.id,
     evalHash: runtime.evalSnapshot.hash,
     skill: skillBundle.skillName,
     skillBundleHash: skillBundle.hash,

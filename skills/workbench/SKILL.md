@@ -66,7 +66,7 @@ Workbench keeps eval source under `.workbench/**` and installable package source
 
 Editing `.workbench/**` changes the eval. Editing package files outside `.workbench/**` changes the skill source that Workbench versions, evaluates, improves, and publishes.
 
-Provider-backed cases can be prompt plus rubric criteria. Local and command-backed cases need a top-level `command` or an executable `tests/test.sh`. Draft placeholders block launch until the prompt and required grading criteria are filled.
+Provider-backed cases can be prompt plus grading criteria. Local and command-backed cases need a top-level `command` or an executable `tests/test.sh`. Draft placeholders block launch until the prompt and required grading criteria are filled.
 
 ## Agents and selectors
 
@@ -128,15 +128,17 @@ workbench show RUN_ID
 workbench show JOB_ID
 workbench show RUN_ID:cases/investor-focus/output/result.json
 workbench diff <base-version-id>..<candidate-version-id>
-workbench switch <version-id>
+workbench switch <version-id> --dry-run
+workbench switch <version-id> --yes
 workbench open
 ```
 
 `results` shows recorded scorecards across versions, agents, cases, and samples. `show REF` reads run, job, trace, artifact, source, and file evidence. `show REF:PATH` prints one file inside a version, run, job, trace, or artifact. If a suffix is ambiguous, Workbench prints exact `workbench show REF:PATH` commands.
+Use `switch VERSION --dry-run` before materializing a saved version. If the dry run reports that unsaved local package source would be overwritten, pass `--yes` only after reviewing the change list.
 
 Use `watch RUN_ID` for an active or detached run, `cancel RUN_ID` to request cancellation without deleting evidence, and `retry RUN_ID` to start a new whole-run attempt from the selected run's stored plan.
 
-The browser UI reads the same inspection data as CLI commands. It can show source files, eval source, results, run details, trace evidence, and output files without changing project state.
+The browser UI reads the same inspection data and trace projection as CLI commands. It can show source files, eval source, results, run details, trace evidence, and output files without changing project state.
 
 ## Publish, install, clone, and Cloud
 
@@ -180,7 +182,7 @@ Use `workbench unpublish VERSION` to remove one installable source version. Use 
 
 ## File artifacts
 
-When a workflow creates Office files, PDFs, or tabular exports, load [File formats](references/docs/file-formats.md) before designing cases or rubrics. Put generated outputs and diagnostics under `/workspace/output`, put runtime tools in `.workbench/environment/Dockerfile`, and use structured parsers or rendered previews depending on what the case needs to judge.
+When a workflow creates Office files, PDFs, or tabular exports, load [File formats](references/docs/file-formats.md) before designing cases or grading criteria. Put generated outputs and diagnostics under `/workspace/output`, put runtime tools in `.workbench/environment/Dockerfile`, and use structured parsers or rendered previews depending on what the case needs to judge.
 
 For `.xlsx`, use spreadsheet parsers for workbook structure and LibreOffice/`soffice` when formula recalculation, PDF conversion, or visual fidelity matters. For `.docx` and `.pptx`, parse structure for content checks and render when layout matters. For `.pdf`, prefer text extraction for born-digital PDFs and rendered page images for layout checks.
 
@@ -202,7 +204,7 @@ Load only what is needed:
 - `references/docs/workflows.md` for common command paths.
 - `references/docs/cli.md` for command syntax.
 - `references/docs/evals.md` for evaluation basics and the run/grade/eval loop.
-- `references/docs/cases-rubrics.md` for case files, grading criteria, and shell tests.
+- `references/docs/cases-grading.md` for case files, grading criteria, and shell tests.
 - `references/docs/agents-models.md` for agents, model labels, selectors, samples, and provider auth.
 - `references/docs/file-formats.md` when cases or outputs involve `.xlsx`, `.docx`, `.pptx`, `.pdf`, or similar files.
 - `references/docs/improve.md` when turning evidence into a candidate skill version.

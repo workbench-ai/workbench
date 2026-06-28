@@ -1,9 +1,11 @@
-import type {
-  WorkbenchJob,
-  WorkbenchOperationRequest,
-  WorkbenchRun,
-  WorkbenchRunPhase,
-  WorkbenchRunSnapshot,
+import {
+  workbenchJobReportTotalCostUsd,
+  type WorkbenchJob,
+  type WorkbenchOperationRequest,
+  type WorkbenchRun,
+  type WorkbenchRunPhase,
+  type WorkbenchRunSnapshot,
+  type WorkbenchTrace,
 } from "@workbench-ai/workbench-contract";
 import {
   createWorkbenchRunSnapshot,
@@ -42,6 +44,7 @@ export interface RunProgressSnapshotInput {
   location: "local" | "cloud";
   runs: readonly WorkbenchRun[];
   jobs: readonly WorkbenchJob[];
+  traces?: readonly WorkbenchTrace[];
   startedAtMs: number;
   nowMs?: number;
   evidence?: ProgressEvidenceCounts;
@@ -57,7 +60,14 @@ export function runProgressSnapshotFromRuns(input: RunProgressSnapshotInput): Wo
     return undefined;
   }
   const jobs = progressJobs(input.command, input.phase, input.jobs);
-  const base = createWorkbenchRunSnapshot(request, input.runs, { jobs });
+  const nowMs = input.nowMs ?? (input.phase === "complete" || input.runs.every(isTerminalRun)
+    ? terminalProgressObservedAtMs("complete", input.runs, jobs)
+    : undefined) ?? Date.now();
+  const base = createWorkbenchRunSnapshot(request, input.runs, {
+    jobs,
+    traces: input.traces ?? [],
+    now: new Date(nowMs).toISOString(),
+  });
   const phase = runSnapshotPhase(input.phase, base.phase);
   const status = runSnapshotStatus(input, base);
   const measurements = status === "running" && base.status === "queued"
@@ -65,7 +75,6 @@ export function runProgressSnapshotFromRuns(input: RunProgressSnapshotInput): Wo
       measurement.status === "queued" ? { ...measurement, status } : measurement
     )
     : base.measurements;
-  const nowMs = input.nowMs ?? terminalProgressObservedAtMs(phase, input.runs, jobs) ?? Date.now();
   const elapsedMs = Math.max(0, nowMs - input.startedAtMs);
   const { next: baseNext, ...baseWithoutNext } = base;
   const partialScore = progressPartialScore(base, jobs);
@@ -211,18 +220,48 @@ function progressOperationRequest(input: RunProgressSnapshotInput): WorkbenchOpe
     return undefined;
   }
   const storedPlan = firstRun.operationPlan;
+  if ((storedPlan?.kind ?? firstRun.kind) === "improve") {
+    return {
+      kind: "improve",
+      variant: storedPlan?.variant ?? input.location,
+      target: {
+        ...(storedPlan?.versionId ?? firstRun.versionId ? { versionId: storedPlan?.versionId ?? firstRun.versionId } : {}),
+        skill: storedPlan?.skills[0] ?? firstRun.skillName,
+        agent: storedPlan?.agents[0] ?? firstRun.agentName,
+      },
+      versionId: storedPlan?.versionId ?? firstRun.versionId,
+      evalHash: storedPlan?.evalHash ?? firstRun.evalHash,
+      ...(storedPlan?.samples !== undefined ? { samples: storedPlan.samples } : firstRun.requestedSamples !== undefined ? { samples: firstRun.requestedSamples } : {}),
+      ...(storedPlan?.budget !== undefined ? { budget: storedPlan.budget } : firstRun.requestedBudget !== undefined ? { budget: firstRun.requestedBudget } : {}),
+      ...(storedPlan?.retryOfRunId ? { retryOfRunId: storedPlan.retryOfRunId } : firstRun.retryOfRunId ? { retryOfRunId: firstRun.retryOfRunId } : {}),
+    };
+  }
+  const phases = storedPlan?.phases ?? progressPhasesForRunKind(storedPlan?.kind ?? firstRun.kind);
   return {
-    kind: storedPlan?.kind ?? firstRun.kind,
+    kind: "eval",
     variant: storedPlan?.variant ?? input.location,
-    versionId: storedPlan?.versionId ?? firstRun.versionId,
-    evalHash: storedPlan?.evalHash ?? firstRun.evalHash,
-    skill: storedPlan?.skills.join(",") || [...new Set(input.runs.map((run) => run.skillName))].join(","),
-    agent: storedPlan?.agents.join(",") || [...new Set(input.runs.map((run) => run.agentName))].join(","),
+    caseIds: storedPlan?.caseIds ?? [],
+    targets: storedPlan?.targets ?? [...new Set(input.runs.map((run) => run.agentName))].map((agent) => ({
+      ...(storedPlan?.versionId ?? firstRun.versionId ? { versionId: storedPlan?.versionId ?? firstRun.versionId } : {}),
+      ...(storedPlan?.skills[0] ?? firstRun.skillName ? { skill: storedPlan?.skills[0] ?? firstRun.skillName } : {}),
+      agent,
+    })),
+    phases,
+    grader: storedPlan?.grader ?? (phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" }),
     ...(storedPlan?.samples !== undefined ? { samples: storedPlan.samples } : firstRun.requestedSamples !== undefined ? { samples: firstRun.requestedSamples } : {}),
     ...(storedPlan?.rerun ? { rerun: true } : {}),
-    ...(storedPlan?.budget !== undefined ? { budget: storedPlan.budget } : firstRun.kind === "improve" && firstRun.requestedBudget !== undefined ? { budget: firstRun.requestedBudget } : {}),
     ...(storedPlan?.retryOfRunId ? { retryOfRunId: storedPlan.retryOfRunId } : firstRun.retryOfRunId ? { retryOfRunId: firstRun.retryOfRunId } : {}),
   };
+}
+
+function progressPhasesForRunKind(kind: WorkbenchRun["kind"]): Array<"execute" | "grade"> {
+  if (kind === "run") {
+    return ["execute"];
+  }
+  if (kind === "grade") {
+    return ["grade"];
+  }
+  return ["execute", "grade"];
 }
 
 function runSnapshotPhase(
@@ -333,6 +372,7 @@ function progressRenderReason(
 
 function progressSignature(snapshot: WorkbenchRunSnapshot): string {
   const { elapsedMs: _elapsedMs, lastProgressAt: _lastProgressAt, ...stableProgress } = snapshot.progress;
+  const { elapsedMs: _reportElapsedMs, ...stableReport } = snapshot.report;
   return JSON.stringify({
     id: snapshot.id,
     kind: snapshot.kind,
@@ -340,6 +380,7 @@ function progressSignature(snapshot: WorkbenchRunSnapshot): string {
     status: snapshot.status,
     phase: snapshot.phase,
     progress: stableProgress,
+    report: stableReport,
     result: snapshot.result,
     next: snapshot.next,
   });
@@ -360,7 +401,7 @@ function formatProgressSummaryParts(snapshot: WorkbenchRunSnapshot): string[] {
     ...activeProgressParts(snapshot),
     ...evidenceProgressParts(snapshot),
     ...usageProgressParts(snapshot),
-    `elapsed ${formatProgressDuration(snapshot.progress.elapsedMs)}`,
+    `wall time ${formatProgressDuration(snapshot.progress.elapsedMs)}`,
   ];
 }
 
@@ -434,8 +475,8 @@ function evidenceProgressParts(snapshot: WorkbenchRunSnapshot): string[] {
 }
 
 function usageProgressParts(snapshot: WorkbenchRunSnapshot): string[] {
-  const costUsd = snapshot.progress.costUsd;
-  return costUsd !== undefined ? [`usage cost=${formatCostUsd(costUsd)}`] : [];
+  const costUsd = workbenchJobReportTotalCostUsd(snapshot.report);
+  return costUsd !== undefined ? [`cost=${formatCostUsd(costUsd)} total`] : [];
 }
 
 function terminalProgressObservedAtMs(

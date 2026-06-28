@@ -9,7 +9,7 @@ Workbench turns [Agent Skills](https://agentskills.io/home) into evaluated, vers
 | Build your first measured skill | [Quickstart](quickstart.md) |
 | Choose a task path | [Common workflows](workflows.md) |
 | Learn the eval source model | [Evaluation basics](evals.md) |
-| Author cases and rubrics | [Cases and rubrics](cases-rubrics.md) |
+| Author cases and grading | [Cases and grading](cases-grading.md) |
 | Configure agents and models | [Agents and models](agents-models.md) |
 | Choose tools for Office, PDF, and other file artifacts | [File formats](file-formats.md) |
 | Improve from failed or below-perfect evidence | [Improve from evidence](improve.md) |
