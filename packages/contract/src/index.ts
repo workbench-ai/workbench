@@ -1081,18 +1081,24 @@ export interface WorkbenchAgentVersion {
   model?: string;
 }
 
-export interface WorkbenchResultEvaluation {
+export interface WorkbenchEvalVersionSummary {
   id: string;
-  label?: string;
-  caseCount?: number;
-  gradeAdapter?: string;
-  createdAt?: string;
-  updatedAt?: string;
+  hash: string;
+  label: string;
+  ordinal: number;
+  current: boolean;
+  caseCount: number;
+  gradeAdapter: string;
+  createdAt: string;
+  updatedAt: string;
+  runCount: number;
+  latestRunId?: string;
+  latestQuality?: number;
 }
 
 export interface WorkbenchResultCell {
   skillVersionId: string;
-  evaluationId: string;
+  evalVersionId: string;
   agentVersionId: string;
   runId?: string;
   status?: WorkbenchRunStatus;
@@ -1103,9 +1109,9 @@ export interface WorkbenchResultCell {
 }
 
 export interface WorkbenchResults {
-  versions: WorkbenchSkillVersion[];
-  evaluations: WorkbenchResultEvaluation[];
-  agents: WorkbenchAgentVersion[];
+  skillVersions: WorkbenchSkillVersion[];
+  evalVersions: WorkbenchEvalVersionSummary[];
+  agentVersions: WorkbenchAgentVersion[];
   cells: WorkbenchResultCell[];
 }
 
@@ -1116,6 +1122,7 @@ export interface WorkbenchInspectionSnapshot {
   skillSources: WorkbenchSkillSource[];
   skillBundles: WorkbenchSkillBundleSnapshot[];
   evals: WorkbenchEvalSnapshot[];
+  evalVersions: WorkbenchEvalVersionSummary[];
   evaluationFiles?: SurfaceSnapshotFile[];
   agents: WorkbenchAgentSnapshot[];
   results?: WorkbenchResults;

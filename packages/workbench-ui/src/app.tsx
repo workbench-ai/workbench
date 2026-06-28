@@ -155,7 +155,7 @@ import {
   emptyFileRouteState,
   parseWorkbenchLocation,
   routePrimaryTab,
-  withEvaluationId,
+  withEvalVersionId,
   withFileRouteState,
   type WorkbenchEvaluationView,
   type WorkbenchFileOwnerKind,
@@ -179,20 +179,20 @@ import {
 
 export type { WorkbenchOperationPreviewState } from "./components/workbench-action-bar";
 import {
-  buildComparisonEvidenceRows,
-  buildComparisonGroups,
-  comparisonForScorecard,
-  defaultEvaluationIdForScorecard,
-  evaluationOptionsForScorecard,
+  buildResultEvidenceRows,
+  buildResultGroups,
+  resultsForScorecard,
+  defaultEvalVersionIdForResults,
+  evalVersionOptionsForResults,
   formatEvaluationDisplayDetail,
   formatEvaluationDisplayName,
   formatVersionDisplayName,
   missingCostLabelForStatus,
   resultVersionGroupId,
-  type ComparisonEvaluationOption,
-  type ComparisonEvidenceRow,
-  type ComparisonLabelContext,
-} from "./lib/comparison-metrics";
+  type ResultEvalVersionOption,
+  type ResultEvidenceRow,
+  type ResultLabelContext,
+} from "./lib/results-metrics";
 
 export interface WorkbenchWorkspaceProps {
   apiBasePath?: string;
@@ -747,7 +747,7 @@ export function WorkbenchWorkspace({
               <ProblemState
                 icon={WorkbenchLoadingIcon}
                 title="Loading evidence"
-                message="Reading evaluation and run details."
+                message="Reading eval and run details."
                 scope="pane"
               />
             ) : (
@@ -1032,7 +1032,7 @@ function PrimaryTabs({
   const active = routePrimaryTab(route);
   const routeFor = (tab: WorkbenchPrimaryTab): WorkbenchRoute => {
     if (tab === "evaluation") {
-      return createEvaluationRoute({ view: "results", evaluationId: route.kind === "evaluation" || route.kind === "case" ? route.evaluationId : null });
+      return createEvaluationRoute({ view: "results", evalVersionId: route.kind === "evaluation" || route.kind === "case" ? route.evalVersionId : null });
     }
     if (tab === "runs") {
       return createRunsRoute();
@@ -1530,22 +1530,22 @@ function EvaluationSurface({
   route: Extract<WorkbenchRoute, { kind: "evaluation" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const results = comparisonForScorecard(snapshot);
-  const evaluationOptions = evaluationOptionsForScorecard(snapshot, results);
-  const defaultEvaluationId = defaultEvaluationIdForScorecard(evaluationOptions);
-  const activeEvaluationId = route.evaluationId && evaluationOptions.some((option) => option.id === route.evaluationId)
-    ? route.evaluationId
+  const results = resultsForScorecard(snapshot);
+  const evaluationOptions = evalVersionOptionsForResults(snapshot, results);
+  const defaultEvaluationId = defaultEvalVersionIdForResults(evaluationOptions);
+  const activeEvaluationId = route.evalVersionId && evaluationOptions.some((option) => option.id === route.evalVersionId)
+    ? route.evalVersionId
     : defaultEvaluationId;
-  const labelContext = comparisonLabelContext(snapshot);
-  const groups = buildComparisonGroups(results, labelContext);
-  const rows = buildComparisonEvidenceRows({
+  const labelContext = resultLabelContext(snapshot);
+  const groups = buildResultGroups(results, labelContext);
+  const rows = buildResultEvidenceRows({
     groups,
     context: labelContext,
-    agents: results.agents,
+    agents: results.agentVersions,
     runs: snapshot.runs,
   });
   const visibleRows = activeEvaluationId
-    ? rows.filter((row) => row.evalHash === activeEvaluationId)
+    ? rows.filter((row) => row.evalVersionId === activeEvaluationId)
     : rows;
   const selectedEvaluation = activeEvaluationId
     ? evaluationOptions.find((option) => option.id === activeEvaluationId) ?? null
@@ -1555,12 +1555,12 @@ function EvaluationSurface({
     <div className="grid min-w-0 gap-5">
       <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <ViewSwitch
-          ariaLabel="Evaluation views"
+          ariaLabel="Eval views"
           value={route.view}
           items={EVALUATION_VIEW_ITEMS}
           onValueChange={(value) => {
             if (value === "results" || value === "cases") {
-              navigate(createEvaluationRoute({ view: value, evaluationId: activeEvaluationId ?? route.evaluationId }));
+              navigate(createEvaluationRoute({ view: value, evalVersionId: activeEvaluationId ?? route.evalVersionId }));
             }
           }}
         />
@@ -1568,7 +1568,7 @@ function EvaluationSurface({
           <EvaluationSelect
             options={evaluationOptions}
             value={activeEvaluationId}
-            onValueChange={(evaluationId) => navigate(withEvaluationId(route, evaluationId), { replace: false })}
+            onValueChange={(evalVersionId) => navigate(withEvalVersionId(route, evalVersionId), { replace: false })}
           />
         ) : null}
       </div>
@@ -1576,7 +1576,7 @@ function EvaluationSurface({
         <EvaluationCases
           allowMutations={allowMutations}
           apiBasePath={apiBasePath}
-          evaluationId={activeEvaluationId}
+          evalVersionId={activeEvaluationId}
           hrefFor={hrefFor}
           onRouteClick={onRouteClick}
           refreshSnapshot={refreshSnapshot}
@@ -1584,7 +1584,7 @@ function EvaluationSurface({
         />
       ) : (
         <EvaluationResults
-          evaluationId={activeEvaluationId}
+          evalVersionId={activeEvaluationId}
           hasResults={results.cells.length > 0}
           hrefFor={hrefFor}
           onRouteClick={onRouteClick}
@@ -1599,33 +1599,33 @@ function EvaluationSurface({
 
 /**
  * Build the sorted scorecard result rows for a snapshot, mirroring what the
- * Evaluation → Results view renders. By default it returns rows for the
- * snapshot's default evaluation; pass `evaluationId` to select a specific one,
+ * Evaluation -> Results view renders. By default it returns rows for the
+ * snapshot's default eval; pass `evalVersionId` to select a specific one,
  * or `null` for all.
  */
 export function buildEvaluationResultRows(
   snapshot: WorkbenchInspectionSnapshot,
-  options: { evaluationId?: string | null } = {},
-): ComparisonEvidenceRow[] {
-  const results = comparisonForScorecard(snapshot);
-  const context = comparisonLabelContext(snapshot);
-  const groups = buildComparisonGroups(results, context);
+  options: { evalVersionId?: string | null } = {},
+): ResultEvidenceRow[] {
+  const results = resultsForScorecard(snapshot);
+  const context = resultLabelContext(snapshot);
+  const groups = buildResultGroups(results, context);
   const rows = sortLeaderboardRows(
-    buildComparisonEvidenceRows({
+    buildResultEvidenceRows({
       groups,
       context,
-      agents: results.agents,
+      agents: results.agentVersions,
       runs: snapshot.runs,
     }),
   );
-  const evaluationId = "evaluationId" in options
-    ? options.evaluationId
-    : defaultEvaluationIdForScorecard(evaluationOptionsForScorecard(snapshot, results));
-  return evaluationId ? rows.filter((row) => row.evalHash === evaluationId) : rows;
+  const evalVersionId = "evalVersionId" in options
+    ? options.evalVersionId
+    : defaultEvalVersionIdForResults(evalVersionOptionsForResults(snapshot, results));
+  return evalVersionId ? rows.filter((row) => row.evalVersionId === evalVersionId) : rows;
 }
 
 function EvaluationResults({
-  evaluationId,
+  evalVersionId,
   hasResults,
   hrefFor,
   onRouteClick,
@@ -1633,12 +1633,12 @@ function EvaluationResults({
   selectedEvaluation,
   snapshot,
 }: {
-  evaluationId: string | null;
+  evalVersionId: string | null;
   hasResults: boolean;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  rows: ComparisonEvidenceRow[];
-  selectedEvaluation: ComparisonEvaluationOption | null;
+  rows: ResultEvidenceRow[];
+  selectedEvaluation: ResultEvalVersionOption | null;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
   const sortedRows = useMemo(() => sortLeaderboardRows(rows), [rows]);
@@ -1646,10 +1646,10 @@ function EvaluationResults({
     return (
       <EmptyState
         icon={ActivityIcon}
-        eyebrow={selectedEvaluation?.label ?? "Evaluation"}
-        title={hasResults ? "No results for this evaluation" : "No runs yet"}
+        eyebrow={selectedEvaluation?.label ?? "Eval"}
+        title={hasResults ? "No results for this eval" : "No runs yet"}
         message={hasResults
-          ? "This evaluation has no recorded scorecard rows."
+          ? "This eval has no recorded scorecard rows."
           : "Run evals to record results."}
         variant="hero"
         size="sm"
@@ -1660,7 +1660,7 @@ function EvaluationResults({
     <section className="grid min-w-0 gap-4" aria-label="Results">
       <EvaluationResultsVisualSummary rows={sortedRows} />
       <EvaluationLeaderboard
-        evaluationId={evaluationId}
+        evalVersionId={evalVersionId}
         hrefFor={hrefFor}
         onRouteClick={onRouteClick}
         rows={sortedRows}
@@ -1671,18 +1671,18 @@ function EvaluationResults({
 }
 
 export function EvaluationLeaderboard({
-  evaluationId = null,
+  evalVersionId = null,
   hrefFor,
   maxRows,
   onRouteClick,
   rows,
   snapshot,
 }: {
-  evaluationId?: string | null;
+  evalVersionId?: string | null;
   hrefFor?: (route: WorkbenchRoute) => string;
   maxRows?: number;
   onRouteClick?: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
-  rows: ComparisonEvidenceRow[];
+  rows: ResultEvidenceRow[];
   snapshot: WorkbenchInspectionSnapshot;
 }) {
   const sorted = useMemo(() => sortLeaderboardRows(rows), [rows]);
@@ -1784,11 +1784,11 @@ export function EvaluationLeaderboard({
 interface LeaderboardGroup {
   id: string;
   label: string;
-  rows: ComparisonEvidenceRow[];
+  rows: ResultEvidenceRow[];
 }
 
-function buildLeaderboardGroups(rows: readonly ComparisonEvidenceRow[]): LeaderboardGroup[] {
-  const rowsByGroup = new Map<string, ComparisonEvidenceRow[]>();
+function buildLeaderboardGroups(rows: readonly ResultEvidenceRow[]): LeaderboardGroup[] {
+  const rowsByGroup = new Map<string, ResultEvidenceRow[]>();
   const groupLabels = new Map<string, string>();
   for (const row of rows) {
     const groupId = resultVersionGroupId(row);
@@ -1812,8 +1812,8 @@ function EvaluationSelect({
   options,
   value,
 }: {
-  onValueChange: (evaluationId: string) => void;
-  options: ComparisonEvaluationOption[];
+  onValueChange: (evalVersionId: string) => void;
+  options: ResultEvalVersionOption[];
   value: string;
 }) {
   const selectedOption = options.find((option) => option.id === value);
@@ -1821,10 +1821,10 @@ function EvaluationSelect({
     <Select value={value} onValueChange={onValueChange}>
       <SelectTrigger
         size="sm"
-        aria-label="Select evaluation"
+        aria-label="Select eval"
         data-testid="evaluation-select"
       >
-        <SelectValue placeholder="Evaluation">{selectedOption?.label}</SelectValue>
+        <SelectValue placeholder="Eval">{selectedOption?.label}</SelectValue>
       </SelectTrigger>
       <SelectContent align="end" className="min-w-64">
         {options.map((option) => (
@@ -1840,7 +1840,7 @@ function EvaluationSelect({
   );
 }
 
-function sortLeaderboardRows(rows: readonly ComparisonEvidenceRow[]): ComparisonEvidenceRow[] {
+function sortLeaderboardRows(rows: readonly ResultEvidenceRow[]): ResultEvidenceRow[] {
   return [...rows].sort((left, right) =>
     compareOptionalNumber(left.score, right.score, "desc") ||
     compareOptionalNumber(left.latencyPerSampleMs, right.latencyPerSampleMs, "asc") ||
@@ -1995,7 +1995,7 @@ function compareText(left: string, right: string): number {
 function EvaluationCases({
   allowMutations,
   apiBasePath,
-  evaluationId,
+  evalVersionId: selectedEvalVersionId,
   hrefFor,
   onRouteClick,
   refreshSnapshot,
@@ -2003,23 +2003,26 @@ function EvaluationCases({
 }: {
   allowMutations: boolean;
   apiBasePath: string;
-  evaluationId: string | null;
+  evalVersionId: string | null;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   refreshSnapshot: () => void;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const evalSnapshot = selectedEvalSnapshot(snapshot, evaluationId);
+  const evalSnapshot = selectedEvalSnapshot(snapshot, selectedEvalVersionId);
+  const resolvedEvalVersionId = evalSnapshot
+    ? evalVersionIdForHash(snapshot, evalSnapshot.hash) ?? selectedEvalVersionId ?? evalSnapshot.hash
+    : null;
   const matrixColumns = useMemo(
-    () => evalSnapshot ? buildCaseMatrixColumns(snapshot, evalSnapshot.hash) : [],
-    [evalSnapshot, snapshot],
+    () => evalSnapshot && resolvedEvalVersionId ? buildCaseMatrixColumns(snapshot, resolvedEvalVersionId) : [],
+    [evalSnapshot, resolvedEvalVersionId, snapshot],
   );
   if (!evalSnapshot) {
     return (
       <EmptyState
         icon={FileTextIcon}
         title="No cases"
-        message="Add a case to start building the evaluation matrix."
+        message="Add a case to start building the eval matrix."
         variant="hero"
         size="sm"
       />
@@ -2031,6 +2034,7 @@ function EvaluationCases({
       allowMutations={allowMutations}
       columns={matrixColumns}
       evalSnapshot={evalSnapshot}
+      evalVersionId={resolvedEvalVersionId ?? evalSnapshot.hash}
       hrefFor={hrefFor}
       onRouteClick={onRouteClick}
       refreshSnapshot={refreshSnapshot}
@@ -2108,6 +2112,7 @@ function EvaluationCaseMatrix({
   allowMutations,
   columns,
   evalSnapshot,
+  evalVersionId,
   hrefFor,
   onRouteClick,
   refreshSnapshot,
@@ -2117,6 +2122,7 @@ function EvaluationCaseMatrix({
   allowMutations: boolean;
   columns: CaseMatrixColumn[];
   evalSnapshot: WorkbenchEvalSnapshot;
+  evalVersionId: string;
   hrefFor: (route: WorkbenchRoute) => string;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
   refreshSnapshot: () => void;
@@ -2197,7 +2203,7 @@ function EvaluationCaseMatrix({
           </TableHeader>
           <TableBody>
             {evalSnapshot.cases.map((evalCase) => {
-              const caseRoute = createCaseRoute({ caseId: evalCase.id, evaluationId: evalSnapshot.hash });
+              const caseRoute = createCaseRoute({ caseId: evalCase.id, evalVersionId: evalVersionId });
               return (
                 <TableRow className="hover:bg-transparent" key={evalCase.id}>
                   <TableCell className="relative h-full p-0 align-top whitespace-normal">
@@ -2261,7 +2267,7 @@ function EvaluationCaseMatrix({
           allowMutations={allowMutations}
           column={selectedColumn}
           evalCase={selectedCase}
-          evaluationId={evalSnapshot.hash}
+          evalVersionId={evalVersionId}
           hrefFor={hrefFor}
           open={Boolean(selectedCell)}
           onOpenChange={(open) => {
@@ -2431,7 +2437,7 @@ function CaseMatrixCellDialog({
   allowMutations,
   column,
   evalCase,
-  evaluationId,
+  evalVersionId,
   hrefFor,
   onOpenChange,
   onRouteClick,
@@ -2443,7 +2449,7 @@ function CaseMatrixCellDialog({
   allowMutations: boolean;
   column: CaseMatrixColumn;
   evalCase: WorkbenchEvalCaseSnapshot;
-  evaluationId: string;
+  evalVersionId: string;
   hrefFor: (route: WorkbenchRoute) => string;
   onOpenChange: (open: boolean) => void;
   onRouteClick: (route: WorkbenchRoute) => (event: MouseEvent<HTMLElement>) => void;
@@ -2747,18 +2753,18 @@ function caseMatrixColumnDotClass(column: CaseMatrixColumn, columnIndex: number)
 
 function buildCaseMatrixColumns(
   snapshot: WorkbenchInspectionSnapshot,
-  evaluationId: string,
+  evalVersionId: string,
 ): CaseMatrixColumn[] {
   const runsById = new Map(snapshot.runs.map((run) => [run.id, run]));
   const results = snapshot.results;
   if (!results) {
     return buildFallbackCaseMatrixColumns(snapshot);
   }
-  const versionsById = new Map(results.versions.map((version) => [version.id, version]));
-  const agentsById = new Map(results.agents.map((agent) => [agent.id, agent]));
+  const versionsById = new Map(results.skillVersions.map((version) => [version.id, version]));
+  const agentsById = new Map(results.agentVersions.map((agent) => [agent.id, agent]));
   const seen = new Set<string>();
   const columns = results.cells.flatMap((cell): CaseMatrixColumn[] => {
-    if (cell.evaluationId !== evaluationId) {
+    if (cell.evalVersionId !== evalVersionId) {
       return [];
     }
     const version = versionsById.get(cell.skillVersionId);
@@ -2836,7 +2842,7 @@ function buildFallbackCaseMatrixColumns(snapshot: WorkbenchInspectionSnapshot): 
   const versionId = snapshot.status.currentVersionId ?? snapshot.versions.at(-1)?.id ?? null;
   const targetVersionId = versionId && versionId !== "current" ? versionId : null;
   const versionLabel = versionId
-    ? formatVersionDisplayName(versionId, snapshot.versions, comparisonLabelContext(snapshot))
+    ? formatVersionDisplayName(versionId, snapshot.versions, resultLabelContext(snapshot))
     : "Current skill";
   return snapshot.agents.map((agent) => ({
     id: `source:${versionId ?? "current"}:${agent.hash}`,
@@ -2971,14 +2977,15 @@ function CaseDetail({
   route: Extract<WorkbenchRoute, { kind: "case" }>;
   snapshot: WorkbenchInspectionSnapshot;
 }) {
-  const evalSnapshot = selectedEvalSnapshot(snapshot, route.evaluationId);
+  const evalSnapshot = selectedEvalSnapshot(snapshot, route.evalVersionId);
   const evalCase = evalSnapshot?.cases.find((entry) => entry.id === route.caseId) ?? null;
   if (!evalSnapshot || !evalCase) {
     return <MissingObject label={`Case ${route.caseId}`} />;
   }
+  const evalVersionId = evalVersionIdForHash(snapshot, evalSnapshot.hash) ?? route.evalVersionId ?? evalSnapshot.hash;
   const jobs = jobsForCase(snapshot, evalSnapshot.hash, evalCase.id);
-  const definitionRoute = createCaseRoute({ caseId: evalCase.id, evaluationId: evalSnapshot.hash, section: "definition", file: route.file });
-  const runsRoute = createCaseRoute({ caseId: evalCase.id, evaluationId: evalSnapshot.hash, section: "runs" });
+  const definitionRoute = createCaseRoute({ caseId: evalCase.id, evalVersionId: evalVersionId, section: "definition", file: route.file });
+  const runsRoute = createCaseRoute({ caseId: evalCase.id, evalVersionId: evalVersionId, section: "runs" });
   return (
     <div className="grid min-w-0 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
       <nav className="grid h-max gap-1 rounded-lg border border-border/70 bg-background p-2 text-sm" aria-label="Case sections">
@@ -4214,7 +4221,7 @@ function RouteSidebar({
   snapshot: WorkbenchInspectionSnapshot;
 }) {
   if (route.kind === "case") {
-    const evalSnapshot = selectedEvalSnapshot(snapshot, route.evaluationId);
+    const evalSnapshot = selectedEvalSnapshot(snapshot, route.evalVersionId);
     const evalCase = evalSnapshot?.cases.find((entry) => entry.id === route.caseId) ?? null;
     if (evalSnapshot && evalCase) {
       return (
@@ -4293,7 +4300,7 @@ function RunContextSidebar({
           <>
             <FactItem title="Version" value={runVersionDisplayName(snapshot, run)} />
             <FactItem title="Agent" value={runAgentDisplayName(snapshot, run)} />
-            <FactItem title="Evaluation" value={formatEvaluationDisplayName(run.evalHash, snapshot.evals)} />
+            <FactItem title="Eval" value={formatEvaluationDisplayName(run.evalHash, snapshot.evals)} />
           </>
         ) : (
           <>
@@ -4572,7 +4579,7 @@ function breadcrumbItems(route: WorkbenchRoute, snapshot: WorkbenchInspectionSna
   }
   if (route.kind === "case") {
     return [
-      { label: "Cases", route: createEvaluationRoute({ view: "cases", evaluationId: route.evaluationId }) },
+      { label: "Cases", route: createEvaluationRoute({ view: "cases", evalVersionId: route.evalVersionId }) },
       { label: route.caseId },
     ];
   }
@@ -4897,10 +4904,10 @@ function MissingObject({ label }: { label: string }) {
   );
 }
 
-function comparisonLabelContext(
+function resultLabelContext(
   snapshot: WorkbenchInspectionSnapshot,
-  overrides: Partial<ComparisonLabelContext> = {},
-): ComparisonLabelContext {
+  overrides: Partial<ResultLabelContext> = {},
+): ResultLabelContext {
   return {
     allVersions: snapshot.versions,
     currentVersionId: snapshot.status.currentVersionId,
@@ -4910,16 +4917,36 @@ function comparisonLabelContext(
   };
 }
 
-function selectedEvalSnapshot(snapshot: WorkbenchInspectionSnapshot, evaluationId: string | null): WorkbenchEvalSnapshot | null {
-  if (evaluationId) {
-    const selected = snapshot.evals.find((entry) => entry.hash === evaluationId);
-    if (selected) {
-      return selected;
-    }
+function selectedEvalSnapshot(snapshot: WorkbenchInspectionSnapshot, evalVersionId: string | null): WorkbenchEvalSnapshot | null {
+  const hash = evalVersionId
+    ? evalVersionHashForRef(snapshot, evalVersionId)
+    : defaultEvalVersion(snapshot)?.hash;
+  return hash ? snapshot.evals.find((entry) => entry.hash === hash) ?? null : null;
+}
+
+function defaultEvalVersion(snapshot: WorkbenchInspectionSnapshot): WorkbenchInspectionSnapshot["evalVersions"][number] | undefined {
+  const ordered = [...snapshot.evalVersions].sort((left, right) =>
+    left.ordinal - right.ordinal || left.id.localeCompare(right.id)
+  );
+  return ordered.find((entry) => entry.current) ?? ordered.at(-1);
+}
+
+function evalVersionHashForRef(snapshot: WorkbenchInspectionSnapshot, ref: string): string | undefined {
+  const normalized = ref.trim();
+  if (!normalized) {
+    return undefined;
   }
-  return [...snapshot.evals].sort((left, right) =>
-    right.createdAt.localeCompare(left.createdAt) || right.hash.localeCompare(left.hash)
-  )[0] ?? null;
+  const normalizedLabel = normalized.toLowerCase();
+  return snapshot.evalVersions.find((entry) =>
+    entry.id === normalized ||
+    entry.hash === normalized ||
+    entry.hash.startsWith(normalized) ||
+    entry.label.toLowerCase() === normalizedLabel
+  )?.hash;
+}
+
+function evalVersionIdForHash(snapshot: WorkbenchInspectionSnapshot, hash: string): string | undefined {
+  return snapshot.evalVersions.find((entry) => entry.hash === hash)?.id;
 }
 
 function jobsForCase(snapshot: WorkbenchInspectionSnapshot, evalHash: string, caseId: string): WorkbenchJob[] {
@@ -4941,8 +4968,8 @@ function uniqueRunsForJobs(snapshot: WorkbenchInspectionSnapshot, jobs: readonly
 }
 
 type InspectionResults = NonNullable<WorkbenchInspectionSnapshot["results"]>;
-type InspectionResultVersion = InspectionResults["versions"][number];
-type InspectionResultAgent = InspectionResults["agents"][number];
+type InspectionResultVersion = InspectionResults["skillVersions"][number];
+type InspectionResultAgent = InspectionResults["agentVersions"][number];
 
 function runEvidenceView(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): WorkbenchRunEvidenceView {
   return buildWorkbenchRunEvidenceView(snapshot, run) ?? {
@@ -5094,7 +5121,7 @@ function runVersionDisplayName(snapshot: WorkbenchInspectionSnapshot, run: Workb
   if (baseVersion) {
     return baseVersion.label;
   }
-  return formatVersionDisplayName(run.outputVersionId ?? run.versionId, snapshot.versions, comparisonLabelContext(snapshot));
+  return formatVersionDisplayName(run.outputVersionId ?? run.versionId, snapshot.versions, resultLabelContext(snapshot));
 }
 
 function runAgentDisplayName(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): string {
@@ -5105,19 +5132,19 @@ function runAgentDisplayName(snapshot: WorkbenchInspectionSnapshot, run: Workben
   if (resultAgents.length > 1) {
     return formatCount(resultAgents.length, "agent");
   }
-  return snapshot.results?.agents.find((agent) => agent.id === run.agentHash)?.label ?? run.agentName;
+  return snapshot.results?.agentVersions.find((agent) => agent.id === run.agentHash)?.label ?? run.agentName;
 }
 
 function jobAgentDisplayName(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob): string {
-  return snapshot.results?.agents.find((agent) => agent.id === job.agentHash)?.label ?? job.agentName;
+  return snapshot.results?.agentVersions.find((agent) => agent.id === job.agentHash)?.label ?? job.agentName;
 }
 
-function runResultVersions(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): InspectionResults["versions"] {
+function runResultVersions(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): InspectionResults["skillVersions"] {
   const results = snapshot.results;
   if (!results) {
     return [];
   }
-  const versionById = new Map(results.versions.map((version) => [version.id, version]));
+  const versionById = new Map(results.skillVersions.map((version) => [version.id, version]));
   const versions = new Map<string, InspectionResultVersion>();
   for (const cell of results.cells) {
     if (cell.runId !== run.id) {
@@ -5131,12 +5158,12 @@ function runResultVersions(snapshot: WorkbenchInspectionSnapshot, run: Workbench
   return [...versions.values()];
 }
 
-function runResultAgents(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): InspectionResults["agents"] {
+function runResultAgents(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): InspectionResults["agentVersions"] {
   const results = snapshot.results;
   if (!results) {
     return [];
   }
-  const agentById = new Map(results.agents.map((agent) => [agent.id, agent]));
+  const agentById = new Map(results.agentVersions.map((agent) => [agent.id, agent]));
   const agents = new Map<string, InspectionResultAgent>();
   for (const cell of results.cells) {
     if (cell.runId !== run.id) {
@@ -5154,7 +5181,7 @@ function resultVersionForProjectVersionId(
   snapshot: WorkbenchInspectionSnapshot,
   projectVersionId: string,
 ): InspectionResultVersion | null {
-  return snapshot.results?.versions.find((version) =>
+  return snapshot.results?.skillVersions.find((version) =>
     version.projectVersionId === projectVersionId || version.id === projectVersionId
   ) ?? null;
 }
@@ -5184,7 +5211,7 @@ function runSkillSource(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun
 }
 
 function versionNameFor(snapshot: WorkbenchInspectionSnapshot, versionId: string | null | undefined): string {
-  return versionId ? formatVersionDisplayName(versionId, snapshot.versions, comparisonLabelContext(snapshot)) : "none";
+  return versionId ? formatVersionDisplayName(versionId, snapshot.versions, resultLabelContext(snapshot)) : "none";
 }
 
 function WorkbenchLoadingIcon({ className, ...props }: SVGProps<SVGSVGElement>) {

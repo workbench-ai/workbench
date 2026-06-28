@@ -6,7 +6,7 @@ import type {
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 
-import { formatVersionDisplayName } from "./comparison-metrics";
+import { formatVersionDisplayName } from "./results-metrics";
 import { runScore } from "./format";
 
 export const VERSION_LINEAGE_NODE_WIDTH = 224;

@@ -22,29 +22,29 @@ import {
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
 
 import {
-  buildComparisonCategoryAxisLayout,
-  COMPARISON_CATEGORY_AXIS_LINE_HEIGHT,
-  wrapComparisonCategoryAxisLabel,
-  type ComparisonCategoryAxisLayout,
-} from "../lib/comparison-chart-labels";
+  buildResultCategoryAxisLayout,
+  RESULT_CATEGORY_AXIS_LINE_HEIGHT,
+  wrapResultCategoryAxisLabel,
+  type ResultCategoryAxisLayout,
+} from "../lib/result-chart-labels";
 import {
-  buildComparisonMetricData,
-  buildComparisonMetricDescriptors,
-  buildComparisonTradeoffData,
-  buildComparisonTradeoffPairs,
-  comparisonMetricDisplayLabel,
-  comparisonMetricTestId,
-  comparisonMetricValueLabel,
-  formatComparisonMetricValue,
+  buildResultMetricData,
+  buildResultMetricDescriptors,
+  buildResultTradeoffData,
+  buildResultTradeoffPairs,
+  resultMetricDisplayLabel,
+  resultMetricTestId,
+  resultMetricValueLabel,
+  formatResultMetricValue,
   resultVersionGroupId,
-  selectPrimaryComparisonMetrics,
-  type ComparisonEvidenceRow,
-  type ComparisonGroupPresentation,
-  type ComparisonMetricDatum,
-  type ComparisonMetricDescriptor,
-  type ComparisonTradeoffDatum,
-  type ComparisonTradeoffPair,
-} from "../lib/comparison-metrics";
+  selectPrimaryResultMetrics,
+  type ResultEvidenceRow,
+  type ResultGroupPresentation,
+  type ResultMetricDatum,
+  type ResultMetricDescriptor,
+  type ResultTradeoffDatum,
+  type ResultTradeoffPair,
+} from "../lib/results-metrics";
 
 const BAR_CHART_MIN_HEIGHT = 220;
 const BAR_CHART_MAX_HEIGHT = 520;
@@ -59,7 +59,7 @@ export function EvaluationResultsVisualSummary({
   showBarCharts = true,
   showTradeoff = true,
 }: {
-  rows: ComparisonEvidenceRow[];
+  rows: ResultEvidenceRow[];
   /**
    * Compact layout for constrained surfaces: smaller metric charts so the
    * summary fits without scrolling.
@@ -83,20 +83,20 @@ export function EvaluationResultsVisualSummary({
     [groups],
   );
   const metricDescriptors = React.useMemo(() => {
-    const primary = selectPrimaryComparisonMetrics(buildComparisonMetricDescriptors(rows));
+    const primary = selectPrimaryResultMetrics(buildResultMetricDescriptors(rows));
     return metricIds
       ? primary.filter((descriptor) => metricIds.includes(descriptor.id))
       : primary;
   }, [metricIds, rows]);
   const chartDescriptors = React.useMemo(
     () => metricDescriptors.filter((descriptor) =>
-      buildComparisonMetricData(rows, descriptor, groupColorById).length >= 2
+      buildResultMetricData(rows, descriptor, groupColorById).length >= 2
     ),
     [groupColorById, metricDescriptors, rows],
   );
   const tradeoffPairs = React.useMemo(
-    () => buildComparisonTradeoffPairs(chartDescriptors).filter((pair) =>
-      buildComparisonTradeoffData(rows, pair, groupColorById).length >= 2
+    () => buildResultTradeoffPairs(chartDescriptors).filter((pair) =>
+      buildResultTradeoffData(rows, pair, groupColorById).length >= 2
     ),
     [chartDescriptors, groupColorById, rows],
   );
@@ -149,17 +149,17 @@ function EvaluationMetricBarChart({
   rows,
 }: {
   dense: boolean;
-  descriptor: ComparisonMetricDescriptor;
-  groups: readonly ComparisonGroupPresentation[];
+  descriptor: ResultMetricDescriptor;
+  groups: readonly ResultGroupPresentation[];
   groupColorById: ReadonlyMap<string, string>;
-  rows: ComparisonEvidenceRow[];
+  rows: ResultEvidenceRow[];
 }) {
   const data = React.useMemo(
-    () => buildComparisonMetricData(rows, descriptor, groupColorById),
+    () => buildResultMetricData(rows, descriptor, groupColorById),
     [descriptor, groupColorById, rows],
   );
   const chartRows = React.useMemo(
-    () => buildComparisonMetricChartRows(data, groups),
+    () => buildResultMetricChartRows(data, groups),
     [data, groups],
   );
   const chartRowsByKey = React.useMemo(
@@ -167,13 +167,13 @@ function EvaluationMetricBarChart({
     [chartRows],
   );
   const categoryAxisLayout = React.useMemo(
-    () => buildComparisonCategoryAxisLayout(chartRows.map((entry) => entry.label)),
+    () => buildResultCategoryAxisLayout(chartRows.map((entry) => entry.label)),
     [chartRows],
   );
   const chartConfig = React.useMemo(
     () => ({
       value: {
-        label: comparisonMetricValueLabel(descriptor),
+        label: resultMetricValueLabel(descriptor),
       },
     }) satisfies ChartConfig,
     [descriptor],
@@ -185,14 +185,14 @@ function EvaluationMetricBarChart({
         BAR_CHART_MIN_HEIGHT,
         BAR_CHART_MAX_HEIGHT,
       );
-  const axisDomain = comparisonMetricAxisDomain(data, descriptor);
-  const displayLabel = comparisonMetricDisplayLabel(descriptor);
+  const axisDomain = resultMetricAxisDomain(data, descriptor);
+  const displayLabel = resultMetricDisplayLabel(descriptor);
 
   return (
     <section
       aria-label={displayLabel}
       className="grid min-w-0 gap-3 rounded-lg border border-border/70 bg-background px-3 py-3"
-      data-testid={`evaluation-${comparisonMetricTestId(descriptor)}-chart`}
+      data-testid={`evaluation-${resultMetricTestId(descriptor)}-chart`}
     >
       <header className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-sm font-medium text-foreground">{displayLabel}</h3>
@@ -220,7 +220,7 @@ function EvaluationMetricBarChart({
             axisLine={false}
             domain={axisDomain}
             name={displayLabel}
-            tickFormatter={(value) => formatComparisonMetricValue(descriptor, Number(value))}
+            tickFormatter={(value) => formatResultMetricValue(descriptor, Number(value))}
             tickLine={false}
             tickMargin={8}
             type="number"
@@ -230,7 +230,7 @@ function EvaluationMetricBarChart({
             dataKey="rowKey"
             interval={0}
             tick={(
-              <ComparisonGroupedAxisTick
+              <ResultGroupedAxisTick
                 layout={categoryAxisLayout}
                 rowsByKey={chartRowsByKey}
               />
@@ -245,11 +245,11 @@ function EvaluationMetricBarChart({
             content={(
               <ChartTooltipContent
                 labelFormatter={(_label, payload) => {
-                  const datum = payload?.[0]?.payload as ComparisonMetricChartRow | undefined;
+                  const datum = payload?.[0]?.payload as ResultMetricChartRow | undefined;
                   return datum?.kind === "row" ? datum.rowLabel : "Evaluation";
                 }}
                 formatter={(_value, _name, item) => {
-                  const payload = item.payload as ComparisonMetricChartRow;
+                  const payload = item.payload as ResultMetricChartRow;
                   return payload.kind === "row"
                     ? renderMetricTooltipLine(displayLabel, payload.displayValue)
                     : null;
@@ -289,9 +289,9 @@ function EvaluationTradeoffChart({
   dense: boolean;
   defaultMetricId?: string;
   groupColorById: ReadonlyMap<string, string>;
-  groups: readonly ComparisonGroupPresentation[];
-  rows: ComparisonEvidenceRow[];
-  tradeoffPairs: ComparisonTradeoffPair[];
+  groups: readonly ResultGroupPresentation[];
+  rows: ResultEvidenceRow[];
+  tradeoffPairs: ResultTradeoffPair[];
 }) {
   const defaultPairKey = React.useMemo(
     () => defaultTradeoffPairKey(tradeoffPairs, defaultMetricId),
@@ -312,7 +312,7 @@ function EvaluationTradeoffChart({
   }, [defaultPairKey, pair, pairKey]);
 
   const data = React.useMemo(
-    () => (pair ? buildComparisonTradeoffData(rows, pair, groupColorById) : []),
+    () => (pair ? buildResultTradeoffData(rows, pair, groupColorById) : []),
     [groupColorById, pair, rows],
   );
   const legendItems = React.useMemo(
@@ -384,8 +384,8 @@ function EvaluationTradeoffChart({
           <XAxis
             axisLine={false}
             dataKey="x"
-            name={comparisonMetricValueLabel(pair.xMetric)}
-            tickFormatter={(value) => formatComparisonMetricValue(pair.xMetric, Number(value))}
+            name={resultMetricValueLabel(pair.xMetric)}
+            tickFormatter={(value) => formatResultMetricValue(pair.xMetric, Number(value))}
             tickLine={false}
             tickMargin={8}
             type="number"
@@ -394,8 +394,8 @@ function EvaluationTradeoffChart({
             axisLine={false}
             dataKey="y"
             domain={pair.yMetric.kind === "number" ? [0, 1] : undefined}
-            name={comparisonMetricValueLabel(pair.yMetric)}
-            tickFormatter={(value) => formatComparisonMetricValue(pair.yMetric, Number(value))}
+            name={resultMetricValueLabel(pair.yMetric)}
+            tickFormatter={(value) => formatResultMetricValue(pair.yMetric, Number(value))}
             tickLine={false}
             tickMargin={8}
             type="number"
@@ -406,16 +406,16 @@ function EvaluationTradeoffChart({
               <ChartTooltipContent
                 hideIndicator
                 labelFormatter={(_label, payload) => {
-                  const datum = payload?.[0]?.payload as ComparisonTradeoffDatum | undefined;
+                  const datum = payload?.[0]?.payload as ResultTradeoffDatum | undefined;
                   return datum?.rowLabel ?? "Evaluation";
                 }}
                 formatter={(_value, _name, item) => {
-                  const datum = item.payload as ComparisonTradeoffDatum;
+                  const datum = item.payload as ResultTradeoffDatum;
                   if (item.dataKey === "x") {
-                    return renderMetricTooltipLine(comparisonMetricValueLabel(pair.xMetric), datum.xDisplay);
+                    return renderMetricTooltipLine(resultMetricValueLabel(pair.xMetric), datum.xDisplay);
                   }
                   if (item.dataKey === "y") {
-                    return renderMetricTooltipLine(comparisonMetricValueLabel(pair.yMetric), datum.yDisplay);
+                    return renderMetricTooltipLine(resultMetricValueLabel(pair.yMetric), datum.yDisplay);
                   }
                   return null;
                 }}
@@ -441,7 +441,7 @@ function EvaluationTradeoffChart({
   );
 }
 
-type ComparisonMetricChartRow =
+type ResultMetricChartRow =
   | {
       kind: "group";
       rowKey: string;
@@ -449,17 +449,17 @@ type ComparisonMetricChartRow =
       label: string;
       value?: undefined;
     }
-  | (ComparisonMetricDatum & {
+  | (ResultMetricDatum & {
       kind: "row";
       rowKey: string;
       label: string;
     });
 
-function buildComparisonMetricChartRows(
-  data: readonly ComparisonMetricDatum[],
-  groups: readonly ComparisonGroupPresentation[],
-): ComparisonMetricChartRow[] {
-  const rowsByGroup = new Map<string, ComparisonMetricDatum[]>();
+function buildResultMetricChartRows(
+  data: readonly ResultMetricDatum[],
+  groups: readonly ResultGroupPresentation[],
+): ResultMetricChartRow[] {
+  const rowsByGroup = new Map<string, ResultMetricDatum[]>();
   for (const row of data) {
     const entries = rowsByGroup.get(row.groupId);
     if (entries) {
@@ -469,7 +469,7 @@ function buildComparisonMetricChartRows(
     }
   }
 
-  const chartRows: ComparisonMetricChartRow[] = [];
+  const chartRows: ResultMetricChartRow[] = [];
   for (const group of groups) {
     const rows = rowsByGroup.get(group.id);
     if (!rows?.length) {
@@ -481,7 +481,7 @@ function buildComparisonMetricChartRows(
       groupId: group.id,
       label: group.label,
     });
-    chartRows.push(...rows.map(toComparisonMetricChartRow));
+    chartRows.push(...rows.map(toResultMetricChartRow));
     rowsByGroup.delete(group.id);
   }
 
@@ -496,13 +496,13 @@ function buildComparisonMetricChartRows(
       groupId: firstRow.groupId,
       label: firstRow.groupLabel,
     });
-    chartRows.push(...rows.map(toComparisonMetricChartRow));
+    chartRows.push(...rows.map(toResultMetricChartRow));
   }
 
   return chartRows;
 }
 
-function toComparisonMetricChartRow(row: ComparisonMetricDatum): ComparisonMetricChartRow {
+function toResultMetricChartRow(row: ResultMetricDatum): ResultMetricChartRow {
   return {
     ...row,
     kind: "row",
@@ -511,16 +511,16 @@ function toComparisonMetricChartRow(row: ComparisonMetricDatum): ComparisonMetri
   };
 }
 
-function ComparisonGroupedAxisTick({
+function ResultGroupedAxisTick({
   layout,
   payload,
   rowsByKey,
   x = 0,
   y = 0,
 }: {
-  layout: ComparisonCategoryAxisLayout;
+  layout: ResultCategoryAxisLayout;
   payload?: { value?: number | string };
-  rowsByKey: ReadonlyMap<string, ComparisonMetricChartRow>;
+  rowsByKey: ReadonlyMap<string, ResultMetricChartRow>;
   x?: number;
   y?: number;
 }) {
@@ -533,8 +533,8 @@ function ComparisonGroupedAxisTick({
   const maxCharsPerLine = isGroup
     ? layout.yAxisMaxCharsPerLine
     : Math.max(8, layout.yAxisMaxCharsPerLine - 3);
-  const lines = wrapComparisonCategoryAxisLabel(row.label, maxCharsPerLine);
-  const firstLineY = -((lines.length - 1) * COMPARISON_CATEGORY_AXIS_LINE_HEIGHT) / 2;
+  const lines = wrapResultCategoryAxisLabel(row.label, maxCharsPerLine);
+  const firstLineY = -((lines.length - 1) * RESULT_CATEGORY_AXIS_LINE_HEIGHT) / 2;
   const leftEdge = -layout.yAxisWidth + (isGroup ? 8 : 24);
 
   return (
@@ -547,7 +547,7 @@ function ComparisonGroupedAxisTick({
           <tspan
             key={`${line}-${index}`}
             x={leftEdge}
-            y={firstLineY + index * COMPARISON_CATEGORY_AXIS_LINE_HEIGHT}
+            y={firstLineY + index * RESULT_CATEGORY_AXIS_LINE_HEIGHT}
           >
             {line}
           </tspan>
@@ -557,8 +557,8 @@ function ComparisonGroupedAxisTick({
   );
 }
 
-function buildVisualSummaryGroups(rows: readonly ComparisonEvidenceRow[]): ComparisonGroupPresentation[] {
-  const groupsById = new Map<string, Omit<ComparisonGroupPresentation, "color"> & { versionOrdinal: number }>();
+function buildVisualSummaryGroups(rows: readonly ResultEvidenceRow[]): ResultGroupPresentation[] {
+  const groupsById = new Map<string, Omit<ResultGroupPresentation, "color"> & { versionOrdinal: number }>();
   for (const row of rows) {
     const groupId = resultVersionGroupId(row);
     if (!groupsById.has(groupId)) {
@@ -582,9 +582,9 @@ function buildVisualSummaryGroups(rows: readonly ComparisonEvidenceRow[]): Compa
     }));
 }
 
-function comparisonMetricAxisDomain(
-  data: ComparisonMetricDatum[],
-  descriptor: ComparisonMetricDescriptor,
+function resultMetricAxisDomain(
+  data: ResultMetricDatum[],
+  descriptor: ResultMetricDescriptor,
 ): [number, number] | undefined {
   if (descriptor.kind !== "number") {
     return undefined;
@@ -593,9 +593,9 @@ function comparisonMetricAxisDomain(
 }
 
 function buildGroupLegendItems(
-  groups: readonly ComparisonGroupPresentation[],
-  data: readonly ComparisonTradeoffDatum[],
-): ComparisonGroupPresentation[] {
+  groups: readonly ResultGroupPresentation[],
+  data: readonly ResultTradeoffDatum[],
+): ResultGroupPresentation[] {
   const groupIdsInData = new Set(data.map((datum) => datum.groupId));
   return groups.filter((group) => groupIdsInData.has(group.id));
 }
@@ -603,7 +603,7 @@ function buildGroupLegendItems(
 function GroupColorKey({
   items,
 }: {
-  items: readonly ComparisonGroupPresentation[];
+  items: readonly ResultGroupPresentation[];
 }) {
   if (items.length <= 1) {
     return null;
@@ -637,20 +637,20 @@ function renderMetricTooltipLine(label: string, displayValue: string) {
   );
 }
 
-function bestDirectionLabel(descriptor: ComparisonMetricDescriptor): string {
+function bestDirectionLabel(descriptor: ResultMetricDescriptor): string {
   return descriptor.direction === "lower" ? "Lower is better" : "Higher is better";
 }
 
-function tradeoffPairLabel(pair: ComparisonTradeoffPair): string {
+function tradeoffPairLabel(pair: ResultTradeoffPair): string {
   return pair.label;
 }
 
-function tradeoffTabLabel(pair: ComparisonTradeoffPair): string {
+function tradeoffTabLabel(pair: ResultTradeoffPair): string {
   return pair.label;
 }
 
 function defaultTradeoffPairKey(
-  pairs: readonly ComparisonTradeoffPair[],
+  pairs: readonly ResultTradeoffPair[],
   metricId: string | undefined,
 ): string {
   return (metricId ? pairs.find((pair) => pair.xMetric.id === metricId) : undefined)?.key

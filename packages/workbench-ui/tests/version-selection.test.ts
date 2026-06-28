@@ -75,6 +75,7 @@ function snapshot(input: {
     skillSources: [],
     skillBundles: [],
     evals: [],
+    evalVersions: [],
     agents: [],
     runs: [],
     jobs: [],

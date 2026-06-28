@@ -665,7 +665,7 @@ function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): Work
     ...(snapshot.results ? {
       results: {
         ...snapshot.results,
-        versions: snapshot.results.versions.map((version) => ({
+        skillVersions: snapshot.results.skillVersions.map((version) => ({
           ...version,
           ...(version.files ? { files: inspectionFileManifests(version.files) } : {}),
         })),

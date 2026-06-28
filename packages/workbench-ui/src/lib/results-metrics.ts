@@ -3,12 +3,12 @@ import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-col
 import {
   workbenchJobReportMetricBreakdown,
   type WorkbenchAgentVersion,
+  type WorkbenchEvalVersionSummary,
   type WorkbenchEvalSnapshot,
   type WorkbenchInspectionSnapshot,
   type WorkbenchJob,
   type WorkbenchJobReport,
   type WorkbenchResultCell,
-  type WorkbenchResultEvaluation,
   type WorkbenchResults,
   type WorkbenchRun,
   type WorkbenchSampleCoverage,
@@ -25,23 +25,23 @@ import {
   shortId,
 } from "./format";
 
-export type ComparisonMetricKind = "number" | "duration_ms" | "currency_usd";
-export type ComparisonMetricDirection = "higher" | "lower";
-export type ComparisonMetricSemanticRole = "performance" | "speed" | "cost";
+export type ResultMetricKind = "number" | "duration_ms" | "currency_usd";
+export type ResultMetricDirection = "higher" | "lower";
+export type ResultMetricSemanticRole = "performance" | "speed" | "cost";
 
-export interface ComparisonMetricDescriptor {
+export interface ResultMetricDescriptor {
   id: string;
   label: string;
   displayLabel?: string;
   valueLabel?: string;
   testId?: string;
-  direction: ComparisonMetricDirection;
-  kind: ComparisonMetricKind;
-  semanticRole?: ComparisonMetricSemanticRole;
+  direction: ResultMetricDirection;
+  kind: ResultMetricKind;
+  semanticRole?: ResultMetricSemanticRole;
   primary: boolean;
 }
 
-export interface ComparisonEvidenceRow {
+export interface ResultEvidenceRow {
   rowId: string;
   groupId: string;
   groupLabel: string;
@@ -53,7 +53,7 @@ export interface ComparisonEvidenceRow {
   versionOrdinal: number;
   versionBadges: string[];
   skillName: string;
-  evalHash: string;
+  evalVersionId: string;
   agentName: string;
   agentHash: string;
   agentDetail: string;
@@ -69,41 +69,41 @@ export interface ComparisonEvidenceRow {
   costPerSampleUsd?: number;
 }
 
-export interface ComparisonGroupPresentation {
+export interface ResultGroupPresentation {
   id: string;
   label: string;
   color: string;
 }
 
-export interface ComparisonEvaluationOption {
+export interface ResultEvalVersionOption {
   id: string;
   label: string;
   detail: string;
   subtitle: string;
   ordinal: number;
-  isLatest: boolean;
+  isCurrent: boolean;
   createdAt: string;
   updatedAt: string;
   caseCount: number;
   gradeAdapter: string;
 }
 
-export interface ComparisonGroup {
+export interface ResultGroup {
   id: string;
   label: string;
   skillName: string;
   setupRank: number;
-  cells: ComparisonResolvedCell[];
+  cells: ResultResolvedCell[];
 }
 
-export interface ComparisonResolvedCell {
+export interface ResultResolvedCell {
   cell: WorkbenchResultCell;
   version: WorkbenchSkillVersion;
   agent?: WorkbenchAgentVersion;
-  evaluation?: WorkbenchResultEvaluation;
+  evaluation?: WorkbenchEvalVersionSummary;
 }
 
-export interface ComparisonMetricDatum {
+export interface ResultMetricDatum {
   rowId: string;
   rowLabel: string;
   groupId: string;
@@ -114,14 +114,14 @@ export interface ComparisonMetricDatum {
   displayValue: string;
 }
 
-export interface ComparisonTradeoffPair {
+export interface ResultTradeoffPair {
   key: string;
   label: string;
-  xMetric: ComparisonMetricDescriptor;
-  yMetric: ComparisonMetricDescriptor;
+  xMetric: ResultMetricDescriptor;
+  yMetric: ResultMetricDescriptor;
 }
 
-export interface ComparisonTradeoffDatum {
+export interface ResultTradeoffDatum {
   rowId: string;
   rowLabel: string;
   groupId: string;
@@ -133,14 +133,14 @@ export interface ComparisonTradeoffDatum {
   yDisplay: string;
 }
 
-export interface ComparisonLabelContext {
+export interface ResultLabelContext {
   allVersions?: readonly WorkbenchVersion[];
   currentVersionId?: string | null;
   defaultSkill?: string | null;
   publishedVersionId?: string | null;
 }
 
-const COMPARISON_METRIC_DESCRIPTORS: readonly ComparisonMetricDescriptor[] = [
+const RESULT_METRIC_DESCRIPTORS: readonly ResultMetricDescriptor[] = [
   {
     id: "score",
     label: "Score",
@@ -175,108 +175,68 @@ const COMPARISON_METRIC_DESCRIPTORS: readonly ComparisonMetricDescriptor[] = [
   },
 ];
 
-export function comparisonMetricDisplayLabel(descriptor: ComparisonMetricDescriptor): string {
+export function resultMetricDisplayLabel(descriptor: ResultMetricDescriptor): string {
   return descriptor.displayLabel ?? descriptor.label;
 }
 
-export function comparisonMetricValueLabel(descriptor: ComparisonMetricDescriptor): string {
-  return descriptor.valueLabel ?? comparisonMetricDisplayLabel(descriptor);
+export function resultMetricValueLabel(descriptor: ResultMetricDescriptor): string {
+  return descriptor.valueLabel ?? resultMetricDisplayLabel(descriptor);
 }
 
-export function comparisonMetricTestId(descriptor: ComparisonMetricDescriptor): string {
+export function resultMetricTestId(descriptor: ResultMetricDescriptor): string {
   return descriptor.testId ?? descriptor.id.replace(/[^a-z0-9]+/giu, "-").toLowerCase();
 }
 
-export function comparisonForSnapshot(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
-  return snapshot.results ?? { versions: [], evaluations: [], agents: [], cells: [] };
+export function resultsForSnapshot(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
+  return snapshot.results ?? { skillVersions: [], evalVersions: [], agentVersions: [], cells: [] };
 }
 
-export function comparisonForScorecard(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
-  return comparisonForSnapshot(snapshot);
+export function resultsForScorecard(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
+  return resultsForSnapshot(snapshot);
 }
 
-export function evaluationOptionsForScorecard(
+export function evalVersionOptionsForResults(
   snapshot: WorkbenchInspectionSnapshot,
-  results: WorkbenchResults,
-): ComparisonEvaluationOption[] {
-  const resultEvaluationIds = new Set(results.cells.map((cell) => cell.evaluationId));
-  const resultEvaluationById = new Map(results.evaluations.map((evaluation) => [evaluation.id, evaluation]));
-  const orderedSnapshotEvals = orderEvaluationSnapshots(snapshot.evals).filter((evaluation) =>
-    resultEvaluationIds.has(evaluation.hash)
-  );
-  const optionRecords: Array<{
-    id: string;
-    label?: string;
-    caseCount?: number;
-    gradeAdapter?: string;
-    createdAt?: string;
-    updatedAt?: string;
-    snapshot?: WorkbenchEvalSnapshot;
-  }> = orderedSnapshotEvals.map((snapshotEval) => {
-    const resultEvaluation = resultEvaluationById.get(snapshotEval.hash);
-    return {
-      id: snapshotEval.hash,
-      label: resultEvaluation?.label,
-      caseCount: resultEvaluation?.caseCount ?? snapshotEval.caseCount,
-      gradeAdapter: resultEvaluation?.gradeAdapter ?? snapshotEval.gradeAdapter,
-      createdAt: resultEvaluation?.createdAt ?? snapshotEval.createdAt,
-      updatedAt: resultEvaluation?.updatedAt ?? snapshotEval.updatedAt,
-      snapshot: snapshotEval,
-    };
-  });
-
-  const seen = new Set(optionRecords.map((record) => record.id));
-  for (const evaluation of results.evaluations) {
-    if (!resultEvaluationIds.has(evaluation.id) || seen.has(evaluation.id)) {
-      continue;
-    }
-    seen.add(evaluation.id);
-    optionRecords.push(evaluation);
-  }
-
-  optionRecords.sort((left, right) =>
-    (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.id.localeCompare(right.id)
-  );
-
-  const latestEvaluationId = optionRecords.at(-1)?.id ?? null;
-  return optionRecords.map((evaluation, index) => {
-    const gradeAdapter = normalizeGradeAdapter(evaluation.gradeAdapter) ?? "tests";
-    const detail = evaluationDetail({
-      caseCount: evaluation.caseCount,
-      gradeAdapter,
+  _results: WorkbenchResults,
+): ResultEvalVersionOption[] {
+  return [...snapshot.evalVersions]
+    .sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id))
+    .map((evaluation) => {
+      const gradeAdapter = normalizeGradeAdapter(evaluation.gradeAdapter) ?? "tests";
+      const detail = evaluationDetail({
+        caseCount: evaluation.caseCount,
+        gradeAdapter,
+      });
+      const createdAt = evaluation.createdAt;
+      return {
+        id: evaluation.id,
+        label: evaluation.label,
+        detail,
+        subtitle: evaluationOptionSubtitle(createdAt, detail, evaluation.current),
+        ordinal: evaluation.ordinal,
+        isCurrent: evaluation.current,
+        createdAt,
+        updatedAt: evaluation.updatedAt,
+        caseCount: evaluation.caseCount,
+        gradeAdapter,
+      };
     });
-    const isLatest = evaluation.id === latestEvaluationId;
-    const label = evaluation.label?.trim() || `Evaluation ${index + 1}`;
-    const createdAt = evaluation.createdAt ?? "";
-    return {
-      id: evaluation.id,
-      label,
-      detail,
-      subtitle: evaluationOptionSubtitle(createdAt, detail, isLatest),
-      ordinal: index + 1,
-      isLatest,
-      createdAt,
-      updatedAt: evaluation.updatedAt ?? createdAt,
-      caseCount: evaluation.caseCount ?? 0,
-      gradeAdapter,
-    };
-  });
 }
 
-export function defaultEvaluationIdForScorecard(
-  options: readonly ComparisonEvaluationOption[],
+export function defaultEvalVersionIdForResults(
+  options: readonly ResultEvalVersionOption[],
 ): string | null {
-  return options.find((option) => option.isLatest)?.id ?? null;
+  return options.find((option) => option.isCurrent)?.id ?? options.at(-1)?.id ?? null;
 }
 
-export function buildComparisonGroups(
+export function buildResultGroups(
   results: WorkbenchResults,
-  _context: ComparisonLabelContext = {},
-): ComparisonGroup[] {
-  const versionsById = new Map(results.versions.map((version) => [version.id, version]));
-  const agentsById = new Map(results.agents.map((agent) => [agent.id, agent]));
-  const evaluationsById = new Map(results.evaluations.map((evaluation) => [evaluation.id, evaluation]));
-  const cellsByGroup = new Map<string, ComparisonResolvedCell[]>();
+  _context: ResultLabelContext = {},
+): ResultGroup[] {
+  const versionsById = new Map(results.skillVersions.map((version) => [version.id, version]));
+  const agentsById = new Map(results.agentVersions.map((agent) => [agent.id, agent]));
+  const evaluationsById = new Map(results.evalVersions.map((evaluation) => [evaluation.id, evaluation]));
+  const cellsByGroup = new Map<string, ResultResolvedCell[]>();
 
   for (const cell of results.cells) {
     const version = versionsById.get(cell.skillVersionId);
@@ -284,11 +244,11 @@ export function buildComparisonGroups(
       continue;
     }
     const key = resultGroupId(version);
-    const resolvedCell: ComparisonResolvedCell = {
+    const resolvedCell: ResultResolvedCell = {
       cell,
       version,
       ...(agentsById.get(cell.agentVersionId) ? { agent: agentsById.get(cell.agentVersionId) } : {}),
-      ...(evaluationsById.get(cell.evaluationId) ? { evaluation: evaluationsById.get(cell.evaluationId) } : {}),
+      ...(evaluationsById.get(cell.evalVersionId) ? { evaluation: evaluationsById.get(cell.evalVersionId) } : {}),
     };
     const cells = cellsByGroup.get(key);
     if (cells) {
@@ -298,8 +258,8 @@ export function buildComparisonGroups(
     }
   }
 
-  const versionOrdinalById = resultVersionOrdinals(results.versions);
-  return [...cellsByGroup.entries()].flatMap(([key, cells]): ComparisonGroup[] => {
+  const versionOrdinalById = resultVersionOrdinals(results.skillVersions);
+  return [...cellsByGroup.entries()].flatMap(([key, cells]): ResultGroup[] => {
     const first = cells[0];
     if (!first) {
       return [];
@@ -318,18 +278,18 @@ export function buildComparisonGroups(
   );
 }
 
-export function buildComparisonEvidenceRows({
+export function buildResultEvidenceRows({
   agents,
   groups,
   jobs = [],
   runs,
 }: {
   agents: WorkbenchAgentVersion[];
-  context?: ComparisonLabelContext;
-  groups: ComparisonGroup[];
+  context?: ResultLabelContext;
+  groups: ResultGroup[];
   jobs?: readonly WorkbenchJob[];
   runs: WorkbenchRun[];
-}): ComparisonEvidenceRow[] {
+}): ResultEvidenceRow[] {
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
   const runsById = new Map(runs.map((run) => [run.id, run]));
   const versionOrdinalById = resultVersionOrdinals(groups.flatMap((group) => group.cells.map((entry) => entry.version)));
@@ -348,9 +308,9 @@ export function buildComparisonEvidenceRows({
         rowId: [
           group.id,
           cell.skillVersionId,
-          cell.evaluationId,
+          cell.evalVersionId,
           cell.agentVersionId,
-        ].map(encodeComparisonGroupPart).join("/"),
+        ].map(encodeResultGroupPart).join("/"),
         groupId: group.id,
         groupLabel: group.label,
         setupLabel: group.label,
@@ -361,7 +321,7 @@ export function buildComparisonEvidenceRows({
         versionOrdinal: ordinal,
         versionBadges: resultVersionBadges(version),
         skillName: version.id,
-        evalHash: cell.evaluationId,
+        evalVersionId: cell.evalVersionId,
         agentName: agent?.name ?? cell.agentVersionId,
         agentHash: cell.agentVersionId,
         agentDetail: formatAgentVersion(agent),
@@ -378,13 +338,13 @@ export function buildComparisonEvidenceRows({
       };
     })
   );
-  return collapseUnmeasuredComparisonRows(rows);
+  return collapseUnmeasuredResultRows(rows);
 }
 
 export function formatVersionDisplayName(
   versionId: string,
   versions: readonly WorkbenchVersion[],
-  _context: ComparisonLabelContext = {},
+  _context: ResultLabelContext = {},
 ): string {
   const version = versions.find((entry) => entry.id === versionId);
   if (!version) {
@@ -395,7 +355,7 @@ export function formatVersionDisplayName(
 
 export function formatSkillDisplayName(
   skillName: string,
-  context: ComparisonLabelContext = {},
+  context: ResultLabelContext = {},
 ): string {
   const normalized = skillName.trim();
   if (isActiveSkillName(normalized, context.defaultSkill?.trim())) {
@@ -412,7 +372,7 @@ export function formatEvaluationDisplayName(
   evals: readonly WorkbenchEvalSnapshot[],
 ): string {
   const index = orderEvaluationSnapshots(evals).findIndex((evalSnapshot) => evalSnapshot.hash === evalHash);
-  return index >= 0 ? `Evaluation ${index + 1}` : "Recorded evaluation";
+  return index >= 0 ? `Eval v${index + 1}` : "Recorded eval";
 }
 
 export function formatEvaluationDisplayDetail(
@@ -425,30 +385,30 @@ export function formatEvaluationDisplayDetail(
     : undefined);
 }
 
-export function buildComparisonMetricDescriptors(
-  rows: readonly ComparisonEvidenceRow[],
-): ComparisonMetricDescriptor[] {
-  return COMPARISON_METRIC_DESCRIPTORS.filter((descriptor) =>
-    rows.some((row) => getComparisonMetricValue(row, descriptor) !== undefined)
+export function buildResultMetricDescriptors(
+  rows: readonly ResultEvidenceRow[],
+): ResultMetricDescriptor[] {
+  return RESULT_METRIC_DESCRIPTORS.filter((descriptor) =>
+    rows.some((row) => getResultMetricValue(row, descriptor) !== undefined)
   );
 }
 
-export function buildComparisonTableMetricDescriptors(
-  rows?: readonly ComparisonEvidenceRow[],
-): ComparisonMetricDescriptor[] {
-  const descriptors = COMPARISON_METRIC_DESCRIPTORS.filter((descriptor) => descriptor.primary);
+export function buildResultTableMetricDescriptors(
+  rows?: readonly ResultEvidenceRow[],
+): ResultMetricDescriptor[] {
+  const descriptors = RESULT_METRIC_DESCRIPTORS.filter((descriptor) => descriptor.primary);
   if (!rows) {
     return descriptors;
   }
   return descriptors.filter((descriptor) =>
     descriptor.id !== "costPerSampleUsd" ||
-    rows.some((row) => getComparisonMetricValue(row, descriptor) !== undefined)
+    rows.some((row) => getResultMetricValue(row, descriptor) !== undefined)
   );
 }
 
-export function selectPrimaryComparisonMetrics(
-  descriptors: ComparisonMetricDescriptor[] | undefined,
-): ComparisonMetricDescriptor[] {
+export function selectPrimaryResultMetrics(
+  descriptors: ResultMetricDescriptor[] | undefined,
+): ResultMetricDescriptor[] {
   const available = descriptors ?? [];
   const primary = available.filter((descriptor) => descriptor.primary);
   if (primary.length > 0) {
@@ -457,13 +417,13 @@ export function selectPrimaryComparisonMetrics(
   return available.slice(0, 3);
 }
 
-export function buildComparisonMetricData(
-  rows: readonly ComparisonEvidenceRow[],
-  descriptor: ComparisonMetricDescriptor,
+export function buildResultMetricData(
+  rows: readonly ResultEvidenceRow[],
+  descriptor: ResultMetricDescriptor,
   groupColorById?: ReadonlyMap<string, string>,
-): ComparisonMetricDatum[] {
+): ResultMetricDatum[] {
   return rows.flatMap((row, index) => {
-    const value = getComparisonMetricValue(row, descriptor);
+    const value = getResultMetricValue(row, descriptor);
     if (value === undefined) {
       return [];
     }
@@ -474,17 +434,17 @@ export function buildComparisonMetricData(
       groupId,
       groupLabel: row.versionLabel,
       configurationLabel: row.agentDetail,
-      color: resolveComparisonGroupChartColor(groupId, groupColorById, index),
+      color: resolveResultGroupChartColor(groupId, groupColorById, index),
       value,
-      displayValue: formatComparisonMetricValue(descriptor, value),
+      displayValue: formatResultMetricValue(descriptor, value),
     }];
   }).sort((left, right) => compareMetricRows(left, right, descriptor));
 }
 
-export function buildComparisonTradeoffPairs(
-  descriptors: ComparisonMetricDescriptor[] | undefined,
-): ComparisonTradeoffPair[] {
-  const primary = selectPrimaryComparisonMetrics(descriptors);
+export function buildResultTradeoffPairs(
+  descriptors: ResultMetricDescriptor[] | undefined,
+): ResultTradeoffPair[] {
+  const primary = selectPrimaryResultMetrics(descriptors);
   if (primary.length < 2) {
     return [];
   }
@@ -494,20 +454,20 @@ export function buildComparisonTradeoffPairs(
     .filter((descriptor) => descriptor.id !== performanceMetric.id)
     .map((descriptor) => ({
       key: `${performanceMetric.id}::${descriptor.id}`,
-      label: `${comparisonMetricDisplayLabel(performanceMetric)} vs ${comparisonMetricDisplayLabel(descriptor)}`,
+      label: `${resultMetricDisplayLabel(performanceMetric)} vs ${resultMetricDisplayLabel(descriptor)}`,
       xMetric: descriptor,
       yMetric: performanceMetric,
     }));
 }
 
-export function buildComparisonTradeoffData(
-  rows: readonly ComparisonEvidenceRow[],
-  pair: ComparisonTradeoffPair,
+export function buildResultTradeoffData(
+  rows: readonly ResultEvidenceRow[],
+  pair: ResultTradeoffPair,
   groupColorById?: ReadonlyMap<string, string>,
-): ComparisonTradeoffDatum[] {
+): ResultTradeoffDatum[] {
   return rows.flatMap((row, index) => {
-    const x = getComparisonMetricValue(row, pair.xMetric);
-    const y = getComparisonMetricValue(row, pair.yMetric);
+    const x = getResultMetricValue(row, pair.xMetric);
+    const y = getResultMetricValue(row, pair.yMetric);
     if (x === undefined || y === undefined) {
       return [];
     }
@@ -517,17 +477,17 @@ export function buildComparisonTradeoffData(
       rowLabel: `${row.versionLabel} / ${row.agentDetail}`,
       groupId,
       groupLabel: row.versionLabel,
-      color: resolveComparisonGroupChartColor(groupId, groupColorById, index),
+      color: resolveResultGroupChartColor(groupId, groupColorById, index),
       x,
       y,
-      xDisplay: formatComparisonMetricValue(pair.xMetric, x),
-      yDisplay: formatComparisonMetricValue(pair.yMetric, y),
+      xDisplay: formatResultMetricValue(pair.xMetric, x),
+      yDisplay: formatResultMetricValue(pair.yMetric, y),
     }];
   });
 }
 
-export function formatComparisonMetricValue(
-  descriptor: ComparisonMetricDescriptor,
+export function formatResultMetricValue(
+  descriptor: ResultMetricDescriptor,
   value: number | undefined,
 ): string {
   if (value === undefined) {
@@ -542,15 +502,15 @@ export function formatComparisonMetricValue(
   return formatScore(value);
 }
 
-export function formatComparisonTableMetricValue(
-  row: ComparisonEvidenceRow,
-  descriptor: ComparisonMetricDescriptor,
+export function formatResultTableMetricValue(
+  row: ResultEvidenceRow,
+  descriptor: ResultMetricDescriptor,
 ): string {
-  const value = getComparisonMetricValue(row, descriptor);
+  const value = getResultMetricValue(row, descriptor);
   if (descriptor.id === "costPerSampleUsd" && value === undefined) {
     return missingCostLabelForStatus(row.statusLabel, Boolean(row.runId));
   }
-  return formatComparisonMetricValue(descriptor, value);
+  return formatResultMetricValue(descriptor, value);
 }
 
 export function missingCostLabelForStatus(statusLabel: string | null | undefined, hasRun: boolean): string {
@@ -564,9 +524,9 @@ export function missingCostLabelForStatus(statusLabel: string | null | undefined
   return "Not reported";
 }
 
-export function getComparisonMetricValue(
-  row: ComparisonEvidenceRow,
-  descriptor: ComparisonMetricDescriptor,
+export function getResultMetricValue(
+  row: ResultEvidenceRow,
+  descriptor: ResultMetricDescriptor,
 ): number | undefined {
   if (descriptor.id === "score") {
     return finiteNumber(row.score);
@@ -580,7 +540,7 @@ export function getComparisonMetricValue(
   return undefined;
 }
 
-export function resolveComparisonGroupChartColor(
+export function resolveResultGroupChartColor(
   groupId: string,
   groupColorById: ReadonlyMap<string, string> | undefined,
   fallbackIndex: number,
@@ -588,7 +548,7 @@ export function resolveComparisonGroupChartColor(
   return groupColorById?.get(groupId) ?? getCategoricalChartColor(fallbackIndex);
 }
 
-export function resultVersionGroupId(row: ComparisonEvidenceRow): string {
+export function resultVersionGroupId(row: ResultEvidenceRow): string {
   if (row.versionDetail === "local:.") {
     return row.versionId;
   }
@@ -596,7 +556,7 @@ export function resultVersionGroupId(row: ComparisonEvidenceRow): string {
 }
 
 function resultGroupId(version: WorkbenchSkillVersion): string {
-  return ["version", version.id].map(encodeComparisonGroupPart).join("/");
+  return ["version", version.id].map(encodeResultGroupPart).join("/");
 }
 
 function resultVersionOrdinals(versions: readonly WorkbenchSkillVersion[]): Map<string, number> {
@@ -633,8 +593,8 @@ function resultVersionSetupRank(version: WorkbenchSkillVersion): number {
 }
 
 function compareResolvedCells(
-  left: ComparisonResolvedCell,
-  right: ComparisonResolvedCell,
+  left: ResultResolvedCell,
+  right: ResultResolvedCell,
   versionOrdinalById: ReadonlyMap<string, number>,
 ): number {
   return (versionOrdinalById.get(right.version.id) ?? 0) - (versionOrdinalById.get(left.version.id) ?? 0) ||
@@ -642,7 +602,7 @@ function compareResolvedCells(
       numeric: true,
       sensitivity: "base",
     }) ||
-    left.cell.evaluationId.localeCompare(right.cell.evaluationId) ||
+    left.cell.evalVersionId.localeCompare(right.cell.evalVersionId) ||
     left.cell.agentVersionId.localeCompare(right.cell.agentVersionId);
 }
 
@@ -716,7 +676,7 @@ function readableWord(word: string, index: number): string {
   return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
 }
 
-function encodeComparisonGroupPart(value: string): string {
+function encodeResultGroupPart(value: string): string {
   return encodeURIComponent(value);
 }
 
@@ -728,7 +688,7 @@ function orderEvaluationSnapshots(evals: readonly WorkbenchEvalSnapshot[]): Work
 }
 
 function evaluationDetail(
-  evaluation: Pick<WorkbenchResultEvaluation, "caseCount" | "gradeAdapter"> | undefined,
+  evaluation: Pick<WorkbenchEvalVersionSummary, "caseCount" | "gradeAdapter"> | undefined,
 ): string {
   const parts = [
     evaluation?.caseCount !== undefined ? formatEvalCaseCount(evaluation.caseCount) : null,
@@ -740,10 +700,10 @@ function evaluationDetail(
 function evaluationOptionSubtitle(
   createdAt: string,
   detail: string,
-  isLatest: boolean,
+  isCurrent: boolean,
 ): string {
-  const context = isLatest
-    ? "Latest"
+  const context = isCurrent
+    ? "Current"
     : createdAt
       ? `Created ${formatTimestamp(createdAt)}`
       : "Recorded";
@@ -784,8 +744,8 @@ function agentLabel(agent: WorkbenchAgentVersion | undefined): string {
   return formatAgentVersion(agent);
 }
 
-function collapseUnmeasuredComparisonRows(rows: readonly ComparisonEvidenceRow[]): ComparisonEvidenceRow[] {
-  const rowsByVersion = new Map<string, ComparisonEvidenceRow[]>();
+function collapseUnmeasuredResultRows(rows: readonly ResultEvidenceRow[]): ResultEvidenceRow[] {
+  const rowsByVersion = new Map<string, ResultEvidenceRow[]>();
   for (const row of rows) {
     const groupRows = rowsByVersion.get(row.versionId);
     if (groupRows) {
@@ -795,7 +755,7 @@ function collapseUnmeasuredComparisonRows(rows: readonly ComparisonEvidenceRow[]
     }
   }
 
-  const visibleRows: ComparisonEvidenceRow[] = [];
+  const visibleRows: ResultEvidenceRow[] = [];
   for (const groupRows of rowsByVersion.values()) {
     const measuredRows = groupRows.filter((row) =>
       row.runId ||
@@ -884,9 +844,9 @@ function compareVersionLabels(left: string, right: string): number {
 }
 
 function compareMetricRows(
-  left: ComparisonMetricDatum,
-  right: ComparisonMetricDatum,
-  descriptor: ComparisonMetricDescriptor,
+  left: ResultMetricDatum,
+  right: ResultMetricDatum,
+  descriptor: ResultMetricDescriptor,
 ): number {
   const valueOrder = descriptor.direction === "higher"
     ? right.value - left.value

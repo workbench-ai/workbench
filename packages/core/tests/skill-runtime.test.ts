@@ -581,13 +581,13 @@ describe("skill-first Workbench runtime", () => {
     });
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
     const version = (await listWorkbenchVersions({ dir: root })).find((entry) => entry.id === runVersionIds[0]);
-    const versionById = new Map(comparison.versions.map((entry) => [entry.id, entry]));
+    const versionById = new Map(comparison.skillVersions.map((entry) => [entry.id, entry]));
     const scoreByVersionSource = new Map(comparison.cells.map((cell) => {
       const resultVersion = versionById.get(cell.skillVersionId);
       return [resultVersion?.source ?? cell.skillVersionId, cell.quality];
     }));
-    const snapshotVersionById = new Map(snapshot.results?.versions.map((entry) => [entry.id, entry]));
-    const snapshotAgentNameById = new Map(snapshot.results?.agents.map((agent) => [agent.id, agent.name]));
+    const snapshotVersionById = new Map(snapshot.results?.skillVersions.map((entry) => [entry.id, entry]));
+    const snapshotAgentNameById = new Map(snapshot.results?.agentVersions.map((agent) => [agent.id, agent.name]));
     const snapshotScoreByVersionSource = new Map(snapshot.results?.cells
       .filter((cell) => snapshotAgentNameById.get(cell.agentVersionId) === "skill-probe")
       .map((cell) => {
@@ -602,7 +602,7 @@ describe("skill-first Workbench runtime", () => {
     expect(runVersionIds).toHaveLength(1);
     expect(version?.files.map((file) => file.path)).toContain("baselines/dummy-skill/SKILL.md");
     expect(version?.files.map((file) => file.path)).not.toContain("baselines/no-skill/README.md");
-    expect(comparison.versions.map((entry) => entry.source).sort()).toEqual([
+    expect(comparison.skillVersions.map((entry) => entry.source).sort()).toEqual([
       "local:.",
       "local:baselines/dummy-skill",
       "none",
@@ -617,8 +617,8 @@ describe("skill-first Workbench runtime", () => {
       ["none", 0.1],
       ["local:.", 0.9],
     ]));
-    expect([...new Set(snapshot.results?.versions.map((resultVersion) => resultVersion.projectVersionId))]).toEqual(runVersionIds);
-    expect(snapshot.results?.versions.map((entry) => entry.source).sort()).toEqual([
+    expect([...new Set(snapshot.results?.skillVersions.map((resultVersion) => resultVersion.projectVersionId))]).toEqual(runVersionIds);
+    expect(snapshot.results?.skillVersions.map((entry) => entry.source).sort()).toEqual([
       "local:.",
       "local:baselines/dummy-skill",
       "none",
@@ -728,9 +728,55 @@ describe("skill-first Workbench runtime", () => {
     });
     expect(evalRun?.versionId).toBe(executeRun?.versionId);
     const results = await resultsWorkbench({ dir: root });
-    expect(results.evaluations.map((evaluation) => evaluation.id)).toEqual([evalRun?.evalHash]);
-    expect(results.versions.map((version) => version.projectVersionId ?? version.id)).toEqual([executeRun?.versionId]);
+    expect(results.evalVersions.map((evaluation) => evaluation.hash)).toEqual([evalRun?.evalHash]);
+    expect(results.skillVersions.map((version) => version.projectVersionId ?? version.id)).toEqual([executeRun?.versionId]);
   }, 60_000);
+
+  dockerTest("results select eval versions independently from skill versions", async () => {
+    const root = await makeTempRoot("workbench-results-eval-version-axis-");
+    await createNewWorkbenchSkillProject({ dir: root, agent: "local" });
+
+    await writeScoredCaseTest(root, 1, "one");
+    const [firstRun] = await evalWorkbenchSkill({ dir: root, rerun: true });
+    await writeScoredCaseTest(root, 0.5, "two");
+    const [secondRun] = await evalWorkbenchSkill({ dir: root, rerun: true });
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nSkill source v2.\n");
+    await writeScoredCaseTest(root, 0.25, "three");
+    const [thirdRun] = await evalWorkbenchSkill({ dir: root, rerun: true });
+
+    expect(new Set([firstRun?.evalHash, secondRun?.evalHash, thirdRun?.evalHash]).size).toBe(3);
+    expect(firstRun?.versionId).toBe(secondRun?.versionId);
+    expect(thirdRun?.versionId).not.toBe(firstRun?.versionId);
+
+    const allResults = await resultsWorkbench({ dir: root, eval: "all", projectVersions: "all" });
+    expect(allResults.evalVersions.map((version) => version.label)).toEqual(["Eval v1", "Eval v2", "Eval v3"]);
+    expect(allResults.evalVersions.map((version) => version.current)).toEqual([false, false, true]);
+    expect(new Set(allResults.cells.filter((cell) => cell.runId).map((cell) => cell.evalVersionId))).toEqual(
+      new Set(["eval-v1", "eval-v2", "eval-v3"]),
+    );
+    expect(new Set(allResults.skillVersions.map((version) => version.projectVersionId ?? version.id))).toEqual(
+      new Set([firstRun?.versionId, thirdRun?.versionId]),
+    );
+
+    const currentResults = await resultsWorkbench({ dir: root, eval: "current", projectVersions: "all" });
+    expect(currentResults.evalVersions.map((version) => version.id)).toEqual(["eval-v3"]);
+    expect(currentResults.cells.filter((cell) => cell.runId).map((cell) => cell.evalVersionId)).toEqual(["eval-v3"]);
+
+    const firstResults = await resultsWorkbench({ dir: root, eval: "eval-v1", projectVersions: "all" });
+    expect(firstResults.evalVersions.map((version) => version.id)).toEqual(["eval-v1"]);
+    expect(firstResults.cells.filter((cell) => cell.runId).map((cell) => cell.evalVersionId)).toEqual(["eval-v1"]);
+
+    const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
+    expect(snapshot.evalVersions.map((version) => `${version.label}${version.current ? " current" : ""}`)).toEqual([
+      "Eval v1",
+      "Eval v2",
+      "Eval v3 current",
+    ]);
+    const evalFiles = await filesForWorkbenchRef("eval-v2", { dir: root });
+    expect(evalFiles.map((file) => file.path)).toContain("cases/case-001/case.yaml");
+    const evalCase = await showWorkbenchRef("eval-v2:cases/case-001/case.yaml", { dir: root }) as { content?: string };
+    expect(evalCase.content).toContain("eval version two");
+  }, 90_000);
 
   dockerTest("grade reuses failed terminal grade evidence until rerun", async () => {
     const root = await makeTempRoot("workbench-grade-reuse-failed-");
@@ -854,22 +900,22 @@ describe("skill-first Workbench runtime", () => {
     const comparison = await resultsWorkbench({ dir: root });
 
     expect(defaultRun?.agentName).toBe("default");
-    expect(comparison.versions.map((version) => version.id)).toEqual([patcherRun?.versionId]);
-    expect(comparison.agents.map((agent) => agent.name)).toEqual(["patcher"]);
+    expect(comparison.skillVersions.map((version) => version.id)).toEqual([patcherRun?.versionId]);
+    expect(comparison.agentVersions.map((agent) => agent.name)).toEqual(["patcher"]);
     expect(comparison.cells).toHaveLength(1);
     expect(comparison.cells[0]).toMatchObject({
       runId: patcherRun?.id,
-      agentVersionId: comparison.agents[0]?.id,
+      agentVersionId: comparison.agentVersions[0]?.id,
       quality: 0.9,
     });
 
     const broadened = await resultsWorkbench({ dir: root, projectVersions: "all", agents: "all" });
-    const broadenedAgentNames = new Map(broadened.agents.map((agent) => [agent.id, agent.name]));
+    const broadenedAgentNames = new Map(broadened.agentVersions.map((agent) => [agent.id, agent.name]));
     expect(broadened.cells.map((cell) => broadenedAgentNames.get(cell.agentVersionId))).toEqual(
       expect.arrayContaining(["default", "patcher"]),
     );
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const snapshotAgentNames = new Map(snapshot.results?.agents.map((agent) => [agent.id, agent.name]));
+    const snapshotAgentNames = new Map(snapshot.results?.agentVersions.map((agent) => [agent.id, agent.name]));
     expect(snapshot.results?.cells.map((cell) => snapshotAgentNames.get(cell.agentVersionId))).toEqual(
       expect.arrayContaining(["default", "patcher"]),
     );
@@ -910,7 +956,7 @@ describe("skill-first Workbench runtime", () => {
       throw new Error("Expected both eval runs to record skill version ids.");
     }
     const snapshot = await createWorkbenchInspectionSnapshot({ dir: root });
-    const resultVersionsById = new Map(snapshot.results?.versions.map((version) => [version.id, version]));
+    const resultVersionsById = new Map(snapshot.results?.skillVersions.map((version) => [version.id, version]));
     const resultCellVersionIds = new Set(snapshot.results?.cells.map((cell) => cell.skillVersionId));
     const firstLabel = resultVersionsById.get(firstRun.versionId)?.label ?? "";
     const secondLabel = resultVersionsById.get(secondRun.versionId)?.label ?? "";
@@ -1222,7 +1268,7 @@ describe("skill-first Workbench runtime", () => {
     const initialCell = comparison.cells.find((cell) => cell.skillVersionId === initialVersionId);
     const currentCell = comparison.cells.find((cell) => cell.skillVersionId === committedCurrentVersionId);
 
-    expect(comparison.versions.map((version) => version.id)).toEqual(expect.arrayContaining([initialVersionId, committedCurrentVersionId]));
+    expect(comparison.skillVersions.map((version) => version.id)).toEqual(expect.arrayContaining([initialVersionId, committedCurrentVersionId]));
     expect(initialCell).toMatchObject({
       skillVersionId: initialVersionId,
       runId: initialRun.id,
@@ -1732,7 +1778,7 @@ describe("skill-first Workbench runtime", () => {
 
     const comparison = buildWorkbenchResultsFromState(state);
 
-    expect(comparison.agents.map((agent) => agent.id).sort()).toEqual([newAgentHash, oldAgentHash].sort());
+    expect(comparison.agentVersions.map((agent) => agent.id).sort()).toEqual([newAgentHash, oldAgentHash].sort());
     expect(comparison.cells.find((cell) => cell.agentVersionId === oldAgentHash)).toMatchObject({
       agentVersionId: oldAgentHash,
       runId: "run_old",
@@ -1983,7 +2029,7 @@ describe("skill-first Workbench runtime", () => {
 
     const comparison = buildWorkbenchResultsFromState(state);
 
-    expect(comparison.versions).toEqual([
+    expect(comparison.skillVersions).toEqual([
       expect.objectContaining({ id: "v001", label: "earnings-prep v1" }),
     ]);
   });
@@ -2314,7 +2360,7 @@ describe("skill-first Workbench runtime", () => {
 
     const comparison = buildWorkbenchResultsFromState(state, { versions: "v002", agents: "gpt-5.4-mini" });
 
-    expect(comparison.agents.map((agent) => agent.id)).toEqual([sparkAgentHash]);
+    expect(comparison.agentVersions.map((agent) => agent.id)).toEqual([sparkAgentHash]);
     expect(comparison.cells).toHaveLength(1);
     expect(comparison.cells[0]).toMatchObject({
       skillVersionId: "v002",
@@ -2367,7 +2413,7 @@ describe("skill-first Workbench runtime", () => {
       defaultAgent: liveAgent.name,
     });
 
-    expect(comparison.agents.map((agent) => agent.id)).toEqual([liveAgentHash]);
+    expect(comparison.agentVersions.map((agent) => agent.id)).toEqual([liveAgentHash]);
     expect(comparison.cells).toHaveLength(1);
     expect(comparison.cells[0]).toMatchObject({
       skillVersionId: "v001",
@@ -2392,12 +2438,12 @@ describe("skill-first Workbench runtime", () => {
 
     const comparison = await resultsWorkbench({ dir: root, projectVersions: "all", agents: "patcher" });
 
-    expect(comparison.versions.map((version) => version.id)).toEqual([initial.id]);
-    expect(comparison.agents.map((agent) => agent.name)).toEqual(["patcher"]);
+    expect(comparison.skillVersions.map((version) => version.id)).toEqual([initial.id]);
+    expect(comparison.agentVersions.map((agent) => agent.name)).toEqual(["patcher"]);
     expect(comparison.cells).toHaveLength(1);
     expect(comparison.cells[0]).toMatchObject({
       skillVersionId: initial.id,
-      agentVersionId: comparison.agents[0]?.id,
+      agentVersionId: comparison.agentVersions[0]?.id,
     });
     expect(comparison.cells[0]?.runId).toBeUndefined();
   });
@@ -3184,7 +3230,7 @@ describe("skill-first Workbench runtime", () => {
 
     expect(snapshot.status.currentVersionId).toBe("current");
     expect(snapshot.versions).toHaveLength(1);
-    expect(snapshot.results?.versions.map((version) => version.id)).toEqual(["v001"]);
+    expect(snapshot.results?.skillVersions.map((version) => version.id)).toEqual(["v001"]);
   });
 
   dockerTest("rejects queued eval execution when same-name agent hash has changed", async () => {
@@ -6352,6 +6398,29 @@ async function writePassingCaseTest(root: string): Promise<void> {
     "set -eu",
     "mkdir -p \"$OUTPUT_DIR\"",
     "printf '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}\\n' > \"$OUTPUT_DIR/result.json\"",
+    "",
+  ].join("\n"));
+  await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);
+}
+
+async function writeScoredCaseTest(root: string, score: number, marker: string): Promise<void> {
+  await fs.mkdir(path.join(root, ".workbench", "cases", "case-001", "tests"), { recursive: true });
+  await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "case.yaml"), [
+    "version: 1",
+    "id: case-001",
+    `prompt: Exercise eval version ${marker}.`,
+    "grade:",
+    "  with:",
+    "    criteria:",
+    "      - id: success-evidence",
+    `        description: Captures ${marker} success evidence.`,
+    "",
+  ].join("\n"));
+  await fs.writeFile(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), [
+    "#!/bin/sh",
+    "set -eu",
+    "mkdir -p \"$OUTPUT_DIR\"",
+    `printf '{"ok":true,"score":${score},"metrics":{"score":${score}}}\\n' > "$OUTPUT_DIR/result.json"`,
     "",
   ].join("\n"));
   await fs.chmod(path.join(root, ".workbench", "cases", "case-001", "tests", "test.sh"), 0o755);

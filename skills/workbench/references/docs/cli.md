@@ -153,17 +153,31 @@ Flags:
 
 #### `workbench results`
 
-Shows recorded eval results for selected skill versions and agents.
+Shows recorded eval results for selected skill, eval, and agent versions.
 
 Usage:
 
 ```bash
-workbench results [--versions all|LIST] [--agents all|LIST] [--dir DIR] [--json]
+workbench results [--versions all|LIST] [--eval current|all|EVAL] [--agents all|LIST] [--dir DIR] [--json]
 ```
 
 Flags:
 
-`--json`, `--dir VALUE`, `--help`, `--agents VALUE`, `--versions VALUE`
+`--json`, `--dir VALUE`, `--help`, `--agents VALUE`, `--eval VALUE`, `--versions VALUE`
+
+#### `workbench evals`
+
+Lists eval versions created from eval source changes.
+
+Usage:
+
+```bash
+workbench evals [--dir DIR] [--json]
+```
+
+Flags:
+
+`--json`, `--dir VALUE`, `--help`
 
 #### `workbench traces`
 

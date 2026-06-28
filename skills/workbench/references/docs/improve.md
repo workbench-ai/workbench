@@ -10,13 +10,14 @@ Improve after below-perfect, failed, or reviewed graded evidence:
 
 ```bash
 workbench results
+workbench evals
 workbench show RUN_ID
 workbench improve --dry-run
 workbench improve
 workbench results
 ```
 
-Perfect-only projects need better cases, stricter grading criteria, or higher samples before improvement is useful. Add or tighten eval cases instead of asking for cosmetic source changes.
+Perfect-only projects need better cases, stricter grading criteria, or higher samples before improvement is useful. Add or tighten eval cases instead of asking for cosmetic source changes. After changing eval source, use `workbench evals` or `workbench results --eval eval-vN` when you need to compare old and current score meanings.
 
 ## Candidate and proof
 

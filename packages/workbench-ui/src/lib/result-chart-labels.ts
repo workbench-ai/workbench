@@ -1,4 +1,4 @@
-export const COMPARISON_CATEGORY_AXIS_LINE_HEIGHT = 12;
+export const RESULT_CATEGORY_AXIS_LINE_HEIGHT = 12;
 
 const CATEGORY_AXIS_CHARACTER_WIDTH = 6.4;
 const CATEGORY_AXIS_LABEL_PADDING = 16;
@@ -8,16 +8,16 @@ const CATEGORY_Y_AXIS_MAX_WIDTH = 320;
 const CATEGORY_Y_AXIS_MIN_CHARS_PER_LINE = 12;
 const CATEGORY_Y_AXIS_WIDTH_CHARS_CAP = 42;
 
-export interface ComparisonCategoryAxisLayout {
+export interface ResultCategoryAxisLayout {
   rowHeight: number;
   yAxisMaxCharsPerLine: number;
   yAxisWidth: number;
 }
 
-export function buildComparisonCategoryAxisLayout(
+export function buildResultCategoryAxisLayout(
   labels: readonly string[],
-): ComparisonCategoryAxisLayout {
-  const normalizedLabels = labels.map(normalizeComparisonCategoryAxisLabel);
+): ResultCategoryAxisLayout {
+  const normalizedLabels = labels.map(normalizeResultCategoryAxisLabel);
   const longestLabelLength = normalizedLabels.reduce(
     (maxLength, label) => Math.max(maxLength, label.length),
     0,
@@ -40,18 +40,18 @@ export function buildComparisonCategoryAxisLayout(
   return {
     rowHeight: Math.max(
       34,
-      yAxisMaxLineCount * COMPARISON_CATEGORY_AXIS_LINE_HEIGHT + CATEGORY_AXIS_ROW_PADDING,
+      yAxisMaxLineCount * RESULT_CATEGORY_AXIS_LINE_HEIGHT + CATEGORY_AXIS_ROW_PADDING,
     ),
     yAxisMaxCharsPerLine,
     yAxisWidth,
   };
 }
 
-export function wrapComparisonCategoryAxisLabel(
+export function wrapResultCategoryAxisLabel(
   value: string,
   maxCharsPerLine: number,
 ): string[] {
-  const normalized = normalizeComparisonCategoryAxisLabel(value);
+  const normalized = normalizeResultCategoryAxisLabel(value);
   if (!normalized) {
     return [""];
   }
@@ -101,12 +101,12 @@ function maxWrappedLineCount(
 ): number {
   return labels.reduce(
     (maxLineCount, label) =>
-      Math.max(maxLineCount, wrapComparisonCategoryAxisLabel(label, maxCharsPerLine).length),
+      Math.max(maxLineCount, wrapResultCategoryAxisLabel(label, maxCharsPerLine).length),
     1,
   );
 }
 
-function normalizeComparisonCategoryAxisLabel(value: string): string {
+function normalizeResultCategoryAxisLabel(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
 }
 

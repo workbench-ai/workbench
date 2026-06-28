@@ -400,17 +400,34 @@ export async function runCli(argv: readonly string[], io: CliIo = {
       return emitImproveOutcome(parsed, io, completed.snapshot, improveResult, next);
     }
     if (command === "results") {
+      rejectExtraInput(parsed, {
+        maxPositionals: 1,
+        message: "workbench results does not accept refs or paths.",
+        remediation: "workbench results --eval current",
+      });
       const results = await resultsWorkbench({
         ...core,
         projectVersions: "all",
         resultVersions: stringFlag(parsed, "versions"),
         agents: stringFlag(parsed, "agents"),
+        eval: stringFlag(parsed, "eval"),
       });
       const next = resultsNextCommand(results);
       return emitResult("workbench.cli.results.v1", {
         result: resultsManifest(results),
         next: next as Json,
       }, parsed, io, (format) => formatResults(results, format));
+    }
+    if (command === "evals") {
+      rejectExtraInput(parsed, {
+        maxPositionals: 1,
+        message: "workbench evals does not accept refs or paths.",
+        remediation: "workbench evals",
+      });
+      const snapshot = await createWorkbenchReadOnlyInspectionSnapshot(core);
+      return emitResult("workbench.cli.evals.v1", {
+        evalVersions: snapshot.evalVersions.map(evalVersionManifest) as unknown as Json,
+      }, parsed, io, (format) => formatEvalVersions(snapshot.evalVersions, format));
     }
     if (command === "switch") {
       const versionRef = requiredPositional(parsed, 1, "workbench switch requires VERSION.", "workbench switch VERSION");
@@ -2149,6 +2166,10 @@ async function handleShow(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const version = snapshotVersionByRef(snapshot, objectRef);
   if (version) {
     return output(fileListing("version", version.id, version.files), parsed, io, () => formatFileListing("version", version.id, version.files));
+  }
+  const evalSnapshot = snapshotEvalByRef(snapshot, objectRef);
+  if (evalSnapshot) {
+    return output(fileListing("eval", objectRef, evalSnapshot.files), parsed, io, () => formatFileListing("eval", objectRef, evalSnapshot.files));
   }
   const selection = runOrJobEvidenceSelection(snapshot, objectRef);
   const details = evidenceDetailsForSelection(snapshot, selection);
@@ -8599,18 +8620,18 @@ function snapshotVersionByRef(snapshot: InspectionSnapshot, ref: string): Workbe
 function snapshotResultVersionsByRef(
   snapshot: InspectionSnapshot,
   ref: string,
-): WorkbenchResults["versions"][number][] {
+): WorkbenchResults["skillVersions"][number][] {
   const requested = ref.trim();
   const normalized = requested === "current" ? snapshot.refs.current ?? "" : requested;
   if (!normalized || !snapshot.results) {
     return [];
   }
-  return snapshot.results.versions.filter((version) =>
+  return snapshot.results.skillVersions.filter((version) =>
     resultVersionRefMatches(version, normalized)
   );
 }
 
-function resultVersionRefMatches(version: WorkbenchResults["versions"][number], ref: string): boolean {
+function resultVersionRefMatches(version: WorkbenchResults["skillVersions"][number], ref: string): boolean {
   const candidates = [version.id, version.projectVersionId]
     .filter((value): value is string => typeof value === "string" && value.length > 0);
   return candidates.some((candidate) =>
@@ -8618,6 +8639,27 @@ function resultVersionRefMatches(version: WorkbenchResults["versions"][number], 
     candidate.startsWith(ref) ||
     (candidate.startsWith("v_") && (candidate.slice(2) === ref || candidate.slice(2).startsWith(ref)))
   );
+}
+
+function snapshotEvalByRef(snapshot: InspectionSnapshot, ref: string): InspectionSnapshot["evals"][number] | undefined {
+  const requested = ref.trim();
+  if (!requested) {
+    return undefined;
+  }
+  const candidates = snapshot.evalVersions.filter((version) =>
+    version.id === requested ||
+    version.label.toLowerCase() === requested.toLowerCase() ||
+    version.hash === requested ||
+    version.hash.startsWith(requested)
+  );
+  if (candidates.length > 1) {
+    throw new WorkbenchCodedError("ref_ambiguous", `Eval version ref is ambiguous: ${ref}. Candidates: ${displayCandidateRefs(candidates.map((entry) => entry.id)).join(", ")}.`, {
+      subject: { ref, candidates: candidates.map((entry) => entry.id) },
+      exitCode: 2,
+    });
+  }
+  const hash = candidates[0]?.hash;
+  return hash ? snapshot.evals.find((entry) => entry.hash === hash) : undefined;
 }
 
 function snapshotVersionRefMatches(version: WorkbenchVersion, ref: string): boolean {
@@ -8969,7 +9011,7 @@ function evidenceJobsForSelection(
 }
 
 function fallbackEvidenceJob(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob): WorkbenchRunEvidenceJob {
-  const resultAgent = snapshot.results?.agents.find((agent) => agent.id === job.agentHash);
+  const resultAgent = snapshot.results?.agentVersions.find((agent) => agent.id === job.agentHash);
   const resultVersion = resultVersionForJob(snapshot, job);
   const snapshotAgent = snapshot.agents.find((agent) => agent.hash === job.agentHash);
   const adapter = resultAgent?.adapter ?? snapshotAgent?.agent.adapter ?? job.adapter?.use ?? "recorded";
@@ -9013,8 +9055,8 @@ function usageModelForJob(job: Pick<WorkbenchJob, "result">): string | undefined
 function resultVersionForJob(
   snapshot: WorkbenchInspectionSnapshot,
   job: Pick<WorkbenchJob, "versionId" | "skillName" | "skillBundleHash">,
-): WorkbenchResults["versions"][number] | undefined {
-  const versions = snapshot.results?.versions ?? [];
+): WorkbenchResults["skillVersions"][number] | undefined {
+  const versions = snapshot.results?.skillVersions ?? [];
   return versions.find((version) =>
     version.contentHash === job.skillBundleHash && version.projectVersionId === job.versionId
   ) ??
@@ -9361,7 +9403,7 @@ function manifestOnly(value: unknown): Json {
 
 function resultsManifest(results: WorkbenchResults): Json {
   return {
-    versions: results.versions.map((version) => ({
+    skillVersions: results.skillVersions.map((version) => ({
       ...version,
       ...(version.files
         ? {
@@ -9371,10 +9413,14 @@ function resultsManifest(results: WorkbenchResults): Json {
           }
         : {}),
     })),
-    evaluations: results.evaluations.map((evaluation) => ({ ...evaluation })),
-    agents: results.agents.map((agent) => ({ ...agent })),
+    evalVersions: results.evalVersions.map(evalVersionManifest),
+    agentVersions: results.agentVersions.map((agent) => ({ ...agent })),
     cells: results.cells.map((cell) => ({ ...cell })),
   } as unknown as Json;
+}
+
+function evalVersionManifest(version: WorkbenchResults["evalVersions"][number]): WorkbenchResults["evalVersions"][number] {
+  return { ...version };
 }
 
 function formatLogEntries(entries: readonly WorkbenchLogEntry[], format: HumanFormatOptions): string {
@@ -9439,6 +9485,18 @@ function fileForSnapshotRef(
   const resultVersionFile = fileForResultVersionSnapshotRef(snapshot, objectRef, requestedPath);
   if (resultVersionFile) {
     return resultVersionFile;
+  }
+  const evalSnapshot = snapshotEvalByRef(snapshot, objectRef);
+  if (evalSnapshot) {
+    const file = findShowFile(evalSnapshot.files, requestedPath, objectRef);
+    if (file) {
+      return file;
+    }
+    throw new WorkbenchCodedError("ref_not_found", `File not found in ${objectRef}: ${requestedPath}`, {
+      remediation: `workbench show ${objectRef}`,
+      subject: { ref: objectRef, path: requestedPath },
+      exitCode: 1,
+    });
   }
   const runOrJobFile = fileForRunOrJobSnapshotRef(snapshot, objectRef, requestedPath);
   if (runOrJobFile) {
@@ -9620,7 +9678,7 @@ function ambiguousShowPath(
   });
 }
 
-function fileListing(kind: "version" | "trace" | "artifact", id: string, files: readonly SurfaceSnapshotFile[]): Json {
+function fileListing(kind: "version" | "eval" | "trace" | "artifact", id: string, files: readonly SurfaceSnapshotFile[]): Json {
   return {
     kind,
     id,
@@ -9629,7 +9687,7 @@ function fileListing(kind: "version" | "trace" | "artifact", id: string, files: 
   };
 }
 
-function formatFileListing(kind: "version" | "trace" | "artifact", id: string, files: readonly SurfaceSnapshotFile[]): string {
+function formatFileListing(kind: "version" | "eval" | "trace" | "artifact", id: string, files: readonly SurfaceSnapshotFile[]): string {
   return [
     `${kind}\t${displayRef(id)}\tfiles=${files.length}`,
     ...files.map((file) => `workbench show ${quoteShellArg(showFileRef(id, file.path))}`),
@@ -10152,6 +10210,25 @@ function humanSampleNumber(sample: number): number {
   return sample + 1;
 }
 
+function formatEvalVersions(
+  evalVersions: readonly WorkbenchResults["evalVersions"][number][],
+  format: HumanFormatOptions = PLAIN_HUMAN_FORMAT,
+): string {
+  if (evalVersions.length === 0) {
+    return "No eval versions.";
+  }
+  return renderTable(evalVersions, [
+    { header: "eval", cell: (version) => version.label },
+    { header: "ref", cell: (version) => version.id },
+    { header: "cases", align: "right", cell: (version) => String(version.caseCount) },
+    { header: "grade", cell: (version) => version.gradeAdapter },
+    { header: "runs", align: "right", cell: (version) => String(version.runCount) },
+    { header: "quality", cell: (version) => formatQualityCli(version.latestQuality) },
+    { header: "current", cell: (version) => version.current ? "yes" : "" },
+    { header: "updated", cell: (version) => version.updatedAt },
+  ], format);
+}
+
 function formatResults(
   results: WorkbenchResults,
   format: HumanFormatOptions = PLAIN_HUMAN_FORMAT,
@@ -10168,6 +10245,7 @@ function formatResults(
     ? ["No results."]
     : [renderTable(evidenceCells, [
         { header: "version", cell: (cell) => formatResultVersion(results, cell) },
+        { header: "eval", cell: (cell) => formatResultEval(results, cell) },
         { header: "agent", cell: (cell) => formatResultAgent(results, cell) },
         { header: "status", cell: (cell, options) => styleStatus(cell.status ?? "unknown", options) },
         {
@@ -10207,15 +10285,15 @@ function resultsNextCommand(results: WorkbenchResults): string | null {
   return currentResultVersionsWithoutEvidence(results).length > 0 ? "workbench eval" : null;
 }
 
-function currentResultVersionsWithoutEvidence(results: WorkbenchResults): WorkbenchResults["versions"] {
-  return results.versions.filter((version) =>
+function currentResultVersionsWithoutEvidence(results: WorkbenchResults): WorkbenchResults["skillVersions"] {
+  return results.skillVersions.filter((version) =>
     version.current &&
     !results.cells.some((cell) => cell.skillVersionId === version.id && (cell.runId || cell.status))
   );
 }
 
-function historicalResultVersionsWithoutEvidence(results: WorkbenchResults): WorkbenchResults["versions"] {
-  return results.versions.filter((version) =>
+function historicalResultVersionsWithoutEvidence(results: WorkbenchResults): WorkbenchResults["skillVersions"] {
+  return results.skillVersions.filter((version) =>
     !version.current &&
     results.cells.some((cell) => cell.skillVersionId === version.id) &&
     !results.cells.some((cell) => cell.skillVersionId === version.id && (cell.runId || cell.status))
@@ -10224,7 +10302,7 @@ function historicalResultVersionsWithoutEvidence(results: WorkbenchResults): Wor
 
 function partialResultCellsWithoutEvidence(
   results: WorkbenchResults,
-  versionLevelOmissions: readonly WorkbenchResults["versions"][number][],
+  versionLevelOmissions: readonly WorkbenchResults["skillVersions"][number][],
 ): WorkbenchResults["cells"] {
   const omittedVersionIds = new Set(versionLevelOmissions.map((version) => version.id));
   return results.cells.filter((cell) =>
@@ -10239,13 +10317,13 @@ function formatResultCellList(
   results: WorkbenchResults,
   cells: readonly WorkbenchResults["cells"][number][],
 ): string {
-  const labels = cells.map((cell) => `${formatResultVersion(results, cell)} + ${formatResultAgent(results, cell)}`);
+  const labels = cells.map((cell) => `${formatResultVersion(results, cell)} + ${formatResultEval(results, cell)} + ${formatResultAgent(results, cell)}`);
   const shown = labels.slice(0, 6);
   const extra = labels.length - shown.length;
   return extra > 0 ? `${shown.join(", ")} and ${extra} more` : shown.join(", ");
 }
 
-function formatResultVersionList(versions: WorkbenchResults["versions"]): string {
+function formatResultVersionList(versions: WorkbenchResults["skillVersions"]): string {
   return versions.map((version) => version.label).join(", ");
 }
 
@@ -10253,15 +10331,23 @@ function formatResultVersion(
   results: WorkbenchResults,
   cell: WorkbenchResults["cells"][number],
 ): string {
-  const version = results.versions.find((entry) => entry.id === cell.skillVersionId);
+  const version = results.skillVersions.find((entry) => entry.id === cell.skillVersionId);
   if (!version) {
     return displayRef(cell.skillVersionId);
   }
   return `${version.label}${version.current ? " · Current" : ""}`;
 }
 
+function formatResultEval(
+  results: WorkbenchResults,
+  cell: WorkbenchResults["cells"][number],
+): string {
+  const version = results.evalVersions.find((entry) => entry.id === cell.evalVersionId);
+  return version?.label ?? cell.evalVersionId;
+}
+
 function formatResultAgent(results: WorkbenchResults, cell: WorkbenchResults["cells"][number]): string {
-  const agent = results.agents.find((entry) => entry.id === cell.agentVersionId);
+  const agent = results.agentVersions.find((entry) => entry.id === cell.agentVersionId);
   return agent?.label ?? displayRef(cell.agentVersionId);
 }
 

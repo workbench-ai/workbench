@@ -14,7 +14,7 @@ See [Cases and grading](cases-grading.md) for case authoring, [Agents and models
 | Agents | `.workbench/agents.yaml` | Agent and model configuration for runs. |
 | Runtime | `.workbench/environment/Dockerfile` | Project-owned sandbox dependencies. |
 
-Editing `.workbench/**` changes the eval. Editing files outside `.workbench/**` changes the package that Workbench versions, evaluates, improves, and publishes.
+Editing `.workbench/**` changes the mutable eval draft. Editing package files outside `.workbench/**` changes the mutable skill draft that Workbench versions, evaluates, improves, and publishes.
 
 ## Starter layout
 
@@ -45,6 +45,12 @@ workbench results
 `run` records output before you finalize grade criteria. `grade` judges existing output. `eval` combines both steps.
 
 `eval --dry-run` previews selectors, cases, samples, package source status, environment file, reusable evidence, and launch checks without writing state. Real `run`, `grade`, and `eval` use the same launch checks.
+
+## Eval versions
+
+Each execution snapshots the current eval draft into an immutable eval version when the eval source content is new. Editing `.workbench/eval.yaml`, case files, case tests, or environment files creates a new draft; the next real `run`, `grade`, or `eval` records it as `Eval vN`. If the content matches an existing eval version, Workbench reuses that version instead of minting another ordinal.
+
+Use `workbench evals` to list stored eval versions. `workbench results` selects the current eval version by default, `workbench results --eval eval-v1` inspects an older score meaning, and `workbench results --eval all` explicitly inspects all eval versions without treating their scores as one flat ranking.
 
 Live captures use the same run/job evidence model as eval runs. `workbench record on` enables Workbench's native Codex and Claude Code trace plugins, project-matched captures appear in `Runs` as live agent-session jobs, and `workbench case promote TRACE_ID --id CASE_ID` turns a reviewed low-level trace into a normal case.
 

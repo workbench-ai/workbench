@@ -13,7 +13,7 @@ Most workflows follow the same loop: author source, run or grade cases, inspect 
 | Edit someone else's skill | `workbench clone` | Editable source in a fresh Workbench project. |
 | Add evals to an existing skill | `workbench init` | Existing `SKILL.md` plus Workbench controls. |
 | Build an eval interactively | `workbench run` then `workbench grade` | Prompt output and judgment evidence you can iterate on separately. |
-| Review quality | `workbench eval` then `workbench results` | Quality, coverage, latency, cost, and run evidence by version and agent. |
+| Review quality | `workbench eval` then `workbench results` | Quality, coverage, latency, cost, and run evidence by skill version, eval version, and agent. |
 | Improve from evidence | `workbench improve` | Candidate source plus proof eval before switching. |
 | Run hosted | `--cloud` | The same run graph executed by Workbench Cloud. |
 | Inspect evidence | `workbench show` | Source, run, job, trace, artifact, or file evidence. |
@@ -143,10 +143,15 @@ workbench grade
 workbench eval
 workbench eval --agents all -n 5
 workbench results
+workbench evals
+workbench results --eval eval-v1
+workbench results --eval all
 workbench results --versions all --agents all
 ```
 
 `eval --dry-run` previews selectors, cases, samples, package source status, environment file, reusable evidence, and launch checks without writing state. Real `run`, `grade`, and `eval` use the same launch checks. Draft prompts block `run`, `grade`, and `eval`; draft grade criteria block `grade` and `eval` but still allow output-only `run`.
+
+Results default to the current eval version. Use `workbench evals` and `--eval eval-vN` when a case, test, rubric, or environment edit changed the scoring standard and you need to inspect older evidence.
 
 Use `--rerun` only when you need fresh evidence:
 

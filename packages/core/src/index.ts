@@ -35,6 +35,7 @@ import type {
   WorkbenchDefaultAgentSelection,
   WorkbenchEvalCaseSnapshot,
   WorkbenchEvalCaseGradePlan,
+  WorkbenchEvalVersionSummary,
   WorkbenchGradePlanDisplayBlock,
   WorkbenchGradePlanSource,
   WorkbenchEvalSnapshot,
@@ -3384,6 +3385,7 @@ export interface WorkbenchResultsOptions extends WorkbenchCommandOptions {
   resultVersions?: string;
   versions?: string;
   agents?: string;
+  eval?: string;
 }
 
 interface InternalComparisonCell {
@@ -3402,7 +3404,7 @@ interface InternalComparisonCell {
 }
 
 interface InternalComparison {
-  evalHash?: string;
+  evalHashes?: string[];
   versions: WorkbenchVersion[];
   skills: WorkbenchSkillBundleSnapshot[];
   agents: WorkbenchAgentSnapshot[];
@@ -3413,7 +3415,7 @@ interface InternalComparisonSelection {
   versions?: string;
   skills?: string;
   agents?: string;
-  evalHash?: string;
+  evalHashes?: readonly string[];
   availableAgents?: readonly WorkbenchAgent[];
   defaultAgent?: string;
 }
@@ -3598,6 +3600,8 @@ const VERSIONS_FILE = "versions.yaml";
 const SKILL_FILE = "SKILL.md";
 const CURRENT_SKILL_VERSION_NAME = "current";
 const ALL_SELECTOR = "all";
+const CURRENT_EVAL_SELECTOR = "current";
+const EVAL_VERSION_REF_PREFIX = "eval-v";
 const STATE_SCHEMA = "workbench.skill.state.v1";
 const PACK_SCHEMA = "workbench.object-pack.v1";
 const DEFAULT_SKILL_RUNTIME_IMAGE = "workbench/workbench-node-22:envv_node_22";
@@ -8970,6 +8974,161 @@ function resultsConfiguredVersionRefs(state: WorkbenchProjectState): string[] {
   return [...new Set(refs)].sort();
 }
 
+function resultEvalVersionSummaries(
+  state: WorkbenchProjectState,
+  currentEvalHash?: string,
+  includeEvalHashes: readonly string[] = [],
+): WorkbenchEvalVersionSummary[] {
+  const versionedEvalHashes = resultEvalVersionHashes(state);
+  for (const hash of includeEvalHashes) {
+    versionedEvalHashes.add(hash);
+  }
+  const orderedEvals = orderResultEvalSnapshots(state.evals)
+    .filter((evalSnapshot) => versionedEvalHashes.has(evalSnapshot.hash));
+  const latestRunByEvalHash = new Map<string, WorkbenchRun>();
+  const runCountByEvalHash = new Map<string, number>();
+  for (const run of [...state.runs].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+    runCountByEvalHash.set(run.evalHash, (runCountByEvalHash.get(run.evalHash) ?? 0) + 1);
+    latestRunByEvalHash.set(run.evalHash, run);
+  }
+  const latestVersionedRun = [...state.runs]
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .find((run) => versionedEvalHashes.has(run.evalHash));
+  const currentHash = currentEvalHash && versionedEvalHashes.has(currentEvalHash)
+    ? currentEvalHash
+    : latestVersionedRun?.evalHash ?? orderedEvals.at(-1)?.hash;
+  return orderedEvals.map((evalSnapshot, index) => {
+    const ordinal = index + 1;
+    const latestRun = latestRunByEvalHash.get(evalSnapshot.hash);
+    const latestQuality = latestRun ? runQualityScoreFromJobs(latestRun, state.jobs) : undefined;
+    return {
+      id: `${EVAL_VERSION_REF_PREFIX}${ordinal}`,
+      hash: evalSnapshot.hash,
+      label: `Eval v${ordinal}`,
+      ordinal,
+      current: evalSnapshot.hash === currentHash,
+      caseCount: evalSnapshot.caseCount,
+      gradeAdapter: evalSnapshot.gradeAdapter,
+      createdAt: evalSnapshot.createdAt,
+      updatedAt: evalSnapshot.updatedAt,
+      runCount: runCountByEvalHash.get(evalSnapshot.hash) ?? 0,
+      ...(latestRun ? { latestRunId: latestRun.id } : {}),
+      ...(latestQuality !== undefined ? { latestQuality } : {}),
+    };
+  });
+}
+
+function resultEvalVersionHashes(state: WorkbenchProjectState): Set<string> {
+  const hashes = new Set<string>();
+  for (const run of state.runs) {
+    hashes.add(run.evalHash);
+  }
+  for (const job of state.jobs) {
+    hashes.add(job.evalHash);
+  }
+  return hashes;
+}
+
+function orderResultEvalSnapshots(evals: readonly WorkbenchEvalSnapshot[]): WorkbenchEvalSnapshot[] {
+  return [...evals].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.updatedAt.localeCompare(right.updatedAt) ||
+    left.hash.localeCompare(right.hash)
+  );
+}
+
+function resultEvalVersionByHash(
+  state: WorkbenchProjectState,
+  currentEvalHash?: string,
+  includeEvalHashes: readonly string[] = [],
+): Map<string, WorkbenchEvalVersionSummary> {
+  return new Map(resultEvalVersionSummaries(state, currentEvalHash, includeEvalHashes).map((entry) => [entry.hash, entry]));
+}
+
+function resolveResultsEvalHashes(
+  state: WorkbenchProjectState,
+  selection: string | undefined,
+  currentEvalHash?: string,
+): string[] {
+  const summaries = resultEvalVersionSummaries(state, currentEvalHash);
+  const normalized = selection?.trim() || CURRENT_EVAL_SELECTOR;
+  if (normalized === ALL_SELECTOR) {
+    return summaries.map((entry) => entry.hash);
+  }
+  if (normalized === CURRENT_EVAL_SELECTOR) {
+    const currentHash = summaries.find((entry) => entry.current)?.hash ?? summaries.at(-1)?.hash;
+    return currentHash ? [currentHash] : [];
+  }
+  const selectedHashes = normalized
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => resolveEvalVersionHash(summaries, part));
+  return [...new Set(selectedHashes)];
+}
+
+function resolveEvalVersionHash(
+  summaries: readonly WorkbenchEvalVersionSummary[],
+  ref: string,
+): string {
+  const candidates = evalVersionRefCandidates(summaries, ref);
+  if (candidates.length === 1) {
+    return candidates[0]!.hash;
+  }
+  if (candidates.length > 1) {
+    throw new WorkbenchCodedError("usage", `Eval version ref is ambiguous: ${ref}.`, {
+      remediation: "workbench evals",
+      subject: { ref, candidates: candidates.map((entry) => entry.id) },
+      exitCode: 2,
+    });
+  }
+  throw new WorkbenchCodedError("usage", `Eval version not found: ${ref}.`, {
+    remediation: "workbench evals",
+    subject: { ref, configuredEvalVersions: summaries.map((entry) => entry.id) },
+    exitCode: 2,
+  });
+}
+
+function maybeResolveEvalVersionHash(
+  summaries: readonly WorkbenchEvalVersionSummary[],
+  ref: string,
+): string | undefined {
+  const candidates = evalVersionRefCandidates(summaries, ref);
+  if (candidates.length > 1) {
+    throw new WorkbenchCodedError("usage", `Eval version ref is ambiguous: ${ref}.`, {
+      remediation: "workbench evals",
+      subject: { ref, candidates: candidates.map((entry) => entry.id) },
+      exitCode: 2,
+    });
+  }
+  return candidates[0]?.hash;
+}
+
+function evalVersionRefCandidates(
+  summaries: readonly WorkbenchEvalVersionSummary[],
+  ref: string,
+): WorkbenchEvalVersionSummary[] {
+  const normalized = ref.trim();
+  if (!normalized) {
+    return [];
+  }
+  const normalizedLabel = normalized.toLowerCase();
+  return summaries.filter((entry) =>
+    entry.id === normalized ||
+    entry.label.toLowerCase() === normalizedLabel ||
+    entry.hash === normalized ||
+    entry.hash.startsWith(normalized)
+  );
+}
+
+function evalSnapshotByVersionRef(
+  state: WorkbenchProjectState,
+  ref: string,
+): WorkbenchEvalSnapshot | undefined {
+  const hash = maybeResolveEvalVersionHash(resultEvalVersionSummaries(state), ref);
+  return hash ? state.evals.find((entry) => entry.hash === hash) : undefined;
+}
+
 export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): Promise<WorkbenchResults> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
@@ -8982,11 +9141,12 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
     if (currentEvalSnapshot) {
       upsertEvalSnapshotObject(state.evals, currentEvalSnapshot);
     }
+    const selectedEvalHashes = resolveResultsEvalHashes(state, options.eval, currentEvalSnapshot?.hash);
     const internalSelection: InternalComparisonSelection = {
       versions: selection.projectVersions,
       skills: selection.skills,
       agents: options.agents,
-      ...(currentEvalSnapshot?.hash ? { evalHash: currentEvalSnapshot.hash } : {}),
+      evalHashes: selectedEvalHashes,
       availableAgents: runtimeAgents.agents,
       ...(runtimeAgents.defaultAgent ? { defaultAgent: runtimeAgents.defaultAgent } : {}),
     };
@@ -9000,16 +9160,17 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
         ...runtimeSkillSources,
         ...(runtimeAgents.defaultAgent ? { defaultAgent: runtimeAgents.defaultAgent } : {}),
       });
-      return resultsFromInternalComparison(completedComparison, state);
+      return resultsFromInternalComparison(completedComparison, state, { currentEvalHash: currentEvalSnapshot?.hash });
     }
     const versions = resolveVersionSelection(state, selection.projectVersions);
     if (versions.length === 0) {
       return resultsFromInternalComparison({
+        evalHashes: selectedEvalHashes,
         versions: [],
         skills: [],
         agents: [],
         cells: [],
-      }, state);
+      }, state, { currentEvalHash: currentEvalSnapshot?.hash });
     }
     const cells: InternalComparisonCell[] = [];
     const comparedSkills: WorkbenchSkillBundleSnapshot[] = [];
@@ -9017,7 +9178,7 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
     const comparedVersions: WorkbenchVersion[] = [];
     const skippedVersions: string[] = [];
     let skippedSelectionError: unknown;
-    const evalHashes = new Set<string>();
+    const evalHashes = new Set<string>(selectedEvalHashes);
     for (const version of versions) {
       let runtime: WorkbenchVersionRuntimeSnapshot;
       try {
@@ -9089,14 +9250,13 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
       }
       throw new WorkbenchUserError("No selected versions define the requested result versions or agents.");
     }
-    const [onlyEvalHash] = [...evalHashes];
     return resultsFromInternalComparison({
-      ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
+      evalHashes: [...evalHashes],
       versions: comparedVersions,
       skills: comparedSkills,
       agents: uniqueAgentSnapshots(comparedAgents),
       cells,
-    }, state);
+    }, state, { currentEvalHash: currentEvalSnapshot?.hash });
   });
 }
 
@@ -9115,8 +9275,9 @@ async function completeRecordedResultsSelectionMatrix(
   const cells = [...comparison.cells];
   const skills = [...comparison.skills];
   const agents = [...comparison.agents];
+  const constrainedEvalHashes = comparison.evalHashes ? new Set(comparison.evalHashes) : undefined;
   const evalHashes = new Set<string>([
-    ...(comparison.evalHash ? [comparison.evalHash] : []),
+    ...(comparison.evalHashes ?? []),
     ...cells.map((cell) => cell.evalHash),
   ]);
   const existingCellKeys = new Set(cells.map(comparisonCellAxisKey));
@@ -9145,8 +9306,10 @@ async function completeRecordedResultsSelectionMatrix(
       throw error;
     }
 
-    evalHashes.add(runtime.evalSnapshot.hash);
-    upsertEvalSnapshotObject(state.evals, runtime.evalSnapshot);
+    if (!constrainedEvalHashes) {
+      evalHashes.add(runtime.evalSnapshot.hash);
+      upsertEvalSnapshotObject(state.evals, runtime.evalSnapshot);
+    }
     upsertAgentSnapshots(state.agents, runtime.agents);
     for (const bundle of runtime.skillBundles) {
       upsertByHash(state.skillBundles, bundle);
@@ -9160,44 +9323,46 @@ async function completeRecordedResultsSelectionMatrix(
       }
     }
 
-    for (const skill of runtime.skillBundles) {
-      for (const agent of runtime.selectedAgents) {
-        const agentHash = hashJson(agent);
-        const cell: InternalComparisonCell = {
-          versionId: version.id,
-          skillName: skill.skillName,
-          skillBundleHash: skill.hash,
-          evalHash: runtime.evalSnapshot.hash,
-          agentName: agent.name,
-          agentHash,
-        };
-        const key = comparisonCellAxisKey(cell);
-        if (existingCellKeys.has(key)) {
-          continue;
+    const runtimeEvalHashes = constrainedEvalHashes ? [...constrainedEvalHashes] : [runtime.evalSnapshot.hash];
+    for (const evalHash of runtimeEvalHashes) {
+      for (const skill of runtime.skillBundles) {
+        for (const agent of runtime.selectedAgents) {
+          const agentHash = hashJson(agent);
+          const cell: InternalComparisonCell = {
+            versionId: version.id,
+            skillName: skill.skillName,
+            skillBundleHash: skill.hash,
+            evalHash,
+            agentName: agent.name,
+            agentHash,
+          };
+          const key = comparisonCellAxisKey(cell);
+          if (existingCellKeys.has(key)) {
+            continue;
+          }
+          const evidence = bestComparableEvidence({
+            runs: state.runs,
+            jobs: state.jobs,
+            traces: state.traces,
+            versionId: version.id,
+            skillName: skill.skillName,
+            skillBundleHash: skill.hash,
+            evalHash,
+            agentName: agent.name,
+            agentHash,
+          });
+          cells.push({
+            ...cell,
+            ...(evidence ? comparisonCellEvidenceFields(evidence) : {}),
+          });
+          existingCellKeys.add(key);
         }
-        const evidence = bestComparableEvidence({
-          runs: state.runs,
-          jobs: state.jobs,
-          traces: state.traces,
-          versionId: version.id,
-          skillName: skill.skillName,
-          skillBundleHash: skill.hash,
-          evalHash: runtime.evalSnapshot.hash,
-          agentName: agent.name,
-          agentHash,
-        });
-        cells.push({
-          ...cell,
-          ...(evidence ? comparisonCellEvidenceFields(evidence) : {}),
-        });
-        existingCellKeys.add(key);
       }
     }
   }
 
-  const [onlyEvalHash] = [...evalHashes];
   return {
-    ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
+    evalHashes: [...evalHashes],
     versions,
     skills: uniqueSkillBundles(skills),
     agents: uniqueResolvedAgentSnapshots(agents),
@@ -9227,22 +9392,31 @@ function comparisonCellAxisKey(cell: Pick<InternalComparisonCell, "versionId" | 
 function resultsFromInternalComparison(
   comparison: InternalComparison,
   state: WorkbenchProjectState,
+  options: { currentEvalHash?: string } = {},
 ): WorkbenchResults {
   const skillByHash = new Map(comparison.skills.map((skill) => [skill.hash, skill]));
   const agentByHash = new Map(comparison.agents.map((agent) => [agent.hash, agent]));
-  const evalByHash = new Map(state.evals.map((evalSnapshot) => [evalSnapshot.hash, evalSnapshot]));
+  const evalVersionByHash = resultEvalVersionByHash(state, options.currentEvalHash, comparison.evalHashes ?? []);
   const projectVersionById = new Map(comparison.versions.map((version) => [version.id, version]));
   const localOrdinalByProjectVersionId = resultLocalVersionOrdinals(state);
-  const resultVersions = new Map<string, WorkbenchResults["versions"][number]>();
-  const resultAgents = new Map<string, WorkbenchResults["agents"][number]>();
-  const resultEvaluations = new Map<string, WorkbenchResults["evaluations"][number]>();
+  const resultVersions = new Map<string, WorkbenchResults["skillVersions"][number]>();
+  const resultAgents = new Map<string, WorkbenchResults["agentVersions"][number]>();
+  const resultEvalVersions = new Map<string, WorkbenchResults["evalVersions"][number]>();
   const resultCells = new Map<string, WorkbenchResults["cells"][number]>();
   const createdAtByRunId = new Map(state.runs.map((run) => [run.id, run.createdAt]));
+
+  for (const evalHash of comparison.evalHashes ?? []) {
+    const evalVersion = evalVersionByHash.get(evalHash);
+    if (evalVersion) {
+      resultEvalVersions.set(evalVersion.id, evalVersion);
+    }
+  }
 
   for (const cell of comparison.cells) {
     const skill = skillByHash.get(cell.skillBundleHash);
     const agent = agentByHash.get(cell.agentHash);
-    if (!skill || !agent) {
+    const evalVersion = evalVersionByHash.get(cell.evalHash);
+    if (!skill || !agent || !evalVersion) {
       continue;
     }
     const projectVersion = projectVersionById.get(cell.versionId);
@@ -9253,10 +9427,9 @@ function resultsFromInternalComparison(
       localOrdinalByProjectVersionId,
       state,
     );
-    const evaluation = evalByHash.get(cell.evalHash);
     const resultCell: WorkbenchResults["cells"][number] = {
       skillVersionId: skillVersion.id,
-      evaluationId: cell.evalHash,
+      evalVersionId: evalVersion.id,
       agentVersionId: cell.agentHash,
       ...(cell.runId ? { runId: cell.runId } : {}),
       ...(cell.status ? { status: cell.status } : {}),
@@ -9267,7 +9440,7 @@ function resultsFromInternalComparison(
     };
     const resultCellKey = [
       resultCell.skillVersionId,
-      resultCell.evaluationId,
+      resultCell.evalVersionId,
       resultCell.agentVersionId,
     ].join("\0");
     const existingCell = resultCells.get(resultCellKey);
@@ -9282,30 +9455,22 @@ function resultsFromInternalComparison(
       adapter: agent.agent.adapter,
       ...(agent.agent.model ? { model: agent.agent.model } : {}),
     });
-    resultEvaluations.set(cell.evalHash, {
-      id: cell.evalHash,
-      ...(evaluation ? {
-        caseCount: evaluation.caseCount,
-        gradeAdapter: evaluation.gradeAdapter,
-        createdAt: evaluation.createdAt,
-        updatedAt: evaluation.updatedAt,
-      } : {}),
-    });
+    resultEvalVersions.set(evalVersion.id, evalVersion);
   }
 
   return {
-    versions: [...resultVersions.values()].sort((left, right) =>
+    skillVersions: [...resultVersions.values()].sort((left, right) =>
       resultVersionSortKey(left).localeCompare(resultVersionSortKey(right))
     ),
-    evaluations: [...resultEvaluations.values()].sort((left, right) =>
-      (left.createdAt ?? "").localeCompare(right.createdAt ?? "") || left.id.localeCompare(right.id)
+    evalVersions: [...resultEvalVersions.values()].sort((left, right) =>
+      left.ordinal - right.ordinal || left.id.localeCompare(right.id)
     ),
-    agents: [...resultAgents.values()].sort((left, right) =>
+    agentVersions: [...resultAgents.values()].sort((left, right) =>
       left.label.localeCompare(right.label) || left.id.localeCompare(right.id)
     ),
     cells: [...resultCells.values()].sort((left, right) =>
       resultVersionSortKey(resultVersions.get(left.skillVersionId)).localeCompare(resultVersionSortKey(resultVersions.get(right.skillVersionId))) ||
-      left.evaluationId.localeCompare(right.evaluationId) ||
+      left.evalVersionId.localeCompare(right.evalVersionId) ||
       left.agentVersionId.localeCompare(right.agentVersionId)
     ),
   };
@@ -9317,7 +9482,7 @@ function resultVersionFromInternalCell(
   projectVersion: WorkbenchVersion | undefined,
   localOrdinalByProjectVersionId: ReadonlyMap<string, number>,
   state: WorkbenchProjectState,
-): WorkbenchResults["versions"][number] {
+): WorkbenchResults["skillVersions"][number] {
   const id = resultSkillVersionId(skill, cell);
   const localOrdinal = localOrdinalByProjectVersionId.get(cell.versionId) ?? 1;
   const source = resultSkillVersionSource(skill);
@@ -9429,7 +9594,7 @@ function compareResultCellEvidence(
   return leftCreated.localeCompare(rightCreated);
 }
 
-function resultVersionSortKey(version: WorkbenchResults["versions"][number] | undefined): string {
+function resultVersionSortKey(version: WorkbenchResults["skillVersions"][number] | undefined): string {
   return version?.projectVersionId ?? version?.id ?? "";
 }
 
@@ -9448,7 +9613,7 @@ export function buildInternalComparisonFromState(
 ): InternalComparison {
   const versions = resolveVersionSelection(state, options.versions ?? "current");
   const versionIds = new Set(versions.map((version) => version.id));
-  const selectedEvalHash = options.evalHash ?? selectActiveEvalSnapshot(state)?.hash;
+  const selectedEvalHashes = options.evalHashes ? new Set(options.evalHashes) : null;
   const skillBundlesByHash = new Map(state.skillBundles.map((bundle) => [bundle.hash, bundle]));
   const entriesByKey = new Map<string, {
     version: WorkbenchVersion;
@@ -9459,7 +9624,7 @@ export function buildInternalComparisonFromState(
   for (const run of [...state.runs].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
     if (
       !versionIds.has(run.versionId) ||
-      (selectedEvalHash && run.evalHash !== selectedEvalHash) ||
+      (selectedEvalHashes && !selectedEvalHashes.has(run.evalHash)) ||
       !skillSelectionIncludes(options.skills, run.skillName, run.skillBundleHash)
     ) {
       continue;
@@ -9476,7 +9641,7 @@ export function buildInternalComparisonFromState(
   for (const job of [...state.jobs].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
     if (
       !versionIds.has(job.versionId) ||
-      (selectedEvalHash && job.evalHash !== selectedEvalHash) ||
+      (selectedEvalHashes && !selectedEvalHashes.has(job.evalHash)) ||
       !skillSelectionIncludes(options.skills, job.skillName, job.skillBundleHash)
     ) {
       continue;
@@ -9490,18 +9655,26 @@ export function buildInternalComparisonFromState(
     entriesByKey.set(key, { version, bundle, evalHash: job.evalHash });
   }
 
-  if (entriesByKey.size === 0 && versions.length > 0) {
+  if (versions.length > 0) {
     const selectedBundles = state.skillBundles.filter((bundle) =>
       skillSelectionIncludes(options.skills, bundle.skillName, bundle.hash)
     );
-    const evalHash = selectedEvalHash ?? state.evals[0]?.hash;
-    if (evalHash) {
+    const storedEvalVersionHashes = resultEvalVersionSummaries(state).map((entry) => entry.hash);
+    const activeEvalHash = selectActiveEvalSnapshot(state)?.hash;
+    const placeholderEvalHashes = selectedEvalHashes
+      ? [...selectedEvalHashes]
+      : entriesByKey.size === 0
+        ? storedEvalVersionHashes.length > 0
+          ? storedEvalVersionHashes
+          : activeEvalHash ? [activeEvalHash] : []
+        : [];
+    for (const evalHash of placeholderEvalHashes) {
       for (const version of versions) {
         for (const bundle of selectedBundles) {
-          entriesByKey.set(
-            comparisonEntryKey(version.id, bundle.skillName, bundle.hash, evalHash),
-            { version, bundle, evalHash },
-          );
+          const key = comparisonEntryKey(version.id, bundle.skillName, bundle.hash, evalHash);
+          if (!entriesByKey.has(key)) {
+            entriesByKey.set(key, { version, bundle, evalHash });
+          }
         }
       }
     }
@@ -9525,7 +9698,7 @@ export function buildInternalComparisonFromState(
     entries.flatMap((entry) => agentsByVersionId.get(entry.version.id) ?? []),
   );
   const comparedSkills = uniqueSkillBundles(entries.map((entry) => entry.bundle));
-  const evalHashes = new Set(entries.map((entry) => entry.evalHash));
+  const evalHashes = new Set([...(options.evalHashes ?? []), ...entries.map((entry) => entry.evalHash)]);
   const cells: InternalComparisonCell[] = [];
 
   for (const entry of entries) {
@@ -9554,9 +9727,8 @@ export function buildInternalComparisonFromState(
     }
   }
 
-  const [onlyEvalHash] = [...evalHashes];
   return {
-    ...(evalHashes.size === 1 && onlyEvalHash ? { evalHash: onlyEvalHash } : {}),
+    evalHashes: [...evalHashes],
     versions,
     skills: comparedSkills,
     agents: comparedAgents,
@@ -9665,6 +9837,21 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
     }
     const version = await liveWorkbenchVersion(root, state);
     return version;
+  }
+  const evalSnapshot = evalSnapshotByVersionRef(state, objectRef);
+  if (evalSnapshot) {
+    if (!filePath) {
+      return copyEval(evalSnapshot);
+    }
+    const file = evalSnapshot.files.find((entry) => entry.path === filePath);
+    if (!file) {
+      throw new WorkbenchCodedError("ref_not_found", `File not found in ${objectRef}: ${filePath}`, {
+        remediation: `workbench show ${objectRef}`,
+        subject: { ref: objectRef, path: filePath },
+        exitCode: 1,
+      });
+    }
+    return copyFile(file);
   }
   const version = findVersion(state, objectRef);
   if (version) {
@@ -9806,6 +9993,10 @@ export async function filesForWorkbenchRef(ref: string, options: WorkbenchComman
   const version = findVersion(state, ref);
   if (version) {
     return version.files.map(copyFile);
+  }
+  const evalSnapshot = evalSnapshotByVersionRef(state, ref);
+  if (evalSnapshot) {
+    return evalSnapshot.files.map(copyFile);
   }
   const trace = resolveStateObjectByRef(state.traces, ref, "trace");
   if (trace) {
@@ -10405,6 +10596,11 @@ export function createWorkbenchInspectionSnapshotFromState(
     .filter((run) => runQualityScoreFromJobs(run, state.jobs) !== undefined)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   const lastRunScore = lastRun ? runQualityScoreFromJobs(lastRun, state.jobs) : undefined;
+  const currentEvalHash = state.evals[0]?.hash ?? selectActiveEvalSnapshot(state)?.hash;
+  const evalVersions = resultEvalVersionSummaries(state, currentEvalHash);
+  const resultEvalHashes = evalVersions.length > 0
+    ? evalVersions.map((entry) => entry.hash)
+    : currentEvalHash ? [currentEvalHash] : [];
   const status: WorkbenchStatus = {
     root,
     initialized: true,
@@ -10431,6 +10627,7 @@ export function createWorkbenchInspectionSnapshotFromState(
     skillSources,
     skillBundles: state.skillBundles.map(copySkillBundle),
     evals: state.evals.map(copyEval),
+    evalVersions,
     evaluationFiles: (options.evaluationFiles ?? state.evals[0]?.files ?? []).map(copyFile),
     agents,
     ...(state.versions.length > 0 ? {
@@ -10438,7 +10635,8 @@ export function createWorkbenchInspectionSnapshotFromState(
         versions: "all",
         skills: "all",
         agents: "all",
-      }), state),
+        evalHashes: resultEvalHashes,
+      }), state, { currentEvalHash }),
     } : {}),
     runs: state.runs.map(copyRun),
     jobs: state.jobs.map(copyJob),

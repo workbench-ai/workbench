@@ -11,10 +11,13 @@ Use `show` to inspect source, run, job, trace, artifact, and file evidence:
 ```bash
 workbench show RUN_ID
 workbench show JOB_ID
+workbench show eval-v2
+workbench show eval-v2:cases/investor-focus/case.yaml
 workbench show RUN_ID:cases/investor-focus/output/result.json
 ```
 
 If a suffix is ambiguous, Workbench prints exact `workbench show REF:PATH` commands.
+Use `eval-vN` refs to inspect the exact historical eval definition that produced a result.
 
 ## Live run evidence
 

@@ -1413,21 +1413,20 @@ describe("workbench skill-first CLI", () => {
     const contextualResults = await invoke(["results", "--agents", "strict", "--dir", root]);
     expect(contextualResults.code, contextualResults.stdout || contextualResults.stderr).toBe(0);
     expect(contextualResults.stdout).toMatch(new RegExp(`${expectedLocalSkillLabel(root, 0).replace(/0$/u, "\\d+")} · Current`, "u"));
-    expect(contextualResults.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
+    expect(contextualResults.stdout).toMatch(/^version\s+eval\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
     expect(contextualResults.stdout).toMatch(/\bstrict\s+succeeded\b/u);
 
     const resultsJson = await invoke(["results", "--versions", "all", "--agents", "all", "--dir", root, "--json"]);
     expect(resultsJson.code, resultsJson.stdout || resultsJson.stderr).toBe(0);
     const resultsPayload = stdoutJson<{
-      result: {
-        versions: Array<{
+      result: { skillVersions: Array<{
           id: string;
           projectVersionId?: string;
           files?: Array<{ path: string; ref?: string; content?: string }>;
         }>;
       };
     }>(resultsJson);
-    const resultVersion = resultsPayload.result.versions.find((version) =>
+    const resultVersion = resultsPayload.result.skillVersions.find((version) =>
       version.files?.some((file) => file.path.endsWith("SKILL.md"))
     );
     const resultFile = resultVersion?.files?.find((file) => file.path.endsWith("SKILL.md"));
@@ -1689,7 +1688,7 @@ describe("workbench skill-first CLI", () => {
 
     const results = await invoke(["results", "--dir", root]);
     expect(results.code, results.stdout || results.stderr).toBe(0);
-    expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
+    expect(results.stdout).toMatch(/^version\s+eval\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
     expect(results.stdout).toContain("700ms/sample");
   });
 
@@ -1711,20 +1710,19 @@ describe("workbench skill-first CLI", () => {
     expect(resultsJson.code, resultsJson.stdout || resultsJson.stderr).toBe(0);
     const payload = stdoutJson<{
       next: string | null;
-      result: {
-        versions: Array<{ id: string; label: string; current?: boolean }>;
+      result: { skillVersions: Array<{ id: string; label: string; current?: boolean }>;
         cells: Array<{ skillVersionId?: string; runId?: string; status?: string }>;
       };
     }>(resultsJson);
     expect(payload.next).toBe("workbench eval");
-    const labels = payload.result.versions.map((version) => version.label);
+    const labels = payload.result.skillVersions.map((version) => version.label);
     expect(new Set(labels).size).toBe(labels.length);
     const recordedVersionIds = new Set(payload.result.cells
       .filter((cell) => (typeof cell.runId === "string" || typeof cell.status === "string") && cell.status !== "not-run")
       .map((cell) => cell.skillVersionId)
       .filter((id): id is string => typeof id === "string"));
-    const current = payload.result.versions.find((version) => version.current === true);
-    const historical = payload.result.versions.find((version) => version.current !== true && recordedVersionIds.has(version.id));
+    const current = payload.result.skillVersions.find((version) => version.current === true);
+    const historical = payload.result.skillVersions.find((version) => version.current !== true && recordedVersionIds.has(version.id));
     expect(current).toBeTruthy();
     expect(historical).toBeTruthy();
     expect(results.stdout).toContain(historical!.label);
@@ -1746,29 +1744,28 @@ describe("workbench skill-first CLI", () => {
     const all = await invoke(["results", "--versions", "all", "--dir", root, "--json"]);
     expect(all.code, all.stdout || all.stderr).toBe(0);
     const allPayload = stdoutJson<{
-      result: {
-        versions: Array<{ id: string; label: string; projectVersionId?: string; current?: boolean }>;
+      result: { skillVersions: Array<{ id: string; label: string; projectVersionId?: string; current?: boolean }>;
         cells: Array<{ skillVersionId?: string; runId?: string; status?: string }>;
       };
     }>(all);
     const allRecordedProjectIds = new Set(allPayload.result.cells
       .filter((cell) => cell.runId || cell.status)
-      .map((cell) => allPayload.result.versions.find((version) => version.id === cell.skillVersionId)?.projectVersionId)
+      .map((cell) => allPayload.result.skillVersions.find((version) => version.id === cell.skillVersionId)?.projectVersionId)
       .filter((id): id is string => typeof id === "string"));
     expect(allRecordedProjectIds).toEqual(new Set([firstVersionId, secondVersionId]));
 
     const current = await invoke(["results", "--versions", "current", "--dir", root, "--json"]);
     expect(current.code, current.stdout || current.stderr).toBe(0);
     const currentPayload = stdoutJson<typeof allPayload>(current);
-    expect(currentPayload.result.versions.map((version) => version.projectVersionId)).toEqual([secondVersionId]);
-    expect(currentPayload.result.versions[0]).toMatchObject({ current: true });
+    expect(currentPayload.result.skillVersions.map((version) => version.projectVersionId)).toEqual([secondVersionId]);
+    expect(currentPayload.result.skillVersions[0]).toMatchObject({ current: true });
     expect(currentPayload.result.cells.every((cell) => cell.skillVersionId === secondVersionId)).toBe(true);
-    const currentLabel = currentPayload.result.versions[0]!.label;
-    const historicalLabel = allPayload.result.versions.find((version) => version.projectVersionId === firstVersionId)!.label;
+    const currentLabel = currentPayload.result.skillVersions[0]!.label;
+    const historicalLabel = allPayload.result.skillVersions.find((version) => version.projectVersionId === firstVersionId)!.label;
 
     const byPrefix = await invoke(["results", "--versions", secondVersionId.slice(0, 12), "--dir", root, "--json"]);
     expect(byPrefix.code, byPrefix.stdout || byPrefix.stderr).toBe(0);
-    expect(stdoutJson<typeof allPayload>(byPrefix).result.versions.map((version) => version.projectVersionId))
+    expect(stdoutJson<typeof allPayload>(byPrefix).result.skillVersions.map((version) => version.projectVersionId))
       .toEqual([secondVersionId]);
 
     const currentHuman = await invoke(["results", "--versions", "current", "--dir", root]);
@@ -1776,6 +1773,83 @@ describe("workbench skill-first CLI", () => {
     expect(currentHuman.stdout).toContain(currentLabel);
     expect(currentHuman.stdout).not.toContain(historicalLabel);
   });
+
+  test("eval source edits create selectable eval result versions", async () => {
+    const root = await makeTempRoot("workbench-cli-results-eval-selector-");
+    expect((await invoke(["new", root, "--agent", "local", "--json"])).code).toBe(0);
+
+    await writeScoredCaseTest(root, 1, "one");
+    const firstEval = await invoke(["eval", "--rerun", "--dir", root, "--json"]);
+    expect(firstEval.code, firstEval.stdout || firstEval.stderr).toBe(0);
+    const firstVersionId = await currentVersionIdFor(root);
+
+    await writeScoredCaseTest(root, 0.5, "two");
+    const secondEval = await invoke(["eval", "--rerun", "--dir", root, "--json"]);
+    expect(secondEval.code, secondEval.stdout || secondEval.stderr).toBe(0);
+    expect(await currentVersionIdFor(root)).toBe(firstVersionId);
+
+    await fs.appendFile(path.join(root, "SKILL.md"), "\nSkill source v2.\n");
+    await writeScoredCaseTest(root, 0.25, "three");
+    const thirdEval = await invoke(["eval", "--rerun", "--dir", root, "--json"]);
+    expect(thirdEval.code, thirdEval.stdout || thirdEval.stderr).toBe(0);
+    const secondVersionId = await currentVersionIdFor(root);
+    expect(secondVersionId).not.toBe(firstVersionId);
+
+    const evals = await invoke(["evals", "--dir", root, "--json"]);
+    expect(evals.code, evals.stdout || evals.stderr).toBe(0);
+    expect(stdoutJson<{
+      schema: string;
+      evalVersions: Array<{ id: string; label: string; current?: boolean }>;
+    }>(evals)).toMatchObject({
+      schema: "workbench.cli.evals.v1",
+      evalVersions: [
+        { id: "eval-v1", label: "Eval v1", current: false },
+        { id: "eval-v2", label: "Eval v2", current: false },
+        { id: "eval-v3", label: "Eval v3", current: true },
+      ],
+    });
+
+    const all = await invoke(["results", "--eval", "all", "--versions", "all", "--dir", root, "--json"]);
+    expect(all.code, all.stdout || all.stderr).toBe(0);
+    const allPayload = stdoutJson<{
+      result: {
+        skillVersions: Array<{ projectVersionId?: string }>;
+        evalVersions: Array<{ id: string; label: string; current?: boolean }>;
+        cells: Array<{ evalVersionId: string; runId?: string; quality?: number }>;
+      };
+    }>(all);
+    expect(allPayload.result.evalVersions.map((version) => version.id)).toEqual(["eval-v1", "eval-v2", "eval-v3"]);
+    expect(new Set(allPayload.result.skillVersions.map((version) => version.projectVersionId))).toEqual(
+      new Set([firstVersionId, secondVersionId]),
+    );
+    expect(new Set(allPayload.result.cells.filter((cell) => cell.runId).map((cell) => cell.evalVersionId))).toEqual(
+      new Set(["eval-v1", "eval-v2", "eval-v3"]),
+    );
+
+    const current = await invoke(["results", "--eval", "current", "--versions", "all", "--dir", root, "--json"]);
+    expect(current.code, current.stdout || current.stderr).toBe(0);
+    const currentPayload = stdoutJson<typeof allPayload>(current);
+    expect(currentPayload.result.evalVersions.map((version) => version.id)).toEqual(["eval-v3"]);
+    expect(currentPayload.result.cells.filter((cell) => cell.runId).map((cell) => [cell.evalVersionId, cell.quality])).toEqual([
+      ["eval-v3", 0.25],
+    ]);
+
+    const first = await invoke(["results", "--eval", "eval-v1", "--versions", "all", "--dir", root, "--json"]);
+    expect(first.code, first.stdout || first.stderr).toBe(0);
+    const firstPayload = stdoutJson<typeof allPayload>(first);
+    expect(firstPayload.result.evalVersions.map((version) => version.id)).toEqual(["eval-v1"]);
+    expect(firstPayload.result.cells.filter((cell) => cell.runId).map((cell) => [cell.evalVersionId, cell.quality])).toEqual([
+      ["eval-v1", 1],
+    ]);
+
+    const evalCase = await invoke(["show", "eval-v2:cases/case-001/case.yaml", "--dir", root, "--json"]);
+    expect(evalCase.code, evalCase.stdout || evalCase.stderr).toBe(0);
+    expect(stdoutJson<{ result: { content: string } }>(evalCase).result.content).toContain("eval version two");
+
+    const unknown = await invoke(["results", "--eval", "eval-v9", "--dir", root, "--json"]);
+    expect(unknown.code).toBe(2);
+    expect(stdoutJson<{ remediation?: string }>(unknown).remediation).toContain("workbench evals");
+  }, 90_000);
 
   test("results json labels selected unevaluated local versions distinctly", async () => {
     const root = await makeTempRoot("workbench-cli-results-unrun-labels-");
@@ -1788,8 +1862,8 @@ describe("workbench skill-first CLI", () => {
     const results = await invoke(["results", "--versions", "all", "--dir", root, "--json"]);
     expect(results.code, results.stdout || results.stderr).toBe(0);
     const labels = stdoutJson<{
-      result: { versions: Array<{ projectVersionId: string; label: string }> };
-    }>(results).result.versions.map((version) => version.label);
+      result: { skillVersions: Array<{ projectVersionId: string; label: string }> };
+    }>(results).result.skillVersions.map((version) => version.label);
     expect(labels).toEqual(expect.arrayContaining([
       expectedLocalSkillLabel(root, 1),
       expectedLocalSkillLabel(root, 2),
@@ -4122,7 +4196,7 @@ describe("workbench skill-first CLI", () => {
 
     const result = await invoke(["versions", "--dir", root, "--json"]);
     expect(result.code, result.stdout || result.stderr).toBe(0);
-    expect(stdoutJson<{ schema: string; versions: Array<{ id: string; fileCount: number }> }>(result))
+    expect(stdoutJson<{ schema: string; skillVersions: Array<{ id: string; fileCount: number }> }>(result))
       .toMatchObject({
         schema: "workbench.cli.versions.v1",
         versions: [expect.objectContaining({
@@ -11844,7 +11918,7 @@ describe("workbench skill-first CLI", () => {
         schema: string;
         cursor: string;
         snapshot: {
-          versions: Array<{ files: Array<{ path: string; content: string }> }>;
+          skillVersions: Array<{ files: Array<{ path: string; content: string }> }>;
           evals: Array<{ hash: string; cases: Array<{ id: string; path: string; files: Array<{ path: string; content: string }> }> }>;
         };
       };
@@ -12374,7 +12448,7 @@ describe("workbench skill-first CLI", () => {
 
     const inspection = await invoke(["versions", "--dir", root, "--json"]);
     expect(inspection.code, inspection.stdout || inspection.stderr).toBe(0);
-    expect(stdoutJson<{ versions: Array<Record<string, unknown>> }>(inspection).versions).toHaveLength(1);
+    expect(stdoutJson<{ skillVersions: Array<Record<string, unknown>> }>(inspection).versions).toHaveLength(1);
     expect(inspection.stdout).not.toContain(marker);
 
     const versions = await invoke(["log", "--versions", "--dir", root, "--json"]);
@@ -12964,17 +13038,16 @@ describe("workbench skill-first CLI", () => {
     expect(improvePayload).toMatchObject({ promoted: false, switched: false, outputScore: 0 });
 
     const results = await invoke(["results", "--dir", root, "--agents", "patcher"]);
-    expect(results.stdout).toMatch(/^version\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
+    expect(results.stdout).toMatch(/^version\s+eval\s+agent\s+status\s+quality\s+coverage\s+latency\s+cost\s+run/mu);
     expect(results.stdout).toMatch(/\bpatcher\s+succeeded\b/u);
     expect(results.stdout).toMatch(/\bsucceeded\s+score 0\.000\b/u);
     const resultsJson = await invoke(["results", "--dir", root, "--agents", "patcher", "--json"]);
     const resultsPayload = stdoutJson<{
-      result: {
-        versions: Array<{ id: string; label: string }>;
+      result: { skillVersions: Array<{ id: string; label: string }>;
         cells: Array<Record<string, unknown>>;
       };
     }>(resultsJson);
-    const labelByVersion = new Map(resultsPayload.result.versions.map((version) => [version.id, version.label]));
+    const labelByVersion = new Map(resultsPayload.result.skillVersions.map((version) => [version.id, version.label]));
     const recordedPatcherLabels = [...new Set(resultsPayload.result.cells
       .filter((cell) => (typeof cell.runId === "string" || typeof cell.status === "string") && cell.status !== "not-run")
       .map((cell) => typeof cell.skillVersionId === "string" ? labelByVersion.get(cell.skillVersionId) : undefined)
@@ -12984,7 +13057,7 @@ describe("workbench skill-first CLI", () => {
       expect(results.stdout).toContain(label);
     }
     expect(resultsPayload.result.cells[0]).toHaveProperty("skillVersionId");
-    expect(resultsPayload.result.cells[0]).toHaveProperty("evaluationId");
+    expect(resultsPayload.result.cells[0]).toHaveProperty("evalVersionId");
     expect(resultsPayload.result.cells[0]).toHaveProperty("agentVersionId");
     expect(resultsPayload.result.cells[0]).not.toHaveProperty("skillName");
     expect(resultsPayload.result.cells[0]).not.toHaveProperty("skillBundleHash");
@@ -12997,12 +13070,11 @@ describe("workbench skill-first CLI", () => {
     const allAgentsResultsJson = await invoke(["results", "--dir", root, "--agents", "all", "--json"]);
     expect(allAgentsResultsJson.code, allAgentsResultsJson.stdout || allAgentsResultsJson.stderr).toBe(0);
     const allAgentsPayload = stdoutJson<{
-      result: {
-        versions: Array<{ id: string; label: string }>;
+      result: { skillVersions: Array<{ id: string; label: string }>;
         cells: Array<{ skillVersionId?: string; status?: string }>;
       };
     }>(allAgentsResultsJson);
-    const allAgentLabelByVersion = new Map(allAgentsPayload.result.versions.map((version) => [version.id, version.label]));
+    const allAgentLabelByVersion = new Map(allAgentsPayload.result.skillVersions.map((version) => [version.id, version.label]));
     const recordedAllAgentLabels = [...new Set(allAgentsPayload.result.cells
       .filter((cell) => (typeof cell.runId === "string" || typeof cell.status === "string") && cell.status !== "not-run")
       .map((cell) => typeof cell.skillVersionId === "string" ? allAgentLabelByVersion.get(cell.skillVersionId) : undefined)
@@ -13366,6 +13438,29 @@ async function writePassingCaseTest(root: string, caseId = "case-001"): Promise<
     "set -eu",
     "mkdir -p \"$OUTPUT_DIR\"",
     "printf '{\"ok\":true,\"score\":1,\"metrics\":{\"score\":1}}\\n' > \"$OUTPUT_DIR/result.json\"",
+    "",
+  ].join("\n"));
+  await fs.chmod(path.join(root, ".workbench", "cases", caseId, "tests", "test.sh"), 0o755);
+}
+
+async function writeScoredCaseTest(root: string, score: number, marker: string, caseId = "case-001"): Promise<void> {
+  await fs.mkdir(path.join(root, ".workbench", "cases", caseId, "tests"), { recursive: true });
+  await fs.writeFile(path.join(root, ".workbench", "cases", caseId, "case.yaml"), [
+    "version: 1",
+    `id: ${caseId}`,
+    `prompt: Exercise eval version ${marker}.`,
+    "grade:",
+    "  with:",
+    "    criteria:",
+    "      - id: success-evidence",
+    `        description: Captures ${marker} success evidence.`,
+    "",
+  ].join("\n"));
+  await fs.writeFile(path.join(root, ".workbench", "cases", caseId, "tests", "test.sh"), [
+    "#!/bin/sh",
+    "set -eu",
+    "mkdir -p \"$OUTPUT_DIR\"",
+    `printf '{"ok":true,"score":${score},"metrics":{"score":${score}}}\\n' > "$OUTPUT_DIR/result.json"`,
     "",
   ].join("\n"));
   await fs.chmod(path.join(root, ".workbench", "cases", caseId, "tests", "test.sh"), 0o755);

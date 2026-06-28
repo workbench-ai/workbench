@@ -63,11 +63,13 @@ grade:
 
 ```bash
 workbench eval
+workbench evals
 workbench results
 workbench show RUN_ID
 ```
 
 `workbench run` records output before grading. `workbench grade` judges existing output. `workbench eval` runs both steps.
+`workbench evals` lists the immutable eval versions created from authored eval source.
 
 ## Improve
 

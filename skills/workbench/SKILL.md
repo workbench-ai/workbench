@@ -64,7 +64,7 @@ Workbench keeps eval source under `.workbench/**` and installable package source
 - `.workbench/environment/Dockerfile`: sandbox dependencies.
 - `.workbench/versions.yaml`: optional measured versions, no-skill baselines, and included skills.
 
-Editing `.workbench/**` changes the eval. Editing package files outside `.workbench/**` changes the skill source that Workbench versions, evaluates, improves, and publishes.
+Editing `.workbench/**` changes the mutable eval draft. Editing package files outside `.workbench/**` changes the mutable skill draft that Workbench versions, evaluates, improves, and publishes. A real run, grade, or eval snapshots new eval draft content as `Eval vN` and new package draft content as `Skill vN`; identical content reuses the existing version.
 
 Provider-backed cases can be prompt plus grading criteria. Local and command-backed cases need a top-level `command` or an executable `tests/test.sh`. Draft placeholders block launch until the prompt and required grading criteria are filled.
 
@@ -78,7 +78,10 @@ codex login --device-auth
 workbench login codex --method oauth
 workbench agent add default --adapter codex --model gpt-5.4-mini --with auth=default
 workbench eval --agents all -n 1
+workbench evals
 workbench results --agents all --versions all
+workbench results --eval eval-v1
+workbench results --eval all
 ```
 
 `local` and `command` agents run case tests directly. `codex` and `claude` agents run provider-backed skill execution and then grade the same cases through the configured grader. Workbench passes provider `model` values through to the adapter; for Claude, use a Claude Code alias such as `opus` or `sonnet`, or a full Claude Code model id.
@@ -88,8 +91,12 @@ Use selector flags only when the user wants a broader or narrower selected set:
 ```bash
 workbench eval --versions all --agents all -n 1
 workbench results --versions all --agents all
+workbench results --eval current
+workbench results --eval eval-v2
 workbench eval --agents default --cases investor-focus
 ```
+
+`workbench results` defaults to the current eval version. Use `workbench evals` to list stored eval versions and `--eval eval-vN` when case, test, rubric, or environment edits changed the score meaning.
 
 ## Improve from evidence
 

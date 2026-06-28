@@ -104,7 +104,7 @@ export interface WorkbenchRunEvidenceJobDependency {
 }
 
 type WorkbenchRunEvidenceResultCell = NonNullable<WorkbenchInspectionSnapshot["results"]>["cells"][number];
-type WorkbenchRunEvidenceResultVersion = NonNullable<WorkbenchInspectionSnapshot["results"]>["versions"][number];
+type WorkbenchRunEvidenceResultVersion = NonNullable<WorkbenchInspectionSnapshot["results"]>["skillVersions"][number];
 
 export function workbenchSampleCoverage(
   completed: number | undefined,
@@ -736,7 +736,7 @@ function agentIdentityForJob(
   snapshot: WorkbenchInspectionSnapshot,
   job: Pick<WorkbenchJob, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentName" | "agentHash" | "adapter" | "result">,
 ): WorkbenchRunEvidenceAgentIdentity {
-  const resultAgent = snapshot.results?.agents.find((agent) => agent.id === job.agentHash);
+  const resultAgent = snapshot.results?.agentVersions.find((agent) => agent.id === job.agentHash);
   const agentSnapshot = snapshot.agents.find((agent) => agent.hash === job.agentHash);
   const adapter = resultAgent?.adapter ?? agentSnapshot?.agent.adapter ?? job.adapter?.use ?? "recorded";
   const model = resultAgent?.model ?? agentSnapshot?.agent.model ?? usageModelForJob(job);
@@ -775,7 +775,7 @@ function resultVersionForJob(
   snapshot: WorkbenchInspectionSnapshot,
   job: Pick<WorkbenchJob, "versionId" | "skillName" | "skillBundleHash">,
 ): WorkbenchRunEvidenceResultVersion | undefined {
-  const versions = snapshot.results?.versions ?? [];
+  const versions = snapshot.results?.skillVersions ?? [];
   return versions.find((version) =>
     version.contentHash === job.skillBundleHash && version.projectVersionId === job.versionId
   ) ??
