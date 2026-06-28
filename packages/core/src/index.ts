@@ -16885,24 +16885,49 @@ async function restoreStateBackupDirectory(target: string, backup: string): Prom
 
 async function replaceStateDirectory(target: string, next: string, backup: string): Promise<void> {
   await removeStateTree(backup);
+  const collisionBackup = `${backup}.collision-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`;
   if (await exists(target)) {
     await fs.mkdir(path.dirname(backup), { recursive: true });
     await fs.rename(target, backup);
   }
   try {
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.rename(next, target);
+    await renameStateDirectoryIntoPlace(next, target, collisionBackup);
     await removeStateTree(backup);
+    await removeStateTree(collisionBackup);
   } catch (error) {
-    if (!await exists(target) && await exists(backup)) {
-      await fs.rename(backup, target);
+    if (!await exists(target)) {
+      if (await exists(collisionBackup)) {
+        await restoreStateBackupDirectory(target, collisionBackup);
+      } else if (await exists(backup)) {
+        await restoreStateBackupDirectory(target, backup);
+      }
     }
     throw error;
+  } finally {
+    await removeStateTree(collisionBackup);
   }
 }
 
 async function removeStateTree(target: string): Promise<void> {
   await fs.rm(target, STATE_TREE_RM_OPTIONS);
+}
+
+async function renameStateDirectoryIntoPlace(next: string, target: string, collisionBackup: string): Promise<void> {
+  try {
+    await fs.rename(next, target);
+  } catch (error) {
+    const code = fileErrorCode(error);
+    if (code !== "ENOTEMPTY" && code !== "EEXIST") {
+      throw error;
+    }
+    if (!await exists(target)) {
+      throw error;
+    }
+    await removeStateTree(collisionBackup);
+    await fs.rename(target, collisionBackup);
+    await fs.rename(next, target);
+  }
 }
 
 async function writeObjectCollectionToDir<T>(

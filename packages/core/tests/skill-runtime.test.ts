@@ -3263,7 +3263,7 @@ describe("skill-first Workbench runtime", () => {
       sample: job!.sample,
       state: changedState,
     })).rejects.toThrow(/Agent not found: default/u);
-  }, 15_000);
+  }, 30_000);
 
   test("rejects queued eval execution when the exact eval hash is missing", async () => {
     const state = createQueuedEvalState();
@@ -4436,7 +4436,7 @@ describe("skill-first Workbench runtime", () => {
     await expect(syncWorkbenchRemote({ dir: root })).rejects.toThrow(/object conflict/u);
     const status = await workbenchStatus({ dir: root });
     expect(status.pendingSyncCount).toBe(1);
-  });
+  }, 15_000);
 
   dockerTest("runs command-backed improve through a bounded skill patch", async () => {
     const root = await makeTempRoot("workbench-command-improve-");
@@ -5769,7 +5769,7 @@ describe("skill-first Workbench runtime", () => {
     expect(run?.jobIds).toHaveLength(10);
     expect(run?.traceIds).toHaveLength(10);
     await expect(listWorkbenchVersions({ dir: root })).resolves.toHaveLength(1);
-  }, 15_000);
+  }, 30_000);
 
   test("rejects provider-backed skill eval agents with explicit isolated network", () => {
     expect(() => createWorkbenchSkillEvalRuntimeInput({

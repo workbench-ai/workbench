@@ -40,27 +40,27 @@ describe("hub-shaped Workbench UI", () => {
       .toEqual(createFilesRoute({ file: { filePath: null, directoryPath: "references", previewMode: "rendered" } }));
     expect(parseWorkbenchLocation(`${base}/evaluation`, base))
       .toEqual(createEvaluationRoute({ view: "results" }));
-    expect(parseWorkbenchLocation(`${base}/evaluation/cases?evaluation=eval-v1`, base))
+    expect(parseWorkbenchLocation(`${base}/evaluation/cases?eval=eval-v1`, base))
       .toEqual(createEvaluationRoute({ view: "cases", evalVersionId: "eval-v1" }));
-    expect(parseWorkbenchLocation(`${base}/evaluation/traces?evaluation=eval-v1`, base).kind)
+    expect(parseWorkbenchLocation(`${base}/evaluation/traces?eval=eval-v1`, base).kind)
       .toBe("not-found");
-    expect(parseWorkbenchLocation(`${base}/evaluation/playground?evaluation=eval-v1`, base).kind)
+    expect(parseWorkbenchLocation(`${base}/evaluation/playground?eval=eval-v1`, base).kind)
       .toBe("not-found");
-    expect(parseWorkbenchLocation(`${base}/evaluation/outputs?evaluation=eval-v1`, base).kind)
+    expect(parseWorkbenchLocation(`${base}/evaluation/outputs?eval=eval-v1`, base).kind)
       .toBe("not-found");
-    expect(parseWorkbenchLocation(`${base}/evaluation/source?evaluation=eval-v1&file=environment%2FDockerfile&view=raw`, base).kind)
+    expect(parseWorkbenchLocation(`${base}/evaluation/source?eval=eval-v1&file=environment%2FDockerfile&view=raw`, base).kind)
       .toBe("not-found");
-    expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?evaluation=eval-v1`, base))
+    expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?eval=eval-v1`, base))
       .toEqual(createCaseRoute({ caseId: "case_001", evalVersionId: "eval-v1" }));
-    expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?evaluation=eval-v1&file=cases%2Fcase_001%2Fnotes.md&view=raw`, base))
+    expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?eval=eval-v1&file=cases%2Fcase_001%2Fnotes.md&view=raw`, base))
       .toEqual(createCaseRoute({
         caseId: "case_001",
         evalVersionId: "eval-v1",
         file: { filePath: "cases/case_001/notes.md", previewMode: "raw" },
       }));
-    expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?evaluation=eval-v1&section=runs`, base))
+    expect(parseWorkbenchLocation(`${base}/evaluation/cases/case_001?eval=eval-v1&section=runs`, base))
       .toEqual(createCaseRoute({ caseId: "case_001", evalVersionId: "eval-v1", section: "runs" }));
-    expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?evaluation=eval-v1`, base).kind)
+    expect(parseWorkbenchLocation(`${base}/evaluation/runs/run_eval?eval=eval-v1`, base).kind)
       .toBe("not-found");
     expect(parseWorkbenchLocation(`${base}/runs`, base)).toEqual(createRunsRoute());
     expect(parseWorkbenchLocation(`${base}/runs/run_eval`, base))
@@ -80,12 +80,12 @@ describe("hub-shaped Workbench UI", () => {
       file: { filePath: null, directoryPath: "references", previewMode: "rendered" },
     }), base)).toBe(`${base}/files?dir=references`);
     expect(buildWorkbenchLocationHref(createEvaluationRoute({ view: "cases", evalVersionId: "eval-v1" }), base))
-      .toBe(`${base}/evaluation/cases?evaluation=eval-v1`);
+      .toBe(`${base}/evaluation/cases?eval=eval-v1`);
     expect(buildWorkbenchLocationHref(createCaseRoute({
       caseId: "case_001",
       evalVersionId: "eval-v1",
       file: { filePath: "cases/case_001/notes.md", previewMode: "raw" },
-    }), base)).toBe(`${base}/evaluation/cases/case_001?evaluation=eval-v1&file=cases%2Fcase_001%2Fnotes.md&view=raw`);
+    }), base)).toBe(`${base}/evaluation/cases/case_001?eval=eval-v1&file=cases%2Fcase_001%2Fnotes.md&view=raw`);
     expect(buildWorkbenchLocationHref(withFileRouteState(createCaseRoute({
       caseId: "case_001",
       evalVersionId: "eval-v1",
@@ -94,9 +94,9 @@ describe("hub-shaped Workbench UI", () => {
       filePath: "cases/case_001/notes.md",
       previewMode: "raw",
       versionId: "ignored-for-cases",
-    }), base)).toBe(`${base}/evaluation/cases/case_001?evaluation=eval-v1&file=cases%2Fcase_001%2Fnotes.md&view=raw`);
+    }), base)).toBe(`${base}/evaluation/cases/case_001?eval=eval-v1&file=cases%2Fcase_001%2Fnotes.md&view=raw`);
     expect(buildWorkbenchLocationHref(createCaseRoute({ caseId: "case_001", evalVersionId: "eval-v1", section: "runs" }), base))
-      .toBe(`${base}/evaluation/cases/case_001?evaluation=eval-v1&section=runs`);
+      .toBe(`${base}/evaluation/cases/case_001?eval=eval-v1&section=runs`);
     expect(buildWorkbenchLocationHref(createRunRoute({ runId: "run_eval" }), base))
       .toBe(`${base}/runs/run_eval`);
     expect(buildWorkbenchLocationHref(createRunJobRoute({ runId: "run_eval", jobId: "job_001" }), base))
@@ -403,7 +403,7 @@ describe("hub-shaped Workbench UI", () => {
     expect(listHtml).toContain("Case one");
     expect(listHtml).toContain("Criteria");
     expect(listHtml).toContain("2 criteria");
-    expect(listHtml).toContain("href=\"/skills/alice/earnings/evaluation/cases/case_001?evaluation=eval-v1\"");
+    expect(listHtml).toContain("href=\"/skills/alice/earnings/evaluation/cases/case_001?eval=eval-v1\"");
     expect(listHtml).toContain("earnings-prep v2");
     expect(listHtml).toContain("earnings-prep v1");
     expect(listHtml).toContain("command / deterministic");
@@ -431,7 +431,7 @@ describe("hub-shaped Workbench UI", () => {
     expect(definitionHtml).toContain("Rendered");
     expect(definitionHtml).toContain("Raw");
     expect(definitionHtml).toContain("aria-label=\"Case sections\"");
-    expect(definitionHtml).toContain("href=\"/skills/alice/earnings/evaluation/cases/case_001?evaluation=eval-v1&amp;section=runs\"");
+    expect(definitionHtml).toContain("href=\"/skills/alice/earnings/evaluation/cases/case_001?eval=eval-v1&amp;section=runs\"");
     expect(definitionHtml).not.toContain("All cases");
     expect(definitionHtml).not.toContain("href=\"#runs\"");
     expect(definitionHtml).not.toContain("href=\"/skills/alice/earnings/runs/run_eval\"");

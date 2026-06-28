@@ -35,7 +35,7 @@ export function parseWorkbenchRoute(
   const [pathOnly, inlineSearch = ""] = pathname.split("?", 2);
   const searchParams = new URLSearchParams(search || inlineSearch);
   const segments = routeSegments(pathOnly ?? "/", routeBasePath);
-  const evalVersionId = normalizedQueryValue(searchParams.get("evaluation"));
+  const evalVersionId = normalizedQueryValue(searchParams.get("eval"));
   const sectionParam = normalizedQueryValue(searchParams.get("section"));
   const [section, subsection, id, ...rest] = segments;
 
@@ -230,7 +230,7 @@ function routeQuery(route: WorkbenchRoute): URLSearchParams {
     return params;
   }
   if ((route.kind === "evaluation" || route.kind === "case") && route.evalVersionId) {
-    params.set("evaluation", route.evalVersionId);
+    params.set("eval", route.evalVersionId);
   }
   if (route.kind === "case" && route.section !== "definition") {
     params.set("section", route.section);
