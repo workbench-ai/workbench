@@ -9,21 +9,21 @@ See [Results](track.md) for scorecards and [Traces, artifacts, and files](track-
 Use lifecycle commands with recorded run ids:
 
 ```bash
-workbench status
+workbench skill show
 workbench watch RUN_ID
 workbench cancel RUN_ID
 workbench retry RUN_ID
 ```
 
-`status` shows the next useful command. `watch` follows an active or detached run. `cancel` requests cancellation without deleting evidence. `retry` creates a new whole-run attempt from the selected run's stored plan.
+`workbench skill show` shows the next useful command. `watch` follows an active or detached run. `cancel` requests cancellation without deleting evidence. `retry` creates a new whole-run attempt from the selected run's stored plan.
 
 ## Jobs
 
-Runs contain jobs for phase-specific work such as execute, grade, improve, environment setup, and hosted operations. Use `show` to inspect a run or job:
+Runs contain jobs for step-specific work such as run, grade, improve, environment setup, and hosted operations. Use `eval show` to inspect a run or job:
 
 ```bash
-workbench show RUN_ID
-workbench show JOB_ID
+workbench eval show RUN_ID
+workbench eval show JOB_ID
 ```
 
 Run pages show the measured skill, agent results, case results, jobs, status, duration, errors, and evidence counts.
@@ -33,7 +33,8 @@ Run pages show the measured skill, agent results, case results, jobs, status, du
 Hosted runs use the same run ids after Cloud accepts the operation:
 
 ```bash
-workbench eval --cloud
+workbench eval run --cloud
+workbench eval grade --cloud
 workbench watch RUN_ID
 ```
 

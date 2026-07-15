@@ -22,12 +22,10 @@ const ROW_VIRTUALIZATION_THRESHOLD = 250;
 
 interface TabularPreviewProps {
   preview: FilePreviewData;
-  fillHeight?: boolean;
 }
 
 export function TabularPreview({
   preview,
-  fillHeight = false,
 }: TabularPreviewProps) {
   const textSource = getPreviewSourceText(preview) ?? "";
   const sourceLanguage = detectSourceLanguage({
@@ -54,7 +52,6 @@ export function TabularPreview({
           mode: "rendered",
         })}
         language={sourceLanguage}
-        fillHeight={fillHeight}
         testId="preview-source-viewer"
         ariaLabel={`Rendered source preview for ${preview.path}`}
       />
@@ -82,14 +79,7 @@ export function TabularPreview({
   );
   if (table.columns.length === 0) {
     return (
-      <div
-        className={cn(
-          fillHeight
-            ? "flex min-h-0 flex-1 flex-col gap-3"
-            : "grid gap-3",
-        )}
-        data-testid="preview-table"
-      >
+      <div className="grid gap-3" data-testid="preview-table">
         {metadata}
         <div className="rounded-md border border-dashed border-border/80 bg-muted/20 p-3">
           <EmptyState
@@ -166,22 +156,14 @@ export function TabularPreview({
 
   return (
     <div
-      className={cn(
-        fillHeight
-          ? "flex min-h-0 flex-1 flex-col gap-3"
-          : "grid gap-3",
-      )}
+      className="grid gap-3"
       data-testid="preview-table"
       data-delimiter={table.delimiterLabel.toLowerCase()}
     >
       {metadata}
       <div
         ref={scrollRef}
-        className={cn(
-          "min-h-0 overflow-auto rounded-md border border-border/80 bg-card/40 isolate [contain:paint]",
-          fillHeight && "flex-1",
-          !fillHeight && "max-h-[28rem]",
-        )}
+        className="max-h-[28rem] min-h-0 overflow-auto rounded-md border border-border/80 bg-card/40 isolate [contain:paint]"
         data-testid="preview-table-scroll"
         role="region"
         aria-label={`${table.kindLabel} table preview scroll region`}

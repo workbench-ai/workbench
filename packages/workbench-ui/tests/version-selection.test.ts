@@ -3,38 +3,32 @@ import { describe, expect, test } from "vitest";
 import type { WorkbenchInspectionSnapshot } from "@workbench-ai/workbench-contract";
 
 import {
-  defaultSourceVersionId,
+  defaultPackageVersionId,
   orderedVersions,
   publishedVersionId,
 } from "../src/lib/version-selection";
 
-describe("source version selection", () => {
+describe("package version selection", () => {
   test("uses an explicit route version before snapshot defaults", () => {
-    expect(defaultSourceVersionId(snapshot({ currentVersionId: "v002", publishedVersionId: "v002" }), "v001"))
+    expect(defaultPackageVersionId(snapshot({ currentVersionId: "v002", publishedVersionId: "v002" }), "v001"))
       .toBe("v001");
   });
 
   test("uses the project current version before publication metadata", () => {
-    expect(defaultSourceVersionId(snapshot({ currentVersionId: "v001", publishedVersionId: "v002" })))
+    expect(defaultPackageVersionId(snapshot({ currentVersionId: "v001", publishedVersionId: "v002" })))
       .toBe("v001");
   });
 
   test("uses the current published version when no project current ref exists", () => {
-    expect(defaultSourceVersionId(snapshot({ publishedVersionId: "v002" }))).toBe("v002");
-  });
-
-  test("reads the current published version from refs when publication metadata is absent", () => {
-    const value = snapshot({ refs: { "publication/current-version": "v002" } });
-    expect(publishedVersionId(value)).toBe("v002");
-    expect(defaultSourceVersionId(value)).toBe("v002");
+    expect(defaultPackageVersionId(snapshot({ publishedVersionId: "v002" }))).toBe("v002");
   });
 
   test("falls back to the newest known version instead of the first stored version", () => {
-    expect(defaultSourceVersionId(snapshot({}))).toBe("v002");
+    expect(defaultPackageVersionId(snapshot({}))).toBe("v002");
   });
 
   test("ignores invalid selected refs before falling back", () => {
-    expect(defaultSourceVersionId(snapshot({ currentVersionId: "missing-current", publishedVersionId: "missing-published" }), "missing-route"))
+    expect(defaultPackageVersionId(snapshot({ currentVersionId: "missing-current", publishedVersionId: "missing-published" }), "missing-route"))
       .toBe("v002");
   });
 
@@ -65,11 +59,7 @@ function snapshot(input: {
       root: "/tmp/skill",
       initialized: true,
       ...(input.currentVersionId ? { currentVersionId: input.currentVersionId } : {}),
-      versionCount: versions.length,
-      skillCount: 1,
-      agentCount: 0,
       runCount: 0,
-      remoteCount: 0,
     },
     versions,
     skillSources: [],

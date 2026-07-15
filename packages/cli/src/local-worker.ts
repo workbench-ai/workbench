@@ -5,23 +5,12 @@ import { promises as fs } from "node:fs";
 import {
   codedErrorFromUnknown,
   superviseLocalWorkbenchOperation,
-  type Json,
-  type WorkbenchOperationRequest,
 } from "@workbench-ai/workbench-core";
-
-interface LocalWorkerRequestPayload {
-  schema: "workbench.local-worker.request.v1";
-  core: {
-    dir?: string;
-    authToken?: string;
-    adapterAuthStoreRoot?: string;
-    homeDir?: string;
-  };
-  request: WorkbenchOperationRequest;
-  startedPath: string;
-  completedPath: string;
-  errorPath: string;
-}
+import type { Json } from "@workbench-ai/workbench-contract";
+import {
+  LOCAL_WORKER_REQUEST_SCHEMA,
+  type LocalWorkerRequestPayload,
+} from "./local-worker-protocol.js";
 
 const payloadPath = process.argv[2];
 
@@ -37,7 +26,7 @@ if (process.env.WORKBENCH_INTERNAL_LOCAL_WORKER !== "1" || !payloadPath) {
 
 async function runLocalWorker(filePath: string): Promise<void> {
   const payload = JSON.parse(await fs.readFile(filePath, "utf8")) as LocalWorkerRequestPayload;
-  if (payload.schema !== "workbench.local-worker.request.v1") {
+  if (payload.schema !== LOCAL_WORKER_REQUEST_SCHEMA) {
     throw new Error("Invalid local worker request payload.");
   }
   try {

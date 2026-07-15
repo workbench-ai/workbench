@@ -7,9 +7,14 @@ import type {
   WorkbenchExecutionSpec,
   WorkbenchResult,
 } from "@workbench-ai/workbench-contract";
+import { isWorkbenchJson } from "@workbench-ai/workbench-contract";
 
 import { normalizeUsageSummary } from "./execution-usage.ts";
-import { isJsonPayload } from "./runtime-utils.ts";
+import {
+  isAllowedEditPath,
+  isSafeRelativePath,
+  normalizeRelativePath,
+} from "./skill-patch.ts";
 
 export interface WorkbenchExecutionOutputPayloads {
   skillPatch?: WorkbenchSkillPatch;
@@ -44,7 +49,7 @@ export function validateWorkbenchExecutionOutputPayloads(
         validated.skillPatch = normalizeSkillPatch(payload, execution, contract, issues);
         break;
       case "workbench.result.v1":
-        validated.result = normalizeResult(payload, execution, contract, issues);
+        validated.result = normalizeResult(payload, contract, issues);
         break;
       default:
         break;
@@ -57,7 +62,7 @@ export function validateWorkbenchExecutionOutputPayloads(
   return validated;
 }
 
-export function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExecutionSpec): string[] {
+function collectWorkbenchExecutionIsolationIssues(execution: WorkbenchExecutionSpec): string[] {
   const issues: string[] = [];
   if (!execution.policy.tenantId.trim()) {
     issues.push(`Execution ${execution.id} must include a non-empty tenant id.`);
@@ -232,17 +237,15 @@ function normalizeSkillPatch(
     files,
     fileChanges,
     ...(typeof record?.summary === "string" ? { summary: record.summary } : {}),
-    ...(isJsonPayload(record?.feedback) ? { feedback: record.feedback } : {}),
+    ...(isWorkbenchJson(record?.feedback) ? { feedback: record.feedback } : {}),
   };
 }
 
 function normalizeResult(
   value: Json,
-  execution: WorkbenchExecutionSpec,
   contract: WorkbenchExecutionOutputContract,
   issues: string[],
 ): WorkbenchResult {
-  void execution;
   const record = readRecord(value, contract.name, issues);
   const score = readFiniteNumber(record?.score, `${contract.name}.score`, issues);
   const usage = normalizeUsageSummary(record?.usage);
@@ -252,7 +255,7 @@ function normalizeResult(
     ...(record?.cases !== undefined ? { cases: normalizeCaseResults(record.cases, `${contract.name}.cases`, issues) } : {}),
     ...(usage ? { usage } : {}),
     ...(typeof record?.summary === "string" ? { summary: record.summary } : {}),
-    ...(isJsonPayload(record?.feedback) ? { feedback: record.feedback } : {}),
+    ...(isWorkbenchJson(record?.feedback) ? { feedback: record.feedback } : {}),
   };
 }
 
@@ -316,10 +319,10 @@ function normalizeCaseResults(value: unknown, label: string, issues: string[]): 
       ...(status ? { status } : {}),
       ...(record.durationMs !== undefined ? { durationMs: readFiniteNumber(record.durationMs, `${itemLabel}.durationMs`, issues) ?? 0 } : {}),
       metrics: normalizeNumberRecord(record.metrics ?? {}, `${itemLabel}.metrics`, issues),
-      ...(isJsonPayload(record.source) && record.source && typeof record.source === "object" && !Array.isArray(record.source)
+      ...(isWorkbenchJson(record.source) && record.source && typeof record.source === "object" && !Array.isArray(record.source)
         ? { source: record.source as Record<string, Json> }
         : {}),
-      ...(isJsonPayload(record.feedback) ? { feedback: record.feedback } : {}),
+      ...(isWorkbenchJson(record.feedback) ? { feedback: record.feedback } : {}),
       ...(criteria && criteria.length > 0 ? { criteria } : {}),
     }];
   });
@@ -437,26 +440,4 @@ function readFiniteNumber(value: unknown, label: string, issues: string[]): numb
     return null;
   }
   return value;
-}
-
-function isAllowedEditPath(filePath: string, edits: string[]): boolean {
-  const normalizedPath = normalizeRelativePath(filePath);
-  return edits.some((entry) => {
-    const normalizedEditPath = normalizeRelativePath(entry).replace(/\/+$/u, "");
-    if (normalizedEditPath === ".") {
-      return true;
-    }
-    return normalizedPath === normalizedEditPath || normalizedPath.startsWith(`${normalizedEditPath}/`);
-  });
-}
-
-function isSafeRelativePath(filePath: string): boolean {
-  const normalized = normalizeRelativePath(filePath);
-  return normalized.length > 0
-    && !normalized.startsWith("/")
-    && !normalized.split("/").includes("..");
-}
-
-function normalizeRelativePath(filePath: string): string {
-  return filePath.replace(/\\/gu, "/").replace(/^\.\/+/u, "").replace(/\/+/gu, "/");
 }

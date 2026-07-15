@@ -1,6 +1,6 @@
 import path from "node:path";
 
-export interface WorkbenchRuntimeAdapterInstallerFile {
+interface WorkbenchRuntimeAdapterInstallerFile {
   path: string;
   content: string;
   encoding?: "utf8" | "base64";

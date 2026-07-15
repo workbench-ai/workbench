@@ -3,6 +3,7 @@ import path from "node:path";
 import type {
   SurfaceSnapshotFile,
 } from "@workbench-ai/workbench-contract";
+import { requiredRecord } from "./validation.ts";
 
 export function normalizeSurfaceSnapshotFiles(
   value: unknown,
@@ -45,11 +46,4 @@ export function normalizeSurfaceRelativePath(filePath: string, label: string): s
     throw new Error(`${label} must not escape the result root.`);
   }
   return normalized;
-}
-
-function requiredRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value as Record<string, unknown>;
 }

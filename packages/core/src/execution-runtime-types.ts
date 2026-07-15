@@ -1,9 +1,8 @@
 import type {
   RemoteWorkbenchEnvironmentVersion,
-  RemoteWorkbenchJob,
+  WorkbenchExecutionJob,
   Json,
   SurfaceSnapshotFile,
-  WorkbenchAdapterInvocation,
 } from "@workbench-ai/workbench-contract";
 
 import type {
@@ -17,14 +16,12 @@ import type {
   WorkbenchAdapterAuthBundle,
 } from "./adapter-auth.ts";
 import type {
-  WorkbenchAdapterOperation,
-  WorkbenchAdapterOperationExecutor,
   WorkbenchAdapterManifest,
   WorkbenchRuntimeControlOperationSequenceRequest,
 } from "@workbench-ai/workbench-protocol";
 
 export interface WorkbenchExecutionRuntimeInput {
-  job: RemoteWorkbenchJob;
+  job: WorkbenchExecutionJob;
   spec: GenericRunSpec;
   environmentVersion?: Pick<RemoteWorkbenchEnvironmentVersion, "id" | "imageRef" | "sourceHash" | "spec">;
   environmentDockerfile?: string;
@@ -47,14 +44,4 @@ export interface WorkbenchExecutionRuntimeInput {
   workdir?: string;
   workspaceRoot?: string;
   runtimeControlOperation?: WorkbenchRuntimeControlOperationSequenceRequest;
-}
-
-export interface WorkbenchWorkloadStepCommand {
-  kind: "improver" | "skill" | "engine";
-  label: string;
-  operation: WorkbenchAdapterOperation;
-  executor: WorkbenchAdapterOperationExecutor;
-  adapter?: WorkbenchAdapterInvocation;
-  command?: string;
-  okExitCodes?: number[];
 }

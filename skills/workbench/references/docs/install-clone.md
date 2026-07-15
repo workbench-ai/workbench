@@ -1,16 +1,16 @@
 # Install and clone
 
-Install published source when someone needs an agent-visible skill package. Clone source when they need editable Workbench files, evals, and future improvement loops.
+Install a published package when someone needs an agent-visible Skill. Clone a Skill when they need editable Workbench files, Evals, and future improvement loops.
 
-See [Publish](share.md) for source publication before handoff and [Skill packages](skills.md) for the installable package boundary.
+See [Publish](share.md) for package publication before handoff and [Skill packages](skills.md) for the installable boundary.
 
 ## Install
 
 Use `install` for an agent-visible skill package:
 
 ```bash
-workbench install OWNER/SKILL
-workbench install OWNER/SKILL@VERSION
+workbench skill install OWNER/SKILL
+workbench skill install OWNER/SKILL@VERSION
 ```
 
 `install` copies the Agent Skills package only: `SKILL.md`, scripts, references, assets, `dist/**`, and support files. It does not copy `.workbench` eval controls or runtime state.
@@ -19,10 +19,10 @@ External Agent Skill sources can still install through Workbench. Workbench-only
 
 ## Clone
 
-Use `clone` for editable Workbench source, evals, and future improvements:
+Use `clone` for an editable Workbench Skill, Evals, and future improvements:
 
 ```bash
-workbench clone OWNER/SKILL ./local-copy
+workbench skill clone OWNER/SKILL ./local-copy
 ```
 
-Use `install` for an agent-visible package. Use `clone` for source that needs Workbench evals, evidence, and future improvement loops.
+Use `install` for an agent-visible package. Use `clone` for a Skill that needs Workbench Evals, evidence, and future improvement loops.

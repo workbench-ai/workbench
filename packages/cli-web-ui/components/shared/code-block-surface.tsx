@@ -10,7 +10,6 @@ export interface CodeBlockSurfaceProps {
   className?: string;
   codeClassName?: string;
   surface?: "plain" | "inset";
-  fillHeight?: boolean;
   wrapLongLines?: boolean;
 }
 
@@ -22,11 +21,8 @@ export function CodeBlockSurface({
   className,
   codeClassName,
   surface = "inset",
-  fillHeight = false,
   wrapLongLines = true,
 }: CodeBlockSurfaceProps) {
-  const shouldWrap = wrapLongLines || fillHeight;
-
   return (
     <div
       aria-label={ariaLabel}
@@ -35,7 +31,6 @@ export function CodeBlockSurface({
         surface === "inset"
           ? "overflow-hidden rounded-xl border border-border/70 bg-background"
           : "overflow-visible bg-transparent p-0",
-        fillHeight && "flex min-h-0 flex-1 flex-col",
         className,
       )}
       data-language={language ?? "plaintext"}
@@ -47,12 +42,8 @@ export function CodeBlockSurface({
         className={cn(
           "m-0 w-full min-w-0 max-w-full font-mono text-xs leading-6 text-foreground tabular-nums",
           surface === "inset" ? "p-3" : "p-0",
-          fillHeight
-            ? "min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
-            : shouldWrap
-              ? "overflow-x-hidden"
-              : "overflow-x-auto",
-          shouldWrap
+          wrapLongLines ? "overflow-x-hidden" : "overflow-x-auto",
+          wrapLongLines
             ? "whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
             : "whitespace-pre",
           codeClassName,
@@ -61,7 +52,7 @@ export function CodeBlockSurface({
         <code
           className={cn(
             "block w-full min-w-0 max-w-full",
-            shouldWrap
+            wrapLongLines
               ? "whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
               : "whitespace-pre",
           )}

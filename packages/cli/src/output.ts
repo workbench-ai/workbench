@@ -1,19 +1,33 @@
-import { codedErrorFromUnknown, type Json } from "@workbench-ai/workbench-core";
+import type { Json } from "@workbench-ai/workbench-contract";
+import { codedErrorFromUnknown } from "@workbench-ai/workbench-core";
 
 import { humanFormatOptions, styleError, styleHint, type HumanFormatOptions } from "./human-format.js";
-import type { CliIo } from "./index.js";
 
-export interface ParsedCliFlags {
+export interface CliIo {
+  stdout: NodeJS.WritableStream;
+  stderr: NodeJS.WritableStream;
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean };
+}
+
+interface ParsedCliFlags {
   flags: Record<string, string | boolean | string[]>;
 }
 
-export interface WorkbenchCliSuccessEnvelope {
+type JsonPrimitive = null | boolean | number | string;
+
+export type JsonSerializable<T> =
+  T extends JsonPrimitive ? T
+    : T extends undefined ? undefined
+      : T extends readonly (infer Item)[] ? readonly JsonSerializable<Item>[]
+        : T extends object ? { [Key in keyof T]: JsonSerializable<T[Key]> }
+          : never;
+
+type WorkbenchCliSuccessEnvelope<Body extends object> = {
   schema: string;
   ok: boolean;
-  [key: string]: Json | undefined;
-}
+} & Body;
 
-export interface WorkbenchCliErrorEnvelope {
+interface WorkbenchCliErrorEnvelope {
   schema: "workbench.cli.error.v1";
   ok: false;
   code: string;
@@ -24,21 +38,20 @@ export interface WorkbenchCliErrorEnvelope {
   subject?: Record<string, Json>;
 }
 
-export function emitResult(
+export function emitResult<Body extends Record<string, unknown>>(
   schema: string,
-  body: Record<string, Json | undefined>,
+  body: JsonSerializable<Body>,
   parsed: ParsedCliFlags,
   io: CliIo,
   text: (format: HumanFormatOptions) => string,
   options: { ok?: boolean; exitCode?: number } = {},
 ): number {
   if (parsed.flags.json === true) {
-    const envelope: WorkbenchCliSuccessEnvelope = { schema, ok: options.ok ?? true };
-    for (const [key, value] of Object.entries(body)) {
-      if (value !== undefined) {
-        envelope[key] = value;
-      }
-    }
+    const envelope: WorkbenchCliSuccessEnvelope<JsonSerializable<Body>> = {
+      schema,
+      ok: options.ok ?? true,
+      ...body,
+    };
     io.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
   } else {
     io.stdout.write(`${text(humanFormatOptions(io.stdout))}\n`);
@@ -83,6 +96,21 @@ export function emitError(error: unknown, parsed: ParsedCliFlags, io: CliIo): nu
     }
   }
   return coded.exitCode;
+}
+
+export function jsonValue(value: unknown): Json {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(jsonValue);
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .map(([key, entry]) => [key, jsonValue(entry)]));
+  }
+  throw new TypeError(`Value is not JSON-serializable: ${typeof value}`);
 }
 
 function setupCommandsFromSubject(subject: Record<string, Json> | undefined): string[] {

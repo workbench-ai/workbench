@@ -20,6 +20,7 @@ import {
   ToggleGroupItem,
 } from "@workbench-ai/cli-web-ui/components/ui/toggle-group";
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
+import { compareWorkbenchNaturalText } from "@workbench-ai/workbench-contract";
 
 import {
   buildResultCategoryAxisLayout,
@@ -572,7 +573,7 @@ function buildVisualSummaryGroups(rows: readonly ResultEvidenceRow[]): ResultGro
   return [...groupsById.values()]
     .sort((left, right) =>
       left.versionOrdinal - right.versionOrdinal ||
-      left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: "base" }) ||
+      compareWorkbenchNaturalText(left.label, right.label) ||
       left.id.localeCompare(right.id)
     )
     .map((group, index) => ({

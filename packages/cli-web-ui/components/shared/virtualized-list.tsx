@@ -2,9 +2,9 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { cn } from "../../lib/utils";
-import { ViewportScrollArea } from "./viewport-scroll-area";
 
 type VirtualizedItemKey = string | number;
+type VirtualizedScrollAlign = "auto" | "center" | "end" | "start";
 
 interface VirtualizedListContentProps<T> {
   items: readonly T[];
@@ -20,15 +20,9 @@ interface VirtualizedListContentProps<T> {
   topPadding?: number;
   bottomPadding?: number;
   measureKey?: string | number | null;
-}
-
-interface VirtualizedScrollAreaListProps<T>
-  extends Omit<VirtualizedListContentProps<T>, "getScrollElement"> {
-  className?: string;
-  viewportClassName?: string;
-  testId?: string;
-  viewportTestId?: string;
-  hideScrollbar?: boolean;
+  scrollToIndex?: number | null;
+  scrollToIndexAlign?: VirtualizedScrollAlign;
+  scrollToIndexKey?: string | number | null;
 }
 
 const DEFAULT_ESTIMATE_SIZE_PX = 88;
@@ -50,6 +44,9 @@ export function VirtualizedListContent<T>({
   topPadding = 0,
   bottomPadding = 0,
   measureKey = null,
+  scrollToIndex = null,
+  scrollToIndexAlign = "center",
+  scrollToIndexKey = null,
 }: VirtualizedListContentProps<T>) {
   const shouldVirtualize = items.length > virtualizeThreshold;
   const virtualizer = useVirtualizer({
@@ -68,34 +65,46 @@ export function VirtualizedListContent<T>({
     overscan,
     gap,
   });
+  const getScrollElementRef = useRef(getScrollElement);
+  const virtualizerRef = useRef(virtualizer);
+  const scrollToIndexRef = useRef(scrollToIndex);
+  const resolvedScrollToIndexKey = scrollToIndexKey ?? measureKey ?? scrollToIndex;
+  getScrollElementRef.current = getScrollElement;
+  virtualizerRef.current = virtualizer;
+  scrollToIndexRef.current = scrollToIndex;
 
   useEffect(() => {
-    if (!shouldVirtualize) {
+    if (shouldVirtualize) {
+      virtualizer.measure();
+    }
+  }, [measureKey, shouldVirtualize, items.length, virtualizer]);
+
+  useEffect(() => {
+    const targetIndex = scrollToIndexRef.current;
+    if (!shouldVirtualize || targetIndex == null) {
       return;
     }
-    virtualizer.measure();
-  }, [measureKey, shouldVirtualize, items.length, virtualizer]);
+    const scroll = () => {
+      if (getScrollElementRef.current()) {
+        virtualizerRef.current.scrollToIndex(targetIndex, { align: scrollToIndexAlign });
+      }
+    };
+    scroll();
+    const timeoutId = window.setTimeout(scroll, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [resolvedScrollToIndexKey, scrollToIndexAlign, shouldVirtualize]);
 
   if (!shouldVirtualize) {
     return (
       <div
-        className={cn(
-          "grid w-full min-w-0 auto-rows-max content-start",
-          contentClassName,
-        )}
-        style={{
-          rowGap: `${gap}px`,
-          paddingTop: `${topPadding}px`,
-          paddingBottom: `${bottomPadding}px`,
-        }}
+        className={cn("grid w-full min-w-0 auto-rows-max content-start", contentClassName)}
+        style={{ rowGap: `${gap}px`, paddingTop: `${topPadding}px`, paddingBottom: `${bottomPadding}px` }}
       >
         {items.map((item, index) => (
           <div
             key={getItemKey(item, index)}
-            className={cn(
-              "min-w-0",
-              resolveItemClassName(itemClassName, item, index),
-            )}
+            data-virtualized-item-key={String(getItemKey(item, index))}
+            className={cn("min-w-0", resolveItemClassName(itemClassName, item, index))}
           >
             {renderItem(item, index)}
           </div>
@@ -104,101 +113,34 @@ export function VirtualizedListContent<T>({
     );
   }
 
-  const virtualItems = virtualizer.getVirtualItems();
-
   return (
     <div
       className={cn("relative min-h-full w-full", contentClassName)}
-      style={{
-        height: `${virtualizer.getTotalSize() + topPadding + bottomPadding}px`,
-      }}
+      style={{ height: `${virtualizer.getTotalSize() + topPadding + bottomPadding}px` }}
     >
-      {virtualItems.map((virtualItem) => {
+      {virtualizer.getVirtualItems().map((virtualItem) => {
         const item = items[virtualItem.index];
-        if (!item) {
-          return null;
-        }
-
-        return (
+        return item ? (
           <div
             key={virtualItem.key}
             ref={virtualizer.measureElement}
             data-index={virtualItem.index}
-            className={cn(
-              "absolute left-0 top-0 w-full min-w-0",
-              resolveItemClassName(itemClassName, item, virtualItem.index),
-            )}
-            style={{
-              transform: `translateY(${virtualItem.start + topPadding}px)`,
-            }}
+            data-virtualized-item-key={String(virtualItem.key)}
+            className={cn("absolute left-0 top-0 w-full min-w-0", resolveItemClassName(itemClassName, item, virtualItem.index))}
+            style={{ transform: `translateY(${virtualItem.start + topPadding}px)` }}
           >
             {renderItem(item, virtualItem.index)}
           </div>
-        );
+        ) : null;
       })}
     </div>
   );
 }
 
-export function VirtualizedScrollAreaList<T>({
-  items,
-  getItemKey,
-  renderItem,
-  estimateSize,
-  overscan,
-  gap,
-  virtualizeThreshold,
-  contentClassName,
-  itemClassName,
-  topPadding,
-  bottomPadding,
-  measureKey,
-  className,
-  viewportClassName,
-  testId,
-  viewportTestId,
-  hideScrollbar = false,
-}: VirtualizedScrollAreaListProps<T>) {
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-
-  return (
-    <ViewportScrollArea
-      className={cn("h-full min-h-0 min-w-0 w-full", className)}
-      data-testid={testId}
-      hideScrollbar={hideScrollbar}
-      viewportClassName={cn("h-full min-w-0", viewportClassName)}
-      viewportRef={viewportRef}
-      viewportTestId={viewportTestId}
-    >
-      <VirtualizedListContent
-        items={items}
-        getScrollElement={() => viewportRef.current}
-        getItemKey={getItemKey}
-        renderItem={renderItem}
-        estimateSize={estimateSize}
-        overscan={overscan}
-        gap={gap}
-        virtualizeThreshold={virtualizeThreshold}
-        contentClassName={contentClassName}
-        itemClassName={itemClassName}
-        topPadding={topPadding}
-        bottomPadding={bottomPadding}
-        measureKey={measureKey}
-      />
-    </ViewportScrollArea>
-  );
-}
-
 function resolveItemClassName<T>(
-  itemClassName:
-    | string
-    | ((item: T, index: number) => string | undefined)
-    | undefined,
+  itemClassName: string | ((item: T, index: number) => string | undefined) | undefined,
   item: T,
   index: number,
 ): string | undefined {
-  if (typeof itemClassName === "function") {
-    return itemClassName(item, index);
-  }
-  return itemClassName;
+  return typeof itemClassName === "function" ? itemClassName(item, index) : itemClassName;
 }

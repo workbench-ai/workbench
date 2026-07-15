@@ -1,19 +1,19 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 
-import type {
-  Json,
-  SurfaceSnapshotFile,
-  UsageSummary,
+import {
+  isWorkbenchJson,
+  type Json,
+  type SurfaceSnapshotFile,
+  type UsageSummary,
 } from "@workbench-ai/workbench-contract";
 import {
   DEFAULT_HARNESS_CANCEL,
   DEFAULT_HARNESS_RETRY,
   resolveRuntimeHome,
   type ActiveHarnessSession,
+  type AgentTrace,
   type HarnessExecutionPlan,
   type HarnessProvider,
   type HarnessTurnLivePersistence,
@@ -26,19 +26,6 @@ import {
 } from "@workbench-ai/workbench-core";
 
 import { importWorkbenchRuntime } from "./runtime.ts";
-
-const DEFAULT_AGENT_TURN_MAX_ATTEMPTS = 3;
-const DEFAULT_AGENT_TURN_RETRY_BASE_MS = 5_000;
-const DEFAULT_AGENT_TURN_RETRY_MAX_MS = 30_000;
-const DEFAULT_AGENT_TURN_TIMEOUT_MS = 3_600_000;
-const DEFAULT_AGENT_STALL_TIMEOUT_MS = 300_000;
-
-interface AgentProviderRegistration {
-  executable: string;
-  installHint: string;
-  defaultConfig?: Record<string, JsonValue>;
-  load(): Promise<HarnessProvider<unknown>>;
-}
 
 export interface AgentProviderSpec {
   use: string;
@@ -63,75 +50,48 @@ export interface WorkbenchAgentTurnRequest {
 
 export interface WorkbenchAgentTurnResult {
   output: string;
+  agentTrace: AgentTrace;
   traceFiles: SurfaceSnapshotFile[];
   metadata: Record<string, JsonValue>;
   usage?: UsageSummary;
 }
 
 export type WorkbenchAgentTurnExecutor = (request: WorkbenchAgentTurnRequest) => Promise<WorkbenchAgentTurnResult>;
-
-const AGENT_PROVIDER_REGISTRY: Record<string, AgentProviderRegistration> = {
-  codex: {
-    executable: "codex",
-    installHint: "@openai/codex",
-    defaultConfig: {
-      sandbox_mode: "danger-full-access",
-    },
-    async load() {
-      const module = await import("@workbench-ai/agent-driver-openai-codex");
-      return module.codexHarness();
-    },
-  },
-  claude: {
-    executable: "claude",
-    installHint: "@anthropic-ai/claude-code",
-    defaultConfig: {
-      max_turns: 64,
-      permission_mode: "bypassPermissions",
-    },
-    async load() {
-      const module = await import("@workbench-ai/agent-driver-anthropic-claude-code");
-      return module.claudeCodeHarness();
-    },
-  },
-};
+export type HarnessProviderResolver = (
+  id: string,
+) => HarnessProvider<unknown> | undefined;
 
 export async function executeWorkbenchAgentTurn(
   executor: (request: WorkbenchAgentTurnRequest) => Promise<WorkbenchAgentTurnResult>,
   request: WorkbenchAgentTurnRequest,
 ): Promise<WorkbenchAgentTurnResult> {
-  const maxAttempts = workbenchAgentTurnMaxAttempts();
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await executor(request);
-    } catch (error) {
-      lastError = error;
-      const authError = providerAuthRequiredError(request.provider?.use, error);
-      if (authError) {
-        throw authError;
-      }
-      if (attempt >= maxAttempts || !isTransientAgentTurnError(error)) {
-        throw error;
-      }
-      await sleep(agentTurnRetryDelayMs(attempt));
-    }
+  try {
+    return await executor(request);
+  } catch (error) {
+    throw providerAuthRequiredError(request.provider?.use, error) ?? error;
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Agent turn failed."));
 }
 
-export async function defaultWorkbenchAgentTurnExecutor(
+export function createWorkbenchAgentTurnExecutor(
+  resolveProvider: HarnessProviderResolver,
+): WorkbenchAgentTurnExecutor {
+  return async (request) => runWorkbenchAgentTurn(resolveProvider, request);
+}
+
+async function runWorkbenchAgentTurn(
+  resolveProvider: HarnessProviderResolver,
   request: WorkbenchAgentTurnRequest,
 ): Promise<WorkbenchAgentTurnResult> {
-  const execFileAsync = promisify(execFile);
-  await ensureAgentExecutableOnPath(request.provider.use, execFileAsync);
-  const provider = await loadAgentProvider(request.provider.use);
+  const provider = resolveProvider(request.provider.use);
+  if (!provider) {
+    throw new Error(`Unknown harness provider: ${request.provider.use}.`);
+  }
   const agentHome = resolveRuntimeHome();
   const stageSessionPath = path.join(request.traceRoot, "session");
   await fs.mkdir(stageSessionPath, { recursive: true });
   const restoreEnv = applyAdapterAuthEnv(request.adapterAuthEnv);
   try {
-    const plan = await buildAgentExecutionPlan(provider, request.provider, request.workspaceRoot, agentHome, {
+    const plan = await buildAgentExecutionPlan(provider, request.provider, {
       root: request.adapterAuthRoot,
       request: request.adapterAuthRequest,
     });
@@ -191,6 +151,7 @@ export async function defaultWorkbenchAgentTurnExecutor(
       await writeAgentTraceFile(path.join(stageSessionPath, "trace.json"), turnResult.trace);
       return {
         output: turnResult.finalOutput,
+        agentTrace: turnResult.agentTrace,
         traceFiles: await runtime.readOutputTraceFiles(
           request.traceRoot,
           request.tracePath ?? `.workbench/traces/${request.jobId}/${request.role}`,
@@ -259,59 +220,20 @@ function traceEventCount(trace: unknown): number {
   return Array.isArray(traceRecord.events) ? traceRecord.events.length : 0;
 }
 
-async function loadAgentProvider(providerName: AgentProviderSpec["use"]): Promise<HarnessProvider<unknown>> {
-  return await agentProviderRegistration(providerName).load();
-}
-
-async function ensureAgentExecutableOnPath(
-  providerName: AgentProviderSpec["use"],
-  execFileAsync: (file: string, args: string[], options?: Record<string, unknown>) => Promise<unknown>,
-): Promise<void> {
-  const executable = agentExecutableName(providerName);
-  try {
-    await execFileAsync("sh", ["-c", `command -v ${quoteShellArg(executable)} >/dev/null 2>&1`], {
-      maxBuffer: 1024 * 1024,
-      timeout: 5_000,
-    });
-  } catch {
-    throw new Error(
-      `Agent provider "${providerName}" requires "${executable}" on PATH. Install ${agentExecutableInstallHint(providerName)} in the adapter runtime.`,
-    );
-  }
-}
-
-function agentExecutableName(providerName: AgentProviderSpec["use"]): string {
-  return agentProviderRegistration(providerName).executable;
-}
-
-function agentExecutableInstallHint(providerName: AgentProviderSpec["use"]): string {
-  return agentProviderRegistration(providerName).installHint;
-}
-
-function agentProviderRegistration(providerName: AgentProviderSpec["use"]): AgentProviderRegistration {
-  const registration = AGENT_PROVIDER_REGISTRY[providerName];
-  if (!registration) {
-    throw new Error(`Unsupported first-party agent adapter: ${providerName}`);
-  }
-  return registration;
-}
-
 async function buildAgentExecutionPlan(
   provider: HarnessProvider<unknown>,
   providerSpec: AgentProviderSpec,
-  workspaceRoot: string,
-  agentHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<HarnessExecutionPlan> {
   const { turnTimeoutMs, stallTimeoutMs } = resolveAgentTurnTimeouts(provider.manifest.defaults);
   const harness: WorkflowHarness = {
     id: provider.manifest.id,
-    auth: await resolveAgentAuth(provider, providerSpec, workspaceRoot, agentHome, adapterAuth),
+    auth: await resolveAgentAuth(provider, providerSpec, adapterAuth),
     ...(firstNonEmpty(providerSpec.model, provider.manifest.defaults.model) ? { model: firstNonEmpty(providerSpec.model, provider.manifest.defaults.model) } : {}),
     ...(firstNonEmpty(providerSpec.effort, provider.manifest.defaults.effort) ? { effort: firstNonEmpty(providerSpec.effort, provider.manifest.defaults.effort) } : {}),
     turn_timeout_ms: turnTimeoutMs,
     stall_timeout_ms: stallTimeoutMs,
-    config: resolveAgentConfig(provider, defaultWorkbenchAgentConfig(provider, providerSpec.use)),
+    config: resolveAgentConfig(provider, provider.manifest.defaults.config ?? {}),
     retry: DEFAULT_HARNESS_RETRY,
     cancel: DEFAULT_HARNESS_CANCEL,
   };
@@ -331,37 +253,24 @@ export function resolveAgentTurnTimeouts(defaults: {
   turnTimeoutMs: number;
   stallTimeoutMs: number;
 } {
-  const turnTimeoutMs = positiveTimeoutMs(defaults.turn_timeout_ms) ?? DEFAULT_AGENT_TURN_TIMEOUT_MS;
-  const requestedStallTimeoutMs =
-    positiveTimeoutMs(defaults.stall_timeout_ms) ?? DEFAULT_AGENT_STALL_TIMEOUT_MS;
+  const turnTimeoutMs = requiredTimeoutMs(defaults.turn_timeout_ms, "turn_timeout_ms");
+  const requestedStallTimeoutMs = requiredTimeoutMs(defaults.stall_timeout_ms, "stall_timeout_ms");
   return {
     turnTimeoutMs,
     stallTimeoutMs: Math.min(requestedStallTimeoutMs, turnTimeoutMs),
   };
 }
 
-function positiveTimeoutMs(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? value
-    : null;
-}
-
-function defaultWorkbenchAgentConfig(
-  provider: HarnessProvider<unknown>,
-  providerName: AgentProviderSpec["use"],
-): Record<string, JsonValue> {
-  const fallback = (provider.manifest.defaults.config ?? {}) as Record<string, JsonValue>;
-  return {
-    ...fallback,
-    ...(AGENT_PROVIDER_REGISTRY[providerName]?.defaultConfig ?? {}),
-  };
+function requiredTimeoutMs(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Harness provider manifest requires a positive ${name}.`);
+  }
+  return value;
 }
 
 async function resolveAgentAuth(
   provider: HarnessProvider<unknown>,
   providerSpec: AgentProviderSpec,
-  workspaceRoot: string,
-  agentHome: string,
   adapterAuth: { root?: string; request?: JsonValue },
 ): Promise<Record<string, JsonValue>> {
   const authConfig =
@@ -371,8 +280,6 @@ async function resolveAgentAuth(
   if (!parsed.success) {
     throw new Error(`Agent provider "${provider.manifest.id}" auth is invalid: ${formatValidationIssues(parsed.error.issues)}`);
   }
-  void workspaceRoot;
-  void agentHome;
   return { ...parsed.data };
 }
 
@@ -452,46 +359,7 @@ function jsonRecord(value: unknown): Record<string, JsonValue> | null {
 
 function toJsonPayload(value: unknown): Json {
   const normalized = JSON.parse(JSON.stringify(value ?? null)) as unknown;
-  return isJsonValue(normalized) ? normalized : null;
-}
-
-function isJsonValue(value: unknown): value is Json {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean" ||
-    (typeof value === "number" && Number.isFinite(value))
-  ) {
-    return true;
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJsonValue);
-  }
-  return value !== null &&
-    typeof value === "object" &&
-    Object.values(value as Record<string, unknown>).every(isJsonValue);
-}
-
-function workbenchAgentTurnMaxAttempts(): number {
-  const raw = Number.parseInt(process.env.WORKBENCH_AGENT_TURN_MAX_ATTEMPTS ?? "", 10);
-  return Number.isSafeInteger(raw) && raw > 0 ? raw : DEFAULT_AGENT_TURN_MAX_ATTEMPTS;
-}
-
-function agentTurnRetryDelayMs(attempt: number): number {
-  const fallback = process.env.NODE_ENV === "test" ? 1 : DEFAULT_AGENT_TURN_RETRY_BASE_MS;
-  const raw = Number.parseInt(process.env.WORKBENCH_AGENT_TURN_RETRY_BASE_MS ?? "", 10);
-  const baseDelay = Number.isSafeInteger(raw) && raw >= 0 ? raw : fallback;
-  return Math.min(baseDelay * 2 ** Math.max(0, attempt - 1), DEFAULT_AGENT_TURN_RETRY_MAX_MS);
-}
-
-function isTransientAgentTurnError(error: unknown): boolean {
-  const message = error instanceof Error
-    ? `${error.message}\n${error.stack ?? ""}\n${String(error.cause ?? "")}`
-    : String(error);
-  if (isNativeCaCertificateFailure(message)) {
-    return false;
-  }
-  return /\b(fetch failed|error sending request|stream disconnected before completion|turn stalled after \d+ms|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ECONNREFUSED|socket hang up|network error|UND_ERR_|signal SIGTERM)/iu.test(message);
+  return isWorkbenchJson(normalized) ? normalized : null;
 }
 
 function providerAuthRequiredError(providerName: string | undefined, error: unknown): Error | null {
@@ -501,57 +369,25 @@ function providerAuthRequiredError(providerName: string | undefined, error: unkn
   const message = error instanceof Error
     ? `${error.message}\n${error.stack ?? ""}\n${String(error.cause ?? "")}`
     : String(error);
-  if (!providerAuthErrorPatterns(providerName).some((pattern) => pattern.test(message))) {
+  if (!AUTH_ERROR_PATTERNS.some((pattern) => pattern.test(message))) {
     return null;
   }
   return new Error(`ADAPTER_AUTH_REQUIRED: ${providerName} disconnected. Next: ${workbenchProviderAuthSetupCommand(providerName)}.`);
 }
 
-function providerAuthErrorPatterns(providerName: string): RegExp[] {
-  if (providerName === "claude") {
-    return [
-      /not logged in/iu,
-      /login required/iu,
-      /authentication required/iu,
-      /failed to authenticate/iu,
-      /authentication_error/iu,
-      /api error:\s*401/iu,
-      /invalid.*session/iu,
-      /invalid bearer token/iu,
-      /session.*expired/iu,
-      /oauth.*expired/iu,
-      /unauthorized/iu,
-      /claude_code_oauth_token/iu,
-    ];
-  }
-  if (providerName === "codex") {
-    return [
-      /not logged in/iu,
-      /login required/iu,
-      /authentication required/iu,
-      /failed to authenticate/iu,
-      /authentication_error/iu,
-      /api error:\s*401/iu,
-      /invalid.*session/iu,
-      /invalid bearer token/iu,
-      /session.*expired/iu,
-      /oauth.*expired/iu,
-      /unauthorized/iu,
-    ];
-  }
-  return [];
-}
-
-function isNativeCaCertificateFailure(message: string): boolean {
-  return /\bno native root CA certificates found\b|install ca-certificates/iu.test(message);
-}
-
-async function sleep(ms: number): Promise<void> {
-  if (ms <= 0) {
-    return;
-  }
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
+const AUTH_ERROR_PATTERNS = [
+  /not logged in/iu,
+  /login required/iu,
+  /authentication required/iu,
+  /failed to authenticate/iu,
+  /authentication_error/iu,
+  /api error:\s*401/iu,
+  /invalid.*session/iu,
+  /invalid bearer token/iu,
+  /session.*expired/iu,
+  /oauth.*expired/iu,
+  /unauthorized/iu,
+];
 
 function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
   for (const value of values) {
@@ -569,8 +405,4 @@ function formatValidationIssues(issues: Array<{ path: PropertyKey[]; message: st
       return `${issuePath}: ${issue.message}`;
     })
     .join("; ");
-}
-
-function quoteShellArg(value: string): string {
-  return `'${value.replace(/'/gu, "'\\''")}'`;
 }

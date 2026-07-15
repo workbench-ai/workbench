@@ -4,7 +4,5 @@ export {
 } from "./components/shared/spreadsheet-viewer";
 export {
   parseSpreadsheetViewerWorkbook,
-  type SpreadsheetViewerParseOptions,
-  type SpreadsheetViewerSelection,
-  type SpreadsheetViewerWorkbookFile,
-} from "./lib/spreadsheet-viewer";
+  type WorkbookModel as SpreadsheetViewerWorkbook,
+} from "./lib/spreadsheet-viewer-model";

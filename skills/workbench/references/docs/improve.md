@@ -9,30 +9,30 @@ See [Evaluation basics](evals.md) for eval setup, [Results](track.md) for eviden
 Improve after below-perfect, failed, or reviewed graded evidence:
 
 ```bash
-workbench results
-workbench evals
-workbench show RUN_ID
-workbench improve --dry-run
-workbench improve
-workbench results
+workbench eval results
+workbench eval list
+workbench eval show RUN_ID
+workbench skill improve --dry-run
+workbench skill improve
+workbench eval results
 ```
 
-Perfect-only projects need better cases, stricter grading criteria, or higher samples before improvement is useful. Add or tighten eval cases instead of asking for cosmetic source changes. After changing eval source, use `workbench evals` or `workbench results --eval eval-vN` when you need to compare old and current score meanings.
+Perfect-only projects need better cases, stricter grading criteria, or higher samples before improvement is useful. Add or tighten eval cases instead of asking for cosmetic source changes. After changing eval source, use `workbench eval list` or `workbench eval results --eval eval-vN` when you need to compare old and current score meanings.
 
 ## Candidate and proof
 
-`workbench improve` needs one package version and one agent. Use `--versions` and `--agents` when defaults would select more than one entry.
+`workbench skill improve` needs one package version and one agent. Use `--versions` and `--agents` when defaults would select more than one entry.
 
 ```bash
-workbench improve --versions current --agents default
-workbench improve --budget 2
-workbench improve --cloud
+workbench skill improve --versions current --agents default
+workbench skill improve --budget 2
+workbench skill improve --cloud
 ```
 
 The improver edits package source outside `.workbench/**`, runs proof evidence, and switches only when the proof succeeds and beats the current version. Improvement changes the skill package, not the grading standard.
 
 ## Next steps
 
-- [Review candidate changes](improve-review.md) explains `log`, `versions`, `diff`, and evidence inspection for a candidate.
+- [Review candidate changes](improve-review.md) explains `skill versions`, `skill diff`, and evidence inspection for a candidate.
 - [Rerun proof evals](improve-rerun.md) explains `--rerun`, `retry`, and higher-sample proof runs.
 - [Publish](share.md) explains source publication after a candidate is ready.

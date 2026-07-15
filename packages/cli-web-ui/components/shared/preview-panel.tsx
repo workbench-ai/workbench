@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
-import DOMPurify from "dompurify";
 import { FileQuestion, Maximize2 } from "lucide-react";
 
 import type { FilePreviewData, PreviewKind } from "../../lib/file-preview";
@@ -18,7 +17,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
-import { AiCodeView } from "./ai-code-view";
 import { CodeBlockSurface } from "./code-block-surface";
 import { EmptyState } from "./empty-state";
 import { MarkdownDocumentView } from "./markdown-document-view";
@@ -34,15 +32,12 @@ const PdfPreview = lazy(() =>
 
 interface PreviewPanelProps {
   preview: FilePreviewData;
-  fillHeight?: boolean;
 }
 
 type ExpandedRenderedPreviewKind = "image" | "pdf";
 
 type RenderedPreviewContext = {
   preview: FilePreviewData;
-  fillHeight: boolean;
-  sanitizedRenderedHtml: string | null;
   textSource: string | null;
   base64Source: string | null;
   onExpand: () => void;
@@ -51,7 +46,6 @@ type RenderedPreviewContext = {
 type RenderedPreviewResolution = {
   body: ReactNode;
   expandedKind: ExpandedRenderedPreviewKind | null;
-  ownsScroll: boolean;
 };
 
 type RenderedPreviewResolver = (
@@ -59,15 +53,14 @@ type RenderedPreviewResolver = (
 ) => RenderedPreviewResolution;
 
 const renderedPreviewResolvers: Record<PreviewKind, RenderedPreviewResolver> = {
-  text: ({ preview, fillHeight, textSource, sanitizedRenderedHtml }) =>
+  text: ({ preview, textSource }) =>
     textSource !== null
       ? {
-          body: renderSourcePreview(preview, textSource, "rendered", fillHeight),
+          body: renderSourcePreview(preview, textSource, "rendered"),
           expandedKind: null,
-          ownsScroll: true,
         }
-      : renderRenderedFallback(sanitizedRenderedHtml),
-  markdown: ({ preview, textSource, sanitizedRenderedHtml }) =>
+      : renderRenderedFallback(),
+  markdown: ({ textSource }) =>
     textSource !== null
       ? {
           body: (
@@ -77,38 +70,34 @@ const renderedPreviewResolvers: Record<PreviewKind, RenderedPreviewResolver> = {
             />
           ),
           expandedKind: null,
-          ownsScroll: false,
         }
-      : renderRenderedFallback(sanitizedRenderedHtml),
-  table: ({ preview, fillHeight, textSource, sanitizedRenderedHtml }) =>
+      : renderRenderedFallback(),
+  table: ({ preview, textSource }) =>
     textSource !== null
       ? {
-          body: <TabularPreview preview={preview} fillHeight={fillHeight} />,
+          body: <TabularPreview preview={preview} />,
           expandedKind: null,
-          ownsScroll: true,
         }
-      : renderRenderedFallback(sanitizedRenderedHtml),
-  spreadsheet: ({ preview, fillHeight, base64Source, sanitizedRenderedHtml }) =>
+      : renderRenderedFallback(),
+  spreadsheet: ({ preview, base64Source }) =>
+    base64Source !== null
+      ? {
+          body: <SpreadsheetFilePreview preview={preview} />,
+          expandedKind: null,
+        }
+      : renderRenderedFallback(),
+  image: ({ preview, base64Source, onExpand }) =>
     base64Source !== null
       ? {
           body: (
-            <SpreadsheetFilePreview preview={preview} fillHeight={fillHeight} />
-          ),
-          expandedKind: null,
-          ownsScroll: true,
-        }
-      : renderRenderedFallback(sanitizedRenderedHtml),
-  image: ({ preview, base64Source, onExpand, sanitizedRenderedHtml }) =>
-    base64Source !== null
-      ? {
-          body: (
-            <button
+            <Button
               type="button"
-              className="block w-full cursor-zoom-in text-left"
+              className="h-auto w-full justify-start p-0 text-left"
               onClick={onExpand}
               aria-label={getExpandedPreviewLabel("image", preview.path)}
               data-testid="image-preview-trigger"
               title="Click to expand"
+              variant="ghost"
             >
               <div className="overflow-auto rounded-md border border-border checkerboard-bg">
                 <img
@@ -118,13 +107,12 @@ const renderedPreviewResolvers: Record<PreviewKind, RenderedPreviewResolver> = {
                   src={`data:${preview.mime_type ?? "image/png"};base64,${base64Source}`}
                 />
               </div>
-            </button>
+            </Button>
           ),
           expandedKind: "image",
-          ownsScroll: true,
         }
-      : renderRenderedFallback(sanitizedRenderedHtml),
-  pdf: ({ preview, base64Source, onExpand, sanitizedRenderedHtml }) =>
+      : renderRenderedFallback(),
+  pdf: ({ preview, base64Source, onExpand }) =>
     base64Source !== null
       ? {
           body: (
@@ -137,27 +125,15 @@ const renderedPreviewResolvers: Record<PreviewKind, RenderedPreviewResolver> = {
             </Suspense>
           ),
           expandedKind: "pdf",
-          ownsScroll: true,
         }
-      : renderRenderedFallback(sanitizedRenderedHtml),
-  unsupported: ({ sanitizedRenderedHtml }) =>
-    renderRenderedFallback(sanitizedRenderedHtml),
+      : renderRenderedFallback(),
+  unsupported: () => renderRenderedFallback(),
 };
 
 export function PreviewPanel({
   preview,
-  fillHeight = false,
 }: PreviewPanelProps) {
   const [isExpandedPreviewOpen, setIsExpandedPreviewOpen] = useState(false);
-  const sanitizedRenderedHtml = useMemo(
-    () =>
-      preview.view === "rendered" && preview.rendered_html
-        ? DOMPurify.sanitize(preview.rendered_html, {
-            USE_PROFILES: { html: true },
-          })
-        : null,
-    [preview.rendered_html, preview.view],
-  );
   const textSource = getPreviewSourceText(preview);
   const base64Source = getPreviewSourceBase64(preview);
   const renderedPreview = useMemo(() => {
@@ -165,50 +141,28 @@ export function PreviewPanel({
 
     return resolver({
       preview,
-      fillHeight,
-      sanitizedRenderedHtml,
       textSource,
       base64Source,
       onExpand: () => setIsExpandedPreviewOpen(true),
     });
-  }, [base64Source, fillHeight, preview, sanitizedRenderedHtml, textSource]);
-  const previewOwnsScroll =
-    preview.view === "rendered"
-      ? renderedPreview.ownsScroll
-      : preview.view === "raw"
-        ? textSource !== null
-        : Boolean(preview.diff);
+  }, [base64Source, preview, textSource]);
 
   useEffect(() => {
     setIsExpandedPreviewOpen(false);
   }, [preview.path, preview.preview_kind, preview.view]);
 
-  const body =
-    preview.view === "rendered" ? (
-      renderedPreview.body
-    ) : preview.view === "raw" ? (
+  const body = preview.view === "rendered" ? (
+    renderedPreview.body
+  ) : (
       textSource !== null ? (
-        renderSourcePreview(preview, textSource, "raw", fillHeight)
+        renderSourcePreview(preview, textSource, "raw")
       ) : (
         <PreviewPlaceholder
           title="Raw view isn't available for this file."
           description="This preview is backed by an encoded file payload. Use Rendered when an inline viewer is available."
         />
       )
-    ) : preview.diff ? (
-      <CodeBlockSurface
-        value={preview.diff}
-        language="diff"
-        surface="plain"
-        fillHeight={fillHeight}
-        testId="preview-diff-viewer"
-      />
-    ) : (
-      <PreviewPlaceholder
-        title="Diff view is unavailable for this file."
-        description="No textual diff was returned for the selected file."
-      />
-    );
+  );
   const canExpandRenderedPreview = renderedPreview.expandedKind !== null;
   const expandedPreviewLabel =
     renderedPreview.expandedKind === null
@@ -218,12 +172,8 @@ export function PreviewPanel({
   return (
     <>
       <div
-        className={cn(
-          "min-w-0 py-2",
-          fillHeight && "flex h-full min-h-0 flex-1 flex-col overflow-hidden",
-        )}
+        className="min-w-0 py-2"
         data-testid="preview-panel"
-        data-fill-height={fillHeight ? "true" : "false"}
       >
         <div className="mb-3 flex shrink-0 items-center gap-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -247,17 +197,7 @@ export function PreviewPanel({
             </Button>
           ) : null}
         </div>
-        <div
-          className={cn(
-            fillHeight && "flex min-h-0 flex-1 flex-col",
-            fillHeight &&
-              (previewOwnsScroll
-                ? "overflow-hidden"
-                : "overflow-y-auto overflow-x-hidden"),
-          )}
-        >
-          {body}
-        </div>
+        <div>{body}</div>
       </div>
       {canExpandRenderedPreview ? (
         <ExpandedRenderedPreviewDialog
@@ -286,7 +226,6 @@ function renderSourcePreview(
   preview: FilePreviewData,
   textSource: string,
   mode: "raw" | "rendered",
-  fillHeight: boolean,
 ): ReactNode {
   return (
     <CodeBlockSurface
@@ -296,37 +235,22 @@ function renderSourcePreview(
         mimeType: preview.mime_type,
       })}
       surface="plain"
-      fillHeight={fillHeight}
       testId="preview-source-viewer"
       ariaLabel={`${mode === "raw" ? "Raw" : "Rendered"} source preview for ${preview.path}`}
     />
   );
 }
 
-function renderRenderedFallback(
-  sanitizedRenderedHtml: string | null,
-): RenderedPreviewResolution {
-  return sanitizedRenderedHtml
-    ? {
-        body: (
-          <div
-            className="markdown-content text-sm text-foreground"
-            dangerouslySetInnerHTML={{ __html: sanitizedRenderedHtml }}
-          />
-        ),
-        expandedKind: null,
-        ownsScroll: false,
-      }
-    : {
-        body: (
-          <PreviewPlaceholder
-            title="Rendered preview isn't available for this file."
-            description="No rendered payload is available for this file. Use Raw or Diff when those views are available."
-          />
-        ),
-        expandedKind: null,
-        ownsScroll: false,
-      };
+function renderRenderedFallback(): RenderedPreviewResolution {
+  return {
+    body: (
+      <PreviewPlaceholder
+        title="Rendered preview isn't available for this file."
+        description="No rendered payload is available for this file. Use Raw when source text is available."
+      />
+    ),
+    expandedKind: null,
+  };
 }
 
 function formatPreviewSource(

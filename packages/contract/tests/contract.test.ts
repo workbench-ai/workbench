@@ -4,30 +4,44 @@ import {
   assertWorkbenchAdapterAuthEnvNameAllowed,
   buildWorkbenchJobReport,
   buildWorkbenchRunEvidenceView,
+  compareWorkbenchNaturalText,
+  compareWorkbenchVersions,
   isWorkbenchAuthoredControlPath,
+  isWorkbenchJobStatusTerminal,
   isWorkbenchPackageSourcePath,
+  isWorkbenchRunStatusTerminal,
+  isWorkbenchSkillVisibility,
   isWorkbenchRuntimeMetadataPath,
   isReservedWorkbenchAdapterAuthEnvName,
+  mergeWorkbenchJobReports,
   normalizeWorkbenchSourcePath,
-  normalizeWorkbenchSourceRequestPath,
+  parseWorkbenchCloudErrorBody,
   parseWorkbenchCaseFileOwnerId,
   workbenchCaseFileOwnerId,
   workbenchInspectionFileOwnerKindFromRouteSegment,
   workbenchInspectionFileOwnerRouteSegment,
+  workbenchGradePlanAuthoringDefaults,
+  workbenchGradePlanAuthoringIssues,
   workbenchInspectionFileContent,
-  workbenchInspectionFileContentUnavailableReason,
   workbenchInspectionFileManifest,
+  workbenchCloudErrorBody,
   workbenchJobReportMetricBreakdown,
   workbenchJobReportMetricSummary,
   workbenchJobReportTotalCostUsd,
+  workbenchOperationStepsForRunKind,
+  workbenchPublishedSkillVersionRefMatches,
+  workbenchRunOwnsJob,
+  workbenchRunStatusFromJobs,
+  workbenchSkillVersionIdentity,
+  workbenchRunKindForOperationSteps,
   workbenchTraceProjection,
-  workbenchTracePromotionReadiness,
   type WorkbenchInspectionFileContent,
   type WorkbenchInspectionSnapshot,
   type WorkbenchInspectionSnapshotEnvelope,
   type WorkbenchJob,
   type WorkbenchJobReport,
   type WorkbenchProjectState,
+  type WorkbenchGradePlanAuthoringControl,
   type WorkbenchRun,
   type WorkbenchRunSnapshot,
   type WorkbenchStateNotice,
@@ -35,7 +49,54 @@ import {
 } from "../src/index";
 
 describe("workbench contract", () => {
-  test("projects trace lifecycle, review, prompt, output, and promotion readiness through one interface", () => {
+  test("owns skill visibility and shared version ordering", () => {
+    expect(["private", "internal", "public", "team"].filter(isWorkbenchSkillVisibility))
+      .toEqual(["private", "internal", "public"]);
+    expect(["Version 10", "version 2"].sort(compareWorkbenchNaturalText))
+      .toEqual(["version 2", "Version 10"]);
+    expect(workbenchSkillVersionIdentity({ id: "bundle", label: "Bundle", projectVersionId: "v002" })).toBe("v002");
+    expect([
+      { id: "v002", hash: "2", message: "", parentIds: [], createdAt: "2026-01-02", files: [] },
+      { id: "v001", hash: "1", message: "", parentIds: [], createdAt: "2026-01-01", files: [] },
+    ].sort(compareWorkbenchVersions).map((version) => version.id)).toEqual(["v001", "v002"]);
+  });
+
+  test("classifies terminal run and job statuses canonically", () => {
+    const runStatuses: WorkbenchRun["status"][] = ["queued", "running", "canceling", "succeeded", "failed", "canceled"];
+    const jobStatuses: WorkbenchJob["status"][] = ["queued", "running", "succeeded", "failed", "canceled"];
+
+    expect(runStatuses.filter(isWorkbenchRunStatusTerminal)).toEqual(["succeeded", "failed", "canceled"]);
+    expect(jobStatuses.filter(isWorkbenchJobStatusTerminal)).toEqual(["succeeded", "failed", "canceled"]);
+  });
+
+  test("owns run jobs and derives their aggregate status canonically", () => {
+    expect(workbenchRunOwnsJob({ jobIds: ["job_owned"] }, { id: "job_owned" })).toBe(true);
+    expect(workbenchRunOwnsJob({ jobIds: ["job_owned"] }, { id: "job_other" })).toBe(false);
+    expect(workbenchRunStatusFromJobs([], "queued")).toBe("queued");
+    expect(workbenchRunStatusFromJobs([{ status: "succeeded" }])).toBe("succeeded");
+    expect(workbenchRunStatusFromJobs([{ status: "failed" }, { status: "running" }])).toBe("running");
+    expect(workbenchRunStatusFromJobs([{ status: "canceled" }, { status: "failed" }])).toBe("failed");
+  });
+
+  test.each(["run", "grade", "eval"] as const)("maps %s run kinds and operation steps bijectively", (kind) => {
+    expect(workbenchRunKindForOperationSteps(workbenchOperationStepsForRunKind(kind))).toBe(kind);
+  });
+
+  test("builds and parses the canonical Cloud error envelope", () => {
+    const body = workbenchCloudErrorBody({
+      code: "auth_required",
+      message: "Sign in first.",
+      remediation: " workbench login ",
+      retryable: false,
+      subject: { skillId: "skill-001" },
+    });
+
+    expect(body.remediation).toBe("workbench login");
+    expect(parseWorkbenchCloudErrorBody(JSON.stringify(body))).toEqual(body);
+    expect(parseWorkbenchCloudErrorBody("<html>bad gateway</html>")).toBeNull();
+  });
+
+  test("projects execution status, prompt, and output through one trace interface", () => {
     const trace = {
       id: "trace_projection",
       runId: "run_projection",
@@ -44,79 +105,18 @@ describe("workbench contract", () => {
       skillBundleHash: "unknown",
       agentName: "codex",
       createdAt: "2026-06-27T00:00:00.000Z",
-      request: { input: { prompt: "  Project this prompt.  " } },
-      result: { status: "completed", output: { assistantText: "  Project this output.  " } },
+      request: {},
+      result: {},
       files: [],
-      protocol: "workbench.trace.v1",
-      origin: "live",
-      status: {
-        capture: "captured",
-        execution: "completed",
-        grade: "ungraded",
-        review: "failed",
-        promotion: "none",
-      },
-      review: {
-        status: "failed",
-        expected: "Expected correction.",
-      },
+      status: "completed",
+      input: { prompt: "  Project this prompt.  " },
+      output: { assistantText: "  Project this output.  " },
     } satisfies WorkbenchTrace;
 
     expect(workbenchTraceProjection(trace)).toMatchObject({
-      lifecycleStatus: "captured/completed/ungraded",
-      reviewStatus: "failed",
-      promotionStatus: "none",
+      lifecycleStatus: "completed",
       prompt: "Project this prompt.",
       output: "Project this output.",
-      promotionReadiness: { ok: true },
-    });
-  });
-
-  test("blocks promotion for unfinished traces before case generation", () => {
-    const trace = {
-      id: "trace_candidate",
-      runId: "run_candidate",
-      versionId: "unknown",
-      skillName: "workbench",
-      skillBundleHash: "unknown",
-      agentName: "codex",
-      createdAt: "2026-06-27T00:00:00.000Z",
-      request: { input: { prompt: "$workbench Finish before promotion." } },
-      result: { status: "running" },
-      files: [],
-      protocol: "workbench.trace.v1",
-      origin: "live",
-      status: {
-        capture: "capturing",
-        execution: "running",
-        grade: "ungraded",
-        review: "unreviewed",
-        promotion: "none",
-      },
-      input: { prompt: "$workbench Finish before promotion." },
-      review: { status: "unreviewed" },
-    } satisfies WorkbenchTrace;
-
-    expect(workbenchTracePromotionReadiness(trace)).toMatchObject({
-      ok: false,
-      code: "trace_not_captured",
-    });
-
-    const traceWithoutInput = { ...trace };
-    delete traceWithoutInput.input;
-    expect(workbenchTracePromotionReadiness({
-      ...traceWithoutInput,
-      id: "trace_without_prompt",
-      request: {},
-      result: { status: "completed" },
-      status: {
-        ...trace.status,
-        capture: "captured",
-        execution: "completed",
-      },
-    })).toMatchObject({
-      ok: false,
-      code: "trace_prompt_required",
     });
   });
 
@@ -145,15 +145,15 @@ describe("workbench contract", () => {
       createdAt: "2026-06-26T00:00:00.000Z",
     });
     const report = buildWorkbenchJobReport([
-      job("job_execute", "execute", {
+      job("job_execute", "run", {
         total: { costUsd: 0.5 },
         runner: { costUsd: 0.2 },
         engine: { costUsd: 0.3 },
       }),
-      job("job_execute_total_only", "execute", {
+      job("job_execute_total_only", "run", {
         total: { costUsd: 0.4 },
       }),
-      job("job_execute_unmatched_scoped", "execute", {
+      job("job_execute_unmatched_scoped", "run", {
         total: { costUsd: 1 },
         engine: { costUsd: 0.9 },
       }),
@@ -174,7 +174,7 @@ describe("workbench contract", () => {
     ]);
 
     expect(report.roles.map((role) => [role.role, role.costUsd])).toEqual([
-      ["execute", 0.6],
+      ["run", 0.6],
       ["grade", 0.4],
       ["improve", 0.6],
       ["setup", 0.8],
@@ -209,8 +209,8 @@ describe("workbench contract", () => {
     });
     const report = buildWorkbenchJobReport([
       job("job_improve", "improve", "current", 500),
-      job("job_execute_one", "execute", "case-001", 100),
-      job("job_execute_two", "execute", "case-002", 100),
+      job("job_execute_one", "run", "case-001", 100),
+      job("job_execute_two", "run", "case-002", 100),
       job("job_grade_one", "grade", "case-001", 300),
     ]);
 
@@ -219,9 +219,51 @@ describe("workbench contract", () => {
       sampleCount: 3,
       latency: { total: 1000, perSample: 333 },
       roles: [
-        { role: "execute", latency: { total: 200, perSample: 67 } },
+        { role: "run", latency: { total: 200, perSample: 67 } },
         { role: "grade", latency: { total: 300, perSample: 100 } },
         { role: "improve", latency: { total: 500, perSample: 167 } },
+      ],
+    });
+  });
+
+  test("treats eval hash as evidence origin, not report unit identity", () => {
+    const job = (
+      id: string,
+      role: WorkbenchJob["role"],
+      evalHash: string,
+      durationMs: number,
+    ): WorkbenchJob => ({
+      id,
+      runId: "run_reused_evidence",
+      kind: "eval",
+      role,
+      inputHash: `input_${id}`,
+      versionId: "v001",
+      skillName: "current",
+      skillBundleHash: "bundle_hash",
+      evalHash,
+      agentName: "default",
+      agentHash: "agent_hash",
+      caseId: "case-001",
+      sample: 0,
+      status: "succeeded",
+      durationMs,
+      artifactIds: [],
+      traceIds: [],
+      createdAt: "2026-06-26T00:00:00.000Z",
+    });
+    const report = buildWorkbenchJobReport([
+      job("job_run_from_eval_v1", "run", "eval_hash_v1", 100),
+      job("job_grade_from_eval_v2", "grade", "eval_hash_v2", 200),
+    ]);
+
+    expect(report.unitCount).toBe(1);
+    expect(workbenchJobReportMetricSummary(report)).toMatchObject({
+      sampleCount: 1,
+      latency: { total: 300, perSample: 300 },
+      roles: [
+        { role: "run", latency: { total: 100, perSample: 100 } },
+        { role: "grade", latency: { total: 200, perSample: 200 } },
       ],
     });
   });
@@ -278,7 +320,7 @@ describe("workbench contract", () => {
       jobCount: 4,
       totalDurationMs: 900,
       roles: [{
-        role: "execute",
+        role: "run",
         jobCount: 2,
         queued: 0,
         running: 0,
@@ -301,8 +343,8 @@ describe("workbench contract", () => {
     } satisfies WorkbenchJobReport;
 
     expect(workbenchJobReportMetricBreakdown(report, "latency")).toMatchObject({
-      primary: { scope: "run", role: "execute", value: { total: 800, perSample: 400 } },
-      run: { scope: "run", role: "execute", value: { total: 800, perSample: 400 } },
+      primary: { scope: "run", role: "run", value: { total: 800, perSample: 400 } },
+      run: { scope: "run", role: "run", value: { total: 800, perSample: 400 } },
       grade: { scope: "grade", role: "grade", value: { total: 100, perSample: 50 } },
       total: { scope: "total", value: { total: 900, perSample: 450 } },
       details: [
@@ -311,10 +353,81 @@ describe("workbench contract", () => {
       ],
     });
     expect(workbenchJobReportMetricBreakdown(report, "cost")).toMatchObject({
-      primary: { scope: "run", role: "execute", value: { total: 0.6, perSample: 0.3 } },
+      primary: { scope: "run", role: "run", value: { total: 0.6, perSample: 0.3 } },
       details: [
         { scope: "grade", value: { total: 0.1, perSample: 0.05 } },
         { scope: "total", value: { total: 0.7, perSample: 0.35 } },
+      ],
+    });
+  });
+
+  test("merges job reports without losing role-level metric breakdowns", () => {
+    const report = mergeWorkbenchJobReports([{
+      unitCount: 1,
+      jobCount: 2,
+      totalDurationMs: 1200,
+      roles: [{
+        role: "run",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 1000,
+        costUsd: 0.4,
+      }, {
+        role: "grade",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 200,
+        costUsd: 0.1,
+      }],
+    }, {
+      unitCount: 1,
+      jobCount: 2,
+      totalDurationMs: 1800,
+      roles: [{
+        role: "run",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 1500,
+        costUsd: 0.5,
+      }, {
+        role: "grade",
+        jobCount: 1,
+        queued: 0,
+        running: 0,
+        succeeded: 1,
+        failed: 0,
+        canceled: 0,
+        totalDurationMs: 300,
+        costUsd: 0.2,
+      }],
+    }]);
+
+    expect(report).toMatchObject({
+      unitCount: 2,
+      jobCount: 4,
+      totalDurationMs: 3000,
+      roles: [
+        { role: "run", jobCount: 2, totalDurationMs: 2500, costUsd: 0.9 },
+        { role: "grade", jobCount: 2, totalDurationMs: 500, costUsd: 0.3 },
+      ],
+    });
+    expect(workbenchJobReportMetricBreakdown(report, "latency")).toMatchObject({
+      primary: { scope: "run", value: { total: 2500, perSample: 1250 } },
+      details: [
+        { scope: "grade", value: { total: 500, perSample: 250 } },
+        { scope: "total", value: { total: 3000, perSample: 1500 } },
       ],
     });
   });
@@ -325,7 +438,7 @@ describe("workbench contract", () => {
       jobCount: 2,
       totalDurationMs: 1200,
       roles: [{
-        role: "execute",
+        role: "run",
         jobCount: 1,
         queued: 0,
         running: 0,
@@ -447,7 +560,7 @@ describe("workbench contract", () => {
       path: "output/blob.bin",
       kind: "binary",
       encoding: "base64",
-      unavailableReason: "Binary file content is not rendered.",
+      content: "QUJD",
     } satisfies WorkbenchInspectionFileContent;
     const envelope = {
       schema: "workbench.inspection.snapshot-envelope.v1",
@@ -463,8 +576,7 @@ describe("workbench contract", () => {
             variant: "local",
             caseIds: ["case_001"],
             targets: [{ agent: "default" }],
-            phases: ["execute"],
-            grader: { kind: "none" },
+            steps: ["run"],
             samples: 1,
           },
         },
@@ -475,8 +587,7 @@ describe("workbench contract", () => {
             variant: "local",
             caseIds: ["case_001"],
             targets: [{ agent: "default" }],
-            phases: ["grade"],
-            grader: { kind: "evaluation" },
+            steps: ["grade"],
             samples: 1,
           },
         },
@@ -487,8 +598,7 @@ describe("workbench contract", () => {
             variant: "local",
             caseIds: ["case_001"],
             targets: [{ agent: "default" }],
-            phases: ["execute", "grade"],
-            grader: { kind: "evaluation" },
+            steps: ["run", "grade"],
             samples: 1,
           },
         },
@@ -509,13 +619,13 @@ describe("workbench contract", () => {
     expect(JSON.parse(JSON.stringify({ state, snapshot, fileContent, envelope }))).toMatchObject({
       state: { schema: "workbench.skill.state.v1", refs: { current: "v001" } },
       snapshot: { status: { initialized: true }, refs: { current: "v001" } },
-      fileContent: { path: "output/blob.bin", unavailableReason: "Binary file content is not rendered." },
+      fileContent: { path: "output/blob.bin", content: "QUJD" },
       envelope: {
         actions: {
           variant: "local",
-          run: { enabled: true, defaultRequest: { kind: "eval", variant: "local", phases: ["execute"] } },
-          grade: { enabled: true, defaultRequest: { kind: "eval", variant: "local", phases: ["grade"] } },
-          eval: { enabled: true, defaultRequest: { kind: "eval", variant: "local", phases: ["execute", "grade"] } },
+          run: { enabled: true, defaultRequest: { kind: "eval", variant: "local", steps: ["run"] } },
+          grade: { enabled: true, defaultRequest: { kind: "eval", variant: "local", steps: ["grade"] } },
+          eval: { enabled: true, defaultRequest: { kind: "eval", variant: "local", steps: ["run", "grade"] } },
           improve: { enabled: false, defaultRequest: { kind: "improve", variant: "local" } },
           acquisition: [{ label: "Open local project" }],
         },
@@ -758,7 +868,7 @@ describe("workbench contract", () => {
           id: "job_codex_execute",
           runId: "run_matrix",
           kind: "eval",
-          role: "execute",
+          role: "run",
           versionId: "v001",
           skillName: "current",
           skillBundleHash: "bundle_hash",
@@ -792,7 +902,7 @@ describe("workbench contract", () => {
           traceIds: [],
           createdAt,
           durationMs: 2000,
-          dependencies: [{ name: "execute", jobId: "job_codex_execute", mount: "input", mode: "readonly" }],
+          dependencies: [{ name: "run", jobId: "job_codex_execute", mount: "input", mode: "readonly" }],
           result: {
             usage: { total: { costUsd: 0.1 } },
             items: [{ kind: "score", score: 1, value: 1 }],
@@ -802,7 +912,7 @@ describe("workbench contract", () => {
           id: "job_claude_execute",
           runId: "run_matrix",
           kind: "eval",
-          role: "execute",
+          role: "run",
           versionId: "v001",
           skillName: "current",
           skillBundleHash: "bundle_hash",
@@ -836,7 +946,7 @@ describe("workbench contract", () => {
           traceIds: [],
           createdAt,
           durationMs: 10,
-          dependencies: [{ name: "execute", jobId: "job_claude_execute", mount: "input", mode: "readonly" }],
+          dependencies: [{ name: "run", jobId: "job_claude_execute", mount: "input", mode: "readonly" }],
           error: "Dependency failed.",
         },
       ],
@@ -876,7 +986,7 @@ describe("workbench contract", () => {
         report: {
           totalDurationMs: 260,
           roles: [
-            { role: "execute", costUsd: 0.23, totalDurationMs: 250 },
+            { role: "run", costUsd: 0.23, totalDurationMs: 250 },
             { role: "grade", totalDurationMs: 10 },
           ],
         },
@@ -893,7 +1003,7 @@ describe("workbench contract", () => {
         report: {
           totalDurationMs: 3000,
           roles: [
-            { role: "execute", costUsd: 0.32, totalDurationMs: 1000 },
+            { role: "run", costUsd: 0.32, totalDurationMs: 1000 },
             { role: "grade", costUsd: 0.1, totalDurationMs: 2000 },
           ],
         },
@@ -907,11 +1017,11 @@ describe("workbench contract", () => {
         caseId: "googl",
         selectedJobId: "job_claude_grade",
         status: "failed",
-        execute: { jobId: "job_claude_execute", status: "failed", error: "Model rejected." },
+        run: { jobId: "job_claude_execute", status: "failed", error: "Model rejected." },
         grade: {
           jobId: "job_claude_grade",
           status: "canceled",
-          dependencyReason: "Dependency failed.; execute failed: Model rejected.",
+          dependencyReason: "Dependency failed.; run failed: Model rejected.",
         },
       },
       {
@@ -920,14 +1030,14 @@ describe("workbench contract", () => {
         selectedJobId: "job_codex_grade",
         status: "succeeded",
         score: 1,
-        execute: { jobId: "job_codex_execute", status: "succeeded" },
+        run: { jobId: "job_codex_execute", status: "succeeded" },
         grade: { jobId: "job_codex_grade", status: "succeeded", score: 1 },
       },
     ]);
     expect(evidence?.jobs.map((job) => `${job.agentLabel}:${job.role}:${job.status}`)).toEqual([
-      "claude / haiku-4.5:execute:failed",
+      "claude / haiku-4.5:run:failed",
       "claude / haiku-4.5:grade:canceled",
-      "codex / gpt-5.5:execute:succeeded",
+      "codex / gpt-5.5:run:succeeded",
       "codex / gpt-5.5:grade:succeeded",
     ]);
   });
@@ -968,7 +1078,7 @@ describe("workbench contract", () => {
         id: `job_${skill.name}_execute`,
         runId: "run_skills",
         kind: "eval" as const,
-        role: "execute" as const,
+        role: "run" as const,
         versionId: "v002",
         skillName: skill.name,
         skillBundleHash: skill.bundleHash,
@@ -1000,7 +1110,7 @@ describe("workbench contract", () => {
         status: "succeeded" as const,
         artifactIds: [],
         traceIds: [],
-        dependencies: [{ name: "execute", jobId: `job_${skill.name}_execute`, mount: "input", mode: "readonly" as const }],
+        dependencies: [{ name: "run", jobId: `job_${skill.name}_execute`, mount: "input", mode: "readonly" as const }],
         result: { items: [{ kind: "score", score: skill.score, value: skill.score }] },
         createdAt,
         durationMs: 20,
@@ -1117,7 +1227,7 @@ describe("workbench contract", () => {
         score: 0.9,
         report: {
           roles: expect.arrayContaining([
-            expect.objectContaining({ role: "execute", totalDurationMs: 111 }),
+            expect.objectContaining({ role: "run", totalDurationMs: 111 }),
           ]),
         },
         coverage: { completed: 1, planned: 1 },
@@ -1128,7 +1238,7 @@ describe("workbench contract", () => {
         score: 0.7,
         report: {
           roles: expect.arrayContaining([
-            expect.objectContaining({ role: "execute", totalDurationMs: 333 }),
+            expect.objectContaining({ role: "run", totalDurationMs: 333 }),
           ]),
         },
         coverage: { completed: 1, planned: 1 },
@@ -1139,7 +1249,7 @@ describe("workbench contract", () => {
         score: 0.4,
         report: {
           roles: expect.arrayContaining([
-            expect.objectContaining({ role: "execute", totalDurationMs: 222 }),
+            expect.objectContaining({ role: "run", totalDurationMs: 222 }),
           ]),
         },
         coverage: { completed: 1, planned: 1 },
@@ -1152,11 +1262,11 @@ describe("workbench contract", () => {
       "No skill:job_no-skill_grade:0.4",
     ]);
     expect(evidence?.jobs.map((entry) => `${entry.skillLabel}:${entry.role}`)).toEqual([
-      "Current:execute",
+      "Current:run",
       "Current:grade",
-      "Dummy skill:execute",
+      "Dummy skill:run",
       "Dummy skill:grade",
-      "No skill:execute",
+      "No skill:run",
       "No skill:grade",
     ]);
   });
@@ -1181,10 +1291,8 @@ describe("workbench contract", () => {
       path: "asset.bin",
       kind: "binary",
       encoding: "base64",
-      unavailableReason: "Binary file content is not rendered.",
+      content: "QUJD",
     });
-    expect(workbenchInspectionFileContentUnavailableReason({ encoding: "base64" }))
-      .toBe("Base64 file content is not rendered.");
   });
 
   test("defines inspection file owner route vocabulary", () => {
@@ -1192,7 +1300,7 @@ describe("workbench contract", () => {
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("traces")).toBe("trace");
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("artifacts")).toBe("artifact");
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("cases")).toBe("case");
-    expect(workbenchInspectionFileOwnerKindFromRouteSegment("evaluation")).toBe("evaluation");
+    expect(workbenchInspectionFileOwnerKindFromRouteSegment("evaluation")).toBeNull();
     expect(workbenchInspectionFileOwnerKindFromRouteSegment("skills")).toBeNull();
 
     expect(workbenchInspectionFileOwnerRouteSegment("version")).toBe("versions");
@@ -1215,9 +1323,51 @@ describe("workbench contract", () => {
     expect(parseWorkbenchCaseFileOwnerId(":case-001")).toBeNull();
   });
 
+  test("validates grade plan authoring primitives through one generic contract", () => {
+    const controls = [{
+      kind: "list",
+      name: "criteria",
+      label: "Acceptance criteria",
+      itemLabel: "Criterion",
+      minItems: 1,
+      fields: [{
+        kind: "text",
+        name: "description",
+        label: "Criterion",
+        required: true,
+      }],
+      defaultItems: [{ description: "" }],
+    }, {
+      kind: "file",
+      name: "testScript",
+      label: "Test script",
+      required: true,
+      path: "tests/test.sh",
+      defaultValue: "#!/bin/sh\n",
+    }] satisfies readonly WorkbenchGradePlanAuthoringControl[];
+
+    expect(workbenchGradePlanAuthoringDefaults(controls)).toEqual({
+      criteria: [{ description: "" }],
+      testScript: "#!/bin/sh\n",
+    });
+    expect(workbenchGradePlanAuthoringIssues(controls).map((issue) => issue.message)).toContain(
+      "Acceptance criteria requires at least 1 criterion.",
+    );
+    expect(workbenchGradePlanAuthoringIssues(controls, {
+      criteria: [{ description: "Checks the result." }],
+      testScript: "#!/bin/sh\n",
+      stale: true,
+    }).map((issue) => issue.message)).toContain(
+      "Case grade.authoring.stale is not supported by this grader.",
+    );
+    expect(workbenchGradePlanAuthoringIssues(controls, {
+      criteria: [{ description: "Checks the result." }],
+      testScript: "#!/bin/sh\n",
+    })).toEqual([]);
+  });
+
   test("normalizes source paths and classifies Workbench file roles explicitly", () => {
     expect(normalizeWorkbenchSourcePath(".workbench/eval.yaml")).toBe(".workbench/eval.yaml");
-    expect(normalizeWorkbenchSourceRequestPath("/.workbench/eval.yaml")).toBe(".workbench/eval.yaml");
     expect(() => normalizeWorkbenchSourcePath("/.workbench/eval.yaml")).toThrow(/Unsafe Workbench source path/u);
     expect(() => normalizeWorkbenchSourcePath("../state")).toThrow(/Unsafe Workbench source path/u);
     expect(() => normalizeWorkbenchSourcePath("source//SKILL.md")).toThrow(/Unsafe Workbench source path/u);
@@ -1240,5 +1390,14 @@ describe("workbench contract", () => {
     expect(isWorkbenchPackageSourcePath("node_modules/pkg/index.js")).toBe(false);
     expect(isWorkbenchPackageSourcePath(".workbench/eval.yaml")).toBe(false);
     expect(isWorkbenchPackageSourcePath(".agents/skills/workbench/SKILL.md")).toBe(false);
+  });
+
+  test.each([
+    ["v_abcdef", "v_abcdef", true],
+    ["v_abcdef", "v_abc", true],
+    ["v_abcdef", " abc ", true],
+    ["v_abcdef", "def", false],
+  ])("matches published skill version %s against %s", (versionId, ref, expected) => {
+    expect(workbenchPublishedSkillVersionRefMatches(versionId, ref)).toBe(expected);
   });
 });

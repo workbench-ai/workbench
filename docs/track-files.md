@@ -6,44 +6,22 @@ Use [Results](track.md) to identify the row that matters. Use [Runs and jobs](tr
 
 ## Show evidence
 
-Use `show` to inspect source, run, job, trace, artifact, and file evidence:
+Use `workbench eval show` to inspect Eval, run, job, trace, artifact, and file evidence:
 
 ```bash
-workbench show RUN_ID
-workbench show JOB_ID
-workbench show eval-v2
-workbench show eval-v2:cases/investor-focus/case.yaml
-workbench show RUN_ID:cases/investor-focus/output/result.json
+workbench eval show RUN_ID
+workbench eval show JOB_ID
+workbench eval show eval-v2
+workbench eval show eval-v2:cases/investor-focus/case.yaml
+workbench eval show RUN_ID:cases/investor-focus/output/result.json
 ```
 
-If a suffix is ambiguous, Workbench prints exact `workbench show REF:PATH` commands.
+If a suffix is ambiguous, Workbench prints exact `workbench eval show REF:PATH` commands.
 Use `eval-vN` refs to inspect the exact historical eval definition that produced a result.
 
-## Live run evidence
+## Source evidence is separate
 
-Use `record` to capture live skill turns from supported agent hosts. Project-matched captures appear in the browser under `Runs` as live runs with agent-session jobs:
-
-```bash
-workbench record on
-# use a Workbench skill in Codex or Claude Code
-workbench open
-workbench traces
-workbench trace review TRACE_ID --pass
-workbench case promote TRACE_ID --id case-001
-```
-
-Live capture is plugin-based. Workbench installs or enables its own Codex and Claude Code trace plugins through official host plugin commands, then host hooks append events to Workbench's local spool under `~/.workbench/traces/spool/`. Browser inspection happens through Runs; `traces`, `show`, review, and promotion are low-level CLI tools for trace records. The shipped plugins record explicit leading `$skill` invocations; the generic hook also accepts exact host skill-claim events when a host integration emits them. Unrelated host turns are discarded. Workbench does not scan provider session histories such as `~/.codex/sessions` as a hidden side effect.
-
-Promotion requires a captured, terminal trace with captured input. Unfinished candidates stay inspectable as traces but cannot become cases until capture finishes.
-
-For failed or deferred reviews, record the correction before promotion:
-
-```bash
-workbench trace review TRACE_ID --fail --expected "Correct expected outcome."
-workbench case promote TRACE_ID --id corrected-case
-```
-
-Codex capture requires a plugin-capable Codex CLI and a trusted Workbench hook. Automation that runs Codex with `--ignore-user-config` does not load user-installed trace plugins; use normal Codex config loading, or Codex's hook-trust bypass only in automation that already vets the plugin source.
+Sources hold evidence ingested from local agent sessions or other adapters. They are deployment-owned corpora, not project execution traces, and do not enter a Skill object pack automatically. The Sources workspace renders exact generic citation blocks from immutable snapshots; Eval execution evidence on this page continues to describe only runs and jobs.
 
 ## Inspection paths
 

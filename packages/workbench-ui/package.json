@@ -1,7 +1,7 @@
 {
   "name": "@workbench-ai/workbench-ui",
   "private": true,
-  "version": "0.0.225",
+  "version": "0.0.226",
   "type": "module",
   "exports": {
     ".": {
@@ -25,13 +25,13 @@
     "@xyflow/react": "^12.10.2",
     "elkjs": "^0.11.1",
     "lucide-react": "^0.577.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react": "^19.2.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.1",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
+    "react-dom": "^19.2.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },

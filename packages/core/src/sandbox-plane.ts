@@ -1,15 +1,16 @@
-import type {
-  BlobObjectRef,
-  Json,
-  SurfaceSnapshotFile,
-  WorkbenchExecutionCapability,
-  WorkbenchExecutionInputRef,
-  WorkbenchExecutionNetworkPolicy,
-  WorkbenchExecutionResult,
-  WorkbenchExecutionSpec,
-  WorkbenchSandboxAllocation,
-  WorkbenchSandboxExecutionMetadata,
-  WorkbenchSandboxHandle,
+import {
+  WORKBENCH_EXECUTION_NETWORK_EGRESS_VALUES,
+  type BlobObjectRef,
+  type Json,
+  type SurfaceSnapshotFile,
+  type WorkbenchExecutionCapability,
+  type WorkbenchExecutionInputRef,
+  type WorkbenchExecutionNetworkPolicy,
+  type WorkbenchExecutionResult,
+  type WorkbenchExecutionSpec,
+  type WorkbenchSandboxAllocation,
+  type WorkbenchSandboxExecutionMetadata,
+  type WorkbenchSandboxHandle,
 } from "@workbench-ai/workbench-contract";
 
 import {
@@ -32,14 +33,14 @@ export interface SandboxExecutionFileStore {
   readJson(ref: BlobObjectRef): Promise<Json>;
 }
 
-export interface SandboxExecutionOptions {
+interface SandboxExecutionOptions {
   fileStore: SandboxExecutionFileStore;
   runnerId?: string;
   now?: string;
   signal?: AbortSignal;
 }
 
-export interface WorkbenchSandboxAllocationOptions {
+interface WorkbenchSandboxAllocationOptions {
   backend: string;
   runnerId?: string;
   now?: string;
@@ -71,6 +72,20 @@ export interface SandboxBackendDescriptor {
   capabilities: SandboxBackendCapabilities;
 }
 
+export function createSandboxBackendDescriptor(name: string): SandboxBackendDescriptor {
+  return {
+    name,
+    version: "1",
+    capabilities: {
+      snapshots: true,
+      interactiveExec: false,
+      filesystemDiff: false,
+      networkPolicy: WORKBENCH_EXECUTION_NETWORK_EGRESS_VALUES,
+      fileCapabilities: true,
+    },
+  };
+}
+
 export interface SandboxCreateRequest {
   execution: WorkbenchExecutionSpec;
   environment: SandboxEnvironmentImage;
@@ -96,7 +111,7 @@ export interface SandboxPlane {
   destroySandbox(sandbox: SandboxHandle, options: SandboxExecutionOptions): Promise<void>;
 }
 
-export interface ValidatedSandboxExecutionResult {
+interface ValidatedSandboxExecutionResult {
   result: WorkbenchExecutionResult;
   payloads: WorkbenchExecutionOutputPayloads;
 }

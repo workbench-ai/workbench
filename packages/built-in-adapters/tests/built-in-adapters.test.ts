@@ -14,9 +14,7 @@ import {
 import {
   executeWorkbenchBuiltInAdapterCommand,
 } from "../src/execute.ts";
-import {
-  builtinWorkbenchAdapterManifest,
-} from "../src/manifests.ts";
+import { builtinAgentTraceAdapters } from "../src/agent-trace-adapters.ts";
 import {
   readWorkbenchAdapterOperationResult,
 } from "@workbench-ai/workbench-protocol";
@@ -27,17 +25,10 @@ afterEach(() => {
 });
 
 describe("built-in Workbench adapters", () => {
-  test("publishes manifest-backed built-in adapters without extra command install", () => {
-    const manifest = builtinWorkbenchAdapterManifest("codex");
-    const workbench = builtinWorkbenchAdapterManifest("workbench");
-
-    expect(manifest?.install.join("\n")).not.toContain("/usr/local/bin/workbench-adapter-codex");
-    expect(manifest?.operations["skill.run"]?.command).toBe("workbench-adapter-codex");
-    expect(workbench?.install).toEqual([]);
-    expect(workbench?.operations).toMatchObject({
-      "engine.resolve": { command: "workbench-adapter-workbench" },
-    });
-    expect(workbench?.operations["grade.run"]).toBeUndefined();
+  test("publishes only the neutral Codex and Claude trace reducers", () => {
+    expect(builtinAgentTraceAdapters().map((adapter) => adapter.id)).toEqual(["codex", "claude"]);
+    expect(builtinAgentTraceAdapters()[0]).not.toHaveProperty("discoverSessions");
+    expect(builtinAgentTraceAdapters()[0]).not.toHaveProperty("projectSession");
   });
 
   test("executes Codex-shaped agent adapters through an operation request", async () => {
@@ -156,8 +147,6 @@ describe("built-in Workbench adapters", () => {
       .resolves.toBe("agent output\n");
     await expect(fs.readFile(path.join(root, "output", "skill-summary.md"), "utf8"))
       .resolves.toBe("agent output");
-    await expect(fs.readFile(path.join(root, "output", "agent-session.json"), "utf8"))
-      .resolves.toContain("\"ref\": \"codex:session-test\"");
     const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "skill.run");
     expect(result.usage.runner.provider).toBe("openai/codex");
   });
@@ -211,7 +200,7 @@ describe("built-in Workbench adapters", () => {
       adapterId: "codex",
       requestPath,
       agentExecutor,
-    })).rejects.toThrow("ADAPTER_AUTH_REQUIRED: codex disconnected. Next: codex login --device-auth.");
+    })).rejects.toThrow("ADAPTER_AUTH_REQUIRED: codex disconnected. Next: workbench login codex.");
     expect(agentExecutor).not.toHaveBeenCalled();
   });
 
@@ -221,11 +210,8 @@ describe("built-in Workbench adapters", () => {
     expect(codexHarness().manifest.defaults.model).toBe("gpt-5.4-mini");
   });
 
-  test("keeps agent stall timeout shorter than the full turn timeout", () => {
-    expect(resolveAgentTurnTimeouts({})).toEqual({
-      turnTimeoutMs: 3_600_000,
-      stallTimeoutMs: 300_000,
-    });
+  test("requires provider-owned timeouts and bounds stall by turn timeout", () => {
+    expect(() => resolveAgentTurnTimeouts({})).toThrow("requires a positive turn_timeout_ms");
     expect(resolveAgentTurnTimeouts({
       turn_timeout_ms: 120_000,
       stall_timeout_ms: 300_000,
@@ -242,7 +228,7 @@ describe("built-in Workbench adapters", () => {
     });
   });
 
-  test("retries stalled agent turns as transient failures", async () => {
+  test("does not add a Workbench retry loop around agent turns", async () => {
     const request = {
       role: "engine" as const,
       provider: { use: "codex" },
@@ -253,24 +239,16 @@ describe("built-in Workbench adapters", () => {
       jobId: "job_stall_retry",
     };
     const executor = vi.fn(async () => {
-      if (executor.mock.calls.length === 1) {
-        throw new Error("turn stalled after 300000ms");
-      }
-      return {
-        output: "ok",
-        traceFiles: [],
-        metadata: { retried: true },
-      };
+      throw new Error("turn stalled after 300000ms");
     });
 
-    await expect(executeWorkbenchAgentTurn(executor, request)).resolves.toMatchObject({
-      output: "ok",
-      metadata: { retried: true },
-    });
-    expect(executor).toHaveBeenCalledTimes(2);
+    await expect(executeWorkbenchAgentTurn(executor, request)).rejects.toThrow(
+      "turn stalled after 300000ms",
+    );
+    expect(executor).toHaveBeenCalledTimes(1);
   });
 
-  test("normalizes provider auth failures before retrying agent turns", async () => {
+  test("reports provider auth failures without retrying agent turns", async () => {
     const request = {
       role: "runner" as const,
       provider: { use: "claude" },
@@ -285,12 +263,12 @@ describe("built-in Workbench adapters", () => {
     });
 
     await expect(executeWorkbenchAgentTurn(executor, request)).rejects.toThrow(
-      "ADAPTER_AUTH_REQUIRED: claude disconnected. Next: claude setup-token.",
+      "ADAPTER_AUTH_REQUIRED: claude disconnected. Next: workbench login claude.",
     );
     expect(executor).toHaveBeenCalledTimes(1);
   });
 
-  test("executes rubric criteria as bounded parallel judge turns and aggregates weighted metrics", async () => {
+  test("executes one rubric judge turn for all criteria and aggregates weighted metrics", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-rubric-"));
     const criteria = [{
       id: "accuracy",
@@ -309,23 +287,16 @@ describe("built-in Workbench adapters", () => {
       score: 0.5,
     }];
     const requestPath = await writeRubricRequest(root, {
-      parallelism: 2,
       criteria,
     });
     const seenRequests: WorkbenchAgentTurnRequest[] = [];
-    let inFlight = 0;
-    let maxInFlight = 0;
     const agentExecutor = vi.fn(async (request: WorkbenchAgentTurnRequest) => {
       seenRequests.push(request);
-      const criterion = singleCriterionFromPrompt(request.prompt, criteria);
-      inFlight += 1;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      await sleep(25);
-      inFlight -= 1;
       return {
-        output: rubricJudgeOutput(criterion.id, criterion.score, `${criterion.id} rationale`),
+        output: rubricJudgeOutput(criteria),
+        agentTrace: mockNeutralTrace("rubric-judge"),
         traceFiles: [
-          mockAgentTraceFile(request, criterion.id, "judge"),
+          mockAgentTraceFile(request, "all", "judge"),
           {
             path: `${request.tracePath!}/session/raw-events.ndjson`,
             kind: "text" as const,
@@ -334,7 +305,7 @@ describe("built-in Workbench adapters", () => {
             content: "{\"private\":true}\n",
           },
         ],
-        metadata: { mocked: true, criterion: criterion.id },
+        metadata: { mocked: true },
       };
     });
 
@@ -344,8 +315,7 @@ describe("built-in Workbench adapters", () => {
       agentExecutor,
     });
 
-    expect(agentExecutor).toHaveBeenCalledTimes(criteria.length);
-    expect(maxInFlight).toBe(2);
+    expect(agentExecutor).toHaveBeenCalledTimes(1);
     expect(seenRequests[0]).toMatchObject({
       role: "engine",
       provider: {
@@ -362,8 +332,7 @@ describe("built-in Workbench adapters", () => {
         },
       },
     });
-    expect(seenRequests.map((request) => singleCriterionFromPrompt(request.prompt, criteria).id).sort())
-      .toEqual(["accuracy", "completeness", "style"]);
+    expect(criteria.every((criterion) => seenRequests[0]!.prompt.includes(criterion.description))).toBe(true);
     expect(seenRequests.every((request) => request.prompt.includes("Score only the runner output."))).toBe(true);
     const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
     const engineResult = adapterResult.value;
@@ -375,42 +344,32 @@ describe("built-in Workbench adapters", () => {
       expect.objectContaining({ criterion_id: "style", score: 0.5 }),
     ]));
     expect(adapterResult.feedback).toMatchObject({
-      rubric: "criterion-fanout",
-      parallelism: 2,
+      rubric: "single-judge",
       aggregation: "weighted_mean",
     });
     expect(engineResult.feedback.judge).toBe("codex");
-    const evidenceScorecard = JSON.parse(
-      await fs.readFile(path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "scorecard.json"), "utf8"),
-    ) as { safeForImprover?: boolean; criteria?: Array<{ id?: string; rationale?: string }> };
-    expect(evidenceScorecard.safeForImprover).toBe(true);
-    expect(evidenceScorecard.criteria?.map((criterion) => criterion.id).sort()).toEqual(["accuracy", "completeness", "style"]);
     const publicScorecard = JSON.parse(
       await fs.readFile(path.join(root, "output", "rubric-scorecard.json"), "utf8"),
     ) as { safeForImprover?: boolean; criteria?: Array<{ id?: string; rationale?: string }> };
     expect(publicScorecard.safeForImprover).toBe(true);
     expect(publicScorecard.criteria?.map((criterion) => criterion.rationale)).toContain("accuracy rationale");
-    await expect(fs.readFile(
-      path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "result.json"),
-      "utf8",
-    )).resolves.toContain("accuracy rationale");
     const accuracyTrace = JSON.parse(
       await fs.readFile(
-        path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "judge", "session", "trace.json"),
+        path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "judge", "session", "trace.json"),
         "utf8",
       ),
     ) as { spans?: Array<{ title?: string }>; events?: Array<{ message?: string }> };
-    expect(accuracyTrace.spans?.map((span) => span.title)).toContain("Judge criterion accuracy");
-    expect(accuracyTrace.events?.map((event) => event.message)).toContain("accuracy judge trace event");
+    expect(accuracyTrace.spans?.map((span) => span.title)).toContain("Judge criterion all");
+    expect(accuracyTrace.events?.map((event) => event.message)).toContain("all judge trace event");
     await expect(fs.stat(
       path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "trace.json"),
     )).rejects.toThrow();
     await expect(fs.stat(
-      path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "criteria", "accuracy", "judge", "session", "raw-events.ndjson"),
+      path.join(root, "output", ".workbench", "traces", "job_rubric_grade", "engine", "rubric", "judge", "session", "raw-events.ndjson"),
     )).rejects.toThrow();
   });
 
-  test("repairs malformed rubric judge output per criterion", async () => {
+  test("fails malformed rubric output without a repair turn", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-first-party-rubric-repair-"));
     const criteria = [{
       id: "factuality",
@@ -424,51 +383,24 @@ describe("built-in Workbench adapters", () => {
       score: 1,
     }];
     const requestPath = await writeRubricRequest(root, {
-      parallelism: 2,
       criteria,
     });
-    const callsByCriterion = new Map<string, WorkbenchAgentTurnRequest[]>();
-    const repairRequests: WorkbenchAgentTurnRequest[] = [];
-    const agentExecutor = vi.fn(async (request: WorkbenchAgentTurnRequest) => {
-      const criterion = singleCriterionFromPrompt(request.prompt, criteria);
-      callsByCriterion.set(criterion.id, [
-        ...(callsByCriterion.get(criterion.id) ?? []),
-        request,
-      ]);
-      const isRepair = request.prompt.includes("rejected by the result parser")
-        || request.prompt.includes("Parser error:");
-      if (isRepair) {
-        repairRequests.push(request);
-      }
-      if (criterion.id === "factuality" && !isRepair) {
-        return {
-          output: "factuality: partial credit because the citation is malformed",
-          traceFiles: [],
-          metadata: { mocked: true, criterion: criterion.id, malformed: true },
-        };
-      }
+    const agentExecutor = vi.fn(async () => {
       return {
-        output: rubricJudgeOutput(criterion.id, criterion.score, `${criterion.id} rationale`),
+        output: "factuality: partial credit because the citation is malformed",
+        agentTrace: mockNeutralTrace("malformed-judge"),
         traceFiles: [],
-        metadata: { mocked: true, criterion: criterion.id, repair: isRepair },
+        metadata: { mocked: true, malformed: true },
       };
     });
 
-    await executeWorkbenchBuiltInAdapterCommand({
+    await expect(executeWorkbenchBuiltInAdapterCommand({
       adapterId: "rubric",
       requestPath,
       agentExecutor,
-    });
+    })).rejects.toThrow("Rubric judge output must be a JSON object");
 
-    expect(agentExecutor).toHaveBeenCalledTimes(3);
-    expect(callsByCriterion.get("factuality")).toHaveLength(2);
-    expect(callsByCriterion.get("coverage")).toHaveLength(1);
-    expect(repairRequests).toHaveLength(1);
-    expect(repairRequests[0]!.prompt).toContain(criteria[0]!.description);
-    expect(repairRequests[0]!.prompt).not.toContain(criteria[1]!.description);
-    const adapterResult = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
-    expect(adapterResult.value.score).toBe(0.75);
-    expect(adapterResult.value.metrics).toEqual({ score: 0.75 });
+    expect(agentExecutor).toHaveBeenCalledTimes(1);
   });
 
   test("executes Workbench engine-resolve requests into engine cases", async () => {
@@ -597,7 +529,7 @@ describe("built-in Workbench adapters", () => {
     })).rejects.toThrow("Workbench grade.run is not implemented by the workbench adapter");
   });
 
-  test("requires command graders to publish a grade.run result", async () => {
+  test("reads command grader results from OUTPUT_DIR/result.json", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-command-engine-"));
     await fs.mkdir(path.join(root, "output"), { recursive: true });
     await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
@@ -605,6 +537,34 @@ describe("built-in Workbench adapters", () => {
     await fs.writeFile(requestPath, `${JSON.stringify({
       protocol: "workbench.adapter.v3",
       id: "exec_command_score",
+      operation: "grade.run",
+      invocation: {
+        use: "command",
+        with: {
+          command: "printf '{\"score\":0.75,\"summary\":\"command grade\",\"metrics\":{\"score\":0.75}}\\n' > \"$OUTPUT_DIR/result.json\"",
+        },
+      },
+      paths: adapterCommandPaths(root),
+    }, null, 2)}\n`);
+
+    await executeWorkbenchBuiltInAdapterCommand({
+      adapterId: "command",
+      requestPath,
+    });
+
+    const result = await readWorkbenchAdapterOperationResult(path.join(root, "output"), "grade.run");
+    expect(result.ok).toBe(true);
+    expect(result.value).toMatchObject({ score: 0.75, summary: "command grade", metrics: { score: 0.75 } });
+  });
+
+  test("requires command graders to publish a public grade result", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-command-engine-missing-result-"));
+    await fs.mkdir(path.join(root, "output"), { recursive: true });
+    await fs.mkdir(path.join(root, ".workbench"), { recursive: true });
+    const requestPath = path.join(root, ".workbench", "request.json");
+    await fs.writeFile(requestPath, `${JSON.stringify({
+      protocol: "workbench.adapter.v3",
+      id: "exec_command_missing_score",
       operation: "grade.run",
       invocation: {
         use: "command",
@@ -618,7 +578,7 @@ describe("built-in Workbench adapters", () => {
     await expect(executeWorkbenchBuiltInAdapterCommand({
       adapterId: "command",
       requestPath,
-    })).rejects.toThrow("Command grader must write workbench-result.json for grade.run.");
+    })).rejects.toThrow("Command grader must write $OUTPUT_DIR/result.json for grade.run.");
   });
 
   test("reads tests engine results from OUTPUT_DIR/result.json", async () => {
@@ -887,22 +847,13 @@ describe("built-in Workbench adapters", () => {
     })).rejects.toThrow(/files\[1\] must be an object with string path and content fields/u);
   });
 
-  test("retries Claude agent turns that exit with a transient SIGTERM", async () => {
+  test("does not retry transient provider exits", async () => {
     let attempts = 0;
-    const result = await executeWorkbenchAgentTurn(async () => {
+    await expect(executeWorkbenchAgentTurn(async () => {
       attempts += 1;
-      if (attempts === 1) {
-        throw new Error("claude exited before returning a terminal result with code null signal SIGTERM");
-      }
-      return {
-        output: "ok",
-        traceFiles: [],
-        metadata: { attempts },
-      };
-    }, testAgentTurnRequest("claude"));
-
-    expect(result.output).toBe("ok");
-    expect(attempts).toBe(2);
+      throw new Error("claude exited before returning a terminal result with code null signal SIGTERM");
+    }, testAgentTurnRequest("claude"))).rejects.toThrow("signal SIGTERM");
+    expect(attempts).toBe(1);
   });
 
   test("does not retry deterministic native CA certificate failures", async () => {
@@ -956,7 +907,6 @@ interface RubricTestCriterion {
 async function writeRubricRequest(
   root: string,
   options: {
-    parallelism: number;
     criteria: RubricTestCriterion[];
   },
 ): Promise<string> {
@@ -973,7 +923,6 @@ async function writeRubricRequest(
       use: "rubric",
       with: {
         instructions: "Score only the runner output.",
-        parallelism: options.parallelism,
         judge: {
           use: "codex",
           with: {
@@ -1021,24 +970,34 @@ async function writeRubricRequest(
   return requestPath;
 }
 
-function singleCriterionFromPrompt(
-  prompt: string,
-  criteria: readonly RubricTestCriterion[],
-): RubricTestCriterion {
-  const matches = criteria.filter((criterion) => prompt.includes(criterion.description));
-  expect(matches.map((criterion) => criterion.id)).toHaveLength(1);
-  return matches[0]!;
+function rubricJudgeOutput(criteria: readonly RubricTestCriterion[]): string {
+  return JSON.stringify({
+    summary: "All criteria graded.",
+    criteria: criteria.map((criterion) => ({
+      id: criterion.id,
+      score: criterion.score,
+      pass: criterion.score >= 0.5,
+      rationale: `${criterion.id} rationale`,
+      evidence: [{
+        path: "output/result.xlsx",
+        locator: "Summary!B2",
+        note: `${criterion.id} evidence`,
+      }],
+    })),
+  });
 }
 
-function rubricJudgeOutput(criterionId: string, score: number, rationale: string): string {
-  return JSON.stringify({
-    criterion_id: criterionId,
-    score,
-    pass: score >= 0.5,
-    rationale,
-    summary: `${criterionId} graded`,
-    feedback: { mocked: true },
-  });
+function mockNeutralTrace(id: string) {
+  return {
+    id,
+    events: [{
+      id: "assistant:1",
+      kind: "message" as const,
+      role: "assistant" as const,
+      channel: "visible" as const,
+      text: "Judge output",
+    }],
+  };
 }
 
 function mockAgentTraceFile(
@@ -1095,8 +1054,4 @@ function mockAgentTraceFile(
       }],
     }, null, 2)}\n`,
   };
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }

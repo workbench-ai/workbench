@@ -7,21 +7,15 @@ import {
   WORKBENCH_ADAPTER_PROTOCOL,
   WORKBENCH_RUNTIME_CONTROL_TIMEOUT_MS_ENV,
   adapterCommandName,
-  adapterResult,
   assertWorkbenchAdapterOperationResultOk,
   assertWorkbenchAdapterOperationSupport,
   collectWorkbenchAdapterAuthRequirements,
-  defineAdapter,
-  defineEngineResolver,
-  defineGradeRunner,
-  defineImprover,
-  defineSkillRunner,
+  isWorkbenchAdapterOperationResult,
   normalizeWorkbenchAdapterOperationRequest,
   normalizeWorkbenchAdapterOperationResult,
   normalizeWorkbenchEngineCase,
   parseWorkbenchAdapterManifest,
   runWorkbenchRuntimeOperationSequence,
-  workbenchAdapterManifestFromDefinition,
   workbenchAdapterOperationExecutor,
   withDefaultWorkbenchAdapterAuthProfiles,
   type WorkbenchAdapterOperationRequest,
@@ -58,14 +52,23 @@ describe("Workbench adapter protocol", () => {
     });
   });
 
-  test("names adapter commands and wraps results without runtime-specific fields", () => {
-    expect(adapterCommandName("codex")).toBe("workbench-adapter-codex");
-    expect(adapterResult("skill.run", { score: 1 })).toEqual({
+  test("recognizes only current adapter operation results", () => {
+    expect(isWorkbenchAdapterOperationResult({
       protocol: "workbench.adapter-result.v1",
       operation: "skill.run",
-      ok: true,
-      value: { score: 1 },
-    });
+    })).toBe(true);
+    expect(isWorkbenchAdapterOperationResult({
+      protocol: "workbench.adapter-result.v1",
+      operation: "legacy.run",
+    })).toBe(false);
+    expect(isWorkbenchAdapterOperationResult({
+      protocol: "workbench.adapter.v3",
+      operation: "skill.run",
+    })).toBe(false);
+  });
+
+  test("names adapter commands", () => {
+    expect(adapterCommandName("codex")).toBe("workbench-adapter-codex");
   });
 
   test("uses install commands in adapter manifests", () => {
@@ -212,26 +215,6 @@ describe("Workbench adapter protocol", () => {
         scratch: "/workspace/scratch",
       },
     })).toThrow("unsupported fields: input, artifacts, scratch");
-  });
-
-  test("emits v3 operation names from typed helper definitions", () => {
-    const manifest = workbenchAdapterManifestFromDefinition(defineAdapter({
-      id: "adapter",
-      engineResolve: defineEngineResolver(),
-      skillRun: defineSkillRunner(),
-      gradeRun: defineGradeRunner(),
-      improve: defineImprover(),
-    }));
-
-    expect(manifest).toMatchObject({
-      protocol: WORKBENCH_ADAPTER_MANIFEST_PROTOCOL,
-      operations: {
-        "engine.resolve": { command: "workbench-adapter-adapter" },
-        "skill.run": { command: "workbench-adapter-adapter" },
-        "grade.run": { command: "workbench-adapter-adapter" },
-        "skill.improve": { command: "workbench-adapter-adapter" },
-      },
-    });
   });
 
   test("rejects invalid protocol strings and unknown operation names", () => {

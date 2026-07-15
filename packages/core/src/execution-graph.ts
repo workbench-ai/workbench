@@ -33,12 +33,12 @@ export interface CompileExecutionGraphInput {
   metadata?: Record<string, Json>;
 }
 
-export interface WorkbenchExecutionGraph {
+interface WorkbenchExecutionGraph {
   nodes: WorkbenchExecutionGraphNode[];
   executions: WorkbenchExecutionSpec[];
 }
 
-export interface WorkbenchExecutionGraphNode {
+interface WorkbenchExecutionGraphNode {
   execution: WorkbenchExecutionSpec;
   dependsOn: string[];
 }

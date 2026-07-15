@@ -1,7 +1,6 @@
 import {
   workbenchJobReportTotalCostUsd,
-  type Json,
-  type WorkbenchAgent,
+  workbenchJobScore,
   type WorkbenchJobReport,
   type WorkbenchJob,
   type WorkbenchRun,
@@ -15,26 +14,12 @@ export function formatScore(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "n/a";
 }
 
-export function jobScore(job: Pick<WorkbenchJob, "result">): number | undefined {
-  const scoreItem = job.result?.items?.find((item) =>
-    item.kind === "score" && typeof item.score === "number" && Number.isFinite(item.score)
-  );
-  return typeof scoreItem?.score === "number" ? scoreItem.score : undefined;
-}
-
-export function runOwnsJob(
-  run: Pick<WorkbenchRun, "id" | "jobIds">,
-  job: Pick<WorkbenchJob, "id" | "runId">,
-): boolean {
-  return job.runId === run.id || (run.jobIds ?? []).includes(job.id);
-}
-
 export function jobsForRun(
   run: Pick<WorkbenchRun, "id" | "jobIds">,
   jobs: readonly WorkbenchJob[],
 ): WorkbenchJob[] {
-  const referencedJobIds = new Set(run.jobIds ?? []);
-  return jobs.filter((job) => job.runId === run.id || referencedJobIds.has(job.id));
+  const referencedJobIds = new Set(run.jobIds);
+  return jobs.filter((job) => referencedJobIds.has(job.id));
 }
 
 export function runScore(
@@ -46,7 +31,7 @@ export function runScore(
   }
   const scores = jobsForRun(run, jobs)
     .filter((job) => job.role === "grade")
-    .map(jobScore)
+    .map(workbenchJobScore)
     .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
   if (scores.length === 0) {
     return undefined;
@@ -120,58 +105,6 @@ export function formatStatus(value: string | null | undefined): string {
 
 export function formatCount(count: number, singular: string): string {
   return `${count} ${count === 1 ? singular : pluralize(singular)}`;
-}
-
-export function formatList(values: readonly string[], empty = "none"): string {
-  return values.length > 0 ? values.join(", ") : empty;
-}
-
-export function agentConfigString(agent: WorkbenchAgent, key: string): string | null {
-  const value = agent.config[key];
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-export function agentNetworkLabel(agent: WorkbenchAgent): string {
-  const value = agent.config.network;
-  if (value === true || value === "true" || value === "on" || value === "bridge") {
-    return "open";
-  }
-  if (value === false || value === "false" || value === "off" || value === "none") {
-    return "isolated";
-  }
-  return typeof value === "string" && value.trim() ? value : "default";
-}
-
-export function agentTimeoutLabel(agent: WorkbenchAgent): string {
-  const minutes = agent.config.timeoutMinutes;
-  if (typeof minutes === "number" && Number.isFinite(minutes)) {
-    return `${minutes}m`;
-  }
-  const seconds = agent.config.timeoutSeconds;
-  if (typeof seconds === "number" && Number.isFinite(seconds)) {
-    return `${seconds}s`;
-  }
-  return "default";
-}
-
-export function runDisplayLabel(run: WorkbenchRun): string {
-  return [
-    run.kind,
-    run.status,
-  ].filter(Boolean).join(" / ");
-}
-
-export function jobDisplayLabel(job: WorkbenchJob): string {
-  return [
-    job.kind,
-    job.status,
-    job.caseId,
-    `sample ${job.sample}`,
-  ].filter(Boolean).join(" / ");
-}
-
-export function jsonPreview(value: Json): string {
-  return JSON.stringify(value, null, 2);
 }
 
 export function fileName(path: string): string {

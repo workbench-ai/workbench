@@ -11,7 +11,7 @@ const require = createRequire(import.meta.url);
 const DEFAULT_EXTERNAL_SKILLS_TIMEOUT_MS = 120_000;
 const MAX_CAPTURED_OUTPUT_BYTES = 1024 * 1024;
 
-export interface ExternalSkillInstallRequest {
+interface ExternalSkillInstallRequest {
   source: string;
   args: readonly string[];
   dryRun: boolean;
@@ -104,11 +104,11 @@ export async function runExternalSkillInstall(request: ExternalSkillInstallReque
   };
 }
 
-export function externalSkillInstallCommand(source: string, args: readonly string[]): string[] {
+function externalSkillInstallCommand(source: string, args: readonly string[]): string[] {
   return ["skills", "add", source, ...args];
 }
 
-export function externalSkillInstallCommandText(command: readonly string[]): string {
+function externalSkillInstallCommandText(command: readonly string[]): string {
   return command.map((part) => quoteShellArg(part)).join(" ");
 }
 

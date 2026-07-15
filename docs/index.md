@@ -1,13 +1,13 @@
 # Workbench Docs
 
-Workbench turns [Agent Skills](https://agentskills.io/home) into evaluated, versioned workflows. Create a skill, define eval cases, run and grade them with agents, improve from evidence, and publish installable source.
+Workbench mines reviewed workflows from Sources, turns them into Evals, and uses those Evals to improve and publish versioned [Agent Skills](https://agentskills.io/home).
 
 ## Choose a path
 
 | Goal | Start here |
 | --- | --- |
+| Ingest evidence and discover workflows | [Sources](sources.md) |
 | Build your first measured skill | [Quickstart](quickstart.md) |
-| Choose a task path | [Common workflows](workflows.md) |
 | Learn the eval source model | [Evaluation basics](evals.md) |
 | Author cases and grading | [Cases and grading](cases-grading.md) |
 | Configure agents and models | [Agents and models](agents-models.md) |
@@ -19,7 +19,7 @@ Workbench turns [Agent Skills](https://agentskills.io/home) into evaluated, vers
 | Follow runs and jobs | [Runs and jobs](track-runs-jobs.md) |
 | Inspect traces, artifacts, and files | [Traces, artifacts, and files](track-files.md) |
 | Review versions and lineage | [Versions and lineage](track-versions.md) |
-| Publish source | [Publish](share.md) |
+| Publish a Skill package | [Publish](share.md) |
 | Install or clone a skill | [Install and clone](install-clone.md) |
 | Manage visibility and hosted operations | [Visibility and Cloud](visibility-cloud.md) |
 | Look up command behavior | [CLI reference](cli.md) |
@@ -29,22 +29,23 @@ Workbench turns [Agent Skills](https://agentskills.io/home) into evaluated, vers
 
 | Concept | Meaning |
 | --- | --- |
-| Skill | A standards-compliant [Agent Skill](https://agentskills.io/specification) package with `SKILL.md` plus support files. |
+| Source | An ingested evidence corpus with immutable snapshots, grounded workflow Analyses, and explicit human review. |
 | Eval | The grading standard for a workflow: cases, grading config, agents, and runtime environment source under `.workbench/`. |
-| Run | Recorded evidence: run state, jobs, traces, artifacts, result items, and score summaries. |
-| Package version | The exact skill source Workbench evaluated, improved, or published. |
-| Handle | A published identifier such as `acme/earnings-prep`, used for install and clone handoffs. |
+| Skill | A standards-compliant [Agent Skill](https://agentskills.io/specification) package with `SKILL.md` plus support files. |
+
+Runs are Eval evidence; package versions and handles are Skill lifecycle records, not additional product roots.
 
 ## Daily loop
 
 ```bash
-workbench new ./earnings-prep
+workbench skill new ./earnings-prep
 cd ./earnings-prep
-workbench case draft investor-focus
-workbench eval
-workbench results
-workbench improve
-workbench publish
+workbench eval case draft investor-focus
+workbench eval run
+workbench eval grade
+workbench eval results
+workbench skill improve
+workbench skill publish
 ```
 
-Start with [Quickstart](quickstart.md). Use [Common workflows](workflows.md) when you already know the task you want to finish.
+Start with [Quickstart](quickstart.md), then use the pages above for the Source, Eval, or Skill work you need to finish.

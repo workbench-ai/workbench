@@ -5,29 +5,19 @@ import { fileURLToPath } from "node:url";
 
 import {
   createWorkbenchReadOnlyInspectionSnapshot,
+  sleep,
   WorkbenchCodedError,
-  type Json,
-  type WorkbenchOperationRequest,
-  type WorkbenchRunSnapshot,
 } from "@workbench-ai/workbench-core";
-
-export interface PrivateLocalOperationStart {
-  snapshot: WorkbenchRunSnapshot;
-}
-
-interface LocalWorkerRequestPayload {
-  schema: "workbench.local-worker.request.v1";
-  core: {
-    dir?: string;
-    authToken?: string;
-    adapterAuthStoreRoot?: string;
-    homeDir?: string;
-  };
-  request: WorkbenchOperationRequest;
-  startedPath: string;
-  completedPath: string;
-  errorPath: string;
-}
+import type {
+  Json,
+  WorkbenchOperationRequest,
+  WorkbenchRunSnapshot,
+} from "@workbench-ai/workbench-contract";
+import {
+  LOCAL_WORKER_REQUEST_SCHEMA,
+  type LocalWorkerRequestPayload,
+} from "./local-worker-protocol.js";
+import { pathExists, positiveIntEnv } from "./runtime-utils.js";
 
 interface LocalWorkerErrorPayload {
   schema?: string;
@@ -47,7 +37,7 @@ interface LocalWorkerLaunch {
 export async function startPrivateLocalWorkbenchOperation(input: {
   core: { dir?: string; authToken?: string; adapterAuthStoreRoot?: string; homeDir?: string };
   request: WorkbenchOperationRequest;
-}): Promise<PrivateLocalOperationStart> {
+}): Promise<{ snapshot: WorkbenchRunSnapshot }> {
   const root = (await createWorkbenchReadOnlyInspectionSnapshot(input.core)).root;
   const workerId = `worker_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
   const workerDir = path.join(root, ".workbench", "tmp", "workers", workerId);
@@ -58,7 +48,7 @@ export async function startPrivateLocalWorkbenchOperation(input: {
   const launch = await resolveLocalWorkerLaunch(payloadPath);
   await fs.mkdir(workerDir, { recursive: true });
   const payload: LocalWorkerRequestPayload = {
-    schema: "workbench.local-worker.request.v1",
+    schema: LOCAL_WORKER_REQUEST_SCHEMA,
     core: {
       dir: root,
       ...(input.core.authToken ? { authToken: input.core.authToken } : {}),
@@ -121,11 +111,7 @@ async function waitForLocalWorkerStarted(
 ): Promise<WorkbenchRunSnapshot> {
   const deadline = Date.now() + (positiveIntEnv("WORKBENCH_LOCAL_WORKER_START_TIMEOUT_MS") ?? 30_000);
   while (Date.now() < deadline) {
-    const error = await readJsonFile<LocalWorkerErrorPayload>(errorPath).catch(() => undefined);
-    if (error) {
-      throw localWorkerError(error);
-    }
-    const started = await readJsonFile<WorkbenchRunSnapshot>(startedPath).catch(() => undefined);
+    const started = await readLocalWorkerStart(startedPath, errorPath);
     if (started) {
       return started;
     }
@@ -133,7 +119,7 @@ async function waitForLocalWorkerStarted(
   }
   throw new WorkbenchCodedError("local_worker_start_timeout", "Local run worker did not publish a run id before the startup timeout.", {
     retryable: true,
-    remediation: "workbench status",
+    remediation: "workbench eval results",
     exitCode: 1,
   });
 }
@@ -146,11 +132,7 @@ function waitForLocalWorkerPrematureExit(
   return new Promise((_, reject) => {
     child.once("exit", () => {
       void (async () => {
-        const error = await readJsonFile<LocalWorkerErrorPayload>(errorPath).catch(() => undefined);
-        if (error) {
-          throw localWorkerError(error);
-        }
-        const started = await readJsonFile<WorkbenchRunSnapshot>(startedPath).catch(() => undefined);
+        const started = await readLocalWorkerStart(startedPath, errorPath);
         if (started) {
           return;
         }
@@ -159,7 +141,7 @@ function waitForLocalWorkerPrematureExit(
           "Local run worker exited before publishing a run id.",
           {
             retryable: true,
-            remediation: "workbench status",
+            remediation: "workbench eval results",
             exitCode: 1,
           },
         );
@@ -168,30 +150,28 @@ function waitForLocalWorkerPrematureExit(
   });
 }
 
+async function readLocalWorkerStart(
+  startedPath: string,
+  errorPath: string,
+): Promise<WorkbenchRunSnapshot | undefined> {
+  const error = await readJsonFile<LocalWorkerErrorPayload>(errorPath).catch(() => undefined);
+  if (error) {
+    throw localWorkerError(error);
+  }
+  return await readJsonFile<WorkbenchRunSnapshot>(startedPath).catch(() => undefined);
+}
+
 function localWorkerError(error: LocalWorkerErrorPayload): WorkbenchCodedError {
   return new WorkbenchCodedError(
     error.code ?? "local_worker_failed",
     error.message ?? "Local run worker failed before publishing a run id.",
     {
       retryable: error.retryable,
-      remediation: error.remediation ?? "workbench status",
+      remediation: error.remediation ?? "workbench eval results",
       ...(error.subject ? { subject: error.subject } : {}),
       exitCode: error.exitCode ?? 1,
     },
   );
-}
-
-function positiveIntEnv(name: string): number | undefined {
-  const value = process.env[name];
-  if (!value) {
-    return undefined;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function resolveLocalWorkerLaunch(payloadPath: string): Promise<LocalWorkerLaunch> {
@@ -201,27 +181,19 @@ async function resolveLocalWorkerLaunch(payloadPath: string): Promise<LocalWorke
   }
   const sourceWorkerPath = fileURLToPath(new URL("./local-worker.ts", import.meta.url));
   const packageRoot = path.dirname(path.dirname(sourceWorkerPath));
-  const packageDistWorkerPath = path.join(packageRoot, "dist", "local-worker.js");
-  if (await pathExists(packageDistWorkerPath)) {
-    return { command: process.execPath, args: [packageDistWorkerPath, payloadPath] };
-  }
   const tsxBin = path.join(packageRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
   if (await pathExists(sourceWorkerPath) && await pathExists(tsxBin)) {
     return { command: tsxBin, args: [sourceWorkerPath, payloadPath] };
   }
   throw new WorkbenchCodedError(
     "local_worker_missing",
-    "The built Workbench CLI is missing its private local worker module.",
+    "The Workbench CLI local worker module is unavailable for the current runtime.",
     {
-      remediation: "pnpm --dir products/workbench build",
+      remediation: "pnpm --dir products/workbench/packages/cli build",
       retryable: true,
       exitCode: 1,
     },
   );
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-  return await fs.stat(filePath).then(() => true, () => false);
 }
 
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {

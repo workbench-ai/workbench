@@ -1,42 +1,63 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { promises as fs, realpathSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { promises as fs } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify, TextDecoder } from "node:util";
-import { gzipSync } from "node:zlib";
 
 import YAML from "yaml";
 
 import {
   buildWorkbenchJobReport,
+  compareWorkbenchNaturalText,
+  compareWorkbenchVersions,
+  isWorkbenchJobStatusTerminal,
   isWorkbenchAuthoredControlPath,
+  isWorkbenchJson,
   isWorkbenchLiveInspectableProjectPath,
   isWorkbenchPackageSourcePath,
   isWorkbenchRuntimeMetadataPath,
+  isWorkbenchRunStatusTerminal,
+  isWorkbenchSkillVisibility,
   normalizeWorkbenchSkillName,
   normalizeWorkbenchSourcePath,
+  parseWorkbenchProjectState,
+  WorkbenchStateValidationError,
+  workbenchGradePlanAuthoringIssues,
+  workbenchGradePlanAuthoringValues,
+  workbenchJobScore,
+  workbenchRunOwnsJob,
+  workbenchRunStatusFromJobs,
+  workbenchSkillVersionIdentity,
+  workbenchSampleCoverage,
   workbenchSampleCoverageForJobs,
+  workbenchOperationStepsForRunKind as stepsForRunKind,
+  workbenchRunKindForOperationSteps as runKindForOperationSteps,
 } from "@workbench-ai/workbench-contract";
 import type {
   Json,
   EvalCaseResult,
-  RemoteWorkbenchJob,
+  WorkbenchExecutionJob,
   SurfaceSnapshotFile,
   WorkbenchArtifact,
   WorkbenchAdapterInvocation,
   WorkbenchAgentSnapshot,
   WorkbenchSkillPatch,
   WorkbenchResults,
+  WorkbenchCaseGradeMutation,
   WorkbenchDefaultAgentSelection,
   WorkbenchEvalCaseSnapshot,
-  WorkbenchEvalCaseGradePlan,
+  WorkbenchGradePlan,
+  WorkbenchGradeAdapterOption,
+  WorkbenchGradeMutationRequest,
   WorkbenchEvalVersionSummary,
   WorkbenchGradePlanDisplayBlock,
+  WorkbenchGradePlanAuthoringControl,
+  WorkbenchGradePlanAuthoringListField,
   WorkbenchGradePlanSource,
   WorkbenchEvalSnapshot,
   WorkbenchExecutionEvidence,
@@ -45,19 +66,13 @@ import type {
   WorkbenchExecutionSpec,
   WorkbenchExecutionTrace,
   WorkbenchExecutionTraceDetail,
-  WorkbenchFileSurface,
-  WorkbenchInspectionFileContent,
-  WorkbenchInspectionFileOwnerKind,
   WorkbenchInspectionSnapshot,
   WorkbenchActionCapabilities,
   WorkbenchCaseRunKind,
   WorkbenchJobReport,
-  WorkbenchOperationPreview,
   WorkbenchOperationPlanSummary,
-  WorkbenchOperationGrader,
-  WorkbenchOperationPhase,
   WorkbenchOperationRequest,
-  WorkbenchOperationSelection,
+  WorkbenchOperationStep,
   WorkbenchOperationTarget,
   WorkbenchOperationVariant,
   WorkbenchRunSnapshot,
@@ -68,7 +83,6 @@ import type {
   WorkbenchJob,
   WorkbenchJobDependency,
   WorkbenchJobResult,
-  WorkbenchJobStatus,
   WorkbenchResultItem,
   WorkbenchLineageEdge,
   WorkbenchObjectPack,
@@ -78,15 +92,13 @@ import type {
   WorkbenchRemoteSyncState,
   WorkbenchResult,
   WorkbenchRun,
-  WorkbenchRunKind,
   WorkbenchRunLocation,
-  WorkbenchEnvironmentStatus,
   WorkbenchAgent,
   WorkbenchSkillBundleSnapshot,
   WorkbenchSkillInclude,
   WorkbenchSkillSource,
   WorkbenchStatus,
-  WorkbenchStatusSnapshot,
+  WorkbenchSkillVisibility,
   WorkbenchTrace,
   WorkbenchTraceSession,
   WorkbenchVersion,
@@ -94,9 +106,11 @@ import type {
 } from "@workbench-ai/workbench-contract";
 import {
   assertWorkbenchAdapterOperationResultOk,
+  builtinWorkbenchAdapterManifest,
   builtinWorkbenchAdapterManifests,
   collectWorkbenchAdapterAuthRequirements,
   collectWorkbenchAdapterInvocations,
+  isWorkbenchAdapterOperationResult,
   isWorkbenchBuiltInAdapterId,
   readWorkbenchAdapterOperationResult,
   WORKBENCH_RUNTIME_CONTROL_TOKEN_ENV,
@@ -118,26 +132,41 @@ import {
   createWorkbenchSandboxFileStore,
   isSurfaceSnapshotFile,
   readWorkbenchExecutionSpec,
+  readWorkbenchPlannedExecutionJobInput,
 } from "./sandbox-inputs.ts";
 import {
   createSandboxBackendPlaneForBackend,
   DOCKER_SANDBOX_BACKEND,
 } from "./sandbox-backends/index.ts";
+import { requestWorkbenchCloudJson } from "./cloud-json.ts";
+export { requestWorkbenchCloudJson } from "./cloud-json.ts";
+export { runWorkbenchSandboxProcess } from "./sandbox-process.ts";
+import {
+  writeFileAtomically,
+  writeJsonFileAtomically,
+} from "./atomic-files.ts";
+export {
+  writeFileAtomically,
+  writeJsonFileAtomically,
+} from "./atomic-files.ts";
 import {
   assertDockerSandboxAvailable,
 } from "./sandbox-backends/docker.ts";
 import {
   abortSignalOrUndefined,
   asRuntimeRecord,
-  isJsonPayload,
+  dedupeSurfaceFiles,
+  fileErrorCode,
   normalizeRelativePath,
+  publicGradeMetrics,
   quoteShellArg,
-  resolveDockerRuntimeImageRef,
   resolveWorkbenchWorkerId,
+  sleep,
+  writeSurfaceFiles,
 } from "./runtime-utils.ts";
 import {
-  compactWorkbenchTraceSpool,
   listWorkbenchTraceRecords,
+  writeWorkbenchTraceRecord,
 } from "./trace-runtime.ts";
 import type {
   WorkbenchAdapterAuthBundle,
@@ -148,6 +177,7 @@ import {
   localWorkbenchAdapterAuthStore,
   normalizeWorkbenchAdapterAuthTarget,
   sanitizeWorkbenchAdapterAuthBundle,
+  workbenchAdapterAuthTargetIdentity,
 } from "./adapter-auth.ts";
 import {
   executeValidatedSandboxExecution,
@@ -174,15 +204,18 @@ import {
 } from "./execution-scheduler.ts";
 import {
   planWorkbenchExecutionJobsForPurpose,
-  workbenchExecutionJobPurpose,
 } from "./execution-jobs.ts";
 import {
   applyWorkbenchSkillPatch,
+  isWorkbenchControlPath,
 } from "./skill-patch.ts";
 import {
   buildWorkbenchTraceSessionsFromFiles,
   combineWorkbenchTraceSessions,
+  readWorkbenchExecutionTrace,
+  traceSummaryKey,
 } from "./execution-traces.ts";
+import { planWorkbenchOperationGraph } from "./operation-graph.ts";
 import {
   assignUsageRole,
   mergeUsageSummaries,
@@ -202,79 +235,42 @@ import {
   codedErrorFromUnknown,
 } from "./coded-errors.ts";
 import {
+  copyWorkbenchOperationPlanSummary as copyOperationPlanSummary,
+  copyWorkbenchOperationTarget,
+  createWorkbenchOperationPlanSummary as operationPlanSummaryForRun,
+  normalizeWorkbenchOperationRequest,
+  normalizeWorkbenchOperationSteps as uniqueOperationSteps,
+  workbenchOperationTargetAgentSelector as operationTargetAgentSelector,
+  workbenchOperationTargetFromPlan as operationTargetFromPlan,
+  workbenchOperationTargetSkillSelector as operationTargetSkillSelector,
+  workbenchOperationTargetsFromPlan as operationTargetsFromPlan,
+  workbenchOperationTargetVersionId as operationTargetVersionId,
+  uniqueStrings,
+} from "./operation-request.ts";
+import {
   parseWorkbenchRemoteUrl,
 } from "./remote-model.ts";
+import {
+  canonicalize,
+  hashFiles,
+  hashJson,
+} from "./content-hash.ts";
 
-export type {
-  Json,
-  RemoteWorkbenchJob,
-  SurfaceSnapshotFile,
-  WorkbenchArtifact,
-  WorkbenchResults,
-  WorkbenchDefaultAgentSelection,
-  WorkbenchEvalCaseSnapshot,
-  WorkbenchEvalSnapshot,
-  WorkbenchExecutionEvidence,
-  WorkbenchExecutionResult,
-  WorkbenchExecutionSpec,
-  WorkbenchExecutionTrace,
-  WorkbenchExecutionTraceDetail,
-  WorkbenchFileSurface,
-  WorkbenchInspectionFileContent,
-  WorkbenchInspectionFileOwnerKind,
-  WorkbenchInspectionSnapshotEnvelope,
-  WorkbenchInspectionSnapshot,
-  WorkbenchCaseRunKind,
-  WorkbenchActionCapabilities,
-  WorkbenchAcquisitionOption,
-  WorkbenchOperationPreview,
-  WorkbenchOperationPlanSummary,
-  WorkbenchOperationRequest,
-  WorkbenchOperationSelection,
-  WorkbenchOperationVariant,
-  WorkbenchRunSnapshot,
-  WorkbenchMeasurementSummary,
-  WorkbenchRunPhase,
-  WorkbenchStateNotice,
-  WorkbenchJob,
-  WorkbenchLineageEdge,
-  WorkbenchObjectPack,
-  WorkbenchProjectState,
-  WorkbenchRefs,
-  WorkbenchRemote,
-  WorkbenchRemoteSyncState,
-  WorkbenchRun,
-  WorkbenchAgent,
-  WorkbenchAgentSnapshot,
-  WorkbenchSkillBundleSnapshot,
-  WorkbenchSkillInclude,
-  WorkbenchSkillSource,
-  WorkbenchStatus,
-  WorkbenchStatusSnapshot,
-  WorkbenchTrace,
-  WorkbenchTraceReviewStatus,
-  WorkbenchTraceSession,
-  WorkbenchVersion,
-} from "@workbench-ai/workbench-contract";
 export {
   WorkbenchCodedError,
   WorkbenchUserError,
   codedErrorFromUnknown,
 } from "./coded-errors.ts";
 export {
-  workbenchInspectionFileContent,
-  workbenchInspectionFileContentUnavailableReason,
-  workbenchInspectionFileManifest,
-  workbenchTraceLifecycleStatus,
-  workbenchTraceOutputText,
-  workbenchTraceProjection,
-  workbenchTracePromotionReadiness,
-  workbenchTracePrompt,
-  workbenchTraceReviewStatus,
-} from "@workbench-ai/workbench-contract";
+  hashFiles,
+  hashJson,
+} from "./content-hash.ts";
+export {
+  applyWorkbenchEvalPatch,
+  WorkbenchEvalPatchConflictError,
+} from "./eval-patch.ts";
 export type {
   WorkbenchExecutionRuntimeInput,
-  WorkbenchWorkloadStepCommand,
 } from "./execution-runtime-types.ts";
 export {
   attachSandboxMetadataToJob,
@@ -283,8 +279,10 @@ export {
   executionResultFromCompletedSandboxJob,
   isSurfaceSnapshotFile,
   readWorkbenchExecutionSpec,
+  readWorkbenchPlannedExecutionJobInput,
 } from "./sandbox-inputs.ts";
 export {
+  createSandboxBackendDescriptor,
   createWorkbenchExecutionCapability,
   createWorkbenchSandboxAllocation,
   collectExecutionCapabilityScopeIssues,
@@ -303,9 +301,16 @@ export {
   type SandboxPlane,
 } from "./sandbox-plane.ts";
 export {
+  createSandboxBackendRegistry,
   createDockerSandboxBackendDescriptor,
   createDockerSandboxPlane,
   DOCKER_SANDBOX_BACKEND,
+  resolveSandboxTemplateImage,
+  type SandboxBackendAdmission,
+  type SandboxBackendHostCost,
+  type SandboxBackendRequestedResources,
+  type SandboxBackendRegistration,
+  type SandboxHostHealthExpectation,
 } from "./sandbox-backends/index.ts";
 export {
   addCapacity,
@@ -323,6 +328,7 @@ export {
 export {
   createWorkbenchExecutionJob,
   planWorkbenchExecutionJobsForPurpose,
+  workbenchExecutionJobPurpose,
   workbenchExecutionJobId,
 } from "./execution-jobs.ts";
 export {
@@ -330,16 +336,20 @@ export {
 } from "./skill-patch.ts";
 export {
   asRuntimeRecord,
+  dedupeSurfaceFiles,
+  fileErrorCode,
   importNodeModule,
   jsonRecord,
   nodeBuiltin,
   normalizeRelativePath,
   normalizeRuntimeRegistry,
   normalizeWorkbenchWorkerId,
+  publicGradeMetrics,
   quoteShellArg,
   readSurfaceFiles,
   resolveDockerRuntimeImageRef,
   resolveWorkbenchWorkerId,
+  sleep,
   writeSurfaceFiles,
 } from "./runtime-utils.ts";
 export {
@@ -353,22 +363,33 @@ export {
   type WorkbenchRuntimeAdapterInstaller,
 } from "./runtime-dockerfile.ts";
 export {
+  copyWorkbenchOperationPlanSummary,
+  copyWorkbenchOperationTarget,
+  createWorkbenchOperationPlanSummary,
+  normalizeWorkbenchOperationRequest,
+  parseWorkbenchOperationRequest,
+  normalizeWorkbenchOperationSteps,
+  workbenchOperationTargetAgentSelector,
+  workbenchOperationTargetFromPlan,
+  workbenchOperationTargetSkillSelector,
+  workbenchOperationTargetsFromPlan,
+  workbenchOperationTargetVersionId,
+} from "./operation-request.ts";
+export {
   readOutputTraceFiles,
-  workbenchTraceExecutionDirectory,
-  workbenchTraceRunDirectory,
-  workbenchTraceRunDirectoryName,
 } from "./trace-files.ts";
 export {
   createWorkbenchExecutionEventPublisher,
   createWorkbenchProgressStdoutParser,
   publishCommandStepEvent,
   publishWorkbenchProgressStdoutEnvelope,
+  readOptionalWorkbenchExecutionProgressTarget,
   type WorkbenchExecutionEventPublisher,
   type WorkbenchExecutionProgressTarget,
 } from "./execution-events.ts";
 export {
-  persistWorkbenchAdapterAuthUpdates,
-} from "./adapter-auth-updates.ts";
+  readWorkbenchSandboxAdapterJobResponse,
+} from "./sandbox-response.ts";
 export {
   adapterAuthEnv,
   createWorkbenchAdapterAuthBundle,
@@ -377,6 +398,7 @@ export {
   normalizeWorkbenchAdapterAuthTarget,
   parseWorkbenchAdapterAuthTarget,
   sanitizeWorkbenchAdapterAuthBundle,
+  workbenchAdapterAuthTargetIdentity,
   type WorkbenchAdapterAuthBundle,
   type WorkbenchAdapterAuthEnvVar,
   type WorkbenchAdapterAuthFile,
@@ -388,39 +410,19 @@ export {
 export {
   buildWorkbenchTraceSessionsFromFiles,
   combineWorkbenchTraceSessions,
-  mergeWorkbenchExecutionTracesByJob,
 } from "./execution-traces.ts";
 export {
-  appendWorkbenchTraceCandidateEvent,
-  appendWorkbenchTraceSpoolEvent,
-  claimWorkbenchTraceCandidateSubject,
-  closeWorkbenchTraceCandidate,
-  compactWorkbenchTraceSpool,
-  createWorkbenchTraceId,
-  createWorkbenchTraceRecord,
-  discardWorkbenchTraceCandidate,
+  planWorkbenchOperationGraph,
+  type WorkbenchOperationGraph,
+  type WorkbenchOperationGraphCase,
+  type WorkbenchOperationGraphNode,
+  type WorkbenchOperationGraphSampleSelection,
+} from "./operation-graph.ts";
+export {
   listWorkbenchTraceRecords,
-  openWorkbenchTraceCandidate,
-  readWorkbenchTraceRecord,
-  readWorkbenchTraceRecordingConfig,
-  reviewWorkbenchTrace,
   writeWorkbenchTraceRecord,
-  writeWorkbenchTraceRecordingConfig,
-  workbenchProjectTraceRuntimeRoot,
-  workbenchTraceCandidateKey,
-  workbenchTraceRuntimeRoot,
-  workbenchTraceSpoolPath,
-  type WorkbenchTraceCandidateCloseInput,
-  type WorkbenchTraceCandidateEventInput,
-  type WorkbenchTraceCandidateKeyInput,
-  type WorkbenchTraceRecordInput,
-  type WorkbenchTraceRecordingConfig,
-  type WorkbenchTraceReviewUpdate,
   type WorkbenchTraceRuntimeOptions,
-  type WorkbenchTraceSpoolEvent,
-  type WorkbenchTraceSpoolStats,
 } from "./trace-runtime.ts";
-
 export interface WorkbenchDraftEvalCaseFile {
   path: string;
   content: string;
@@ -429,30 +431,140 @@ export interface WorkbenchDraftEvalCaseFile {
 
 const DRAFT_CASE_PROMPT_PLACEHOLDER = "Replace this with a representative workflow prompt.";
 const DRAFT_CASE_GRADE_CRITERION_PLACEHOLDER = "Replace this with observable acceptance criteria.";
+const DRAFT_CASE_TEST_PLACEHOLDER_FRAGMENT = "is intentionally failing. Replace";
+const DRAFT_CASE_COMMAND_GRADER_PLACEHOLDER_FRAGMENT =
+  "Draft command grader is intentionally failing. Replace grade.with.command";
+const DRAFT_CASE_COMMAND_GRADER_PLACEHOLDER =
+  "printf '%s\\n' '{\"ok\":false,\"score\":0,\"metrics\":{\"score\":0},\"summary\":\"Draft command grader is intentionally failing. Replace grade.with.command with real assertions.\"}' > \"$OUTPUT_DIR/result.json\" && exit 1";
+export interface WorkbenchEvaluationCaseSourceInput {
+  caseId: string;
+  prompt: string;
+  defaultGrade: WorkbenchGradePlan;
+  grade?: WorkbenchCaseGradeMutation;
+  metadata?: Json;
+}
+
+export function workbenchEvaluationCaseSourceFiles(
+  input: WorkbenchEvaluationCaseSourceInput,
+): WorkbenchDraftEvalCaseFile[] {
+  const selectedGrade = selectedCaseAuthoringGradePlan(input.defaultGrade, input.grade);
+  const inheritsDefault = !input.grade?.adapter;
+  const gradeAuthoringControls = caseAuthoringControlsForMutation(selectedGrade, inheritsDefault);
+  const authoringInput = input.grade?.authoring ?? {};
+  const authoring = workbenchGradePlanAuthoringValues(gradeAuthoringControls, authoringInput);
+  const authoringIssue = workbenchGradePlanAuthoringIssues(gradeAuthoringControls, authoringInput)[0];
+  if (authoringIssue) {
+    throw new WorkbenchUserError(authoringIssue.message);
+  }
+  const caseDir = `.workbench/cases/${input.caseId}`;
+  const caseRecord: Record<string, Json> = {
+    prompt: input.prompt,
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+  };
+  const gradeWith = gradeConfigFromAuthoring(selectedGrade, authoring);
+  const writesAdapter = selectedGrade.adapter !== input.defaultGrade.adapter;
+  if (writesAdapter || Object.keys(gradeWith).length > 0) {
+    caseRecord.grade = {
+      ...(writesAdapter ? { adapter: selectedGrade.adapter } : {}),
+      ...(Object.keys(gradeWith).length > 0 ? { with: gradeWith } : {}),
+    };
+  }
+  return [
+    { path: `${caseDir}/case.yaml`, content: YAML.stringify(caseRecord) },
+    ...caseFilesFromAuthoring(input.caseId, selectedGrade, authoring),
+  ];
+}
+
+export function workbenchEvaluationGradeSourceFiles(
+  input: WorkbenchGradeMutationRequest,
+): SurfaceSnapshotFile[] {
+  const adapter = input.adapter.trim().toLowerCase();
+  if (!adapter) {
+    throw new WorkbenchUserError(`${EVAL_FILE} grade.adapter must be none, rubric, tests, or command.`);
+  }
+  assertSupportedSkillEvalGradeAdapter(adapter);
+  const grade = gradePlanForAdapter({ adapter, adapterSource: "eval" });
+  const authoringControls = evalGradePlanAuthoringControls(adapter, {});
+  const authoringInput = input.authoring ?? {};
+  const hasAuthoringInput = Object.keys(authoringInput).length > 0;
+  const authoringIssue = hasAuthoringInput
+    ? workbenchGradePlanAuthoringIssues(authoringControls, authoringInput, { pathLabel: "Eval grade.authoring" })[0]
+    : undefined;
+  if (authoringIssue) {
+    throw new WorkbenchUserError(authoringIssue.message);
+  }
+  const gradeWith = hasAuthoringInput
+    ? gradeConfigFromAuthoring(grade, workbenchGradePlanAuthoringValues(authoringControls, authoringInput))
+    : {};
+  const evalRecord: Record<string, Json> = {
+    grade: {
+      adapter,
+      ...(Object.keys(gradeWith).length > 0 ? { with: gradeWith } : {}),
+    },
+  };
+  return [{
+    path: `.workbench/${EVAL_FILE}`,
+    kind: "text",
+    encoding: "utf8",
+    content: YAML.stringify(evalRecord),
+  }];
+}
+
+export async function writeWorkbenchEvaluationGradeSourceFiles(
+  options: WorkbenchCommandOptions & { mutation: WorkbenchGradeMutationRequest },
+): Promise<SurfaceSnapshotFile[]> {
+  const root = resolveRoot(options.dir);
+  await requireInitialized(root);
+  const files = workbenchEvaluationGradeSourceFiles(options.mutation);
+  await writeSurfaceFiles(root, files);
+  return files;
+}
 
 export function workbenchDraftEvalCaseFiles(
   caseId = "case-001",
-  options: { includeHarness?: boolean } = {},
+  options: { defaultGrade: WorkbenchGradePlan; grade?: WorkbenchCaseGradeMutation },
 ): WorkbenchDraftEvalCaseFile[] {
-  const caseDir = `.workbench/cases/${caseId}`;
-  const testDir = `${caseDir}/tests`;
-  const casePath = `${caseDir}/case.yaml`;
-  const testPath = `${testDir}/test.sh`;
+  const selectedGrade = selectedCaseAuthoringGradePlan(options.defaultGrade, options.grade);
+  return workbenchEvaluationCaseSourceFiles({
+    caseId,
+    prompt: DRAFT_CASE_PROMPT_PLACEHOLDER,
+    defaultGrade: options.defaultGrade,
+    grade: {
+      adapter: selectedGrade.adapter,
+      authoring: defaultCaseAuthoringForGradePlan(caseId, selectedGrade),
+    },
+  }).map((file) => file.path.endsWith("/case.yaml")
+    ? { ...file, content: draftCaseYamlComments(selectedGrade) + file.content }
+    : file);
+}
+
+function selectedCaseAuthoringGradePlan(
+  defaultGrade: WorkbenchGradePlan,
+  grade: WorkbenchCaseGradeMutation | undefined,
+): WorkbenchGradePlan {
+  const adapter = grade?.adapter?.trim().toLowerCase();
+  if (!adapter) {
+    return defaultGrade;
+  }
+  assertSupportedSkillEvalGradeAdapter(adapter);
+  return gradePlanForAdapter({ adapter, adapterSource: "case" });
+}
+
+function caseAuthoringControlsForMutation(
+  grade: WorkbenchGradePlan,
+  inheritsDefault: boolean,
+): WorkbenchGradePlanAuthoringControl[] {
+  return inheritsDefault
+    ? grade.authoring.filter((control) => control.kind === "file")
+    : grade.authoring;
+}
+
+export function defaultWorkbenchCaseTestScript(caseId?: string): string {
+  const subject = caseId ? `case ${caseId}` : "this case";
+  const testPath = caseId ? `.workbench/cases/${caseId}/tests/test.sh` : "this test script";
   const placeholderSummary =
-    `Draft case ${caseId} is intentionally failing. Replace ${testPath} with assertions for this case and write JSON to $OUTPUT_DIR/result.json before using local or command agents.`;
-  const caseLines = [
-    "version: 1",
-    `id: ${caseId}`,
-    "# Replace prompt with a realistic user request for this workflow.",
-    `prompt: ${DRAFT_CASE_PROMPT_PLACEHOLDER}`,
-    "grade:",
-    "  with:",
-    "    criteria:",
-    "      # Add one criterion per observable behavior that makes the result good.",
-    "      - id: acceptance",
-    `        description: ${DRAFT_CASE_GRADE_CRITERION_PLACEHOLDER}`,
-  ];
-  const testLines = [
+    `Draft ${subject} is intentionally failing. Replace ${testPath} with assertions and write JSON to $OUTPUT_DIR/result.json.`;
+  return [
     "#!/bin/sh",
     "set -eu",
     "mkdir -p \"$OUTPUT_DIR\"",
@@ -464,21 +576,106 @@ export function workbenchDraftEvalCaseFiles(
     }))} > "$OUTPUT_DIR/result.json"`,
     `printf '%s\\n' ${quoteShellArg(placeholderSummary)} >&2`,
     "exit 1",
-  ];
+  ].join("\n") + "\n";
+}
+
+function defaultCaseAuthoringForGradePlan(
+  caseId: string,
+  grade: WorkbenchGradePlan,
+): Record<string, Json> {
+  if (grade.adapter === "rubric") {
+    return { criteria: [{ description: DRAFT_CASE_GRADE_CRITERION_PLACEHOLDER }] };
+  }
+  if (grade.adapter === "tests") {
+    return { testScript: defaultWorkbenchCaseTestScript(caseId) };
+  }
+  if (grade.adapter === "command") {
+    return { command: DRAFT_CASE_COMMAND_GRADER_PLACEHOLDER };
+  }
+  return {};
+}
+
+function draftCaseYamlComments(grade: WorkbenchGradePlan): string {
   return [
-    { path: casePath, content: `${caseLines.join("\n")}\n` },
-    ...(options.includeHarness === false ? [] : [{ path: testPath, content: `${testLines.join("\n")}\n`, executable: true }]),
-  ];
+    "# Replace prompt with a realistic user request for this workflow.",
+    ...(grade.adapter === "rubric"
+      ? ["# Add one criterion per observable behavior that makes the result good."]
+      : []),
+    "",
+  ].join("\n");
+}
+
+function gradeConfigFromAuthoring(
+  grade: WorkbenchGradePlan,
+  authoring: Record<string, Json>,
+): Record<string, Json> {
+  if (grade.adapter !== "rubric") {
+    if (grade.adapter === "command") {
+      const command = typeof authoring.command === "string" ? authoring.command.trim() : "";
+      return command ? { command } : {};
+    }
+    return {};
+  }
+  const criteria = rubricCriteriaFromAuthoring(authoring.criteria);
+  return criteria.length > 0 ? { criteria } : {};
+}
+
+function caseFilesFromAuthoring(
+  caseId: string,
+  grade: WorkbenchGradePlan,
+  authoring: Record<string, Json>,
+): WorkbenchDraftEvalCaseFile[] {
+  if (grade.adapter !== "tests") {
+    return [];
+  }
+  const content = typeof authoring.testScript === "string" && authoring.testScript.trim()
+    ? authoring.testScript
+    : defaultWorkbenchCaseTestScript(caseId);
+  return [{
+    path: `.workbench/cases/${caseId}/tests/test.sh`,
+    content: content.endsWith("\n") ? content : `${content}\n`,
+    executable: true,
+  }];
+}
+
+function rubricCriteriaFromAuthoring(value: Json | undefined): Json[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const used = new Set<string>();
+  return value.flatMap((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+    const description = typeof entry.description === "string" ? entry.description.trim() : "";
+    if (!description) {
+      return [];
+    }
+    const candidateId = typeof entry.id === "string" ? entry.id.trim() : "";
+    const id = uniqueRubricCriterionId(candidateId || description, index, used);
+    const criterion: Record<string, Json> = { id, description };
+    if (typeof entry.weight === "number" && Number.isFinite(entry.weight)) {
+      criterion.weight = entry.weight;
+    }
+    return [criterion];
+  });
+}
+
+function uniqueRubricCriterionId(seed: string, index: number, used: Set<string>): string {
+  const normalized = normalizeWorkbenchSkillName(seed).slice(0, 48) || `criterion-${index + 1}`;
+  let id = normalized;
+  for (let suffix = 2; used.has(id); suffix += 1) {
+    id = `${normalized}-${suffix}`;
+  }
+  used.add(id);
+  return id;
 }
 
 export function workbenchAuthorEvalCaseCommand(caseId = "case-001"): string {
-  return `workbench case draft ${quoteShellArg(caseId)}`;
+  return `workbench eval case draft ${quoteShellArg(caseId)}`;
 }
 
 export const WORKBENCH_AUTHOR_EVAL_CASE_COMMAND = workbenchAuthorEvalCaseCommand();
-
-const WORKBENCH_CASE_TEST_MISSING_COMMAND_MESSAGE =
-  "Workbench case must define top-level command or include tests/test.sh.";
 
 const WORKBENCH_DEFAULT_CASE_TEST_COMMAND = [
   "mkdir -p \"$OUTPUT_DIR\"",
@@ -519,10 +716,15 @@ export interface WorkbenchInitOptions extends WorkbenchCommandOptions {
 }
 
 type WorkbenchSelectorCommand = "run" | "grade" | "eval" | "results" | "improve";
+const WORKBENCH_SELECTOR_INVOCATIONS: Record<WorkbenchSelectorCommand, string> = {
+  run: "workbench eval run", grade: "workbench eval grade", eval: "workbench eval run",
+  results: "workbench eval results", improve: "workbench skill improve",
+};
 type WorkbenchSchedulableRunKind = WorkbenchCaseRunKind | "improve";
 
 export interface WorkbenchEvalOptions extends WorkbenchCommandOptions {
   version?: string;
+  evalHash?: string;
   skill?: string;
   agent?: string;
   samples?: number;
@@ -530,8 +732,7 @@ export interface WorkbenchEvalOptions extends WorkbenchCommandOptions {
   parentRunId?: string;
   caseIds?: readonly string[];
   operationTargets?: readonly WorkbenchOperationTarget[];
-  operationPhases?: readonly WorkbenchOperationPhase[];
-  operationGrader?: WorkbenchOperationGrader;
+  operationSteps?: readonly WorkbenchOperationStep[];
   gradeOfRunId?: string;
   selectedSamples?: readonly WorkbenchCaseSampleSelection[];
   rerun?: boolean;
@@ -541,33 +742,8 @@ export interface WorkbenchEvalOptions extends WorkbenchCommandOptions {
   onRunStarted?: (run: WorkbenchRun) => void | Promise<void>;
 }
 
-export interface WorkbenchStateEvalOptions {
-  authToken?: string;
-  version?: string;
-  evalHash?: string;
-  skill?: string;
-  agent?: string;
-  samples?: number;
-  kind?: WorkbenchCaseRunKind;
-  operationTargets?: readonly WorkbenchOperationTarget[];
-  operationPhases?: readonly WorkbenchOperationPhase[];
-  operationGrader?: WorkbenchOperationGrader;
-  gradeOfRunId?: string;
-  parentRunId?: string;
-  caseIds?: readonly string[];
-  selectedSamples?: readonly WorkbenchCaseSampleSelection[];
-  rerun?: boolean;
-  location?: WorkbenchRun["location"];
-  remoteName?: string;
-  retryOfRunId?: string;
-}
-
 function isWorkbenchCaseRunKind(kind: unknown): kind is WorkbenchCaseRunKind {
   return kind === "run" || kind === "grade" || kind === "eval";
-}
-
-function isWorkbenchRunKind(kind: unknown): kind is WorkbenchRunKind {
-  return isWorkbenchCaseRunKind(kind) || kind === "improve" || kind === "live";
 }
 
 function normalizeWorkbenchCaseRunKind(kind: unknown, fallback: WorkbenchCaseRunKind): WorkbenchCaseRunKind {
@@ -578,25 +754,10 @@ function normalizeWorkbenchCaseRunKind(kind: unknown, fallback: WorkbenchCaseRun
     return kind;
   }
   throw new WorkbenchCodedError("unsupported_run_kind", `Workbench case runs support kind run, grade, or eval; received ${String(kind)}.`, {
-    remediation: "workbench eval",
+    remediation: "workbench eval run",
     subject: { kind: String(kind) },
     exitCode: 2,
   });
-}
-
-export interface WorkbenchStateImproveOptions {
-  authToken?: string;
-  version?: string;
-  evalHash?: string;
-  skill?: string;
-  agent?: string;
-  budget?: number;
-  samples?: number;
-  parentRunId?: string;
-  evidenceTraceIds?: readonly string[];
-  location?: WorkbenchRun["location"];
-  remoteName?: string;
-  retryOfRunId?: string;
 }
 
 export type WorkbenchPreparedCloudEvalRequest = Extract<WorkbenchOperationRequest, { kind: "eval" }>;
@@ -651,69 +812,24 @@ export interface WorkbenchLaunchReadinessIssue {
   code: string;
   message: string;
   remediation?: string;
-  subject?: Json;
+  subject?: Record<string, Json>;
 }
 
-export type WorkbenchRunRetryPlan =
-  | {
-      kind: WorkbenchCaseRunKind;
-      location: WorkbenchRunLocation;
-      remoteName?: string;
-      versionId: string;
-      skillName: string;
-      agentName: string;
-      caseIds?: readonly string[];
-      samples: number;
-      retryOfRunId: string;
-    }
-  | {
-      kind: "improve";
-      location: WorkbenchRunLocation;
-      remoteName?: string;
-      baseVersionId: string;
-      skillName: string;
-      agentName: string;
-      samples: number;
-      budget: number;
-      retryOfRunId: string;
-    };
+export function assertWorkbenchLaunchReadinessReady(readiness: WorkbenchLaunchReadiness): void {
+  const issue = readiness.issues[0];
+  if (!issue) {
+    return;
+  }
+  throw new WorkbenchCodedError(issue.code, issue.message, {
+    ...(issue.remediation ? { remediation: issue.remediation } : {}),
+    ...(issue.subject ? { subject: issue.subject } : {}),
+    exitCode: issue.code === "remote_invalid_url" ? 2 : 1,
+  });
+}
 
 export interface WorkbenchCaseSampleSelection {
   caseId: string;
   sample: number;
-}
-
-export interface WorkbenchCheckResult {
-  ok: true;
-  status: WorkbenchStatus;
-  cases: number;
-  skills: number;
-  agents: number;
-  plan: {
-    source: {
-      skillFiles: number;
-      evalFiles: number;
-      caseCount: number;
-      smokeCaseCount: number;
-    };
-    skills: Array<{
-      name: string;
-      bundleHash: string;
-      includedSkillCount: number;
-      fileCount: number;
-    }>;
-    agents: Array<{
-      name: string;
-      adapter: string;
-      model?: string;
-      providerBacked: boolean;
-      executionMode: "local-command" | "provider-backed";
-      network: WorkbenchExecutionSpec["policy"]["network"];
-      resources: WorkbenchExecutionSpec["policy"]["resources"];
-      image: string;
-      auth?: "local-adapter-auth";
-    }>;
-  };
 }
 
 export interface WorkbenchExecutionJobOptions {
@@ -733,7 +849,7 @@ export interface WorkbenchExecutionJobOptions {
 export async function executeWorkbenchExecutionJob(
   args: WorkbenchExecutionRuntimeInput,
   options: WorkbenchExecutionJobOptions,
-): Promise<RemoteWorkbenchJob> {
+): Promise<WorkbenchExecutionJob> {
   const startedAt = args.job.startedAt ?? args.now ?? new Date().toISOString();
   try {
     const execution = readWorkbenchExecutionSpec(args.job);
@@ -767,7 +883,7 @@ export async function executeWorkbenchExecutionJob(
       }
     });
   } catch (error) {
-    return failRemoteWorkbenchJob(args.job, startedAt, error);
+    return failWorkbenchExecutionJob(args.job, startedAt, error);
   }
 }
 
@@ -775,10 +891,10 @@ async function executeWorkbenchExecutionJobWithResolvedAuth(
   args: WorkbenchExecutionRuntimeInput,
   options: WorkbenchExecutionJobOptions,
   startedAt: string,
-): Promise<RemoteWorkbenchJob> {
+): Promise<WorkbenchExecutionJob> {
   try {
     if (options.signal?.aborted) {
-      return cancelRemoteWorkbenchJob(args.job, startedAt);
+      return cancelWorkbenchExecutionJob(args.job, startedAt);
     }
     const execution = readWorkbenchExecutionSpec(args.job);
     const executor = workbenchExecutionExecutorForRuntimeInput(args);
@@ -832,14 +948,14 @@ async function executeWorkbenchExecutionJobWithResolvedAuth(
       ...(options.signal ? { signal: options.signal } : {}),
     });
     if (options.signal?.aborted) {
-      return cancelRemoteWorkbenchJob(args.job, startedAt);
+      return cancelWorkbenchExecutionJob(args.job, startedAt);
     }
     return completedRemoteJobFromSandboxResult(args.job, startedAt, validated.result);
   } catch (error) {
     if (options.signal?.aborted) {
-      return cancelRemoteWorkbenchJob(args.job, startedAt);
+      return cancelWorkbenchExecutionJob(args.job, startedAt);
     }
-    return failRemoteWorkbenchJob(args.job, startedAt, error);
+    return failWorkbenchExecutionJob(args.job, startedAt, error);
   }
 }
 
@@ -847,12 +963,6 @@ export function requiredWorkbenchAdapterAuthTargetsForRuntimeInput(
   args: Pick<WorkbenchExecutionRuntimeInput, "job" | "adapterManifests" | "runtimeControlOperation" | "spec">,
 ): WorkbenchAdapterAuthTarget[] {
   return requiredAdapterAuthTargetsForExecution(readWorkbenchExecutionSpec(args.job), args);
-}
-
-export function workbenchExecutionPurpose(
-  job: RemoteWorkbenchJob,
-): WorkbenchExecutionSpec["purpose"] | null {
-  return workbenchExecutionJobPurpose(job);
 }
 
 export function workbenchExecutionExecutorForRuntimeInput(
@@ -905,9 +1015,9 @@ export async function executeAdapterInCurrentRuntime(
   execution: WorkbenchExecutionSpec,
   startedAt: string,
   signal?: AbortSignal,
-): Promise<RemoteWorkbenchJob> {
+): Promise<WorkbenchExecutionJob> {
   if (signal?.aborted) {
-    return cancelRemoteWorkbenchJob(args.job, startedAt);
+    return cancelWorkbenchExecutionJob(args.job, startedAt);
   }
   if (isSkillEvalExecution(execution) && execution.adapter.use === "command") {
     return await executeSkillEvalExecutionInCurrentRuntime(args, execution, startedAt, signal);
@@ -929,7 +1039,7 @@ export async function executeAdapterInCurrentRuntime(
     if (operation) {
       return await executeHostAdapterOperationInCurrentRuntime(runtimeArgs, execution, startedAt, operation, signal);
     }
-    return failRemoteWorkbenchJob(
+    return failWorkbenchExecutionJob(
       args.job,
       startedAt,
       new Error(`Unsupported current-runtime execution purpose ${execution.purpose}.`),
@@ -954,49 +1064,33 @@ async function executeHostAdapterOperationInCurrentRuntime(
   startedAt: string,
   operation: WorkbenchAdapterOperation,
   signal?: AbortSignal,
-): Promise<RemoteWorkbenchJob> {
-  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-host-adapter-"));
-  try {
-    const result = await runRuntimeControlOperationSequence({
-      args: {
-        ...args,
-        runtimeControlOperation: {
-          operations: [{
-            label: "host",
-            operation,
-            invocation: {
-              use: execution.adapter.use,
-              with: execution.adapter.with ?? {},
-              ...(execution.adapter.auth !== undefined ? { auth: execution.adapter.auth } : {}),
-            },
-          }],
-        },
+): Promise<WorkbenchExecutionJob> {
+  return executeRuntimeControlOperationInTemporaryWorkspace({
+    args: {
+      ...args,
+      runtimeControlOperation: {
+        operations: [{
+          label: "host",
+          operation,
+          invocation: {
+            use: execution.adapter.use,
+            with: execution.adapter.with ?? {},
+            ...(execution.adapter.auth !== undefined ? { auth: execution.adapter.auth } : {}),
+          },
+        }],
       },
-      execution,
-      startedAt,
-      workspace,
-      signal,
-    });
-    const finishedAt = now();
-    return {
-      ...args.job,
-      status: result.ok ? "succeeded" : "failed",
-      attempt: Math.max(1, args.job.attempt),
-      startedAt,
-      finishedAt,
-      updatedAt: finishedAt,
-      ...(result.ok ? {} : { error: result.error ?? "Host adapter operation failed." }),
-      output: {
+    },
+    execution,
+    startedAt,
+    workspacePrefix: "workbench-host-adapter-",
+    failureMessage: "Host adapter operation failed.",
+    signal,
+    output: (result) => ({
         ...runtimeControlJobOutput(result),
         executionId: execution.id,
         purpose: execution.purpose,
-      } as unknown as Json,
-    };
-  } catch (error) {
-    return failRemoteWorkbenchJob(args.job, startedAt, error);
-  } finally {
-    await fs.rm(workspace, { recursive: true, force: true }).catch(() => undefined);
-  }
+      }),
+  });
 }
 
 const RUNTIME_CONTROL_MAX_BODY_BYTES = 512 * 1024 * 1024;
@@ -1008,8 +1102,8 @@ async function withWorkbenchRuntimeControlServer(
   args: WorkbenchExecutionRuntimeInput,
   options: WorkbenchExecutionJobOptions,
   startedAt: string,
-  run: (env: Record<string, string>) => Promise<RemoteWorkbenchJob>,
-): Promise<RemoteWorkbenchJob> {
+  run: (env: Record<string, string>) => Promise<WorkbenchExecutionJob>,
+): Promise<WorkbenchExecutionJob> {
   const token = randomBytes(24).toString("base64url");
   const sockets = new Set<Socket>();
   const server = createServer((request, response) => {
@@ -1106,7 +1200,7 @@ async function handleWorkbenchRuntimeControlHttpRequest(args: {
       args.startedAt,
       controlRequest,
     );
-    writeRuntimeControlJson(response, 200, result as unknown as Json);
+    writeRuntimeControlJson(response, 200, toJson(result));
   } catch (error) {
     writeRuntimeControlJson(response, 500, {
       error: error instanceof Error ? error.stack ?? error.message : String(error),
@@ -1252,13 +1346,13 @@ function normalizeRuntimeControlOperation(
   }
   const withConfig = invocationRecord.with === undefined
     ? {}
-    : isJsonPayload(invocationRecord.with)
+    : isWorkbenchJson(invocationRecord.with)
       ? invocationRecord.with
       : null;
   if (withConfig === null) {
     throw new Error(`Workbench runtime-control ${label}.invocation.with must be JSON.`);
   }
-  if (invocationRecord.auth !== undefined && !isJsonPayload(invocationRecord.auth)) {
+  if (invocationRecord.auth !== undefined && !isWorkbenchJson(invocationRecord.auth)) {
     throw new Error(`Workbench runtime-control ${label}.invocation.auth must be JSON.`);
   }
   return {
@@ -1266,7 +1360,7 @@ function normalizeRuntimeControlOperation(
     invocation: {
       use: invocationRecord.use,
       with: withConfig,
-      ...(invocationRecord.auth !== undefined ? { auth: invocationRecord.auth as Json } : {}),
+      ...(invocationRecord.auth !== undefined ? { auth: toJson(invocationRecord.auth) } : {}),
       ...(typeof invocationRecord.command === "string" && invocationRecord.command.trim()
         ? { command: invocationRecord.command }
         : {}),
@@ -1288,10 +1382,10 @@ async function explicitAdapterAuthProfilesForExecution(
   const provided = (args.adapterAuthProfiles ?? [])
     .map((bundle) => sanitizeWorkbenchAdapterAuthBundle(bundle));
   const providedByTarget = new Map(provided.map((bundle) => [
-    adapterAuthTargetKey(bundle),
+    workbenchAdapterAuthTargetIdentity(bundle),
     bundle,
   ]));
-  const missing = required.filter((target) => !providedByTarget.has(adapterAuthTargetKey(target)));
+  const missing = required.filter((target) => !providedByTarget.has(workbenchAdapterAuthTargetIdentity(target)));
   if (missing.length > 0 && loadLocalAdapterProfiles) {
     const store = localWorkbenchAdapterAuthStore(adapterAuthStoreRoot);
     const loaded = await Promise.all(required.map(async (target) => await store.get(target)));
@@ -1304,7 +1398,7 @@ async function explicitAdapterAuthProfilesForExecution(
   if (missing.length > 0) {
     throw new Error(workbenchAdapterAuthRequiredMessage(missing[0]!));
   }
-  return required.map((target) => providedByTarget.get(adapterAuthTargetKey(target))!);
+  return required.map((target) => providedByTarget.get(workbenchAdapterAuthTargetIdentity(target))!);
 }
 
 async function markAdapterAuthProfilesReauthRequired(
@@ -1331,7 +1425,7 @@ function adapterAuthFailureAdapterId(error: unknown): string | null {
   return message.match(/^ADAPTER_AUTH_REQUIRED:\s*([a-z0-9-]+)/iu)?.[1]?.toLowerCase() ?? null;
 }
 
-function adapterAuthRemediationFromError(error: string | undefined): string | null {
+export function adapterAuthRemediationFromError(error: string | undefined): string | null {
   const adapterId = error?.match(/ADAPTER_AUTH_REQUIRED:\s*([a-z0-9-]+)/iu)?.[1];
   return adapterId ? workbenchProviderAuthSetupCommand(adapterId) : null;
 }
@@ -1345,84 +1439,7 @@ function workbenchAdapterAuthTargetLabel(target: WorkbenchAdapterAuthTarget): st
 }
 
 export function workbenchProviderAuthSetupCommand(adapterId: string): string {
-  return workbenchProviderAuthSetupCommands(adapterId)[0] ?? `workbench login ${adapterId.trim().toLowerCase()}`;
-}
-
-export function workbenchProviderAuthSetupCommands(adapterId: string): string[] {
-  const normalized = adapterId.trim().toLowerCase();
-  if (normalized === "claude") {
-    return [
-      "claude setup-token",
-      "CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth",
-    ];
-  }
-  if (normalized === "codex") {
-    return [
-      "codex login --device-auth",
-      "workbench login codex --method oauth",
-    ];
-  }
-  return [`workbench login ${normalized}`];
-}
-
-export function codexDeviceAuthLoginCommand(options: {
-  profileRoot?: string;
-  env?: Record<string, string | undefined>;
-} = {}): string {
-  const codexHome = options.profileRoot?.trim()
-    ? path.join(options.profileRoot.trim(), ".codex")
-    : options.env?.CODEX_HOME?.trim();
-  if (!codexHome) {
-    return "codex login --device-auth";
-  }
-  return `mkdir -p ${quoteShellArg(codexHome)} && CODEX_HOME=${quoteShellArg(codexHome)} codex login --device-auth`;
-}
-
-export async function workbenchProviderAuthSetupCommandsForTarget(
-  target: WorkbenchAdapterAuthTarget,
-  options: Pick<WorkbenchCommandOptions, "homeDir" | "env"> = {},
-): Promise<string[]> {
-  const adapter = providerAgentAdapterFromId(target.adapterId);
-  if (!adapter) {
-    return workbenchProviderAuthSetupCommands(target.adapterId);
-  }
-  const env = options.env ?? process.env;
-  const nativeAuth = await providerNativeAuthState(adapter, options.homeDir?.trim() || os.homedir(), env);
-  return providerSetupCommands(adapter, {
-    executable: true,
-    nativeAuth,
-    workbenchProviderAuth: "missing",
-    profile: target.profile || "default",
-    env,
-  });
-}
-
-export function codexAuthJsonHasUsableToken(source: string): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(source);
-  } catch {
-    return false;
-  }
-  const record = asRecord(parsed);
-  if (!record) {
-    return false;
-  }
-  if (typeof record.OPENAI_API_KEY === "string" && record.OPENAI_API_KEY.trim()) {
-    return true;
-  }
-  const tokens = asRecord(record.tokens);
-  return Boolean(
-    nonEmptyRecordString(tokens, "access_token") ||
-    nonEmptyRecordString(tokens, "refresh_token") ||
-    nonEmptyRecordString(record, "access_token") ||
-    nonEmptyRecordString(record, "refresh_token"),
-  );
-}
-
-function nonEmptyRecordString(record: Record<string, unknown> | null, key: string): string | undefined {
-  const value = record?.[key];
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  return `workbench login ${adapterId.trim().toLowerCase()}`;
 }
 
 function requiredAdapterAuthTargetsForExecution(
@@ -1466,14 +1483,6 @@ function uniqueAdapterInvocations(
     result.push(invocation);
   }
   return result;
-}
-
-function adapterAuthTargetKey(target: {
-  adapterId: string;
-  slot?: string;
-  profile: string;
-}): string {
-  return `${target.adapterId}/${target.slot ?? "_"}/${target.profile}`;
 }
 
 async function persistLocalAdapterAuthProfileUpdates(
@@ -1552,12 +1561,12 @@ function adapterAuthRequest(
   }
   const entries: Record<string, Json> = {};
   if (Object.keys(self).length > 0) {
-    entries.self = self as unknown as Json;
+    entries.self = toJson(self);
   }
   if (Object.keys(adapters).length > 0) {
-    entries.adapters = adapters as unknown as Json;
+    entries.adapters = toJson(adapters);
   }
-  return entries as unknown as Json;
+  return toJson(entries);
 }
 
 function adapterAuthRequestEntry(
@@ -1573,14 +1582,14 @@ function adapterAuthRequestEntry(
         })),
       }
     : undefined;
-  return {
+  return toJson({
     method: bundle.method,
     profile: bundle.profile,
     ...(bundle.env && bundle.env.length > 0
       ? { env: Object.fromEntries(bundle.env.map((entry) => [entry.name, "materialized"])) }
       : {}),
     ...(fileAuth ? fileAuth : {}),
-  } as unknown as Json;
+  });
 }
 
 function adapterAuthRequestForOperation(
@@ -1597,7 +1606,6 @@ function adapterAuthRequestForOperation(
 
 function adapterAuthEnvForStep(
   args: Pick<WorkbenchExecutionRuntimeInput, "adapterAuthProfiles" | "adapterAuthEnv">,
-  _adapterId: string,
 ): Record<string, string> {
   const profiles = (args.adapterAuthProfiles ?? [])
     .map((bundle) => sanitizeWorkbenchAdapterAuthBundle(bundle));
@@ -1748,35 +1756,55 @@ export async function executeRuntimeControlOperationSequenceInCurrentRuntime(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
   startedAt: string,
-): Promise<RemoteWorkbenchJob> {
+): Promise<WorkbenchExecutionJob> {
   if (!args.runtimeControlOperation) {
-    return failRemoteWorkbenchJob(
+    return failWorkbenchExecutionJob(
       args.job,
       startedAt,
       new Error("Runtime-control operation sequence is missing from the sandbox request."),
     );
   }
-  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-runtime-control-"));
+  return executeRuntimeControlOperationInTemporaryWorkspace({
+    args,
+    execution,
+    startedAt,
+    workspacePrefix: "workbench-runtime-control-",
+    failureMessage: "Runtime-control operation sequence failed.",
+    output: runtimeControlJobOutput,
+  });
+}
+
+async function executeRuntimeControlOperationInTemporaryWorkspace(input: {
+  args: WorkbenchExecutionRuntimeInput;
+  execution: WorkbenchExecutionSpec;
+  startedAt: string;
+  workspacePrefix: string;
+  failureMessage: string;
+  signal?: AbortSignal;
+  output: (result: WorkbenchRuntimeControlOperationSequenceResult) => Json;
+}): Promise<WorkbenchExecutionJob> {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), input.workspacePrefix));
   try {
     const result = await runRuntimeControlOperationSequence({
-      args,
-      execution,
-      startedAt,
+      args: input.args,
+      execution: input.execution,
+      startedAt: input.startedAt,
       workspace,
+      signal: input.signal,
     });
     const finishedAt = now();
     return {
-      ...args.job,
+      ...input.args.job,
       status: result.ok ? "succeeded" : "failed",
-      attempt: Math.max(1, args.job.attempt),
-      startedAt,
+      attempt: Math.max(1, input.args.job.attempt),
+      startedAt: input.startedAt,
       finishedAt,
       updatedAt: finishedAt,
-      ...(result.ok ? {} : { error: result.error ?? "Runtime-control operation sequence failed." }),
-      output: runtimeControlJobOutput(result) as unknown as Json,
+      ...(result.ok ? {} : { error: result.error ?? input.failureMessage }),
+      output: toJson(input.output(result)),
     };
   } catch (error) {
-    return failRemoteWorkbenchJob(args.job, startedAt, error);
+    return failWorkbenchExecutionJob(input.args.job, input.startedAt, error);
   } finally {
     await fs.rm(workspace, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -1802,7 +1830,7 @@ function createRuntimeControlSandboxInput(
   const nonce = runtimeControlNonce();
   const childExecutionId = `${parentExecution.id}:runtime:${nonce}`;
   const childJobId = `${args.job.id}:runtime:${nonce}`;
-  const parentInput = asRuntimeRecord(args.job.input);
+  const parentInput = readWorkbenchPlannedExecutionJobInput(args.job);
   const caseId = runtimeControlCaseId(args, parentExecution);
   const publicFiles = runtimeControlRequestInputFiles(
     request.inputs,
@@ -1854,7 +1882,7 @@ function createRuntimeControlSandboxInput(
       source: publicFiles,
     },
   };
-  const childJob: RemoteWorkbenchJob = {
+  const childJob: WorkbenchExecutionJob = {
     ...args.job,
     id: childJobId,
     status: "queued",
@@ -1863,9 +1891,9 @@ function createRuntimeControlSandboxInput(
     updatedAt: startedAt,
     input: {
       ...parentInput,
-      execution: childExecution as unknown as Json,
+      execution: childExecution,
       caseId,
-    } as unknown as Json,
+    },
   };
   const childArgs: WorkbenchExecutionRuntimeInput = {
     ...args,
@@ -1893,7 +1921,7 @@ function runtimeControlRequestInputFiles(
 }
 
 function runtimeControlResultFromCompletedJob(
-  job: RemoteWorkbenchJob,
+  job: WorkbenchExecutionJob,
 ): WorkbenchRuntimeControlOperationSequenceResult {
   return normalizeRuntimeControlResultOutput(
     asRuntimeRecord(job.output),
@@ -1931,21 +1959,9 @@ function normalizeRuntimeControlResultOutput(
       ? { usage: output.usage as UsageSummary }
       : {}),
     ...(typeof output.summary === "string" ? { summary: output.summary } : {}),
-    ...(output.feedback !== undefined && isJsonPayload(output.feedback) ? { feedback: output.feedback } : {}),
+    ...(output.feedback !== undefined && isWorkbenchJson(output.feedback) ? { feedback: output.feedback } : {}),
     ...(typeof output.error === "string" ? { error: output.error } : fallbackError ? { error: fallbackError } : {}),
   };
-}
-
-function isWorkbenchAdapterOperationResult(value: unknown): value is WorkbenchAdapterOperationResult {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  return record.protocol === "workbench.adapter-result.v1" &&
-    (record.operation === "engine.resolve" ||
-      record.operation === "grade.run" ||
-      record.operation === "skill.run" ||
-      record.operation === "skill.improve");
 }
 
 function runtimeControlNonce(): string {
@@ -2006,7 +2022,7 @@ async function runRuntimeControlOperationSequence(args: {
     const stepEnv = runtimeControlAdapterEnv({
       requestPath,
       outputDir: runtimeControlOutputDir(args.workspace),
-      adapterEnv: adapterAuthEnvForStep(runtimeArgs, stepAdapterId),
+      adapterEnv: adapterAuthEnvForStep(runtimeArgs),
       runtimeEnv: runtimeArgs.adapterRuntimeEnv,
       timeoutMs: stepTimeoutMs,
     });
@@ -2020,7 +2036,7 @@ async function runRuntimeControlOperationSequence(args: {
           env: stepEnv,
           adapterAuthRoot: runtimeArgs.adapterAuthRoot,
           adapterAuthRequest: adapterAuthRequestForOperation(runtimeArgs, operation),
-          adapterAuthEnv: adapterAuthEnvForStep(runtimeArgs, stepAdapterId),
+          adapterAuthEnv: adapterAuthEnvForStep(runtimeArgs),
         })
       : await runRuntimeControlShellCommand(runtimeControlOperationCommand(operation, runtimeArgs.adapterManifests), {
           cwd: args.workspace,
@@ -2788,7 +2804,11 @@ async function runtimeControlCollectedFiles(root: string): Promise<SurfaceSnapsh
       !isWorkbenchInternalOutputPath(file.path)
     );
   const traceFiles = await readFilesUnder(path.join(outputRoot, ".workbench", "traces"), ".workbench/traces");
-  return [...outputFiles, ...traceFiles]
+  const agentTraceFiles = await readFilesUnder(
+    path.join(outputRoot, ".workbench", "agent-traces"),
+    ".workbench/agent-traces",
+  );
+  return [...outputFiles, ...traceFiles, ...agentTraceFiles]
     .map(copyFile)
     .sort((left, right) => left.path.localeCompare(right.path));
 }
@@ -2842,13 +2862,13 @@ function runtimeControlJobOutput(
     ?.value;
   return {
     ok: result.ok,
-    files: result.files as unknown as Json,
-    fileChanges: result.fileChanges as unknown as Json,
-    operationResults: result.operationResults as unknown as Json,
-    ...(isJsonPayload(skillPatch) ? { skillPatch } : {}),
-    ...(result.workspaceFiles ? { workspaceFiles: result.workspaceFiles as unknown as Json } : {}),
-    ...(result.result ? { result: result.result as unknown as Json } : {}),
-    ...(result.usage ? { usage: result.usage as unknown as Json } : {}),
+    files: toJson(result.files),
+    fileChanges: toJson(result.fileChanges),
+    operationResults: toJson(result.operationResults),
+    ...(isWorkbenchJson(skillPatch) ? { skillPatch } : {}),
+    ...(result.workspaceFiles ? { workspaceFiles: toJson(result.workspaceFiles) } : {}),
+    ...(result.result ? { result: toJson(result.result) } : {}),
+    ...(result.usage ? { usage: toJson(result.usage) } : {}),
     ...(result.summary !== undefined ? { summary: result.summary } : {}),
     ...(result.feedback !== undefined ? { feedback: result.feedback } : {}),
     ...(result.error ? { error: result.error } : {}),
@@ -2857,10 +2877,10 @@ function runtimeControlJobOutput(
 
 function sanitizeRuntimeControlTracePayload(value: unknown): Json {
   if (Array.isArray(value)) {
-    return value.map((entry) => sanitizeRuntimeControlTracePayload(entry)) as unknown as Json;
+    return toJson(value.map((entry) => sanitizeRuntimeControlTracePayload(entry)));
   }
   if (!value || typeof value !== "object") {
-    return (value ?? null) as Json;
+    return toJson(value ?? null);
   }
   const sanitized: Record<string, Json> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
@@ -2869,7 +2889,7 @@ function sanitizeRuntimeControlTracePayload(value: unknown): Json {
     }
     sanitized[key] = sanitizeRuntimeControlTracePayload(entry);
   }
-  return sanitized as unknown as Json;
+  return toJson(sanitized);
 }
 
 function runtimeControlSkillsDir(root: string): string {
@@ -2911,7 +2931,7 @@ async function executeProviderSkillEvalExecutionInCurrentRuntime(
   execution: WorkbenchExecutionSpec,
   startedAt: string,
   signal?: AbortSignal,
-): Promise<RemoteWorkbenchJob> {
+): Promise<WorkbenchExecutionJob> {
   const workspace = path.resolve(args.workspaceRoot ?? "/workspace");
   const runner = await runRuntimeControlOperationSequence({
     args: {
@@ -2941,7 +2961,7 @@ async function executeProviderSkillEvalExecutionInCurrentRuntime(
     return completedSkillEvalOperationSequenceJob(args.job, startedAt, execution, runner);
   }
   if (signal?.aborted) {
-    return cancelRemoteWorkbenchJob(args.job, startedAt);
+    return cancelWorkbenchExecutionJob(args.job, startedAt);
   }
   return completedSkillEvalOperationSequenceJob(args.job, startedAt, execution, runner);
 }
@@ -2989,11 +3009,11 @@ function skillEvalResultFailedCaseMessage(result: WorkbenchResult | undefined): 
 }
 
 function completedSkillEvalOperationSequenceJob(
-  job: RemoteWorkbenchJob,
+  job: WorkbenchExecutionJob,
   startedAt: string,
   execution: WorkbenchExecutionSpec,
   result: WorkbenchRuntimeControlOperationSequenceResult,
-): RemoteWorkbenchJob {
+): WorkbenchExecutionJob {
   const finishedAt = now();
   const output = runtimeControlJobOutput(result);
   const succeeded = result.ok;
@@ -3010,25 +3030,13 @@ function completedSkillEvalOperationSequenceJob(
     finishedAt,
     updatedAt: finishedAt,
     ...(error ? { error } : {}),
-    output: {
+    output: toJson({
       ...output,
       ok: succeeded,
       executionId: execution.id,
       purpose: execution.purpose,
-    } as unknown as Json,
+    }),
   };
-}
-
-function dedupeRuntimeSurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
-  const byPath = new Map<string, SurfaceSnapshotFile>();
-  for (const file of files) {
-    const normalized = normalizeRelativePath(file.path);
-    byPath.set(normalized, {
-      ...file,
-      path: normalized,
-    });
-  }
-  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
 async function executeSkillEvalExecutionInCurrentRuntime(
@@ -3036,7 +3044,7 @@ async function executeSkillEvalExecutionInCurrentRuntime(
   execution: WorkbenchExecutionSpec,
   startedAt: string,
   signal?: AbortSignal,
-): Promise<RemoteWorkbenchJob> {
+): Promise<WorkbenchExecutionJob> {
   const workspace = path.resolve(args.workspaceRoot ?? "/workspace");
   const skillsDir = path.join(workspace, "input", "skills");
   const metadata = asRuntimeRecord(execution.metadata);
@@ -3121,7 +3129,7 @@ async function executeSkillEvalExecutionInCurrentRuntime(
     finishedAt,
     updatedAt: finishedAt,
     ...(error ? { error } : {}),
-    output: {
+    output: toJson({
       ok: succeeded,
       executionId: execution.id,
       purpose: execution.purpose,
@@ -3130,7 +3138,7 @@ async function executeSkillEvalExecutionInCurrentRuntime(
       metrics: resultPayload.metrics,
       cases: resultPayload.cases,
       summary: adapterResult?.summary ?? resultPayload.summary,
-    } as unknown as Json,
+    }),
   };
 }
 
@@ -3163,7 +3171,7 @@ async function readPublicSkillEvalResult(args: {
     throw new WorkbenchUserError("OUTPUT_DIR/result.json must include a finite numeric score or boolean ok/passed/pass.");
   }
   const passed = rawPassed;
-  const metrics = publicSkillEvalResultMetrics(record, score);
+  const metrics = publicGradeMetrics(record, score);
   const message = typeof record.message === "string"
     ? record.message
     : typeof record.summary === "string"
@@ -3196,19 +3204,6 @@ async function readPublicSkillEvalResult(args: {
     ...(passed !== undefined ? { passed } : {}),
     ...(passed === false ? { error: message ?? "Test failed." } : {}),
   };
-}
-
-function publicSkillEvalResultMetrics(record: Record<string, unknown>, score: number): Record<string, number> {
-  const metrics: Record<string, number> = { score };
-  const source = record.metrics && typeof record.metrics === "object" && !Array.isArray(record.metrics)
-    ? record.metrics as Record<string, unknown>
-    : {};
-  for (const [key, value] of Object.entries(source)) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      metrics[key] = value;
-    }
-  }
-  return metrics;
 }
 
 function workbenchResultFromAdapterResult(
@@ -3262,20 +3257,20 @@ function workbenchAdapterOperationExecutorShim(
 }
 
 function completedRemoteJobFromSandboxResult(
-  fallbackJob: RemoteWorkbenchJob,
+  fallbackJob: WorkbenchExecutionJob,
   startedAt: string,
   result: WorkbenchExecutionResult,
-): RemoteWorkbenchJob {
+): WorkbenchExecutionJob {
   const completedJob = asRuntimeRecord(result.metadata).completedJob;
   if (
     completedJob &&
     typeof completedJob === "object" &&
     !Array.isArray(completedJob)
   ) {
-    return completedJob as RemoteWorkbenchJob;
+    return completedJob as WorkbenchExecutionJob;
   }
   if (result.status === "succeeded") {
-    return failRemoteWorkbenchJob(
+    return failWorkbenchExecutionJob(
       fallbackJob,
       result.startedAt || startedAt,
       `Sandbox execution ${result.executionId} succeeded without returning a completed job.`,
@@ -3283,7 +3278,7 @@ function completedRemoteJobFromSandboxResult(
     );
   }
   return attachSandboxMetadataToJob(
-    failRemoteWorkbenchJob(
+    failWorkbenchExecutionJob(
       fallbackJob,
       result.startedAt || startedAt,
       result.error ?? `Sandbox execution ${result.status}.`,
@@ -3293,12 +3288,12 @@ function completedRemoteJobFromSandboxResult(
   );
 }
 
-function failRemoteWorkbenchJob(
-  job: RemoteWorkbenchJob,
+function failWorkbenchExecutionJob(
+  job: WorkbenchExecutionJob,
   startedAt: string,
   error: unknown,
   finishedAt = new Date().toISOString(),
-): RemoteWorkbenchJob {
+): WorkbenchExecutionJob {
   const message = error instanceof Error ? error.message : String(error);
   return {
     ...job,
@@ -3308,31 +3303,31 @@ function failRemoteWorkbenchJob(
     finishedAt,
     updatedAt: finishedAt,
     error: message,
-    output: {
+    output: toJson({
       ok: false,
       error: message,
-    },
+    }),
   };
 }
 
-function cancelRemoteWorkbenchJob(
-  job: RemoteWorkbenchJob,
+function cancelWorkbenchExecutionJob(
+  job: WorkbenchExecutionJob,
   startedAt: string,
   finishedAt = new Date().toISOString(),
-): RemoteWorkbenchJob {
+): WorkbenchExecutionJob {
   return {
     ...job,
-    status: "cancelled",
+    status: "canceled",
     attempt: Math.max(1, job.attempt),
     startedAt,
     finishedAt,
     updatedAt: finishedAt,
     error: "Run cancellation requested.",
-    output: {
+    output: toJson({
       ok: false,
       canceled: true,
       error: "Run cancellation requested.",
-    },
+    }),
   };
 }
 
@@ -3380,6 +3375,21 @@ export interface WorkbenchRunCancellationResult {
   requestPath: string;
 }
 
+export interface WorkbenchPendingCloudOperation {
+  schema: "workbench.pending-cloud-operation.v1";
+  id: string;
+  command: "run" | "grade" | "eval" | "improve" | "retry";
+  remoteName: string;
+  createdAt: string;
+  retryOfRunId?: string;
+}
+
+export interface WorkbenchPendingCloudOperationCancellation {
+  operation: WorkbenchPendingCloudOperation;
+  requestedAt: string;
+  requestPath: string;
+}
+
 export interface WorkbenchResultsOptions extends WorkbenchCommandOptions {
   projectVersions?: string;
   resultVersions?: string;
@@ -3396,6 +3406,7 @@ interface InternalComparisonCell {
   agentName: string;
   agentHash: string;
   runId?: string;
+  jobIds?: string[];
   status?: WorkbenchRun["status"];
   score?: number;
   coverage?: WorkbenchSampleCoverage;
@@ -3430,17 +3441,15 @@ export interface WorkbenchRemoteOptions extends WorkbenchCommandOptions {
 export interface WorkbenchPublishOptions extends WorkbenchCommandOptions {
   version?: string;
   remote?: string;
-  visibility?: WorkbenchPublishVisibility;
+  visibility?: WorkbenchSkillVisibility;
   authToken?: string;
   dryRun?: boolean;
 }
 
-export type WorkbenchPublishVisibility = "private" | "internal" | "public";
-
 export interface WorkbenchPublishResult {
   remote: WorkbenchRemote;
   version: WorkbenchVersion;
-  visibility: WorkbenchPublishVisibility;
+  visibility: WorkbenchSkillVisibility;
   installHandle: string;
   dryRun?: boolean;
   unchanged?: boolean;
@@ -3456,7 +3465,7 @@ export interface WorkbenchUnpublishOptions extends WorkbenchCommandOptions {
 export interface WorkbenchUnpublishResult {
   remote: WorkbenchRemote;
   version: WorkbenchVersion;
-  visibility?: WorkbenchPublishVisibility;
+  visibility?: WorkbenchSkillVisibility;
   installHandle?: string;
   currentVersionId?: string;
   publishedVersionIds: string[];
@@ -3487,8 +3496,18 @@ export interface WorkbenchSyncResult {
   pulled: number;
   upToDate: boolean;
   dryRun?: boolean;
-  publication?: WorkbenchStatusSnapshot["remotes"][number]["publication"];
+  publication?: WorkbenchSyncPublication;
 }
+
+export type WorkbenchSyncPublication =
+  | { status: "unpublished" }
+  | {
+      status: "published";
+      visibility?: WorkbenchSkillVisibility;
+      currentVersionId: string;
+      publishedVersionIds: string[];
+      installHandle?: string;
+    };
 
 export interface WorkbenchDiffEntry {
   path: string;
@@ -3501,23 +3520,6 @@ export interface WorkbenchCaseRecord {
   id: string;
   path: string;
   content: string;
-}
-
-export interface WorkbenchQueuedSkillEvalJobInput {
-  kind: "workbench.skill.eval.job.v1";
-  ownerUserId?: string;
-  skillId?: string;
-  runId: string;
-  jobId: string;
-  artifactId?: string;
-  traceId?: string;
-  versionId: string;
-  evalHash: string;
-  agentName: string;
-  caseId: string;
-  sample: number;
-  state: WorkbenchProjectState;
-  adapterAuthProfiles?: readonly WorkbenchAdapterAuthBundle[];
 }
 
 export interface WorkbenchEvalCaseRuntime extends WorkbenchCaseRecord {
@@ -3581,10 +3583,10 @@ export interface WorkbenchSkillImprovementPatchApplication {
 const WORKBENCH_DIR = ".workbench";
 const OBJECTS_DIR = "objects";
 const REFS_DIR = "refs";
-const SYNC_DIR = "sync";
 const LIVE_DIR = "live";
 const CANCEL_DIR = "cancel";
 const TMP_DIR = "tmp";
+const SYNC_DIR = "sync";
 const LOGS_DIR = "logs";
 const LOCKS_DIR = "locks";
 const STATE_TREE_RM_OPTIONS = { recursive: true, force: true, maxRetries: 20, retryDelay: 100 } as const;
@@ -3618,21 +3620,11 @@ const STARTER_SKILL_ENVIRONMENT_DOCKERFILE = [
   "",
 ].join("\n");
 
-export function defaultWorkbenchSkillEvalEnvironmentImageRef(): string {
-  return `docker://${DEFAULT_SKILL_RUNTIME_IMAGE}`;
-}
-
-export function defaultWorkbenchSkillEvalEnvironmentDockerfile(): string {
-  return STARTER_SKILL_ENVIRONMENT_DOCKERFILE;
-}
-const HTTP_REMOTE_GZIP_THRESHOLD_BYTES = 1024 * 1024;
-const HTTP_REMOTE_MAX_ATTEMPTS = 3;
-const SOURCE_SNAPSHOT_MESSAGE = "package snapshot";
+const PACKAGE_SNAPSHOT_MESSAGE = "package snapshot";
 const projectLockContext = new AsyncLocalStorage<ReadonlySet<string>>();
 const projectLockQueues = new Map<string, Promise<void>>();
 const stateSaveQueues = new Map<string, Promise<void>>();
 const SKILL_EVAL_COMMAND_AGENT_ADAPTERS = new Set(["local", "command"]);
-const SKILL_EVAL_PROVIDER_AGENT_ADAPTERS = new Set(["codex", "claude"]);
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const dockerAvailabilityExecFileAsync = promisify(execFile) as unknown as (
   file: string,
@@ -3652,31 +3644,6 @@ type WorkbenchProviderAgentAdapter = "codex" | "claude";
 type WorkbenchNewAgentAdapter = WorkbenchProviderAgentAdapter | "command" | "local";
 type WorkbenchManifestEntryNoun = "skill" | "version" | "agent";
 
-const WORKBENCH_PROVIDER_AGENT_DEFAULTS: Record<WorkbenchProviderAgentAdapter, {
-  model: string;
-  executable: string;
-  installCommand: string;
-  apiKeyEnv: string;
-}> = {
-  codex: {
-    model: "gpt-5.4-mini",
-    executable: "codex",
-    installCommand: "npm install --global @openai/codex",
-    apiKeyEnv: "OPENAI_API_KEY",
-  },
-  claude: {
-    model: "sonnet",
-    executable: "claude",
-    installCommand: "npm install --global @anthropic-ai/claude-code",
-    apiKeyEnv: "ANTHROPIC_API_KEY",
-  },
-};
-
-function providerAgentAdapterFromId(value: string): WorkbenchProviderAgentAdapter | null {
-  const normalized = value.trim().toLowerCase();
-  return normalized === "codex" || normalized === "claude" ? normalized : null;
-}
-
 export async function createNewWorkbenchSkillProject(options: WorkbenchInitOptions = {}): Promise<WorkbenchStatus> {
   const root = resolveRoot(options.dir);
   const rootExists = await exists(root);
@@ -3694,7 +3661,7 @@ export async function createNewWorkbenchSkillProject(options: WorkbenchInitOptio
       throw new WorkbenchCodedError("usage", containsSkill
         ? `Directory already contains ${SKILL_FILE}: ${root}`
         : `Directory is not empty: ${root}`, {
-        remediation: containsSkill ? `cd ${root} && workbench init` : "workbench new DIR",
+        remediation: containsSkill ? `cd ${root} && workbench skill init` : "workbench skill new DIR",
         subject: { root },
         exitCode: 2,
       });
@@ -3758,7 +3725,7 @@ export async function initExistingWorkbenchSkillProject(options: WorkbenchInitOp
   const root = resolveRoot(options.dir);
   if (!await exists(path.join(root, SKILL_FILE))) {
     throw new WorkbenchCodedError("usage", `Workbench init requires ${SKILL_FILE} in the current directory.`, {
-      remediation: "workbench new DIR",
+      remediation: "workbench skill new DIR",
       subject: { root, requiredFile: SKILL_FILE },
       exitCode: 2,
     });
@@ -3779,13 +3746,13 @@ export async function initExistingWorkbenchSkillProject(options: WorkbenchInitOp
     }
     if (missing.length > 0) {
       throw new WorkbenchCodedError("invalid_workbench_project", `Workbench metadata already exists but is incomplete: ${root}`, {
-        remediation: "Inspect .workbench, repair the missing files, or move .workbench aside before rerunning workbench init.",
+        remediation: "Inspect .workbench, repair the missing files, or move .workbench aside before rerunning workbench skill init.",
         subject: { root, missing },
         exitCode: 2,
       });
     }
     throw new WorkbenchCodedError("already_initialized", `Workbench project already exists: ${root}`, {
-      remediation: "workbench status",
+      remediation: "workbench skill show",
       subject: { root },
       exitCode: 2,
     });
@@ -3803,7 +3770,7 @@ export async function initializeHydratedWorkbenchSkillProject(options: Workbench
   const root = resolveRoot(options.dir);
   if (!await exists(path.join(root, SKILL_FILE))) {
     throw new WorkbenchCodedError("usage", `Workbench clone requires ${SKILL_FILE} in the hydrated source.`, {
-      remediation: "workbench clone OWNER/SKILL[@VERSION] DIR",
+      remediation: "workbench skill clone OWNER/SKILL[@VERSION] DIR",
       subject: { root, requiredFile: SKILL_FILE },
       exitCode: 2,
     });
@@ -3860,11 +3827,8 @@ async function ensureWorkbenchProjectScaffold(
     await ensureFile(
       evalPath,
       [
-        "version: 1",
-        `name: ${safeName(path.basename(root) || "skill")}`,
-        'description: "TODO: describe what a good run must prove. Add cases under .workbench/cases before running eval."',
         "grade:",
-        `  adapter: ${starterEvalGradeAdapter(defaultAgentSelection)}`,
+        "  adapter: none",
         "",
       ].join("\n"),
     );
@@ -3886,10 +3850,6 @@ async function ensureWorkbenchProjectScaffold(
   return createdPaths;
 }
 
-function starterEvalGradeAdapter(selection: WorkbenchDefaultAgentSelection): "rubric" | "tests" {
-  return selection.kind === "provider" ? "rubric" : "tests";
-}
-
 async function selectNewDefaultAgent(options: WorkbenchInitOptions): Promise<WorkbenchDefaultAgentSelection> {
   const explicitAgent = options.agent?.trim();
   const explicitModel = options.model?.trim();
@@ -3898,8 +3858,8 @@ async function selectNewDefaultAgent(options: WorkbenchInitOptions): Promise<Wor
     const adapter = normalizeNewAgentAdapter(explicitAgent);
     if (adapter === "local" || adapter === "command") {
       if (explicitModel || explicitAuth) {
-        throw new WorkbenchCodedError("usage", "workbench new --model and --auth apply only to provider agents.", {
-          remediation: `workbench new --agent ${adapter}`,
+        throw new WorkbenchCodedError("usage", "workbench skill new --model and --auth apply only to provider agents.", {
+          remediation: `workbench skill new --agent ${adapter}`,
           subject: { agent: adapter },
           exitCode: 2,
         });
@@ -3912,23 +3872,7 @@ async function selectNewDefaultAgent(options: WorkbenchInitOptions): Promise<Wor
     return await providerNewDefaultAgent("codex", "explicit_provider_options", options);
   }
 
-  const [codex, claude] = await Promise.all([
-    providerNewDefaultAgent("codex", "ready_codex", options),
-    providerNewDefaultAgent("claude", "ready_claude", options),
-  ]);
-  if (codex.readiness.state === "ready") {
-    return codex;
-  }
-  if (claude.readiness.state === "ready") {
-    return claude;
-  }
-  if (codex.readiness.state === "partial") {
-    return { ...codex, reason: "partial_codex" };
-  }
-  if (claude.readiness.state === "partial") {
-    return { ...claude, reason: "partial_claude" };
-  }
-  return { ...codex, reason: "product_default" };
+  return providerNewDefaultAgent("codex", "product_default", options);
 }
 
 function normalizeNewAgentAdapter(value: string): WorkbenchNewAgentAdapter {
@@ -3936,8 +3880,8 @@ function normalizeNewAgentAdapter(value: string): WorkbenchNewAgentAdapter {
   if (normalized === "codex" || normalized === "claude" || normalized === "command" || normalized === "local") {
     return normalized;
   }
-  throw new WorkbenchCodedError("usage", "workbench new --agent must be codex, claude, command, or local.", {
-    remediation: "workbench new --agent codex",
+  throw new WorkbenchCodedError("usage", "workbench skill new --agent must be codex, claude, command, or local.", {
+    remediation: "workbench skill new --agent codex",
     subject: { agent: value },
     exitCode: 2,
   });
@@ -3966,134 +3910,26 @@ async function providerNewDefaultAgent(
   reason: string,
   options: WorkbenchInitOptions,
 ): Promise<WorkbenchDefaultAgentSelection> {
-  const defaults = WORKBENCH_PROVIDER_AGENT_DEFAULTS[adapter];
-  const auth = options.auth?.trim() || "default";
+  const auth = options.auth?.trim();
+  const authStatus = await localWorkbenchAdapterAuthStore(options.adapterAuthStoreRoot).status({
+    adapterId: adapter,
+    profile: auth || "default",
+  }).catch(() => ({ status: "disconnected" as const }));
+  const ready = authStatus.status === "connected";
   return {
     name: "default",
     adapter,
-    model: options.model?.trim() || defaults.model,
-    auth,
+    ...(options.model?.trim() ? { model: options.model.trim() } : {}),
+    ...(auth ? { auth } : {}),
     kind: "provider",
     reason,
-    readiness: await providerReadiness(adapter, auth, options),
+    readiness: {
+      state: ready ? "ready" : "partial",
+      workbenchProviderAuth: ready ? "connected" : "missing",
+      setupCommands: ready ? [] : [workbenchProviderAuthSetupCommand(adapter)],
+      warnings: ready ? [] : [`Adapter ${adapter} authentication is not configured.`],
+    },
   };
-}
-
-async function providerReadiness(
-  adapter: WorkbenchProviderAgentAdapter,
-  profile: string,
-  options: WorkbenchInitOptions,
-): Promise<WorkbenchDefaultAgentSelection["readiness"]> {
-  const defaults = WORKBENCH_PROVIDER_AGENT_DEFAULTS[adapter];
-  const homeDir = options.homeDir?.trim() || os.homedir();
-  const env = options.env ?? process.env;
-  const [authStatus, nativeAuth] = await Promise.all([
-    localWorkbenchAdapterAuthStore(options.adapterAuthStoreRoot).status({
-      adapterId: adapter,
-      profile,
-    }).catch(() => ({ status: "disconnected" as const })),
-    providerNativeAuthState(adapter, homeDir, env),
-  ]);
-  const executable = executableOnPath(defaults.executable);
-  const workbenchProviderAuth = authStatus.status === "connected" ? "connected" : "missing";
-  const apiKeyPresent = Boolean(env[defaults.apiKeyEnv]?.trim());
-  const state = executable && workbenchProviderAuth === "connected"
-    ? "ready"
-    : executable || workbenchProviderAuth === "connected" || nativeAuth !== "missing" || apiKeyPresent
-      ? "partial"
-      : "missing";
-  const warnings: string[] = [];
-  if (nativeAuth === "present" && workbenchProviderAuth !== "connected") {
-    warnings.push(`${capitalize(adapter)} native auth exists, but Workbench adapter auth is not captured.`);
-  }
-  if (state !== "ready") {
-    warnings.push(`${capitalize(adapter)} is not ready for provider-backed Workbench runs yet.`);
-  }
-  const effectiveNativeAuth = workbenchProviderAuth === "connected" ? "not_required" : nativeAuth;
-  return {
-    state,
-    executable,
-    workbenchProviderAuth,
-    nativeAuth: effectiveNativeAuth,
-    setupCommands: providerSetupCommands(adapter, {
-      executable,
-      nativeAuth: effectiveNativeAuth,
-      workbenchProviderAuth,
-      profile,
-      env,
-    }),
-    warnings,
-  };
-}
-
-async function providerNativeAuthState(
-  adapter: WorkbenchProviderAgentAdapter,
-  homeDir: string,
-  env: Record<string, string | undefined>,
-): Promise<"present" | "partial" | "missing"> {
-  if (adapter === "codex") {
-    const codexHome = env.CODEX_HOME?.trim();
-    const roots = [
-      ...(codexHome ? [codexHome] : []),
-      path.join(homeDir, ".codex"),
-    ];
-    for (const root of roots) {
-      if (await codexNativeAuthFilePresent(path.join(root, "auth.json"))) {
-        return "present";
-      }
-    }
-    return "missing";
-  }
-  const profile = await exists(path.join(homeDir, ".claude.json"));
-  const tokenEnv = Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
-  if (profile && tokenEnv) {
-    return "present";
-  }
-  return profile || tokenEnv ? "partial" : "missing";
-}
-
-async function codexNativeAuthFilePresent(filePath: string): Promise<boolean> {
-  const source = await fs.readFile(filePath, "utf8").catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  });
-  return source !== null && codexAuthJsonHasUsableToken(source);
-}
-
-function providerSetupCommands(
-  adapter: WorkbenchProviderAgentAdapter,
-  readiness: {
-    executable: boolean;
-    nativeAuth: "present" | "partial" | "missing" | "not_required";
-    workbenchProviderAuth: "connected" | "missing";
-    profile: string;
-    env: Record<string, string | undefined>;
-  },
-): string[] {
-  const defaults = WORKBENCH_PROVIDER_AGENT_DEFAULTS[adapter];
-  const commands: string[] = [];
-  if (!readiness.executable) {
-    commands.push(defaults.installCommand);
-  }
-  if (readiness.workbenchProviderAuth === "connected") {
-    return commands;
-  }
-  if (adapter === "codex") {
-    if (readiness.nativeAuth !== "present") {
-      commands.push(codexDeviceAuthLoginCommand({ env: readiness.env }));
-    }
-    commands.push(`workbench login codex --method oauth${readiness.profile === "default" ? "" : ` --profile ${readiness.profile}`}`);
-    return commands;
-  }
-  if (readiness.nativeAuth !== "present") {
-    commands.push("claude setup-token");
-  }
-  commands.push(readiness.env.CLAUDE_CODE_OAUTH_TOKEN?.trim()
-    ? `workbench login claude --method oauth${readiness.profile === "default" ? "" : ` --profile ${readiness.profile}`}`
-    : `CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth${readiness.profile === "default" ? "" : ` --profile ${readiness.profile}`}`);
-  return commands;
 }
 
 async function assertLocalWorkbenchAdapterAuthReady(
@@ -4101,14 +3937,7 @@ async function assertLocalWorkbenchAdapterAuthReady(
   options?: string | Pick<WorkbenchCommandOptions, "adapterAuthStoreRoot" | "homeDir" | "env">,
 ): Promise<void> {
   const readiness = await localWorkbenchAdapterAuthReadiness(agents, options);
-  const issue = readiness.issues[0];
-  if (issue) {
-    throw new WorkbenchCodedError("adapter_auth_required", issue.message, {
-      remediation: issue.remediation,
-      subject: issue.subject as Record<string, Json> | undefined,
-      exitCode: 1,
-    });
-  }
+  assertWorkbenchLaunchReadinessReady(readiness);
 }
 
 async function assertLocalWorkbenchLaunchReady(
@@ -4134,16 +3963,16 @@ async function localWorkbenchAdapterAuthReadiness(
   for (const target of targets) {
     const status = await store.status(target);
     if (status.status !== "connected") {
-      const setupCommands = await workbenchProviderAuthSetupCommandsForTarget(target, options);
+      const setupCommand = workbenchProviderAuthSetupCommand(target.adapterId);
       issues.push({
         code: "adapter_auth_required",
         message: `${workbenchAdapterAuthTargetLabel(target)} disconnected.`,
-        remediation: setupCommands[0] ?? workbenchProviderAuthSetupCommand(target.adapterId),
+        remediation: setupCommand,
         subject: {
           adapterId: target.adapterId,
           profile: target.profile,
           ...(target.slot ? { slot: target.slot } : {}),
-          setupCommands,
+          setupCommands: [setupCommand],
         },
       });
     }
@@ -4170,14 +3999,7 @@ async function cloudWorkbenchLaunchReadiness(root: string): Promise<WorkbenchLau
 
 async function assertLocalWorkbenchExecutionEnvironmentReady(root: string, agents: readonly WorkbenchAgent[]): Promise<void> {
   const readiness = await localWorkbenchExecutionEnvironmentReadiness(root, agents);
-  const issue = readiness.issues[0];
-  if (issue) {
-    throw new WorkbenchCodedError(issue.code, issue.message, {
-      remediation: issue.remediation,
-      subject: issue.subject as Record<string, Json> | undefined,
-      exitCode: 1,
-    });
-  }
+  assertWorkbenchLaunchReadinessReady(readiness);
 }
 
 async function localWorkbenchExecutionEnvironmentReadiness(root: string, agents: readonly WorkbenchAgent[]): Promise<WorkbenchLaunchReadiness> {
@@ -4199,7 +4021,7 @@ async function localWorkbenchExecutionEnvironmentReadiness(root: string, agents:
 function localWorkbenchLaunchUsesDocker(agents: readonly WorkbenchAgent[]): boolean {
   return agents.some((agent) => {
     const adapter = agent.adapter.trim().toLowerCase();
-    return SKILL_EVAL_COMMAND_AGENT_ADAPTERS.has(adapter) || SKILL_EVAL_PROVIDER_AGENT_ADAPTERS.has(adapter);
+    return SKILL_EVAL_COMMAND_AGENT_ADAPTERS.has(adapter) || isHarnessBackedSkillEvalAdapter(adapter);
   });
 }
 
@@ -4224,7 +4046,7 @@ async function skillEvalEnvironmentDockerfileReadinessIssue(root: string): Promi
       return {
         code: "environment_missing",
         message: `${path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile")} is required.`,
-        remediation: `Create ${path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile")} or rerun workbench init in a fresh project.`,
+        remediation: `Create ${path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile")} or rerun workbench skill init in a fresh project.`,
         subject: {
           path: path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile"),
         },
@@ -4261,7 +4083,7 @@ function uniqueLocalAdapterAuthTargets(targets: readonly WorkbenchAdapterAuthTar
   const seen = new Set<string>();
   const result: WorkbenchAdapterAuthTarget[] = [];
   for (const target of targets) {
-    const key = adapterAuthTargetKey(target);
+    const key = workbenchAdapterAuthTargetIdentity(target);
     if (seen.has(key)) {
       continue;
     }
@@ -4269,13 +4091,6 @@ function uniqueLocalAdapterAuthTargets(targets: readonly WorkbenchAdapterAuthTar
     result.push(target);
   }
   return result;
-}
-
-function executableOnPath(command: string): boolean {
-  const result = process.platform === "win32"
-    ? spawnSync("where", [command], { stdio: "ignore" })
-    : spawnSync("sh", ["-lc", `command -v ${quoteShellArg(command)}`], { stdio: "ignore" });
-  return result.status === 0;
 }
 
 function agentsYamlForNewDefault(selection: WorkbenchDefaultAgentSelection): string {
@@ -4304,248 +4119,38 @@ export async function workbenchStatus(options: WorkbenchCommandOptions = {}): Pr
     return {
       root,
       initialized: false,
-      versionCount: 0,
-      skillCount: 0,
-      agentCount: 0,
       runCount: 0,
-      remoteCount: 0,
     };
   }
-  return withWorkbenchProjectLockRoot(root, async () => workbenchStatusUnlocked(root, options));
+  return withWorkbenchProjectLockRoot(root, async () => workbenchStatusUnlocked(root));
 }
 
-export async function workbenchStatusSnapshot(options: WorkbenchCommandOptions = {}): Promise<Omit<WorkbenchStatusSnapshot, "auth">> {
-  const root = resolveRoot(options.dir);
-  const initialized = await exists(workbenchDir(root));
-  if (!initialized) {
-    return {
-      schema: "workbench.status.v1",
-      ok: true,
-      project: {
-        root,
-        initialized: false,
-      },
-      worktree: {
-      },
-      runs: {
-        total: 0,
-      },
-      remotes: [],
-      next: "workbench new .",
-    };
-  }
-  const [snapshot, syncStates, localState, worktreeFiles] = await Promise.all([
-    createWorkbenchReadOnlyInspectionSnapshot(options),
-    readRemoteSyncStates(root).catch(() => []),
-    loadStateReadOnlyWithRetry(root),
-    readSkillFiles(root).catch(() => undefined),
-  ]);
-  const worktreeSourceHash = worktreeFiles ? hashFiles(worktreeFiles) : undefined;
-  const worktreeSourceVersion = worktreeSourceHash
-    ? findWorkbenchVersionBySourceHash(localState.versions, worktreeSourceHash)
-    : undefined;
-  const durableCurrentVersionId = worktreeSourceVersion?.id ?? localState.refs.current;
-  const worktreeSourceState: WorkbenchStatusSnapshot["worktree"]["sourceState"] | undefined = worktreeSourceHash
-    ? localState.versions.length === 0 ? "no_snapshot" : worktreeSourceVersion ? "clean" : "edited"
-    : undefined;
-  const lastRun = [...snapshot.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-  const lastRunScore = lastRun ? runQualityScoreFromJobs(lastRun, snapshot.jobs) : undefined;
-  const syncByRemote = new Map(syncStates.map((entry) => [entry.remote, entry]));
-  const remotes = snapshot.remotes.map((remote) => {
-    const syncRecord = syncByRemote.get(remote.name);
-    const sync = syncRecord && syncRecord.url === remote.url ? syncRecord : undefined;
-    const syncStatus: WorkbenchStatusSnapshot["remotes"][number]["sync"] = sync
-      ? {
-          status: sync.status === "error"
-            ? "error"
-            : sync.localHash !== remoteSyncLocalHash(localState, remote)
-              ? "local_changes"
-              : "up_to_date",
-          ...(sync.lastSyncedAt ? { lastSyncedAt: sync.lastSyncedAt } : {}),
-          lastAttemptAt: sync.lastAttemptAt,
-          ...(sync.lastError ? { lastError: sync.lastError } : { lastError: null }),
-        }
-      : { status: "never", lastError: null };
-    return {
-      name: remote.name,
-      kind: remote.kind,
-      url: remote.url,
-      sync: syncStatus,
-      publication: remote.kind === "workbench-cloud"
-        ? publicationStatusFromRefs(snapshot.refs, remote.name)
-        : unpublishedPublicationStatus(),
-    };
-  });
-  return {
-    schema: "workbench.status.v1",
-    ok: true,
-    project: {
-      root,
-      initialized: true,
-      ...(durableCurrentVersionId ? { currentVersionId: durableCurrentVersionId } : {}),
-      ...(snapshot.status.defaultSkill ? { defaultSkill: snapshot.status.defaultSkill } : {}),
-      ...(snapshot.status.defaultAgent ? { defaultAgent: snapshot.status.defaultAgent } : {}),
-    },
-    worktree: {
-      ...(worktreeSourceVersion?.id || localState.refs.current ? { latestVersionId: worktreeSourceVersion?.id ?? localState.refs.current } : {}),
-      ...(worktreeSourceState ? { sourceState: worktreeSourceState } : {}),
-    },
-    ...(snapshot.status.environment ? { environment: snapshot.status.environment } : {}),
-    runs: {
-      total: snapshot.runs.length,
-      ...(lastRun ? {
-        lastRunId: lastRun.id,
-        lastStatus: lastRun.status,
-        ...(lastRunScore !== undefined ? { lastScore: lastRunScore } : {}),
-      } : {}),
-      activeRuns: activeRunStatusEntries(snapshot),
-    },
-    remotes,
-    next: null,
-  };
-}
-
-function activeRunStatusEntries(
-  snapshot: WorkbenchInspectionSnapshot,
-): NonNullable<WorkbenchStatusSnapshot["runs"]["activeRuns"]> {
-  const jobsByRun = new Map<string, WorkbenchJob[]>();
-  for (const job of snapshot.jobs) {
-    const entries = jobsByRun.get(job.runId) ?? [];
-    entries.push(job);
-    jobsByRun.set(job.runId, entries);
-  }
-  return snapshot.runs
-    .filter((run) => run.status === "queued" || run.status === "running" || run.status === "canceling")
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-    .map((run) => {
-      const jobs = jobsByRun.get(run.id) ?? [];
-      const lastProgressAt = run.lastProgressAt ?? latestJobProgressAt(jobs);
-      return {
-        id: run.id,
-        kind: run.kind,
-        location: run.location ?? "local",
-        status: run.status,
-        skillName: run.skillName,
-        agentName: run.agentName,
-        failed: jobs.filter((job) => job.status === "failed" || job.status === "canceled").length,
-        elapsedMs: Math.max(0, Date.now() - Date.parse(run.createdAt)),
-        ...(lastProgressAt ? { lastProgressAt } : {}),
-        health: run.location === "cloud" ? "stale_local_state" : "healthy",
-        next: `workbench watch ${run.id}`,
-      };
-    });
-}
-
-function latestJobProgressAt(jobs: readonly WorkbenchJob[]): string | undefined {
-  return jobs
-    .flatMap((job) => [job.finishedAt, job.startedAt, job.createdAt].filter((entry): entry is string => Boolean(entry)))
-    .sort((left, right) => right.localeCompare(left))[0];
-}
-
-async function workbenchStatusUnlocked(root: string, options: WorkbenchCommandOptions = {}): Promise<WorkbenchStatus> {
-  const [state, agents, skillSources, skillFiles, environment] = await Promise.all([
+async function workbenchStatusUnlocked(root: string): Promise<WorkbenchStatus> {
+  const [state, agents, skillSources, skillFiles] = await Promise.all([
     loadStateReadOnlyWithRetry(root),
     readAgents(root),
     readSkillSources(root),
     readSkillFiles(root).catch(() => []),
-    readSkillEvalEnvironmentStatus(root),
   ]);
   const liveHash = skillFiles.length > 0 ? hashFiles(skillFiles) : undefined;
   const sourceVersion = liveHash ? findWorkbenchVersionBySourceHash(state.versions, liveHash) : undefined;
   const currentVersionId = sourceVersion?.id ?? state.refs.current;
-  const lastRun = state.runs
-    .filter((run) => runQualityScoreFromJobs(run, state.jobs) !== undefined)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-  const lastRunScore = lastRun ? runQualityScoreFromJobs(lastRun, state.jobs) : undefined;
   return {
     root,
     initialized: true,
-    ...(liveHash ? { currentSkillHash: liveHash } : {}),
     ...(currentVersionId ? { currentVersionId } : {}),
     defaultSkill: await readDefaultSkillSelection(root, skillSources),
     defaultAgent: await readDefaultAgentSelection(root, agents),
-    versionCount: state.versions.length,
-    skillCount: skillSources.length,
-    agentCount: agents.length,
     runCount: state.runs.length,
-    remoteCount: Object.keys(state.remotes).length,
     pendingSyncCount: await pendingSyncCount(root),
-    ...(lastRunScore !== undefined ? { lastScore: lastRunScore } : {}),
-    environment,
   };
-}
-
-export async function checkWorkbenchSkill(options: WorkbenchCommandOptions = {}): Promise<WorkbenchCheckResult> {
-  const root = resolveRoot(options.dir);
-  return withWorkbenchProjectLockIfInitialized(root, async () => {
-    await requireInitialized(root);
-    const [status, evalSnapshot, cases, agents, skillFiles, environmentDockerfile] = await Promise.all([
-      workbenchStatus({ dir: root, authToken: options.authToken }),
-      readEvalSnapshot(root),
-      readEvalCases(root),
-      readAgents(root),
-      readSkillFiles(root),
-      readSkillEvalEnvironmentDockerfile(root),
-    ]);
-    const state = await loadState(root);
-    const version = (await planWorkbenchLaunchSource(root, state, {
-      commit: false,
-      message: SOURCE_SNAPSHOT_MESSAGE,
-    })).version;
-    const skillBundles = await resolveRequestedSkillBundles({
-      root,
-      state,
-      version,
-      authToken: options.authToken,
-    });
-    if (agents.length === 0) {
-      throw new WorkbenchUserError(`No agents configured. Run \`${providerAgentSetupCommand("codex", "default")}\`.`);
-    }
-    return {
-      ok: true,
-      status,
-      cases: evalSnapshot.caseCount,
-      skills: skillBundles.length,
-      agents: agents.length,
-      plan: {
-        source: {
-          skillFiles: skillFiles.length,
-          evalFiles: evalSnapshot.files.length,
-          caseCount: cases.length,
-          smokeCaseCount: cases.filter((entry) => entry.smoke === true).length,
-        },
-        skills: skillBundles.map((bundle) => ({
-          name: bundle.skillName,
-          bundleHash: bundle.hash,
-          includedSkillCount: bundle.includedSkills.length,
-          fileCount: bundle.files.length,
-        })),
-        agents: agents.map((agent) => {
-          const adapter = agent.adapter.trim().toLowerCase();
-          assertSkillEvalAgentSupported(agent);
-          const providerBacked = SKILL_EVAL_PROVIDER_AGENT_ADAPTERS.has(adapter);
-          return {
-            name: agent.name,
-            adapter: agent.adapter,
-            ...(agent.model ? { model: agent.model } : {}),
-            providerBacked,
-            executionMode: providerBacked ? "provider-backed" : "local-command",
-            network: runtimeNetworkForSkillEval(agent),
-            resources: runtimeResourcesForSkillEval(agent),
-            image: skillEvalRuntimeSpec(agent, environmentDockerfile).dockerfile,
-            ...(providerBacked ? { auth: "local-adapter-auth" as const } : {}),
-          };
-        }),
-      },
-    };
-  });
 }
 
 export async function listWorkbenchVersions(options: WorkbenchCommandOptions = {}): Promise<WorkbenchVersion[]> {
   const root = resolveRoot(options.dir);
   await requireInitialized(root);
   const state = await loadStateReadOnlyWithRetry(root);
-  return [...state.versions].sort(compareVersionIds);
+  return [...state.versions].sort(compareWorkbenchVersions);
 }
 
 export async function reconcileCurrentWorkbenchVersion(options: WorkbenchCommandOptions = {}): Promise<WorkbenchVersion> {
@@ -4553,150 +4158,104 @@ export async function reconcileCurrentWorkbenchVersion(options: WorkbenchCommand
   return withWorkbenchProjectLockIfInitialized(root, async () => {
     await requireInitialized(root);
     const state = await loadState(root);
-    const version = await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
+    const version = await reconcileWorkbenchVersion(root, state, PACKAGE_SNAPSHOT_MESSAGE);
     await saveState(root, state);
     return copyVersion(version);
   });
 }
 
-export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Promise<WorkbenchRun[]> {
-  const root = resolveRoot(options.dir);
-  const kind = normalizeWorkbenchCaseRunKind(options.kind, "eval");
-  return withWorkbenchProjectLockIfInitialized(root, async () => {
-    await requireInitialized(root);
-    const state = await loadState(root);
-    let version = (await planWorkbenchLaunchSource(root, state, {
-      ref: options.version,
-      commit: false,
-      message: SOURCE_SNAPSHOT_MESSAGE,
-    })).version;
-    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
-    const runtimeSkillSources = await runtimeSkillSourceOptionsForRoot(root, state);
-    const runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
-      controlRoot: root,
-      skill: options.skill,
-      agent: options.agent,
-      authToken: options.authToken,
-      selectionRemediationCommand: "eval",
-      ...runtimeSkillSources,
-      ...runtimeAgents,
-    });
-    const agents = runtime.selectedAgents;
-    for (const agent of agents) {
-      assertSkillEvalAgentSupported(agent);
-    }
-    const skillBundles = runtime.skillBundles;
-    const evalSnapshot = runtime.evalSnapshot;
-    const runtimeCases = runtime.cases;
-    if (runtimeCases.length === 0) {
-      throw noEvalCasesError();
-    }
-    const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
-    assertDraftCaseReadinessReady(selectedCases, kind, evalSnapshot);
-    if ((options.location ?? "local") === "local") {
-      await assertLocalWorkbenchLaunchReady(root, agents, options);
-    }
-    const environmentDockerfile = runtime.environmentDockerfile ?? await readSkillEvalEnvironmentDockerfile(root);
-    if (!options.version) {
-      version = await resolveOrCreateRunVersion(root, state);
-    }
-    for (const bundle of skillBundles) {
-      upsertByHash(state.skillBundles, bundle);
-    }
-    upsertEvalSnapshotObject(state.evals, evalSnapshot);
-    upsertAgentSnapshots(state.agents, runtime.agents);
-    if (!options.version) {
-      state.skillSources = runtime.skillSources.map(copySkillSource);
-    }
-    const samples = options.samples ?? 1;
-    const reusableCaseCount = (options.selectedSamples?.length ?? 0) > 0 ? undefined : selectedCases.length;
-    const targets = skillBundles.flatMap((skillBundle) =>
-      agents.map((agent): WorkbenchEvaluationRunTarget => ({ skillBundle, agent }))
-    );
-    const primaryTarget = targets[0];
-    if (!primaryTarget) {
-      throw new WorkbenchUserError("No eval targets resolved for this run.");
-    }
-    void reusableCaseCount;
-    await saveState(root, state);
-    const run = await executeWorkbenchEvaluationRun({
-      root,
-      state,
-      adapterAuthStoreRoot: options.adapterAuthStoreRoot,
-      version,
-      skillBundle: primaryTarget.skillBundle,
-      evalSnapshot,
-      agent: primaryTarget.agent,
-      targets,
-      kind,
-      parentRunId: options.parentRunId,
-      location: options.location ?? "local",
-      remoteName: options.remoteName,
-      retryOfRunId: options.retryOfRunId,
-      rerun: options.rerun === true,
-      samples,
-      cases: runtimeCases,
-      environmentDockerfile,
-      caseIds: options.caseIds,
-      selectedSamples: options.selectedSamples,
-      operationTargets: options.operationTargets,
-      operationPhases: options.operationPhases,
-      operationGrader: options.operationGrader,
-      gradeOfRunId: options.gradeOfRunId,
-      onRunStarted: options.onRunStarted,
-    });
-    await saveState(root, state);
-    return [run];
+async function resolveWorkbenchEvalContext(
+  root: string,
+  state: WorkbenchProjectState,
+  options: Pick<WorkbenchEvalOptions, "version" | "skill" | "agent" | "evalHash" | "authToken" | "caseIds" | "selectedSamples" | "samples">,
+  command: "eval" | "grade",
+  requireEnvironment: boolean,
+) {
+  const source = await planWorkbenchLaunchSource(root, state, {
+    ref: options.version,
+    commit: false,
+    message: PACKAGE_SNAPSHOT_MESSAGE,
   });
+  const runtimeSelection = await runtimeSelectionOptionsForRoot(root, state);
+  const runtimeEvalControls = await runtimeEvalControlsForSelection(root, state, options.evalHash);
+  const runtime = await createWorkbenchVersionRuntimeSnapshot(source.version, {
+    controlRoot: root,
+    ...runtimeEvalControls,
+    skill: options.skill,
+    agent: options.agent,
+    evalHash: options.evalHash,
+    authToken: options.authToken,
+    selectionRemediationCommand: command,
+    ...runtimeSelection,
+  });
+  for (const agent of runtime.selectedAgents) {
+    assertSkillEvalAgentSupported(agent);
+  }
+  const selectedCases = selectEvalCasesForRun(runtime.cases, options.caseIds, options.selectedSamples);
+  const targets = runtime.skillBundles.flatMap((skillBundle) =>
+    runtime.selectedAgents.map((agent): WorkbenchEvaluationRunTarget => ({ skillBundle, agent }))
+  );
+  return {
+    source,
+    version: source.version,
+    runtime,
+    agents: runtime.selectedAgents,
+    skillBundles: runtime.skillBundles,
+    evalSnapshot: runtime.evalSnapshot,
+    runtimeCases: runtime.cases,
+    selectedCases,
+    environmentDockerfile: runtime.environmentDockerfile ?? (requireEnvironment
+      ? await readSkillEvalEnvironmentDockerfile(root)
+      : undefined),
+    targets,
+    primaryTarget: targets[0],
+    samples: options.samples ?? 1,
+  };
+}
+
+export async function evalWorkbenchSkill(options: WorkbenchEvalOptions = {}): Promise<WorkbenchRun[]> {
+  return runWorkbenchEvaluation(options, "eval");
 }
 
 export async function gradeWorkbenchSkill(options: WorkbenchEvalOptions = {}): Promise<WorkbenchRun[]> {
+  return runWorkbenchEvaluation(options, "grade");
+}
+
+async function runWorkbenchEvaluation(
+  options: WorkbenchEvalOptions,
+  command: "eval" | "grade",
+): Promise<WorkbenchRun[]> {
   const root = resolveRoot(options.dir);
+  const kind = command === "grade" ? "grade" : normalizeWorkbenchCaseRunKind(options.kind, "eval");
   return withWorkbenchProjectLockIfInitialized(root, async () => {
     await requireInitialized(root);
     const state = await loadState(root);
-    const version = (await planWorkbenchLaunchSource(root, state, {
-      ref: options.version,
-      commit: false,
-      message: SOURCE_SNAPSHOT_MESSAGE,
-    })).version;
-    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
-    const runtimeSkillSources = await runtimeSkillSourceOptionsForRoot(root, state);
-    const runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
-      controlRoot: root,
-      skill: options.skill,
-      agent: options.agent,
-      authToken: options.authToken,
-      selectionRemediationCommand: "grade",
-      ...runtimeSkillSources,
-      ...runtimeAgents,
-    });
-    const agents = runtime.selectedAgents;
-    for (const agent of agents) {
-      assertSkillEvalAgentSupported(agent);
-    }
-    const runtimeCases = runtime.cases;
+    const context = await resolveWorkbenchEvalContext(root, state, options, command, true);
+    let { version } = context;
+    const { runtime, agents, runtimeCases, selectedCases } = context;
     if (runtimeCases.length === 0) {
       throw noEvalCasesError();
     }
-    const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
-    assertDraftCaseReadinessReady(selectedCases, "grade", runtime.evalSnapshot);
+    assertDraftCaseReadinessReady(selectedCases, kind, runtime.evalSnapshot);
     if ((options.location ?? "local") === "local") {
       await assertLocalWorkbenchLaunchReady(root, agents, options);
     }
-    const environmentDockerfile = runtime.environmentDockerfile ?? await readSkillEvalEnvironmentDockerfile(root);
+    if (command === "eval" && !options.version) {
+      version = await resolveOrCreateRunVersion(root, state);
+    }
     for (const bundle of runtime.skillBundles) {
       upsertByHash(state.skillBundles, bundle);
     }
     upsertEvalSnapshotObject(state.evals, runtime.evalSnapshot);
     upsertAgentSnapshots(state.agents, runtime.agents);
-    const targets = runtime.skillBundles.flatMap((skillBundle) =>
-      agents.map((agent): WorkbenchEvaluationRunTarget => ({ skillBundle, agent }))
-    );
-    const primaryTarget = targets[0];
+    if (command === "eval" && !options.version) {
+      state.skillSources = runtime.skillSources.map(copySkillSource);
+    }
+    const { targets, primaryTarget } = context;
     if (!primaryTarget) {
       throw new WorkbenchUserError("No eval targets resolved for this run.");
     }
+    if (command === "eval") await saveState(root, state);
     const run = await executeWorkbenchEvaluationRun({
       root,
       state,
@@ -4706,29 +4265,28 @@ export async function gradeWorkbenchSkill(options: WorkbenchEvalOptions = {}): P
       evalSnapshot: runtime.evalSnapshot,
       agent: primaryTarget.agent,
       targets,
-      kind: "grade",
+      kind,
       parentRunId: options.parentRunId,
       location: options.location ?? "local",
       remoteName: options.remoteName,
       retryOfRunId: options.retryOfRunId,
       rerun: options.rerun === true,
-      samples: options.samples ?? 1,
+      samples: context.samples,
       cases: runtimeCases,
-      environmentDockerfile,
+      environmentDockerfile: context.environmentDockerfile!,
       caseIds: options.caseIds,
       selectedSamples: options.selectedSamples,
       operationTargets: options.operationTargets,
-      operationPhases: options.operationPhases,
-      operationGrader: options.operationGrader,
+      operationSteps: options.operationSteps,
       gradeOfRunId: options.gradeOfRunId,
       onRunStarted: options.onRunStarted,
     });
     await saveState(root, state);
-    return [copyRun(run)];
+    return [command === "grade" ? copyRun(run) : run];
   });
 }
 
-interface WorkbenchGradeSubject {
+export interface WorkbenchGradeSubject {
   job: WorkbenchJob;
   artifact: WorkbenchArtifact;
   trace: WorkbenchTrace;
@@ -4737,7 +4295,7 @@ interface WorkbenchGradeSubject {
   runtimeCase: WorkbenchEvalCaseRuntime;
 }
 
-function eligibleGradeSubjectsForRuntime(args: {
+export function selectWorkbenchGradeSubjects(args: {
   state: WorkbenchProjectState;
   evalSnapshot: WorkbenchEvalSnapshot;
   targets: readonly WorkbenchEvaluationRunTarget[];
@@ -4754,7 +4312,7 @@ function eligibleGradeSubjectsForRuntime(args: {
   ]));
   const eligibleSubjects: WorkbenchGradeSubject[] = [];
   for (const job of args.state.jobs) {
-    if ((job.role ?? "execute") !== "execute" || job.status !== "succeeded") {
+    if (job.role !== "run" || job.status !== "succeeded") {
       continue;
     }
     if (args.executeRunId && job.runId !== args.executeRunId) {
@@ -4762,7 +4320,16 @@ function eligibleGradeSubjectsForRuntime(args: {
     }
     const target = targetsByKey.get(gradeTargetKey(job.skillBundleHash, job.agentHash));
     const runtimeCase = casesById.get(job.caseId);
-    if (!target || !runtimeCase || !executionJobMatchesCurrentEvalCase(args.state, job, args.evalSnapshot, runtimeCase)) {
+    if (
+      !target ||
+      !runtimeCase ||
+      job.inputHash !== workbenchRunInputHash({
+        evalSnapshot: args.evalSnapshot,
+        target,
+        runtimeCase,
+        sample: job.sample,
+      })
+    ) {
       continue;
     }
     const artifact = job.artifactIds.flatMap((id) => args.state.artifacts.find((entry) => entry.id === id) ?? [])[0];
@@ -4831,7 +4398,7 @@ function currentGradeSubjectsForRuntime(args: {
 
   const expectedKeySet = new Set(expectedKeys);
   const subjectsByKey = new Map<string, WorkbenchGradeSubject[]>();
-  for (const subject of eligibleGradeSubjectsForRuntime(args)) {
+  for (const subject of selectWorkbenchGradeSubjects(args)) {
     const targetKey = splitEvalTargetKey(subject.job);
     const key = splitEvalEvidenceKey(targetKey, subject.runtimeCase.id, subject.job.sample);
     if (!targetsByKey.has(targetKey) || !expectedKeySet.has(key)) {
@@ -4858,165 +4425,6 @@ function currentGradeSubjectsForRuntime(args: {
   return currentSubjects;
 }
 
-function reusableExecutionMatrixEvidence(args: {
-  state: WorkbenchProjectState;
-  version: WorkbenchVersion;
-  evalSnapshot: WorkbenchEvalSnapshot;
-  targets: readonly WorkbenchEvaluationRunTarget[];
-  cases: readonly WorkbenchEvalCaseRuntime[];
-  samples: number;
-}): { jobs: WorkbenchJob[] } | undefined {
-  const samples = Math.max(1, Math.floor(args.samples));
-  const targetsByKey = new Map(args.targets.map((target) => [
-    splitEvalTargetKey({
-      versionId: args.version.id,
-      skillName: target.skillBundle.skillName,
-      skillBundleHash: target.skillBundle.hash,
-      agentName: target.agent.name,
-      agentHash: hashJson(target.agent),
-    }),
-    target,
-  ]));
-  if (targetsByKey.size === 0 || args.cases.length === 0) {
-    return undefined;
-  }
-  const expectedKeys: string[] = [];
-  for (const targetKey of targetsByKey.keys()) {
-    for (const runtimeCase of args.cases) {
-      for (const sample of sampleIndexesForRun(runtimeCase, samples, undefined)) {
-        expectedKeys.push(splitEvalEvidenceKey(targetKey, runtimeCase.id, sample));
-      }
-    }
-  }
-  const executeJobsByKey = new Map<string, WorkbenchJob[]>();
-  const casesById = new Map(args.cases.flatMap((runtimeCase) => [
-    [runtimeCase.id, runtimeCase],
-    [runtimeCase.path, runtimeCase],
-  ]));
-  const expectedKeySet = new Set(expectedKeys);
-  for (const job of args.state.jobs) {
-    if ((job.role ?? "execute") !== "execute" || job.status !== "succeeded") {
-      continue;
-    }
-    const runtimeCase = casesById.get(job.caseId);
-    const targetKey = splitEvalTargetKey(job);
-    const key = splitEvalEvidenceKey(targetKey, job.caseId, job.sample);
-    if (
-      !runtimeCase ||
-      !targetsByKey.has(targetKey) ||
-      !expectedKeySet.has(key) ||
-      !executionJobMatchesCurrentEvalCase(args.state, job, args.evalSnapshot, runtimeCase)
-    ) {
-      continue;
-    }
-    const current = executeJobsByKey.get(key) ?? [];
-    current.push(job);
-    executeJobsByKey.set(key, current);
-  }
-  for (const jobs of executeJobsByKey.values()) {
-    jobs.sort(compareJobsNewestFirst);
-  }
-  const reusableJobs: WorkbenchJob[] = [];
-  for (const key of expectedKeys.sort()) {
-    const executeJob = executeJobsByKey.get(key)?.[0];
-    if (!executeJob) {
-      return undefined;
-    }
-    reusableJobs.push(executeJob);
-  }
-  return { jobs: dedupeJobs(reusableJobs) };
-}
-
-function reusableSplitEvalMatrixEvidence(args: {
-  state: WorkbenchProjectState;
-  version: WorkbenchVersion;
-  evalSnapshot: WorkbenchEvalSnapshot;
-  targets: readonly WorkbenchEvaluationRunTarget[];
-  cases: readonly WorkbenchEvalCaseRuntime[];
-  samples: number;
-}): { jobs: WorkbenchJob[] } | undefined {
-  const execution = reusableExecutionMatrixEvidence(args);
-  if (!execution) {
-    return undefined;
-  }
-  const samples = Math.max(1, Math.floor(args.samples));
-  const targetsByKey = new Map(args.targets.map((target) => [
-    splitEvalTargetKey({
-      versionId: args.version.id,
-      skillName: target.skillBundle.skillName,
-      skillBundleHash: target.skillBundle.hash,
-      agentName: target.agent.name,
-      agentHash: hashJson(target.agent),
-    }),
-    target,
-  ]));
-  if (targetsByKey.size === 0 || args.cases.length === 0) {
-    return undefined;
-  }
-  const expectedKeys: string[] = [];
-  for (const targetKey of targetsByKey.keys()) {
-    for (const runtimeCase of args.cases) {
-      for (const sample of sampleIndexesForRun(runtimeCase, samples, undefined)) {
-        expectedKeys.push(splitEvalEvidenceKey(targetKey, runtimeCase.id, sample));
-      }
-    }
-  }
-  const expectedKeySet = new Set(expectedKeys);
-  const executeJobsByKey = new Map<string, WorkbenchJob[]>();
-  for (const job of execution.jobs) {
-    const targetKey = splitEvalTargetKey(job);
-    const key = splitEvalEvidenceKey(targetKey, job.caseId, job.sample);
-    if (!targetsByKey.has(targetKey) || !expectedKeySet.has(key)) {
-      continue;
-    }
-    const current = executeJobsByKey.get(key) ?? [];
-    current.push(job);
-    executeJobsByKey.set(key, current);
-  }
-  const gradeJobsByExecuteJobId = new Map<string, WorkbenchJob[]>();
-  for (const job of args.state.jobs) {
-    if (
-      job.role !== "grade" ||
-      job.status !== "succeeded" ||
-      job.evalHash !== args.evalSnapshot.hash ||
-      jobQualityScore(job) === undefined
-    ) {
-      continue;
-    }
-    const targetKey = splitEvalTargetKey(job);
-    const key = splitEvalEvidenceKey(targetKey, job.caseId, job.sample);
-    if (!targetsByKey.has(targetKey) || !expectedKeySet.has(key)) {
-      continue;
-    }
-    for (const dependency of job.dependencies ?? []) {
-      if (!dependency.jobId) {
-        continue;
-      }
-      const current = gradeJobsByExecuteJobId.get(dependency.jobId) ?? [];
-      current.push(job);
-      gradeJobsByExecuteJobId.set(dependency.jobId, current);
-    }
-  }
-  for (const jobs of gradeJobsByExecuteJobId.values()) {
-    jobs.sort(compareJobsNewestFirst);
-  }
-  const reusableJobs: WorkbenchJob[] = [];
-  for (const key of expectedKeys.sort()) {
-    const executeJob = executeJobsByKey.get(key)?.[0];
-    if (!executeJob) {
-      return undefined;
-    }
-    const gradeJob = gradeJobsByExecuteJobId.get(executeJob.id)?.find((candidate) =>
-      splitEvalEvidenceKey(splitEvalTargetKey(candidate), candidate.caseId, candidate.sample) === key
-    );
-    if (!gradeJob) {
-      return undefined;
-    }
-    reusableJobs.push(executeJob, gradeJob);
-  }
-  return { jobs: dedupeJobs(reusableJobs) };
-}
-
 function reusableExecutionPreviewEvidence(args: {
   state: WorkbenchProjectState;
   version: WorkbenchVersion;
@@ -5041,9 +4449,11 @@ function reusableSplitEvalPreviewEvidence(args: {
   const reusableJobs: WorkbenchJob[] = [];
   for (const subject of reusableExecutionPreviewSubjects(args)) {
     reusableJobs.push(subject.job);
-    const gradeJob = latestReusableTerminalGradeJobForExecution({
+    const gradeJob = selectReusableWorkbenchGradeJob({
       state: args.state,
-      evalHash: args.evalSnapshot.hash,
+      evalSnapshot: args.evalSnapshot,
+      runtimeCase: subject.runtimeCase,
+      agent: subject.agent,
       executionJob: subject.job,
     });
     if (gradeJob) {
@@ -5067,7 +4477,7 @@ function reusableExecutionPreviewSubjects(args: {
   for (const target of args.targets) {
     for (const runtimeCase of args.cases) {
       for (const sample of sampleIndexesForRun(runtimeCase, samples, undefined)) {
-        const subject = reusableExecutionSubjectForTarget({
+        const subject = selectReusableWorkbenchExecutionSubject({
           state: args.state,
           evalSnapshot: args.evalSnapshot,
           target,
@@ -5085,22 +4495,28 @@ function reusableExecutionPreviewSubjects(args: {
   return subjects;
 }
 
-function reusableExecutionSubjectForTarget(args: {
+export function selectReusableWorkbenchExecutionSubject(args: {
   state: WorkbenchProjectState;
   evalSnapshot: WorkbenchEvalSnapshot;
   target: WorkbenchEvaluationRunTarget;
   runtimeCase: WorkbenchEvalCaseRuntime;
   sample: number;
 }): WorkbenchGradeSubject | undefined {
+  const inputHash = workbenchRunInputHash({
+    evalSnapshot: args.evalSnapshot,
+    target: args.target,
+    runtimeCase: args.runtimeCase,
+    sample: args.sample,
+  });
   const candidates = args.state.jobs
     .filter((job) =>
-      (job.role ?? "execute") === "execute" &&
+      job.role === "run" &&
       job.status === "succeeded" &&
       job.skillBundleHash === args.target.skillBundle.hash &&
       job.agentHash === hashJson(args.target.agent) &&
       job.caseId === args.runtimeCase.id &&
       job.sample === args.sample &&
-      executionJobMatchesCurrentEvalCase(args.state, job, args.evalSnapshot, args.runtimeCase)
+      job.inputHash === inputHash
     )
     .sort(compareJobsNewestFirst);
   for (const job of candidates) {
@@ -5156,45 +4572,116 @@ function dedupeJobs(jobs: readonly WorkbenchJob[]): WorkbenchJob[] {
   return [...byId.values()];
 }
 
-function executionJobMatchesCurrentEvalCase(
-  state: WorkbenchProjectState,
-  job: WorkbenchJob,
-  evalSnapshot: WorkbenchEvalSnapshot,
-  runtimeCase: WorkbenchEvalCaseRuntime,
-): boolean {
-  if (job.evalHash === evalSnapshot.hash) {
-    return true;
-  }
-  const jobEvalSnapshot = state.evals.find((entry) => entry.hash === job.evalHash);
-  if (!jobEvalSnapshot) {
-    return false;
-  }
-  const previous = evalCaseExecutionFingerprint(jobEvalSnapshot, runtimeCase.id);
-  const current = evalCaseExecutionFingerprint(evalSnapshot, runtimeCase.id);
-  return previous !== null && current !== null && previous === current;
+export function createWorkbenchRunInputHash(args: {
+  evalSnapshot: WorkbenchEvalSnapshot;
+  skillBundle: WorkbenchSkillBundleSnapshot;
+  agent: WorkbenchAgent;
+  runtimeCase: WorkbenchEvalCaseRuntime;
+  sample: number;
+}): string {
+  return workbenchRunInputHash({
+    evalSnapshot: args.evalSnapshot,
+    target: { skillBundle: args.skillBundle, agent: args.agent },
+    runtimeCase: args.runtimeCase,
+    sample: args.sample,
+  });
 }
 
-function evalCaseExecutionFingerprint(evalSnapshot: WorkbenchEvalSnapshot, caseId: string): string | null {
-  const runtimeCase = evalSnapshot.cases.find((entry) => entry.id === caseId);
-  if (!runtimeCase) {
-    return null;
-  }
-  const caseRoot = evalSnapshotCaseRoot(runtimeCase);
-  const caseFiles = runtimeCase.files.map((file) => {
-    const localPath = normalizeEvalCaseLocalPath(file.path, caseRoot);
-    const content = localPath === CASE_DESCRIPTOR_FILE
-      ? comparableEvalCaseDescriptorContent(file.content)
-      : file.content;
-    return {
-      ...copyFile(file),
-      path: normalizeRelativePath(`${CASES_DIR}/${runtimeCase.id}/${localPath}`),
-      content,
-    };
+function workbenchRunInputHash(args: {
+  evalSnapshot: WorkbenchEvalSnapshot;
+  target: WorkbenchEvaluationRunTarget;
+  runtimeCase: WorkbenchEvalCaseRuntime;
+  sample: number;
+}): string {
+  return hashJson({
+    schema: "workbench.run-input.v1",
+    skillBundleHash: args.target.skillBundle.hash,
+    agentHash: hashJson(args.target.agent),
+    command: resolveDockerEvalCommand(args.target.agent, args.runtimeCase),
+    caseId: args.runtimeCase.id,
+    sample: args.sample,
+    prompt: skillEvalCasePrompt(args.runtimeCase),
+    caseDescriptor: comparableRunCaseDescriptorContent(args.runtimeCase.content),
+    caseFilesHash: hashFiles(skillEvalRunVisibleCaseFiles(args.target.agent, args.runtimeCase)),
+    environmentFilesHash: hashFiles(evalSnapshotEnvironmentFiles(args.evalSnapshot)),
   });
-  const environmentFiles = evalSnapshot.files
+}
+
+export function createWorkbenchGradeInputHash(args: {
+  evalSnapshot: WorkbenchEvalSnapshot;
+  runtimeCase: WorkbenchEvalCaseRuntime;
+  agent: WorkbenchAgent;
+  subjectJobId: string;
+  subjectInputHash: string;
+}): string {
+  return workbenchGradeInputHash(args);
+}
+
+function workbenchGradeInputHash(args: {
+  evalSnapshot: WorkbenchEvalSnapshot;
+  runtimeCase: WorkbenchEvalCaseRuntime;
+  agent: WorkbenchAgent;
+  subjectJobId: string;
+  subjectInputHash: string;
+}, strict = true): string {
+  const resolved = skillEvalCaseGradePlan({
+    evalSnapshot: args.evalSnapshot,
+    runtimeCase: args.runtimeCase,
+    agent: args.agent,
+    strict,
+  });
+  return hashJson({
+    schema: "workbench.grade-input.v1",
+    subjectJobId: args.subjectJobId,
+    subjectInputHash: args.subjectInputHash,
+    caseId: args.runtimeCase.id,
+    agentHash: hashJson(args.agent),
+    adapter: resolved.adapter,
+    config: resolved.config,
+    sources: resolved.plan.sources,
+    gradeFilesHash: hashFiles(skillEvalGradeVisibleCaseFiles(args.runtimeCase)),
+    environmentFilesHash: hashFiles(evalSnapshotEnvironmentFiles(args.evalSnapshot)),
+  });
+}
+
+function evalSnapshotEnvironmentFiles(evalSnapshot: WorkbenchEvalSnapshot): SurfaceSnapshotFile[] {
+  return evalSnapshot.files
     .filter((file) => normalizeRelativePath(file.path).startsWith(`${ENVIRONMENT_DIR}/`))
-    .map(copyFile);
-  return hashFiles([...caseFiles, ...environmentFiles].sort((left, right) => left.path.localeCompare(right.path)));
+    .map(copyFile)
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function skillEvalRunVisibleCaseFiles(
+  agent: WorkbenchAgent,
+  runtimeCase: WorkbenchEvalCaseRuntime,
+): SurfaceSnapshotFile[] {
+  return (skillEvalEngineCaseFiles(agent, runtimeCase).public ?? [])
+    .map((file) => {
+      const normalized = normalizeRelativePath(file.path);
+      return {
+        ...copyFile(file),
+        path: normalized,
+        content: normalized === CASE_DESCRIPTOR_FILE
+          ? comparableRunCaseDescriptorContent(file.content)
+          : file.content,
+      };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function skillEvalGradeVisibleCaseFiles(runtimeCase: WorkbenchEvalCaseRuntime): SurfaceSnapshotFile[] {
+  return runtimeCase.files
+    .map((file) => {
+      const normalized = normalizeRelativePath(file.path);
+      return {
+        ...copyFile(file),
+        path: normalized,
+        content: normalized === CASE_DESCRIPTOR_FILE
+          ? comparableGradeCaseDescriptorContent(file.content)
+          : file.content,
+      };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function evalSnapshotCaseRoot(runtimeCase: WorkbenchEvalCaseSnapshot): string {
@@ -5203,6 +4690,27 @@ function evalSnapshotCaseRoot(runtimeCase: WorkbenchEvalCaseSnapshot): string {
     return "";
   }
   return normalizeRelativePath(path.posix.dirname(normalized));
+}
+
+function evalRuntimeCaseFromSnapshot(snapshotCase: WorkbenchEvalCaseSnapshot): WorkbenchEvalCaseRuntime {
+  const caseRoot = evalSnapshotCaseRoot(snapshotCase);
+  const files = snapshotCase.files
+    .map((file) => ({
+      ...copyFile(file),
+      path: normalizeEvalCaseLocalPath(file.path, caseRoot),
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const descriptor = files.find((file) => normalizeRelativePath(file.path) === CASE_DESCRIPTOR_FILE);
+  const content = descriptor?.content ?? "";
+  const record = parseCaseSnapshotRecord(content);
+  return {
+    id: snapshotCase.id,
+    path: caseRoot ? path.posix.basename(caseRoot) : snapshotCase.id,
+    content,
+    files,
+    ...(snapshotCase.command ? { command: snapshotCase.command } : {}),
+    ...(caseSmokeFromRecord(record) ? { smoke: true } : {}),
+  };
 }
 
 function normalizeEvalCaseLocalPath(filePath: string, caseRoot: string): string {
@@ -5219,10 +4727,21 @@ function normalizeEvalCaseLocalPath(filePath: string, caseRoot: string): string 
   return normalized;
 }
 
-function comparableEvalCaseDescriptorContent(content: string): string {
-  const record = parseCaseSnapshotRecord(content);
+function comparableRunCaseDescriptorContent(content: string): string {
+  const record = comparableCaseDescriptorRecord(content);
   delete record.grade;
   return `${YAML.stringify(canonicalize(record)).trimEnd()}\n`;
+}
+
+function comparableGradeCaseDescriptorContent(content: string): string {
+  const record = comparableCaseDescriptorRecord(content);
+  return `${YAML.stringify(canonicalize(record)).trimEnd()}\n`;
+}
+
+function comparableCaseDescriptorRecord(content: string): Record<string, unknown> {
+  const record = parseCaseSnapshotRecord(content);
+  delete record.smoke;
+  return record;
 }
 
 function reusableExecutionSubjectForPlannedJob(args: {
@@ -5231,7 +4750,7 @@ function reusableExecutionSubjectForPlannedJob(args: {
   evalSnapshot: WorkbenchEvalSnapshot;
   plannedJob: PlannedWorkbenchEvaluationJob;
 }): WorkbenchGradeSubject | undefined {
-  return reusableExecutionSubjectForTarget({
+  return selectReusableWorkbenchExecutionSubject({
     state: args.state,
     evalSnapshot: args.evalSnapshot,
     target: {
@@ -5243,20 +4762,36 @@ function reusableExecutionSubjectForPlannedJob(args: {
   });
 }
 
-function latestReusableTerminalGradeJobForExecution(args: {
+export function selectReusableWorkbenchGradeJob(args: {
   state: WorkbenchProjectState;
-  evalHash: string;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  runtimeCase: WorkbenchEvalCaseRuntime;
+  agent: WorkbenchAgent;
   executionJob: WorkbenchJob;
 }): WorkbenchJob | undefined {
+  if (!skillEvalCaseHasConcreteGrader({
+    evalSnapshot: args.evalSnapshot,
+    runtimeCase: args.runtimeCase,
+    agent: args.agent,
+  })) {
+    return undefined;
+  }
+  const inputHash = workbenchGradeInputHash({
+    evalSnapshot: args.evalSnapshot,
+    runtimeCase: args.runtimeCase,
+    agent: args.agent,
+    subjectJobId: args.executionJob.id,
+    subjectInputHash: args.executionJob.inputHash,
+  }, false);
   return args.state.jobs
     .filter((job) =>
       job.role === "grade" &&
       isReusableTerminalGradeStatus(job.status) &&
-      job.evalHash === args.evalHash &&
       job.skillBundleHash === args.executionJob.skillBundleHash &&
       job.agentHash === args.executionJob.agentHash &&
       job.caseId === args.executionJob.caseId &&
       job.sample === args.executionJob.sample &&
+      job.inputHash === inputHash &&
       (job.dependencies ?? []).some((dependency) => dependency.jobId === args.executionJob.id)
     )
     .sort(compareJobsNewestFirst)[0];
@@ -5292,32 +4827,25 @@ function completedEvaluationJobFromGradeSubject(args: {
     .filter((file) => !normalizeRelativePath(file.path).startsWith("workspace/"))
     .map(copyFile));
   const workspaceFiles = stripSurfaceFilePrefix("workspace", args.subject.artifact.files);
-  const remoteJob: RemoteWorkbenchJob = {
-    id: args.subject.job.id,
+  const remoteJob: WorkbenchExecutionJob = {
+    ...args.subject.job,
     projectId: "local",
-    runId: args.subject.job.runId,
-    versionId: args.subject.job.versionId,
-    kind: "execute",
     status: "succeeded",
     attempt: 1,
-    createdAt: args.subject.job.createdAt,
     updatedAt: args.subject.job.finishedAt ?? args.subject.job.startedAt ?? args.subject.job.createdAt,
-    ...(args.subject.job.startedAt ? { startedAt: args.subject.job.startedAt } : {}),
-    ...(args.subject.job.finishedAt ? { finishedAt: args.subject.job.finishedAt } : {}),
-    input: {
-      execution: jsonRecord(input.job.input).execution ?? null,
-    } as unknown as Json,
-    output: {
+    input: input.job.input,
+    output: toJson({
       ok: true,
-      files: outputFiles as unknown as Json,
-      workspaceFiles: workspaceFiles as unknown as Json,
+      files: toJson(outputFiles),
+      workspaceFiles: toJson(workspaceFiles),
       result: args.subject.trace.result,
-    } as unknown as Json,
+    }),
   };
   return {
     remoteJob,
     plannedJob: {
-      role: "execute",
+      role: "run",
+      inputHash: args.subject.job.inputHash,
       input,
       runtimeCase: args.subject.runtimeCase,
       sample: args.subject.job.sample,
@@ -5354,28 +4882,8 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
   const kind = normalizeWorkbenchCaseRunKind(options.kind, "eval");
   await requireInitialized(root);
   const state = await loadStateReadOnlyWithRetry(root);
-  const source = await planWorkbenchLaunchSource(root, state, {
-    ref: options.version,
-    commit: false,
-    message: SOURCE_SNAPSHOT_MESSAGE,
-  });
-  const version = source.version;
-  const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
-  const runtimeSkillSources = await runtimeSkillSourceOptionsForRoot(root, state);
-  const runtime = await createWorkbenchVersionRuntimeSnapshot(version, {
-    controlRoot: root,
-    skill: options.skill,
-    agent: options.agent,
-    authToken: options.authToken,
-    selectionRemediationCommand: "eval",
-    ...runtimeSkillSources,
-    ...runtimeAgents,
-  });
-  for (const agent of runtime.selectedAgents) {
-    assertSkillEvalAgentSupported(agent);
-  }
-  const runtimeCases = runtime.cases;
-  const selectedCases = selectEvalCasesForRun(runtimeCases, options.caseIds, options.selectedSamples);
+  const context = await resolveWorkbenchEvalContext(root, state, options, "eval", false);
+  const { source, version, runtime, runtimeCases, selectedCases, samples, targets } = context;
   const draftCaseIssues = runtimeCases.length === 0
     ? []
     : draftCaseReadinessIssues(selectedCases, kind, runtime.evalSnapshot);
@@ -5386,10 +4894,6 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
     ? readinessFromIssues([noEvalCasesReadinessIssue(), ...localReadiness.issues])
     : readinessFromIssues([...draftCaseIssues, ...localReadiness.issues]);
   const adapterAuthTargets = uniqueLocalAdapterAuthTargets(runtime.selectedAgents.flatMap(localAdapterAuthTargetsForAgent));
-  const samples = options.samples ?? 1;
-  const targets = runtime.skillBundles.flatMap((skillBundle) =>
-    runtime.selectedAgents.map((agent): WorkbenchEvaluationRunTarget => ({ skillBundle, agent }))
-  );
   const cached = options.cloud === true
     ? { runIds: [], jobIds: [] }
     : cachedEvalPreviewEvidence({
@@ -5415,10 +4919,10 @@ export async function previewWorkbenchEval(options: WorkbenchEvalOptions & { clo
     samples,
     cachedRunIds: cached.runIds,
     cachedJobIds: cached.jobIds,
-    ...(runtime.environmentDockerfile ? {
+    ...(context.environmentDockerfile ? {
       environment: {
         path: path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile"),
-        dockerfile: runtime.environmentDockerfile,
+        dockerfile: context.environmentDockerfile,
       },
     } : {}),
     adapterAuthTargets,
@@ -5467,9 +4971,11 @@ function cachedEvalPreviewEvidence(args: {
       samples: args.samples,
     });
     const gradeJobs = subjects.flatMap((subject) =>
-      latestReusableTerminalGradeJobForExecution({
+      selectReusableWorkbenchGradeJob({
         state: args.state,
-        evalHash: args.evalSnapshot.hash,
+        evalSnapshot: args.evalSnapshot,
+        runtimeCase: subject.runtimeCase,
+        agent: subject.agent,
         executionJob: subject.job,
       }) ?? []
     );
@@ -5498,7 +5004,7 @@ function cachedEvalPreviewEvidence(args: {
 }
 
 export async function prepareWorkbenchCloudEvalRequest(
-  options: Omit<Pick<WorkbenchEvalOptions, "dir" | "authToken" | "skill" | "agent" | "caseIds" | "samples" | "kind" | "rerun">, "kind"> & {
+  options: Omit<Pick<WorkbenchEvalOptions, "dir" | "authToken" | "evalHash" | "skill" | "agent" | "caseIds" | "samples" | "kind" | "rerun">, "kind"> & {
     kind?: WorkbenchCaseRunKind;
   } = {},
 ): Promise<WorkbenchPreparedCloudEvalRequest> {
@@ -5515,51 +5021,45 @@ export async function prepareWorkbenchCloudEvalRequest(
     const state = await loadState(root);
     const version = await resolveOrCreateRunVersion(root, state);
     await saveState(root, state);
-    const phases = phasesForRunKind(kind);
     return {
       kind: "eval",
       variant: "cloud",
+      ...(options.evalHash ? { evalHash: options.evalHash } : {}),
       caseIds: [...(options.caseIds ?? [])],
       targets: [{
         versionId: version.id,
         ...(options.skill !== undefined ? { skill: options.skill } : {}),
         ...(options.agent !== undefined ? { agent: options.agent } : {}),
       }],
-      phases,
-      grader: phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
+      steps: stepsForRunKind(kind),
       samples: options.samples ?? 1,
       ...(options.rerun === true ? { rerun: true } : {}),
     };
   });
 }
 
-export function resolveWorkbenchRunRetryPlan(
+export function resolveWorkbenchRunRetryRequest(
   snapshot: WorkbenchInspectionSnapshot,
   run: WorkbenchRun,
-): WorkbenchRunRetryPlan {
-  if (run.kind === "live") {
-    throw retryIncompleteError(run, `Run ${run.id} is a live session and cannot be retried.`);
-  }
+): WorkbenchOperationRequest {
   const plan = retryOperationPlanForRun(run);
-  const location = plan.variant;
+  const evalHash = retryEvalHash(run, plan);
   const samples = positiveRetryInteger(run, plan.samples, "operationPlan.samples");
   if (samples === undefined) {
     throw retryIncompleteError(run, `Run ${run.id} does not record operationPlan.samples.`);
   }
   if (run.kind !== "improve") {
-    const skillName = retrySelection(run, plan.skills, "skills");
-    const agentName = retrySelection(run, plan.agents, "agents");
     const versionId = retryVersionId(run, plan);
     requireRetryVersion(snapshot, versionId, run);
     return {
-      kind: run.kind,
-      location,
-      ...(run.remoteName ? { remoteName: run.remoteName } : {}),
-      versionId,
-      skillName,
-      agentName,
-      ...(plan.caseIds ? { caseIds: [...plan.caseIds] } : {}),
+      kind: "eval",
+      variant: plan.variant,
+      evalHash,
+      caseIds: plan.caseIds ? [...plan.caseIds] : [],
+      targets: retryOperationTargets(snapshot, run, plan, versionId),
+      steps: retryOperationSteps(run, plan),
       samples,
+      rerun: true,
       retryOfRunId: run.id,
     };
   }
@@ -5569,11 +5069,14 @@ export function resolveWorkbenchRunRetryPlan(
   requireRetryVersion(snapshot, baseVersionId, run);
   return {
     kind: "improve",
-    location,
-    ...(run.remoteName ? { remoteName: run.remoteName } : {}),
-    baseVersionId,
-    skillName,
-    agentName,
+    variant: plan.variant,
+    versionId: baseVersionId,
+    evalHash,
+    target: {
+      versionId: baseVersionId,
+      skill: skillName,
+      agent: agentName,
+    },
     samples,
     budget: positiveRetryInteger(run, plan.budget, "operationPlan.budget") ?? 1,
     retryOfRunId: run.id,
@@ -5598,19 +5101,71 @@ function retryVersionId(run: WorkbenchRun, plan: WorkbenchOperationPlanSummary):
   throw retryIncompleteError(run, `Run ${run.id} does not record operationPlan.versionId.`);
 }
 
+function retryEvalHash(run: WorkbenchRun, plan: WorkbenchOperationPlanSummary): string {
+  if (plan.evalHash) {
+    return plan.evalHash;
+  }
+  throw retryIncompleteError(run, `Run ${run.id} does not record operationPlan.evalHash.`);
+}
+
+function retryOperationSteps(run: WorkbenchRun, plan: WorkbenchOperationPlanSummary): WorkbenchOperationStep[] {
+  if ((plan.steps?.length ?? 0) > 0) {
+    return uniqueOperationSteps(plan.steps ?? []);
+  }
+  throw retryIncompleteError(run, `Run ${run.id} does not record operationPlan.steps.`);
+}
+
+function retryOperationTargets(
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+  plan: WorkbenchOperationPlanSummary,
+  versionId: string,
+): WorkbenchOperationTarget[] {
+  const targetsFromJobs = retryOperationTargetsFromJobs(snapshot, run, versionId);
+  if (targetsFromJobs.length > 0) {
+    return targetsFromJobs;
+  }
+  const targets = plan.targets?.length ? plan.targets : operationTargetsFromPlan(plan);
+  if (targets.length === 0) {
+    throw retryIncompleteError(run, `Run ${run.id} does not record operationPlan.targets.`);
+  }
+  return targets.map((target, index) => ({
+    ...(target.skill ?? plan.skills[index] ?? plan.skills[0] ? { skill: target.skill ?? plan.skills[index] ?? plan.skills[0] } : {}),
+    versionId: target.versionId ?? versionId,
+    ...(target.agent ?? plan.agents[index] ?? plan.agents[0] ? { agent: target.agent ?? plan.agents[index] ?? plan.agents[0] } : {}),
+  }));
+}
+
+function retryOperationTargetsFromJobs(
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+  versionId: string,
+): WorkbenchOperationTarget[] {
+  const targets = new Map<string, WorkbenchOperationTarget>();
+  for (const job of snapshot.jobs) {
+    if (!run.jobIds.includes(job.id)) {
+      continue;
+    }
+    if (!job.skillName || !job.agentName) {
+      continue;
+    }
+    const key = `${job.skillName}\0${job.agentName}`;
+    if (!targets.has(key)) {
+      targets.set(key, {
+        skill: job.skillName,
+        versionId,
+        agent: job.agentName,
+      });
+    }
+  }
+  return [...targets.values()];
+}
+
 function retrySingleSelection(run: WorkbenchRun, values: readonly string[], label: "skills" | "agents"): string {
   if (values.length === 1 && values[0]) {
     return values[0];
   }
   throw retryIncompleteError(run, `Run ${run.id} does not record exactly one operationPlan.${label} entry.`);
-}
-
-function retrySelection(run: WorkbenchRun, values: readonly string[], label: "skills" | "agents"): string {
-  const selected = uniqueStrings(values);
-  if (selected.length > 0) {
-    return selected.join(",");
-  }
-  throw retryIncompleteError(run, `Run ${run.id} does not record operationPlan.${label}.`);
 }
 
 function positiveRetryInteger(run: WorkbenchRun, value: number | undefined, label: string): number | undefined {
@@ -5632,106 +5187,65 @@ function requireRetryVersion(snapshot: WorkbenchInspectionSnapshot, versionId: s
 
 function retryIncompleteError(run: WorkbenchRun, message: string): WorkbenchCodedError {
   return new WorkbenchCodedError("run_retry_incomplete", message, {
-    remediation: run.kind === "live" ? `workbench show ${run.id}` : `workbench ${run.kind}`,
+    remediation: WORKBENCH_SELECTOR_INVOCATIONS[run.kind],
     subject: { runId: run.id },
     exitCode: 1,
   });
 }
 
-export async function evalWorkbenchProjectState(
+async function resolveWorkbenchImproveContext(
+  root: string,
   state: WorkbenchProjectState,
-  options: WorkbenchStateEvalOptions = {},
-): Promise<{ state: WorkbenchProjectState; runs: WorkbenchRun[] }> {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-cloud-eval-"));
-  const originalRoot = state.root;
-  try {
-    const workingState = copyStateForRoot(state, tempRoot);
-    const versionRef = options.version ?? workingState.refs.current;
-    const version = versionRef ? resolveVersion(workingState, versionRef) : workingState.versions[0];
-    if (!version) {
-      throw new WorkbenchUserError("Cannot run eval for a skill with no version.");
-    }
-    await materializeSkillFiles(tempRoot, version.files);
-    await materializeWorkbenchFiles(tempRoot, workingState, options.evalHash);
-    if (options.evalHash && (await readEvalSnapshot(tempRoot)).hash !== options.evalHash) {
-      throw new WorkbenchUserError(`Eval snapshot ${options.evalHash} is not authored by version ${version.id}.`);
-    }
-    workingState.remotes = await readWorkbenchRemotesFile(tempRoot);
-    workingState.refs.current = version.id;
-    await saveState(tempRoot, workingState);
-    const runs = await evalWorkbenchSkill({
-      dir: tempRoot,
-      authToken: options.authToken,
-      version: version.id,
-      skill: options.skill,
-      agent: options.agent,
-      samples: options.samples,
-      kind: options.kind,
-      operationTargets: options.operationTargets,
-      operationPhases: options.operationPhases,
-      operationGrader: options.operationGrader,
-      gradeOfRunId: options.gradeOfRunId,
-      parentRunId: options.parentRunId,
-      location: options.location,
-      remoteName: options.remoteName,
-      retryOfRunId: options.retryOfRunId,
-      rerun: options.rerun === true,
-      caseIds: options.caseIds,
-      selectedSamples: options.selectedSamples,
-    });
-    const nextState = await loadState(tempRoot);
-    return {
-      state: copyStateForRoot(nextState, originalRoot),
-      runs,
-    };
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true });
+  options: Pick<WorkbenchImproveOptions, "version" | "skill" | "agent" | "authToken" | "evidenceTraceIds">,
+) {
+  const source = await planWorkbenchLaunchSource(root, state, {
+    ref: options.version,
+    commit: false,
+    message: PACKAGE_SNAPSHOT_MESSAGE,
+  });
+  const runtimeSelection = await runtimeSelectionOptionsForRoot(root, state);
+  const runtime = await createWorkbenchVersionRuntimeSnapshot(source.version, {
+    controlRoot: root,
+    skill: options.skill,
+    agent: options.agent,
+    authToken: options.authToken,
+    selectionRemediationCommand: "improve",
+    ...runtimeSelection,
+  });
+  const { skillBundle, evalAgent } = requireWorkbenchImproveTarget(runtime, { requireAdapter: false });
+  if (runtime.cases.length === 0) {
+    throw noEvalCasesError();
   }
-}
-
-export async function improveWorkbenchProjectState(
-  state: WorkbenchProjectState,
-  options: WorkbenchStateImproveOptions = {},
-): Promise<{ state: WorkbenchProjectState; runs: WorkbenchRun[] }> {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-cloud-improve-"));
-  const originalRoot = state.root;
-  try {
-    const workingState = copyStateForRoot(state, tempRoot);
-    const versionRef = options.version ?? workingState.refs.current;
-    const version = versionRef ? resolveVersion(workingState, versionRef) : workingState.versions[0];
-    if (!version) {
-      throw new WorkbenchUserError("Cannot run improve for a skill with no version.");
-    }
-    await materializeSkillFiles(tempRoot, version.files);
-    await materializeWorkbenchFiles(tempRoot, workingState, options.evalHash);
-    if (options.evalHash && (await readEvalSnapshot(tempRoot)).hash !== options.evalHash) {
-      throw new WorkbenchUserError(`Eval snapshot ${options.evalHash} is not authored by version ${version.id}.`);
-    }
-    workingState.remotes = await readWorkbenchRemotesFile(tempRoot);
-    workingState.refs.current = version.id;
-    await saveState(tempRoot, workingState);
-    const result = await improveWorkbenchSkill({
-      dir: tempRoot,
-      authToken: options.authToken,
-      version: version.id,
-      ...(options.skill !== undefined ? { skill: options.skill } : {}),
-      ...(options.agent !== undefined ? { agent: options.agent } : {}),
-      ...(options.budget !== undefined ? { budget: options.budget } : {}),
-      ...(options.samples !== undefined ? { samples: options.samples } : {}),
-      ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
-      ...(options.location !== undefined ? { location: options.location } : {}),
-      ...(options.remoteName !== undefined ? { remoteName: options.remoteName } : {}),
-      ...(options.retryOfRunId !== undefined ? { retryOfRunId: options.retryOfRunId } : {}),
-      ...(options.evidenceTraceIds !== undefined ? { evidenceTraceIds: options.evidenceTraceIds } : {}),
+  const historicalTraces = improvementEvidenceTracesForImproveRequest(state, {
+    versionId: source.version.id,
+    skillName: skillBundle.skillName,
+    skillBundleHash: skillBundle.hash,
+    evalHash: runtime.evalSnapshot.hash,
+    agent: evalAgent,
+    traceIds: options.evidenceTraceIds,
+  });
+  const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
+  if (improvementEvidence.length === 0) {
+    throw workbenchImproveEvidenceRequirementError({
+      state,
+      versionId: source.version.id,
+      skillName: skillBundle.skillName,
+      evalHash: runtime.evalSnapshot.hash,
+      cases: runtime.cases,
+      agentName: evalAgent.name,
+      preserveAgentSelection: options.agent !== undefined,
     });
-    const nextState = await loadState(tempRoot);
-    return {
-      state: copyStateForRoot(nextState, originalRoot),
-      runs: [result.run],
-    };
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true });
   }
+  return {
+    source,
+    base: source.version,
+    runtime,
+    runtimeSelection,
+    skillBundle,
+    evalAgent,
+    historicalTraces,
+    improvementEvidence,
+  };
 }
 
 export async function prepareWorkbenchCloudImproveRequest(
@@ -5741,50 +5255,12 @@ export async function prepareWorkbenchCloudImproveRequest(
   return withWorkbenchProjectLockIfInitialized(root, async () => {
     await requireInitialized(root);
     const state = await loadState(root);
-    let base = (await planWorkbenchLaunchSource(root, state, {
-      commit: false,
-      message: SOURCE_SNAPSHOT_MESSAGE,
-    })).version;
-    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
-    const runtimeSkillSources = await runtimeSkillSourceOptionsForRoot(root, state);
-    const runtime = await createWorkbenchVersionRuntimeSnapshot(base, {
-      controlRoot: root,
-      skill: options.skill,
-      agent: options.agent,
-      authToken: options.authToken,
-      selectionRemediationCommand: "improve",
-      ...runtimeSkillSources,
-      ...runtimeAgents,
-    });
-    const { skillBundle, evalAgent } = requireWorkbenchImproveTarget(runtime, { requireAdapter: false });
-    if (runtime.cases.length === 0) {
-      throw noEvalCasesError();
-    }
-    const historicalTraces = improvementEvidenceTracesForImproveRequest(state, {
-      versionId: base.id,
-      skillName: skillBundle.skillName,
-      skillBundleHash: skillBundle.hash,
-      evalHash: runtime.evalSnapshot.hash,
-      agent: evalAgent,
-      traceIds: options.evidenceTraceIds,
-    });
-    const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
-    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
+    const { evalAgent } = await resolveWorkbenchImproveContext(root, state, options);
+    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent)) {
       throw workbenchSkillImproveAdapterRequirementError(evalAgent, state.agents);
     }
-    if (improvementEvidence.length === 0) {
-      throw workbenchImproveEvidenceRequirementError({
-        state,
-        versionId: base.id,
-        skillName: skillBundle.skillName,
-        evalHash: runtime.evalSnapshot.hash,
-        cases: runtime.cases,
-        agentName: evalAgent.name,
-        preserveAgentSelection: options.agent !== undefined,
-      });
-    }
     requireWorkbenchImproveAgentAdapter(evalAgent);
-    base = await resolveOrCreateRunVersion(root, state);
+    const base = await resolveOrCreateRunVersion(root, state);
     await saveState(root, state);
     return {
       kind: "improve",
@@ -5800,22 +5276,6 @@ export async function prepareWorkbenchCloudImproveRequest(
       ...(options.evidenceTraceIds !== undefined ? { evidenceTraceIds: [...options.evidenceTraceIds] } : {}),
     };
   });
-}
-
-export async function listWorkbenchProjectStateEvalCases(
-  state: WorkbenchProjectState,
-): Promise<WorkbenchCaseRecord[]> {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-cloud-cases-"));
-  try {
-    await materializeWorkbenchFiles(tempRoot, copyStateForRoot(state, tempRoot));
-    return (await readEvalCases(tempRoot)).map((entry) => ({
-      id: entry.id,
-      path: entry.path,
-      content: entry.content,
-    }));
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true });
-  }
 }
 
 export async function listWorkbenchProjectStateEvalRuntimeCases(
@@ -5834,6 +5294,40 @@ export async function listWorkbenchProjectStateEvalRuntimeCases(
   }
 }
 
+function resolveSkillRuntimeEnvironment(
+  agent: WorkbenchAgent,
+  dockerfile: string,
+  manifests: readonly WorkbenchAdapterManifest[],
+  imageRef?: string,
+) {
+  const environmentDockerfile = composeSkillRuntimeDockerfileWithAdapterManifests({
+    dockerfile: requireSkillEvalEnvironmentDockerfileContent(dockerfile),
+    manifests,
+  });
+  const plannedEnvironment = skillEvalRuntimeSpec(agent, environmentDockerfile);
+  const environment = imageRef
+    ? { ...plannedEnvironment, dockerfile: dockerRuntimeImageRef(imageRef) }
+    : plannedEnvironment;
+  return {
+    environment,
+    runtime: environment.dockerfile.startsWith("dockerfile://")
+      ? {
+          environmentDockerfile,
+          environmentVersion: {
+            id: `skill_env_${hashJson(environmentDockerfile).slice(0, 12)}`,
+            imageRef: environment.dockerfile,
+            sourceHash: hashJson(environmentDockerfile),
+            spec: {
+              base: "dockerfile" as const,
+              resources: runtimeResourcesForSkillEval(agent),
+              network: runtimeNetworkForSkillEval(agent).egress === "open" ? "on" as const : "off" as const,
+            },
+          },
+        }
+      : {},
+  };
+}
+
 export function createWorkbenchSkillEvalRuntimeInput(
   args: WorkbenchSkillEvalRuntimeInputArgs,
 ): WorkbenchExecutionRuntimeInput {
@@ -5842,23 +5336,18 @@ export function createWorkbenchSkillEvalRuntimeInput(
   assertSkillEvalAgentSupported(args.agent);
   const createdAt = args.createdAt ?? now();
   const command = resolveDockerEvalCommand(args.agent, args.runtimeCase);
-  const score = skillEvalGradeInvocation({
+  const score = skillEvalRuntimeGradeInvocation({
     evalSnapshot: args.evalSnapshot,
     agent: args.agent,
     runtimeCase: args.runtimeCase,
   });
   const adapterManifests = skillEvalAdapterManifestsForAgent(args.agent, score);
-  const environmentDockerfile = composeSkillRuntimeDockerfileWithAdapterManifests({
-    dockerfile: requireSkillEvalEnvironmentDockerfileContent(args.environmentDockerfile),
-    manifests: adapterManifests,
-  });
-  const plannedEnvironment = skillEvalRuntimeSpec(args.agent, environmentDockerfile);
-  const environment = args.environmentImageRef
-    ? {
-        ...plannedEnvironment,
-        dockerfile: dockerRuntimeImageRef(args.environmentImageRef),
-      }
-    : plannedEnvironment;
+  const { environment, runtime } = resolveSkillRuntimeEnvironment(
+    args.agent,
+    args.environmentDockerfile,
+    adapterManifests,
+    args.environmentImageRef,
+  );
   const providerBacked = isProviderBackedSkillEvalAgent(args.agent);
   const spec = genericSpecForSkillEval(args.agent, environment, command, score);
   const engineCaseFiles = skillEvalEngineCaseFiles(args.agent, args.runtimeCase);
@@ -5904,10 +5393,34 @@ export function createWorkbenchSkillEvalRuntimeInput(
   if (!plannedJob) {
     throw new Error(`Failed to plan skill eval execution job for case ${args.runtimeCase.id}.`);
   }
-  const plannedInput = jsonRecord(plannedJob.input);
-  const job: RemoteWorkbenchJob = {
+  const plannedInput = readWorkbenchPlannedExecutionJobInput(plannedJob);
+  const job: WorkbenchExecutionJob = {
     ...plannedJob,
     id: args.jobId,
+    kind: "eval",
+    role: "run",
+    inputHash: createWorkbenchRunInputHash({
+      evalSnapshot: args.evalSnapshot,
+      skillBundle: {
+        hash: skillBundleHash,
+        skillName,
+        entryName: skillName,
+        source: { name: skillName, kind: "local", path: "." },
+        files: args.versionFiles.map(copyFile),
+        includedSkills: [],
+        createdAt,
+      },
+      agent: args.agent,
+      runtimeCase: args.runtimeCase,
+      sample: args.sample,
+    }),
+    skillName,
+    skillBundleHash,
+    evalHash: args.evalHash,
+    agentName: args.agent.name,
+    agentHash: hashJson(args.agent),
+    caseId: args.runtimeCase.id,
+    sample: args.sample,
     status: "queued",
     attempt: args.attempt ?? 0,
     createdAt,
@@ -5924,26 +5437,12 @@ export function createWorkbenchSkillEvalRuntimeInput(
       smoke: args.runtimeCase.smoke === true,
       sampleIndex: args.sample,
       skillEval: true,
-    } as unknown as Json,
+    },
   };
   return {
     job,
     spec,
-    ...(environment.dockerfile.startsWith("dockerfile://") && environmentDockerfile
-      ? {
-          environmentDockerfile,
-          environmentVersion: {
-            id: `skill_env_${hashJson(environmentDockerfile).slice(0, 12)}`,
-            imageRef: environment.dockerfile,
-            sourceHash: hashJson(environmentDockerfile),
-            spec: {
-              base: "dockerfile",
-              resources: runtimeResourcesForSkillEval(args.agent),
-              network: runtimeNetworkForSkillEval(args.agent).egress === "open" ? "on" : "off",
-            },
-          },
-        }
-      : {}),
+    ...runtime,
     baseFiles: args.versionFiles.map(copyFile),
     engineResolveFiles: (engineCase.files.public ?? []).map(copyFile),
     engineCases: [engineCase],
@@ -5954,9 +5453,12 @@ export function createWorkbenchSkillEvalRuntimeInput(
 export function createWorkbenchSkillEvalGradeRuntimeInput(
   args: WorkbenchSkillEvalGradeRuntimeInputArgs,
 ): WorkbenchExecutionRuntimeInput {
+  // Run-only planning tolerates an unfinished grader so output can be inspected
+  // before judgment policy is authored. A grade execution never does.
+  skillEvalGradeInvocation(args);
   const input = createWorkbenchSkillEvalRuntimeInput(args);
   const execution = readWorkbenchExecutionSpec(input.job);
-  const jobInput = jsonRecord(input.job.input);
+  const jobInput = readWorkbenchPlannedExecutionJobInput(input.job);
   const subjectOutputFiles = normalizeSubjectOutputFiles(args.subject.artifact.files
     .filter((file) => !normalizeRelativePath(file.path).startsWith("workspace/"))
     .map(copyFile));
@@ -5979,7 +5481,7 @@ export function createWorkbenchSkillEvalGradeRuntimeInput(
         dependsOn: [args.subject.job.id],
         subjectJobId: args.subject.job.id,
         role: "grade",
-      } as unknown as Json,
+      },
     },
     traceFiles: args.subject.trace.files.map(copyFile),
     runtimeControlOperation: {
@@ -6014,17 +5516,12 @@ export function createWorkbenchSkillImproveRuntimeInput(
     throw workbenchSkillImproveAdapterRequirementError(args.agent);
   }
   const adapterManifests = skillImproveAdapterManifestsForAgent(args.agent, improve.use);
-  const environmentDockerfile = composeSkillRuntimeDockerfileWithAdapterManifests({
-    dockerfile: requireSkillEvalEnvironmentDockerfileContent(args.environmentDockerfile),
-    manifests: adapterManifests,
-  });
-  const plannedEnvironment = skillEvalRuntimeSpec(args.agent, environmentDockerfile);
-  const environment = args.environmentImageRef
-    ? {
-        ...plannedEnvironment,
-        dockerfile: dockerRuntimeImageRef(args.environmentImageRef),
-      }
-    : plannedEnvironment;
+  const { environment, runtime } = resolveSkillRuntimeEnvironment(
+    args.agent,
+    args.environmentDockerfile,
+    adapterManifests,
+    args.environmentImageRef,
+  );
   const spec = genericSpecForSkillImprove(args.agent, environment, improve);
   const engineCase: WorkbenchEngineCase = {
     id: "current",
@@ -6070,10 +5567,27 @@ export function createWorkbenchSkillImproveRuntimeInput(
   if (!plannedJob) {
     throw new Error(`Failed to plan skill improve execution job for ${args.baseVersionId}.`);
   }
-  const plannedInput = jsonRecord(plannedJob.input);
-  const job: RemoteWorkbenchJob = {
+  const plannedInput = readWorkbenchPlannedExecutionJobInput(plannedJob);
+  const job: WorkbenchExecutionJob = {
     ...plannedJob,
     id: args.jobId,
+    kind: "improve",
+    role: "improve",
+    inputHash: hashJson({
+      schema: "workbench.improve-input.v1",
+      baseVersionId: args.baseVersionId,
+      skillBundleHash,
+      evalHash: args.evalHash,
+      agentHash: hashJson(args.agent),
+      traceIds: args.traces.map((trace) => trace.id).sort(),
+    }),
+    skillName,
+    skillBundleHash,
+    evalHash: args.evalHash,
+    agentName: args.agent.name,
+    agentHash: hashJson(args.agent),
+    caseId: "current",
+    sample: 0,
     status: "queued",
     attempt: args.attempt ?? 0,
     createdAt,
@@ -6089,44 +5603,18 @@ export function createWorkbenchSkillImproveRuntimeInput(
       caseId: "current",
       sampleIndex: 0,
       skillImprove: true,
-    } as unknown as Json,
+    },
   };
   return {
     job,
     spec,
-    ...(environment.dockerfile.startsWith("dockerfile://") && environmentDockerfile
-      ? {
-          environmentDockerfile,
-          environmentVersion: {
-            id: `skill_env_${hashJson(environmentDockerfile).slice(0, 12)}`,
-            imageRef: environment.dockerfile,
-            sourceHash: hashJson(environmentDockerfile),
-            spec: {
-              base: "dockerfile",
-              resources: runtimeResourcesForSkillEval(args.agent),
-              network: runtimeNetworkForSkillEval(args.agent).egress === "open" ? "on" : "off",
-            },
-          },
-        }
-      : {}),
+    ...runtime,
     baseFiles: args.baseFiles.map(copyFile),
     traceFiles: skillImproveTraceInputFiles(args.traces),
     engineResolveFiles: [],
     engineCases: [engineCase],
     adapterManifests,
   };
-}
-
-export function workbenchImprovementEvidenceFromTraces(
-  traces: readonly WorkbenchTrace[],
-): string[] {
-  return improvementEvidenceFromTraces(traces);
-}
-
-export function workbenchImprovementEvidenceTraces(
-  traces: readonly WorkbenchTrace[],
-): WorkbenchTrace[] {
-  return improvementEvidenceTraces(traces);
 }
 
 export function workbenchImprovementEvidenceTracesForVersion(
@@ -6152,14 +5640,14 @@ export function workbenchImprovementEvidenceTracesForVersion(
     if (trace.skillName !== options.skillName) {
       return false;
     }
-    if (options.evalHash && !traceEvalHashMatches(state, trace, options.evalHash)) {
+    if (options.evalHash && !traceHashMatches(state, trace, "evalHash", options.evalHash)) {
       return false;
     }
     if (options.agent) {
       if (trace.agentName !== options.agent.name) {
         return false;
       }
-      return traceAgentHashMatches(state, trace, agentHash!);
+      return traceHashMatches(state, trace, "agentHash", agentHash!);
     }
     return true;
   }));
@@ -6227,44 +5715,24 @@ function lineageAncestorVersionIds(state: WorkbenchProjectState, versionId: stri
   return ids;
 }
 
-function traceAgentHashMatches(
+function traceHashMatches(
   state: WorkbenchProjectState,
   trace: WorkbenchTrace,
-  agentHash: string,
+  key: "agentHash" | "evalHash",
+  expected: string,
 ): boolean {
-  if (trace.agentHash) {
-    return trace.agentHash === agentHash;
+  if (trace[key]) {
+    return trace[key] === expected;
   }
   const job = trace.jobId
     ? state.jobs.find((entry) => entry.id === trace.jobId)
     : undefined;
-  if (job?.agentHash) {
-    return job.agentHash === agentHash;
+  if (job?.[key]) {
+    return job[key] === expected;
   }
   const run = state.runs.find((entry) => entry.id === trace.runId);
-  if (run?.agentHash) {
-    return run.agentHash === agentHash;
-  }
-  return false;
-}
-
-function traceEvalHashMatches(
-  state: WorkbenchProjectState,
-  trace: WorkbenchTrace,
-  evalHash: string,
-): boolean {
-  if (trace.evalHash) {
-    return trace.evalHash === evalHash;
-  }
-  const job = trace.jobId
-    ? state.jobs.find((entry) => entry.id === trace.jobId)
-    : undefined;
-  if (job?.evalHash) {
-    return job.evalHash === evalHash;
-  }
-  const run = state.runs.find((entry) => entry.id === trace.runId);
-  if (run?.evalHash) {
-    return run.evalHash === evalHash;
+  if (run?.[key]) {
+    return run[key] === expected;
   }
   return false;
 }
@@ -6297,27 +5765,15 @@ export function workbenchSkillImproveAdapterRequirementMessage(agent: WorkbenchA
   return `Agent ${agent.name} cannot run improve because it has no skill-improvement adapter. Configure the selected agent with an improvement-capable adapter.`;
 }
 
-function providerAgentAuthSetupCommands(adapter: WorkbenchProviderAgentAdapter): string[] {
-  if (adapter === "claude") {
-    return [
-      "claude setup-token",
-      "CLAUDE_CODE_OAUTH_TOKEN=... workbench login claude --method oauth",
-    ];
-  }
-  return [
-    "codex login --device-auth",
-    "workbench login codex --method oauth",
-  ];
+function providerAgentAuthSetupCommands(adapter: string): string[] {
+  return [workbenchProviderAuthSetupCommand(adapter)];
 }
 
-function providerAgentAddCommand(adapter: WorkbenchProviderAgentAdapter, agentName: string): string {
-  if (adapter === "claude") {
-    return `workbench agent add ${agentName} --adapter claude --model sonnet --with auth=default`;
-  }
-  return `workbench agent add ${agentName} --adapter codex --model gpt-5.4-mini --with auth=default`;
+function providerAgentAddCommand(adapter: string, agentName: string): string {
+  return `workbench eval agent add ${agentName} --adapter ${adapter}`;
 }
 
-function providerAgentSetupCommand(adapter: WorkbenchProviderAgentAdapter, agentName: string): string {
+function providerAgentSetupCommand(adapter: string, agentName: string): string {
   return [...providerAgentAuthSetupCommands(adapter), providerAgentAddCommand(adapter, agentName)].join(" && ");
 }
 
@@ -6329,19 +5785,19 @@ export function workbenchSkillImproveAdapterSetupCommands(
   if (configuredImproveAgent) {
     return [
       ...providerImproveAgentAuthSetupCommands(configuredImproveAgent),
-      `workbench eval --agents ${configuredImproveAgent.name} --rerun`,
-      `workbench improve --agents ${configuredImproveAgent.name}`,
+      `workbench eval run --agents ${configuredImproveAgent.name} --rerun`,
+      `workbench skill improve --agents ${configuredImproveAgent.name}`,
     ];
   }
   const adapter = agent.adapter.trim().toLowerCase();
-  if (adapter === "codex" || adapter === "claude") {
+  if (isHarnessBackedSkillEvalAdapter(adapter)) {
     return [...providerAgentAuthSetupCommands(adapter), providerAgentAddCommand(adapter, agent.name)];
   }
   return [
     providerAgentAddCommand("codex", "improver"),
     ...providerAgentAuthSetupCommands("codex"),
-    "workbench eval --agents improver --rerun",
-    "workbench improve --agents improver",
+    "workbench eval run --agents improver --rerun",
+    "workbench skill improve --agents improver",
   ];
 }
 
@@ -6359,7 +5815,7 @@ function configuredImproveAdapterAgent(
 
 function providerImproveAgentAuthSetupCommands(agent: WorkbenchAgent): string[] {
   const adapter = agent.adapter.trim().toLowerCase();
-  return adapter === "codex" || adapter === "claude"
+  return isHarnessBackedSkillEvalAdapter(adapter)
     ? providerAgentAuthSetupCommands(adapter)
     : [];
 }
@@ -6403,67 +5859,31 @@ function workbenchSkillImproveAdapterRequirementError(
 }
 
 export function readWorkbenchSkillImprovementPatchFromRemoteJob(
-  remoteJob: RemoteWorkbenchJob,
+  remoteJob: WorkbenchExecutionJob,
 ): WorkbenchSkillPatch | null {
   const output = asRuntimeRecord(remoteJob.output);
-  if (output.skillPatch !== undefined) {
-    const direct = asRuntimeRecord(output.skillPatch);
-    return normalizeWorkbenchSkillPatchFromRecord(direct);
-  }
-  const operationResults = Array.isArray(output.operationResults)
-    ? output.operationResults
-    : [];
-  for (const entry of [...operationResults].reverse()) {
-    const result = asRuntimeRecord(entry);
-    if (result.operation !== "skill.improve" || result.ok === false) {
-      continue;
-    }
-    if (result.value === undefined) {
-      continue;
-    }
-    const fallback: { summary?: string; feedback?: Json } = {};
-    if (typeof result.summary === "string") {
-      fallback.summary = result.summary;
-    }
-    if (result.feedback !== undefined && isJsonPayload(result.feedback)) {
-      fallback.feedback = result.feedback;
-    }
-    return normalizeWorkbenchSkillPatchFromRecord(asRuntimeRecord(result.value), fallback);
-  }
-  return null;
+  return output.skillPatch === undefined
+    ? null
+    : normalizeWorkbenchSkillPatchFromRecord(asRuntimeRecord(output.skillPatch));
 }
 
 function normalizeWorkbenchSkillPatchFromRecord(
   record: Record<string, unknown>,
-  fallback: { summary?: string; feedback?: Json } = {},
 ): WorkbenchSkillPatch {
   const files = Array.isArray(record.files)
-    ? record.files.filter(isSurfaceSnapshotFile).map(copyFile).filter((file) => !isWorkbenchImprovePatchControlPath(file.path))
+    ? record.files.filter(isSurfaceSnapshotFile).map(copyFile).filter((file) => !isWorkbenchControlPath(file.path))
     : [];
   const fileChanges = Array.isArray(record.fileChanges)
     ? record.fileChanges
         .flatMap((entry) => typeof entry === "string" ? [normalizeRelativePath(entry)] : [])
-        .filter((entry) => !isWorkbenchImprovePatchControlPath(entry))
+        .filter((entry) => !isWorkbenchControlPath(entry))
     : files.map((file) => normalizeRelativePath(file.path));
   return {
     files,
     fileChanges,
-    ...(typeof record.summary === "string"
-      ? { summary: record.summary }
-      : fallback.summary
-        ? { summary: fallback.summary }
-        : {}),
-    ...(record.feedback !== undefined && isJsonPayload(record.feedback)
-      ? { feedback: record.feedback }
-      : fallback.feedback !== undefined
-        ? { feedback: fallback.feedback }
-        : {}),
+    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+    ...(record.feedback !== undefined && isWorkbenchJson(record.feedback) ? { feedback: record.feedback } : {}),
   };
-}
-
-function isWorkbenchImprovePatchControlPath(filePath: string): boolean {
-  const normalized = normalizeRelativePath(filePath);
-  return normalized === ".workbench" || normalized.startsWith(".workbench/");
 }
 
 export function applyWorkbenchSkillImprovementPatch(
@@ -6537,6 +5957,55 @@ export interface WorkbenchVersionRuntimeSnapshot {
   skillBundles: WorkbenchSkillBundleSnapshot[];
   defaultSkill?: string;
   environmentDockerfile?: string;
+}
+
+interface WorkbenchRuntimeEvalControls {
+  evalSnapshot: WorkbenchEvalSnapshot;
+  cases: WorkbenchEvalCaseRuntime[];
+  environmentDockerfile?: string;
+}
+
+async function runtimeEvalControlsForSelection(
+  root: string,
+  state: WorkbenchProjectState,
+  evalHash?: string,
+): Promise<WorkbenchRuntimeEvalControls> {
+  if (!evalHash) {
+    const liveEvalSnapshot = await readEvalSnapshot(root);
+    const environmentDockerfile = await readOptionalSkillEvalEnvironmentDockerfile(root);
+    return {
+      evalSnapshot: liveEvalSnapshot,
+      cases: await readEvalCases(root),
+      ...(environmentDockerfile ? { environmentDockerfile } : {}),
+    };
+  }
+
+  const evalSnapshot = state.evals.find((entry) => entry.hash === evalHash);
+  if (!evalSnapshot) {
+    const liveEvalSnapshot = await readEvalSnapshot(root);
+    if (liveEvalSnapshot.hash !== evalHash) {
+      throw new WorkbenchUserError(`Eval snapshot not found: ${evalHash}`);
+    }
+    const environmentDockerfile = await readOptionalSkillEvalEnvironmentDockerfile(root);
+    return {
+      evalSnapshot: liveEvalSnapshot,
+      cases: await readEvalCases(root),
+      ...(environmentDockerfile ? { environmentDockerfile } : {}),
+    };
+  }
+
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-eval-controls-"));
+  try {
+    await materializeWorkbenchFiles(tempRoot, copyStateForRoot(state, tempRoot), evalHash);
+    const environmentDockerfile = await readOptionalSkillEvalEnvironmentDockerfile(tempRoot);
+    return {
+      evalSnapshot: copyEval(evalSnapshot),
+      cases: await readEvalCases(tempRoot),
+      ...(environmentDockerfile ? { environmentDockerfile } : {}),
+    };
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
 }
 
 export async function createWorkbenchVersionRuntimeSnapshot(
@@ -6653,152 +6122,27 @@ function runtimeDefaultAgentForSuppliedAgents(
   return agents[0]?.name;
 }
 
-export async function executeQueuedWorkbenchSkillEvalJob(
-  input: WorkbenchQueuedSkillEvalJobInput,
-): Promise<{
-  run: WorkbenchRun;
-  job: WorkbenchJob;
-  artifact: WorkbenchArtifact;
-  trace: WorkbenchTrace;
-}> {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-cloud-queued-eval-"));
-  try {
-    const workingState = copyStateForRoot(input.state, tempRoot);
-    const version = resolveVersion(workingState, input.versionId);
-    const evalSnapshot = workingState.evals.find((entry) => entry.hash === input.evalHash);
-    if (!evalSnapshot) {
-      throw new WorkbenchUserError(`Eval snapshot not found: ${input.evalHash}`);
-    }
-    const existingRun = workingState.runs.find((entry) => entry.id === input.runId);
-    if (!existingRun) {
-      throw new WorkbenchUserError(`Run not found: ${input.runId}`);
-    }
-    const agent = existingRun.agentHash
-      ? workingState.agents.find((entry) =>
-        entry.name === existingRun.agentName && hashJson(entry) === existingRun.agentHash
-      )
-      : workingState.agents.find((entry) => entry.name === existingRun.agentName);
-    if (!agent) {
-      throw new WorkbenchUserError(`Agent not found: ${existingRun.agentName}`);
-    }
-    const skillBundle = workingState.skillBundles.find((entry) => entry.hash === existingRun.skillBundleHash);
-    if (!skillBundle) {
-      throw new WorkbenchUserError(`Skill bundle not found: ${existingRun.skillBundleHash}`);
-    }
-    await materializeSkillFiles(tempRoot, version.files);
-    await materializeWorkbenchFiles(tempRoot, workingState, evalSnapshot.hash);
-    const runtimeCase = (await readEvalCases(tempRoot)).find((entry) =>
-      entry.id === input.caseId || entry.path === input.caseId
-    );
-    if (!runtimeCase) {
-      throw new WorkbenchUserError(`Case not found: ${input.caseId}`);
-    }
-    const runtimeInput = createWorkbenchSkillEvalRuntimeInput({
-      ownerUserId: input.ownerUserId ?? "local",
-      projectId: input.skillId ?? "local",
-      runId: existingRun.id,
-      jobId: input.jobId,
-      versionId: version.id,
-      skillName: skillBundle.skillName,
-      skillBundleHash: skillBundle.hash,
-      evalHash: evalSnapshot.hash,
-      evalSnapshot,
-      agent,
-      versionFiles: skillBundle.files,
-      runtimeCase,
-      sample: input.sample,
-      environmentDockerfile: await readSkillEvalEnvironmentDockerfile(tempRoot),
-    });
-    const completed = await executeWorkbenchExecutionJob({
-      ...runtimeInput,
-      ...(input.adapterAuthProfiles ? { adapterAuthProfiles: input.adapterAuthProfiles } : {}),
-    }, {
-      sandboxBackend: DOCKER_SANDBOX_BACKEND,
-    });
-    const result = skillEvalObjectsFromRemoteJob({
-      remoteJob: completed,
-      run: existingRun,
-      version,
-      skillBundle,
-      evalSnapshot,
-      agent,
-      runtimeCase,
-      sample: input.sample,
-      artifactId: input.artifactId,
-      traceId: input.traceId,
-    });
-    const finishedAt = result.job.finishedAt ?? now();
-    const proofStatus: WorkbenchRun["status"] = result.job.status === "succeeded" ? "succeeded" : "failed";
-    const run: WorkbenchRun = {
-      ...existingRun,
-      status: proofStatus,
-      traceIds: [result.trace.id],
-      jobIds: [result.job.id],
-      finishedAt,
-      ...(result.job.error ? { error: result.job.error } : {}),
-    };
-    return {
-      run: copyRun(run),
-      job: copyJob(result.job),
-      artifact: copyArtifact(result.artifact),
-      trace: copyTrace(result.trace),
-    };
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true });
-  }
-}
-
 export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {}): Promise<WorkbenchImproveResult> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
     await requireInitialized(root);
     let state = await loadState(root);
-    let base = (await planWorkbenchLaunchSource(root, state, {
-      ref: options.version,
-      commit: false,
-      message: SOURCE_SNAPSHOT_MESSAGE,
-    })).version;
-    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
-    const runtimeSkillSources = await runtimeSkillSourceOptionsForRoot(root, state);
-    const runtime = await createWorkbenchVersionRuntimeSnapshot(base, {
-      controlRoot: root,
-      skill: options.skill,
-      agent: options.agent,
-      authToken: options.authToken,
-      selectionRemediationCommand: "improve",
-      ...runtimeSkillSources,
-      ...runtimeAgents,
-    });
-    const { skillBundle, evalAgent } = requireWorkbenchImproveTarget(runtime, { requireAdapter: false });
-    if (runtime.cases.length === 0) {
-      throw noEvalCasesError();
-    }
+    const context = await resolveWorkbenchImproveContext(root, state, options);
+    let { base } = context;
+    const {
+      runtime,
+      runtimeSelection,
+      skillBundle,
+      evalAgent,
+      historicalTraces,
+      improvementEvidence,
+    } = context;
     for (const bundle of runtime.skillBundles) {
       upsertByHash(state.skillBundles, bundle);
     }
     upsertAgentSnapshots(state.agents, runtime.agents);
-    const historicalTraces = improvementEvidenceTracesForImproveRequest(state, {
-      versionId: base.id,
-      skillName: skillBundle.skillName,
-      skillBundleHash: skillBundle.hash,
-      evalHash: runtime.evalSnapshot.hash,
-      agent: evalAgent,
-      traceIds: options.evidenceTraceIds,
-    });
-    const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
-    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent) && improvementEvidence.length > 0) {
+    if (!workbenchSkillImproveCanUseQueuedAdapter(evalAgent)) {
       throw workbenchSkillImproveAdapterRequirementError(evalAgent, state.agents);
-    }
-    if (improvementEvidence.length === 0) {
-      throw workbenchImproveEvidenceRequirementError({
-        state,
-        versionId: base.id,
-        skillName: skillBundle.skillName,
-        evalHash: runtime.evalSnapshot.hash,
-        cases: runtime.cases,
-        agentName: evalAgent.name,
-        preserveAgentSelection: options.agent !== undefined,
-      });
     }
     if ((options.location ?? "local") === "local") {
       await assertLocalWorkbenchLaunchReady(root, [evalAgent], options);
@@ -6860,6 +6204,16 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
       id: improveJobId,
       runId: run.id,
       kind: "improve",
+      role: "improve",
+      inputHash: hashWorkbenchImproveInput({
+        baseVersionId: base.id,
+        skillBundleHash: skillBundle.hash,
+        evalHash: evalSnapshot.hash,
+        agentHash: run.agentHash,
+        evidenceTraceIds: historicalTraces.map((trace) => trace.id),
+        samples: proofSamples,
+        budget: options.budget ?? 1,
+      }),
       versionId: base.id,
       skillName: skillBundle.skillName,
       skillBundleHash: skillBundle.hash,
@@ -6908,6 +6262,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
         });
         upsertJobObject(state.jobs, objects.job);
         upsertImmutableById(state.artifacts, objects.artifact, "artifact");
+        await writeWorkbenchTraceRecord(objects.trace, { projectRoot: root });
         upsertImmutableById(state.traces, objects.trace, "trace");
         run.traceIds = Array.from(new Set([...run.traceIds, objects.trace.id]));
       } else {
@@ -6939,6 +6294,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     });
     upsertJobObject(state.jobs, improveObjects.job);
     upsertImmutableById(state.artifacts, improveObjects.artifact, "artifact");
+    await writeWorkbenchTraceRecord(improveObjects.trace, { projectRoot: root });
     upsertImmutableById(state.traces, improveObjects.trace, "trace");
     run.traceIds = Array.from(new Set([...run.traceIds, improveObjects.trace.id]));
     run.lastProgressAt = improveObjects.job.finishedAt ?? now();
@@ -6960,8 +6316,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
       authToken: options.authToken,
       selectionRemediationCommand: "improve",
       environmentDockerfile,
-      ...runtimeSkillSources,
-      ...runtimeAgents,
+      ...runtimeSelection,
     });
     const [outputSkillBundle] = outputRuntime.skillBundles;
     if (!outputSkillBundle) {
@@ -7011,7 +6366,7 @@ export async function improveWorkbenchSkill(options: WorkbenchImproveOptions = {
     if (proofRun.status !== "succeeded") {
       await saveState(root, state);
       throw new WorkbenchCodedError("improve_failed", improveProofEvalFailureMessage(version, proofRun), {
-        remediation: adapterAuthRemediationFromError(proofRun.error) ?? `workbench show ${proofRun.id}`,
+        remediation: adapterAuthRemediationFromError(proofRun.error) ?? `workbench eval show ${proofRun.id}`,
         subject: { runId: proofRun.id, versionId: version.id, status: proofRun.status },
         exitCode: 1,
       });
@@ -7043,47 +6398,15 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
   const root = resolveRoot(options.dir);
   await requireInitialized(root);
   const state = await loadStateReadOnlyWithRetry(root);
-  const source = await planWorkbenchLaunchSource(root, state, {
-    ref: options.version,
-    commit: false,
-    message: SOURCE_SNAPSHOT_MESSAGE,
-  });
-  const base = source.version;
-  const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
-  const runtimeSkillSources = await runtimeSkillSourceOptionsForRoot(root, state);
-  const runtime = await createWorkbenchVersionRuntimeSnapshot(base, {
-    controlRoot: root,
-    skill: options.skill,
-    agent: options.agent,
-    authToken: options.authToken,
-    selectionRemediationCommand: "improve",
-    ...runtimeSkillSources,
-    ...runtimeAgents,
-  });
-  const { skillBundle, evalAgent } = requireWorkbenchImproveTarget(runtime, { requireAdapter: false });
-  if (runtime.cases.length === 0) {
-    throw noEvalCasesError();
-  }
-  const historicalTraces = improvementEvidenceTracesForImproveRequest(state, {
-    versionId: base.id,
-    skillName: skillBundle.skillName,
-    skillBundleHash: skillBundle.hash,
-    evalHash: runtime.evalSnapshot.hash,
-    agent: evalAgent,
-    traceIds: options.evidenceTraceIds,
-  });
-  const improvementEvidence = improvementEvidenceFromTraces(historicalTraces);
-  if (improvementEvidence.length === 0) {
-    throw workbenchImproveEvidenceRequirementError({
-      state,
-      versionId: base.id,
-      skillName: skillBundle.skillName,
-      evalHash: runtime.evalSnapshot.hash,
-      cases: runtime.cases,
-      agentName: evalAgent.name,
-      preserveAgentSelection: options.agent !== undefined,
-    });
-  }
+  const {
+    source,
+    base,
+    runtime,
+    skillBundle,
+    evalAgent,
+    historicalTraces,
+    improvementEvidence,
+  } = await resolveWorkbenchImproveContext(root, state, options);
   const canImproveWithSelectedAgent = workbenchSkillImproveCanUseQueuedAdapter(evalAgent);
   const readiness = canImproveWithSelectedAgent
     ? options.cloud === true
@@ -7126,7 +6449,8 @@ export async function previewWorkbenchImprove(options: WorkbenchImproveOptions &
 
 export interface WorkbenchActionCapabilitiesOptions {
   variant: WorkbenchOperationVariant;
-  evidenceAccess: "full" | "source";
+  evidenceAccess: "full" | "package";
+  evalRef?: string;
   handle?: string;
   skillName?: string;
 }
@@ -7135,83 +6459,41 @@ export function createWorkbenchActionCapabilities(
   snapshot: WorkbenchInspectionSnapshot,
   options: WorkbenchActionCapabilitiesOptions,
 ): WorkbenchActionCapabilities {
-  const defaultRunRequest = defaultWorkbenchOperationRequest(snapshot, "run", options.variant);
-  const defaultGradeRequest = defaultWorkbenchOperationRequest(snapshot, "grade", options.variant);
-  const defaultEvalRequest = defaultWorkbenchOperationRequest(snapshot, "eval", options.variant);
-  const defaultImproveRequest = defaultWorkbenchOperationRequest(snapshot, "improve", options.variant);
+  const selectedEval = snapshotEvalSelection(snapshot, options.evalRef);
+  const defaultImproveRequest = defaultWorkbenchOperationRequest(snapshot, "improve", options.variant, selectedEval);
   const fullAccess = options.evidenceAccess === "full";
-  const improveEnabled = fullAccess && hasActionableImproveEvidence(snapshot);
+  const selectedEvalSnapshot = snapshot.evals.find((entry) => entry.hash === selectedEval?.hash);
+  const cloudRuntimeReady = options.variant !== "cloud" || Boolean(
+    (snapshot.refs.current ?? latestSnapshotVersionId(snapshot)) && snapshot.status.defaultAgent &&
+    selectedEvalSnapshot?.files.some((file) => file.path === `${ENVIRONMENT_DIR}/Dockerfile`)
+  );
+  const unavailableReason = !selectedEval
+    ? options.evalRef ? `Eval ${options.evalRef} is not available.` : "No Eval is available."
+    : selectedEval.caseIds.length === 0 ? "This Eval has no cases."
+    : !cloudRuntimeReady
+      ? "This Eval is ready for review. Sync an authored Skill with a current version, default agent, and evaluation environment before running it."
+      : undefined;
+  const enabled = fullAccess && !unavailableReason;
+  const improveEnabled = enabled && hasActionableImproveEvidence(snapshot, selectedEval?.hash);
+  const capability = (defaultRequest: WorkbenchOperationRequest, action: string) => ({
+    enabled, defaultRequest,
+    ...(enabled ? {} : { disabledReason: fullAccess ? unavailableReason! : `Package-only pages cannot start ${action}.` }),
+  });
   return {
     variant: options.variant,
     evidenceAccess: options.evidenceAccess,
-    run: {
-      enabled: fullAccess,
-      defaultRequest: defaultRunRequest,
-      ...(fullAccess ? {} : { disabledReason: "Source-only pages cannot start runs." }),
-    },
-    grade: {
-      enabled: fullAccess,
-      defaultRequest: defaultGradeRequest,
-      ...(fullAccess ? {} : { disabledReason: "Source-only pages cannot start grading." }),
-    },
-    eval: {
-      enabled: fullAccess,
-      defaultRequest: defaultEvalRequest,
-      ...(fullAccess ? {} : { disabledReason: "Source-only pages cannot start evaluations." }),
-    },
+    run: capability(defaultWorkbenchOperationRequest(snapshot, "run", options.variant, selectedEval), "runs"),
+    grade: capability(defaultWorkbenchOperationRequest(snapshot, "grade", options.variant, selectedEval), "grading"),
+    eval: capability(defaultWorkbenchOperationRequest(snapshot, "eval", options.variant, selectedEval), "evaluations"),
     improve: {
       enabled: improveEnabled,
       defaultRequest: defaultImproveRequest,
       ...(improveEnabled
         ? {}
-        : { disabledReason: fullAccess ? workbenchImproveEvidenceRequirementMessage() : "Source-only pages cannot start improvements." }),
+        : { disabledReason: fullAccess ? unavailableReason ?? workbenchImproveEvidenceRequirementMessage() : "Package-only pages cannot start improvements." }),
     },
     acquisition: workbenchAcquisitionOptions(snapshot, options),
   };
-}
-
-export async function previewLocalWorkbenchOperation(
-  options: WorkbenchCommandOptions & { request: WorkbenchOperationRequest },
-): Promise<WorkbenchOperationPreview> {
-  const request = normalizeWorkbenchOperationRequest(options.request);
-  try {
-    if (request.kind === "eval") {
-      const preview = await previewWorkbenchEval({
-        dir: options.dir,
-        authToken: options.authToken,
-        adapterAuthStoreRoot: options.adapterAuthStoreRoot,
-        homeDir: options.homeDir,
-        env: options.env,
-        version: operationTargetVersionId(request.targets),
-        skill: operationTargetSkillSelector(request.targets),
-        agent: operationTargetAgentSelector(request.targets),
-        caseIds: request.caseIds,
-        operationGrader: request.grader,
-        samples: request.samples,
-        kind: runKindForOperationPhases(request.phases),
-        rerun: request.rerun,
-        cloud: false,
-      });
-      return operationPreviewFromEvalPreview(request, preview);
-    }
-    const preview = await previewWorkbenchImprove({
-      dir: options.dir,
-      authToken: options.authToken,
-      adapterAuthStoreRoot: options.adapterAuthStoreRoot,
-      homeDir: options.homeDir,
-      env: options.env,
-      version: request.versionId ?? (request.target ? operationTargetVersionId([request.target]) : undefined),
-      skill: request.target?.skill,
-      agent: request.target?.agent,
-      samples: request.samples,
-      budget: request.budget,
-      evidenceTraceIds: request.evidenceTraceIds,
-      cloud: false,
-    });
-    return operationPreviewFromImprovePreview(request, preview);
-  } catch (error) {
-    return disabledOperationPreviewFromError(request, error);
-  }
 }
 
 async function executeLocalWorkbenchOperation(
@@ -7229,49 +6511,35 @@ async function executeLocalWorkbenchOperation(
     notifiedStarted = true;
     await options.onRunStarted?.(run);
   };
+  const evalOperationOptions = request.kind === "eval" ? {
+    dir: options.dir,
+    authToken: options.authToken,
+    adapterAuthStoreRoot: options.adapterAuthStoreRoot,
+    homeDir: options.homeDir,
+    env: options.env,
+    evalHash: request.evalHash,
+    version: operationTargetVersionId(request.targets),
+    skill: operationTargetSkillSelector(request.targets),
+    agent: operationTargetAgentSelector(request.targets),
+    caseIds: request.caseIds,
+    samples: request.samples,
+    rerun: request.rerun,
+    location: "local" as const,
+    operationTargets: request.targets,
+    operationSteps: request.steps,
+    gradeOfRunId: request.gradeOfRunId,
+    retryOfRunId: request.retryOfRunId,
+    onRunStarted,
+  } : undefined;
   const runs = request.kind === "eval"
-    ? request.phases.includes("grade") && !request.phases.includes("execute")
+    ? request.steps.includes("grade") && !request.steps.includes("run")
       ? await gradeWorkbenchSkill({
-          dir: options.dir,
-          authToken: options.authToken,
-          adapterAuthStoreRoot: options.adapterAuthStoreRoot,
-          homeDir: options.homeDir,
-          env: options.env,
-          version: operationTargetVersionId(request.targets),
-          skill: operationTargetSkillSelector(request.targets),
-          agent: operationTargetAgentSelector(request.targets),
-          caseIds: request.caseIds,
-          samples: request.samples,
-          rerun: request.rerun,
+          ...evalOperationOptions!,
           kind: "grade",
-          location: "local",
-          operationTargets: request.targets,
-          operationPhases: request.phases,
-          operationGrader: request.grader,
-          gradeOfRunId: request.gradeOfRunId,
-          retryOfRunId: request.retryOfRunId,
-          onRunStarted,
         })
       : await evalWorkbenchSkill({
-          dir: options.dir,
-          authToken: options.authToken,
-          adapterAuthStoreRoot: options.adapterAuthStoreRoot,
-          homeDir: options.homeDir,
-          env: options.env,
-          version: operationTargetVersionId(request.targets),
-          skill: operationTargetSkillSelector(request.targets),
-          agent: operationTargetAgentSelector(request.targets),
-          caseIds: request.caseIds,
-          samples: request.samples,
-          rerun: request.rerun,
-          kind: runKindForOperationPhases(request.phases),
-          location: "local",
-          operationTargets: request.targets,
-          operationPhases: request.phases,
-          operationGrader: request.grader,
-          gradeOfRunId: request.gradeOfRunId,
-          retryOfRunId: request.retryOfRunId,
-          onRunStarted,
+          ...evalOperationOptions!,
+          kind: runKindForOperationSteps(request.steps),
         })
     : [(
         await improveWorkbenchSkill({
@@ -7348,56 +6616,6 @@ export function superviseLocalWorkbenchOperation(
   return { started, completed };
 }
 
-function operationPlanSummaryForRun(input: {
-  kind: WorkbenchSchedulableRunKind;
-  variant: WorkbenchOperationVariant;
-  targets?: readonly WorkbenchOperationTarget[];
-  phases?: readonly WorkbenchOperationPhase[];
-  grader?: WorkbenchOperationGrader;
-  versionId: string;
-  evalHash: string;
-  skillName?: string;
-  agentName?: string;
-  skillNames?: readonly string[];
-  agentNames?: readonly string[];
-  caseIds?: readonly string[];
-  samples?: number;
-  rerun?: boolean;
-  budget?: number;
-  gradeOfRunId?: string;
-  retryOfRunId?: string;
-}): WorkbenchOperationPlanSummary {
-  return {
-    kind: input.kind,
-    variant: input.variant,
-    ...(input.targets?.length ? { targets: input.targets.map(copyWorkbenchOperationTarget) } : {}),
-    ...(input.phases?.length ? { phases: [...input.phases] } : {}),
-    ...(input.grader ? { grader: copyWorkbenchOperationGrader(input.grader) } : {}),
-    versionId: input.versionId,
-    evalHash: input.evalHash,
-    skills: uniqueStrings([...(input.skillNames ?? []), ...(input.skillName ? [input.skillName] : [])]),
-    agents: uniqueStrings([...(input.agentNames ?? []), ...(input.agentName ? [input.agentName] : [])]),
-    ...((input.caseIds?.length ?? 0) > 0 ? { caseIds: uniqueStrings([...(input.caseIds ?? [])]) } : {}),
-    ...(input.samples !== undefined ? { samples: input.samples } : {}),
-    ...(input.rerun === true ? { rerun: true } : {}),
-    ...(input.budget !== undefined ? { budget: input.budget } : {}),
-    ...(input.gradeOfRunId ? { gradeOfRunId: input.gradeOfRunId } : {}),
-    ...(input.retryOfRunId ? { retryOfRunId: input.retryOfRunId } : {}),
-  };
-}
-
-function copyOperationPlanSummary(plan: WorkbenchOperationPlanSummary): WorkbenchOperationPlanSummary {
-  return {
-    ...plan,
-    ...(plan.targets ? { targets: plan.targets.map(copyWorkbenchOperationTarget) } : {}),
-    ...(plan.phases ? { phases: [...plan.phases] } : {}),
-    ...(plan.grader ? { grader: copyWorkbenchOperationGrader(plan.grader) } : {}),
-    skills: [...plan.skills],
-    agents: [...plan.agents],
-    ...(plan.caseIds ? { caseIds: [...plan.caseIds] } : {}),
-  };
-}
-
 function operationPlanSummaryForSnapshotRuns(runs: readonly WorkbenchRun[]): WorkbenchOperationPlanSummary | undefined {
   const plans: WorkbenchOperationPlanSummary[] = [];
   for (const run of runs) {
@@ -7416,15 +6634,13 @@ function operationPlanSummaryForSnapshotRuns(runs: readonly WorkbenchRun[]): Wor
   const budget = commonNumber(plans.map((plan) => plan.budget));
   const retryOfRunId = commonString(plans.map((plan) => plan.retryOfRunId));
   const caseIds = commonStringArrays(plans.map((plan) => plan.caseIds));
-  const phases = commonStringArrays(plans.map((plan) => plan.phases));
-  const grader = commonJsonObject(plans.map((plan) => plan.grader));
+  const steps = commonStringArrays(plans.map((plan) => plan.steps));
   const targets = commonJsonArray(plans.map((plan) => plan.targets));
   return {
     kind: first.kind,
     variant: first.variant,
     ...(targets ? { targets: (targets as WorkbenchOperationTarget[]).map(copyWorkbenchOperationTarget) } : {}),
-    ...(phases ? { phases: phases as WorkbenchOperationPhase[] } : {}),
-    ...(grader ? { grader: copyWorkbenchOperationGrader(grader as WorkbenchOperationGrader) } : {}),
+    ...(steps ? { steps: steps as WorkbenchOperationStep[] } : {}),
     ...(versionId ? { versionId } : {}),
     ...(evalHash ? { evalHash } : {}),
     skills: uniqueStrings(plans.flatMap((plan) => plan.skills)),
@@ -7435,19 +6651,6 @@ function operationPlanSummaryForSnapshotRuns(runs: readonly WorkbenchRun[]): Wor
     ...(budget !== undefined ? { budget } : {}),
     ...(retryOfRunId ? { retryOfRunId } : {}),
   };
-}
-
-function commonJsonObject<T>(values: readonly (T | undefined)[]): T | undefined {
-  if (values.some((value) => value === undefined)) {
-    return undefined;
-  }
-  const present = values as readonly T[];
-  const [first] = present;
-  if (first === undefined) {
-    return undefined;
-  }
-  const firstHash = hashJson(first);
-  return present.every((value) => hashJson(value) === firstHash) ? JSON.parse(JSON.stringify(first)) as T : undefined;
 }
 
 function commonJsonArray<T>(values: readonly (readonly T[] | undefined)[]): T[] | undefined {
@@ -7495,77 +6698,6 @@ function commonNumber(values: readonly (number | undefined)[]): number | undefin
   return first !== undefined && present.every((value) => value === first) ? first : undefined;
 }
 
-function uniqueStrings(values: readonly string[]): string[] {
-  return [...new Set(values.filter((value) => value.length > 0))];
-}
-
-function copyWorkbenchOperationTarget(target: WorkbenchOperationTarget): WorkbenchOperationTarget {
-  return {
-    ...(target.skill ? { skill: target.skill } : {}),
-    ...(target.versionId ? { versionId: target.versionId } : {}),
-    ...(target.agent ? { agent: target.agent } : {}),
-  };
-}
-
-function copyWorkbenchOperationGrader(grader: WorkbenchOperationGrader): WorkbenchOperationGrader {
-  return { kind: grader.kind };
-}
-
-function phasesForRunKind(kind: WorkbenchCaseRunKind): WorkbenchOperationPhase[] {
-  if (kind === "run") {
-    return ["execute"];
-  }
-  if (kind === "grade") {
-    return ["grade"];
-  }
-  return ["execute", "grade"];
-}
-
-function runKindForOperationPhases(phases: readonly WorkbenchOperationPhase[]): WorkbenchCaseRunKind {
-  const hasExecute = phases.includes("execute");
-  const hasGrade = phases.includes("grade");
-  if (hasExecute && hasGrade) {
-    return "eval";
-  }
-  if (hasGrade) {
-    return "grade";
-  }
-  return "run";
-}
-
-function commandForOperationPhases(phases: readonly WorkbenchOperationPhase[]): "run" | "grade" | "eval" {
-  return runKindForOperationPhases(phases);
-}
-
-function operationTargetSkillSelector(targets: readonly WorkbenchOperationTarget[]): string | undefined {
-  const skills = uniqueStrings(targets.flatMap((target) => target.skill ? [target.skill] : []));
-  return skills.length > 0 ? skills.join(",") : undefined;
-}
-
-function operationTargetAgentSelector(targets: readonly WorkbenchOperationTarget[]): string | undefined {
-  const agents = uniqueStrings(targets.flatMap((target) => target.agent ? [target.agent] : []));
-  return agents.length > 0 ? agents.join(",") : undefined;
-}
-
-function operationTargetVersionId(targets: readonly WorkbenchOperationTarget[]): string | undefined {
-  const versions = uniqueStrings(targets.flatMap((target) => target.versionId ? [target.versionId] : []));
-  return versions.length === 1 ? versions[0] : undefined;
-}
-
-function operationTargetsFromPlan(plan: Pick<WorkbenchOperationPlanSummary, "agents" | "skills" | "versionId">): WorkbenchOperationTarget[] {
-  const agents = plan.agents.length > 0 ? plan.agents : [undefined];
-  const skills = plan.skills;
-  return agents.map((agent, index) => ({
-    ...(skills[index] ? { skill: skills[index] } : skills[0] ? { skill: skills[0] } : {}),
-    ...(plan.versionId ? { versionId: plan.versionId } : {}),
-    ...(agent ? { agent } : {}),
-  }));
-}
-
-function operationTargetFromPlan(plan: Pick<WorkbenchOperationPlanSummary, "agents" | "skills" | "versionId">): WorkbenchOperationTarget | undefined {
-  return operationTargetsFromPlan(plan)[0];
-}
-
 export function createWorkbenchRunSnapshot(
   request: WorkbenchOperationRequest,
   runs: readonly WorkbenchRun[],
@@ -7581,7 +6713,7 @@ export function createWorkbenchRunSnapshot(
   if (!firstRun) {
     throw new WorkbenchCodedError("operation_run_missing", `Workbench ${request.kind} did not create a run.`, {
       retryable: true,
-      remediation: request.kind === "eval" ? "workbench eval" : "workbench improve",
+      remediation: request.kind === "eval" ? "workbench eval run" : "workbench skill improve",
       exitCode: 1,
     });
   }
@@ -7595,14 +6727,13 @@ export function createWorkbenchRunSnapshot(
   const plan = persistedPlan
     ? copyOperationPlanSummary(persistedPlan)
     : {
-        kind: normalized.kind === "improve" ? "improve" : runKindForOperationPhases(normalized.phases),
+        kind: normalized.kind === "improve" ? "improve" : runKindForOperationSteps(normalized.steps),
         variant: normalized.variant,
         ...(normalized.kind === "improve" && normalized.versionId ? { versionId: normalized.versionId } : { versionId: firstRun.versionId }),
         ...(normalized.kind === "improve" && normalized.evalHash ? { evalHash: normalized.evalHash } : { evalHash: firstRun.evalHash }),
         ...(normalized.kind === "eval" ? {
           targets: normalized.targets.map(copyWorkbenchOperationTarget),
-          phases: [...normalized.phases],
-          grader: copyWorkbenchOperationGrader(normalized.grader ?? (normalized.phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" })),
+          steps: [...normalized.steps],
         } : {}),
         skills: [...new Set(runs.map((run) => run.skillName))],
         agents: [...new Set(runs.map((run) => run.agentName))],
@@ -7643,53 +6774,8 @@ export function createWorkbenchRunSnapshotForRun(
   jobs: readonly WorkbenchJob[] = [],
   options: { cursor?: string; traces?: readonly WorkbenchTrace[]; now?: string } = {},
 ): WorkbenchRunSnapshot {
-  if (run.kind === "live") {
-    return createWorkbenchLiveRunSnapshotForRun(run, jobs, options);
-  }
   const plan = run.operationPlan ? copyOperationPlanSummary(run.operationPlan) : undefined;
   return createWorkbenchRunSnapshot(operationRequestFromRunPlan(run, plan), [run], { ...options, jobs, ...(plan ? { plan } : {}) });
-}
-
-function createWorkbenchLiveRunSnapshotForRun(
-  run: WorkbenchRun,
-  jobs: readonly WorkbenchJob[] = [],
-  options: { cursor?: string; traces?: readonly WorkbenchTrace[]; now?: string } = {},
-): WorkbenchRunSnapshot {
-  const traces = options.traces ?? [];
-  const runJobs = jobsForSnapshotRuns([run], jobs);
-  const reportOptions = { now: options.now ?? now() };
-  const result = runSnapshotResultSummary([run], jobs);
-  const plan = copyOperationPlanSummary(run.operationPlan?.kind === "live" ? run.operationPlan : {
-    kind: "live",
-    variant: run.location ?? "local",
-    versionId: run.versionId,
-    evalHash: run.evalHash,
-    skills: [run.skillName],
-    agents: [run.agentName],
-    samples: Math.max(1, runJobs.length || run.jobIds?.length || 1),
-  });
-  const next = runSnapshotNext(run, plan);
-  return {
-    schema: "workbench.run.v1",
-    id: run.id,
-    kind: "live",
-    variant: plan.variant,
-    status: run.status,
-    phase: runPhaseForRuns([run]),
-    plan,
-    progress: runProgressSummary([run], jobs, reportOptions),
-    report: buildWorkbenchJobReport(runJobs, traces, reportOptions),
-    measurements: [],
-    ...(result ? { result } : {}),
-    ...(run.retryOfRunId ? { retryOfRunId: run.retryOfRunId } : {}),
-    route: {
-      kind: "run",
-      runId: run.id,
-    },
-    ...(options.cursor ? { cursor: options.cursor } : {}),
-    cliEquivalent: `workbench show ${run.id}`,
-    ...(next ? { next } : {}),
-  };
 }
 
 function operationRequestFromRunPlan(
@@ -7713,25 +6799,25 @@ function operationRequestFromRunPlan(
     };
   }
   const kind = normalizeWorkbenchCaseRunKind(plan?.kind ?? run.kind, "eval");
-  const phases = plan?.phases ?? phasesForRunKind(kind);
+  const steps = plan?.steps ?? stepsForRunKind(kind);
   return {
     kind: "eval",
     variant: plan?.variant ?? run.location ?? "local",
+    evalHash: plan?.evalHash ?? run.evalHash,
     caseIds: plan?.caseIds ?? [],
     targets: plan?.targets ?? operationTargetsFromPlan(plan ?? {
       versionId: run.versionId,
       skills: [run.skillName],
       agents: [run.agentName],
     }),
-    phases,
-    grader: plan?.grader ?? (phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" }),
+    steps,
     ...(plan?.samples !== undefined ? { samples: plan.samples } : run.requestedSamples !== undefined ? { samples: run.requestedSamples } : {}),
     ...(plan?.rerun ? { rerun: true } : {}),
     ...(plan?.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : run.retryOfRunId ? { retryOfRunId: run.retryOfRunId } : {}),
   };
 }
 
-function workbenchRunFromSnapshot(
+export function workbenchRunFromSnapshot(
   snapshot: WorkbenchRunSnapshot,
   options: { remoteName?: string } = {},
 ): WorkbenchRun {
@@ -7781,10 +6867,10 @@ function workbenchOperationPlanCliEquivalent(plan: WorkbenchOperationPlanSummary
   return workbenchOperationCliEquivalent({
     kind: "eval",
     variant: plan.variant,
+    ...(plan.evalHash ? { evalHash: plan.evalHash } : {}),
     caseIds: plan.caseIds ?? [],
     targets: plan.targets ?? operationTargetsFromPlan(plan),
-    phases: plan.phases ?? phasesForRunKind(kind),
-    ...(plan.grader ? { grader: plan.grader } : {}),
+    steps: plan.steps ?? stepsForRunKind(kind),
     ...(plan.samples !== undefined ? { samples: plan.samples } : {}),
     ...(plan.rerun ? { rerun: true } : {}),
     ...(plan.retryOfRunId ? { retryOfRunId: plan.retryOfRunId } : {}),
@@ -7794,9 +6880,9 @@ function workbenchOperationPlanCliEquivalent(plan: WorkbenchOperationPlanSummary
 export function workbenchOperationCliEquivalent(request: WorkbenchOperationRequest): string {
   const normalized = normalizeWorkbenchOperationRequest(request);
   const command = normalized.kind === "improve"
-    ? "improve"
-    : commandForOperationPhases(normalized.phases);
-  const parts = ["workbench", command];
+    ? ["skill", "improve"]
+    : ["eval", runKindForOperationSteps(normalized.steps) === "grade" ? "grade" : "run"];
+  const parts = ["workbench", ...command];
   if (normalized.variant === "cloud") {
     parts.push("--cloud");
   }
@@ -7867,25 +6953,25 @@ function runProgressSummary(
   const runJobs = jobsForSnapshotRuns(runs, jobs);
   const caseJobs = runJobs.filter((job) => job.caseId !== "current");
   const selectedJobs = caseJobs.length > 0 ? caseJobs : runJobs;
-  const completedJobs = selectedJobs.filter(isTerminalJob);
-  const scoredJobs = selectedJobs.filter((job) => jobQualityScore(job) !== undefined);
+  const completedJobs = selectedJobs.filter((job) => isWorkbenchJobStatusTerminal(job.status));
+  const scoredJobs = selectedJobs.filter((job) => workbenchJobScore(job) !== undefined);
   const failedJobs = selectedJobs.filter((job) => job.status === "failed");
   const canceledJobs = selectedJobs.filter((job) => job.status === "canceled");
   const activeJobs = selectedJobs.filter((job) => job.status === "running");
   const firstRun = runs[0];
-  const observedAt = runs.every(isTerminalRun)
+  const observedAt = runs.every((run) => isWorkbenchRunStatusTerminal(run.status))
     ? latestRunObservedAt(runs, selectedJobs)
     : options.now ?? latestRunObservedAt(runs, selectedJobs);
   const startedAt = firstRun?.createdAt ?? observedAt ?? now();
   const score = scoredJobs.length > 0
-    ? averageScores(scoredJobs.map(jobQualityScore))
+    ? averageScores(scoredJobs.map(workbenchJobScore))
     : undefined;
   const observedAtMs = timestampMs(observedAt ?? now()) ?? Date.now();
   const startedAtMs = timestampMs(startedAt) ?? observedAtMs;
   const lastProgressAt = latestRunProgressAt(runs, selectedJobs);
   const observedPlanned = selectedJobs.length > 0
     ? selectedJobs.length
-    : runs.reduce((sum, run) => sum + (run.jobIds?.length ?? 0), 0);
+    : runs.reduce((sum, run) => sum + run.jobIds.length, 0);
   return {
     planned: Math.max(observedPlanned, plannedJobCountForRuns(runs) ?? 0),
     completed: completedJobs.length,
@@ -7902,8 +6988,8 @@ function runProgressSummary(
         runningCount: activeJobs.length,
       },
     } : {}),
-    ...(!runs.every(isTerminalRun) && score !== undefined ? { partialScore: score } : {}),
-    evidenceCount: runs.reduce((sum, run) => sum + run.traceIds.length + (run.jobIds?.length ?? 0), 0),
+    ...(!runs.every((run) => isWorkbenchRunStatusTerminal(run.status)) && score !== undefined ? { partialScore: score } : {}),
+    evidenceCount: runs.reduce((sum, run) => sum + run.traceIds.length + run.jobIds.length, 0),
     elapsedMs: Math.max(0, observedAtMs - startedAtMs),
     ...(lastProgressAt ? { lastProgressAt } : {}),
   };
@@ -7913,13 +6999,8 @@ function jobsForSnapshotRuns(
   runs: readonly WorkbenchRun[],
   jobs: readonly WorkbenchJob[],
 ): WorkbenchJob[] {
-  const runIds = new Set(runs.map((run) => run.id));
-  const jobIds = new Set(runs.flatMap((run) => run.jobIds ?? []));
-  return jobs.filter((job) => runIds.has(job.runId) || jobIds.has(job.id));
-}
-
-function runOwnsJob(run: WorkbenchRun, job: WorkbenchJob): boolean {
-  return job.runId === run.id || (run.jobIds ?? []).includes(job.id);
+  const jobIds = new Set(runs.flatMap((run) => run.jobIds));
+  return jobs.filter((job) => jobIds.has(job.id));
 }
 
 function plannedJobCountForRuns(runs: readonly WorkbenchRun[]): number | undefined {
@@ -7948,8 +7029,8 @@ function plannedJobCountForRun(run: WorkbenchRun): number | undefined {
   }
   const samples = Math.max(1, Math.floor(plan.samples ?? run.requestedSamples ?? 1));
   const targetCount = Math.max(1, plan.targets?.length ?? (plan.skills.length * plan.agents.length));
-  const phaseCount = Math.max(1, plan.phases?.length ?? (plan.kind === "eval" ? 2 : 1));
-  return caseCount * samples * targetCount * phaseCount;
+  const stepCount = Math.max(1, plan.steps?.length ?? (plan.kind === "eval" ? 2 : 1));
+  return caseCount * samples * targetCount * stepCount;
 }
 
 function runMeasurementSummary(
@@ -7958,7 +7039,7 @@ function runMeasurementSummary(
   traces: readonly WorkbenchTrace[] = [],
   reportOptions: { now?: string } = {},
 ): WorkbenchMeasurementSummary {
-  const runJobs = jobs.filter((job) => runOwnsJob(run, job) && job.caseId !== "current");
+  const runJobs = jobs.filter((job) => workbenchRunOwnsJob(run, job) && job.caseId !== "current");
   const score = aggregateJobScore(runJobs);
   const coverage = workbenchSampleCoverageForJobs(runJobs);
   return {
@@ -7983,43 +7064,34 @@ function runMeasurementSummaries(
   traces: readonly WorkbenchTrace[] = [],
   reportOptions: { now?: string } = {},
 ): WorkbenchMeasurementSummary[] {
-  const runsById = new Map(runs.map((run) => [run.id, run]));
-  const runsByReferencedJobId = new Map<string, WorkbenchRun[]>();
-  for (const run of runs) {
-    for (const jobId of run.jobIds ?? []) {
-      const current = runsByReferencedJobId.get(jobId) ?? [];
-      current.push(run);
-      runsByReferencedJobId.set(jobId, current);
-    }
-  }
+  const jobsById = new Map(jobs.map((job) => [job.id, job]));
   const jobsByMeasurement = new Map<string, {
     run: WorkbenchRun;
     jobs: WorkbenchJob[];
     versionId: string;
     evalHash: string;
   }>();
-  for (const job of jobs) {
-    if (job.caseId === "current") {
-      continue;
+  for (const run of runs) {
+    for (const jobId of run.jobIds) {
+      const job = jobsById.get(jobId);
+      if (!job || job.caseId === "current") {
+        continue;
+      }
+      const versionId = run.operationPlan?.versionId ?? run.versionId;
+      const evalHash = run.operationPlan?.evalHash ?? run.evalHash;
+      const key = [
+        run.id,
+        versionId,
+        job.skillName,
+        job.skillBundleHash,
+        evalHash,
+        job.agentName,
+        job.agentHash,
+      ].join("\0");
+      const current = jobsByMeasurement.get(key) ?? { run, jobs: [], versionId, evalHash };
+      current.jobs.push(job);
+      jobsByMeasurement.set(key, current);
     }
-    const run = runsById.get(job.runId) ?? runsByReferencedJobId.get(job.id)?.[0];
-    if (!run) {
-      continue;
-    }
-    const versionId = run.operationPlan?.versionId ?? run.versionId ?? job.versionId;
-    const evalHash = run.operationPlan?.evalHash ?? run.evalHash ?? job.evalHash;
-    const key = [
-      run.id,
-      versionId,
-      job.skillName,
-      job.skillBundleHash,
-      evalHash,
-      job.agentName,
-      job.agentHash,
-    ].join("\0");
-    const current = jobsByMeasurement.get(key) ?? { run, jobs: [], versionId, evalHash };
-    current.jobs.push(job);
-    jobsByMeasurement.set(key, current);
   }
   const measuredRunIds = new Set<string>();
   const measurements = [...jobsByMeasurement.values()].map(({ run, jobs: measurementJobs, versionId, evalHash }) => {
@@ -8045,13 +7117,13 @@ function runMeasurementSummaryFromJobs(
   if (!firstJob) {
     return runMeasurementSummary(run, jobs, traces, reportOptions);
   }
-  const scoredJobs = jobs.filter((job) => jobQualityScore(job) !== undefined);
+  const scoredJobs = jobs.filter((job) => workbenchJobScore(job) !== undefined);
   const coverage = workbenchSampleCoverageForJobs(jobs);
   const errors = jobs.flatMap((job) => job.error ? [job.error] : []);
-  const status = comparisonJobStatus(jobs, run.status);
+  const status = workbenchRunStatusFromJobs(jobs, run.status);
   const score = status === "canceled" || scoredJobs.length === 0
     ? undefined
-    : averageScores(scoredJobs.map(jobQualityScore));
+    : averageScores(scoredJobs.map(workbenchJobScore));
   return {
     versionId: options.versionId ?? firstJob.versionId,
     skillName: firstJob.skillName,
@@ -8086,10 +7158,10 @@ function runSnapshotResultSummary(
 }
 
 function improveProofVersionId(runs: readonly WorkbenchRun[], jobs: readonly WorkbenchJob[]): string | undefined {
-  const improveRunIds = new Set(runs.filter((run) => run.kind === "improve").map((run) => run.id));
+  const improveJobIds = new Set(runs.filter((run) => run.kind === "improve").flatMap((run) => run.jobIds));
   const baseVersionIds = new Set(runs.map((run) => run.operationPlan?.versionId ?? run.baseVersionId ?? run.versionId));
   return jobs.find((job) =>
-    improveRunIds.has(job.runId) &&
+    improveJobIds.has(job.id) &&
     job.kind === "improve" &&
     job.caseId !== "current" &&
     !baseVersionIds.has(job.versionId)
@@ -8101,9 +7173,6 @@ function runSnapshotNext(run: WorkbenchRun, plan: WorkbenchOperationPlanSummary 
     return `workbench watch ${run.id}`;
   }
   if (run.status === "failed" || run.status === "canceled") {
-    return undefined;
-  }
-  if (run.kind === "live") {
     return undefined;
   }
   if (run.kind === "run") {
@@ -8120,7 +7189,7 @@ function runSnapshotNext(run: WorkbenchRun, plan: WorkbenchOperationPlanSummary 
 }
 
 export function workbenchRunResultsCliEquivalent(run: WorkbenchRun): string {
-  const parts = ["workbench results"];
+  const parts = ["workbench eval results"];
   const skillSelection = run.operationPlan?.skills.join(",") || run.skillName;
   const agentSelection = run.operationPlan?.agents.join(",") || run.agentName;
   if (skillSelection && skillSelection !== CURRENT_SKILL_VERSION_NAME) {
@@ -8150,35 +7219,24 @@ export function workbenchRunTransitionCliEquivalent(
       skills: [run.skillName],
       agents: [run.agentName],
     }),
-    phases: phasesForRunKind(kind),
-    grader: kind === "grade" || kind === "eval" ? { kind: "evaluation" } : { kind: "none" },
+    steps: stepsForRunKind(kind),
     samples: options.samples ?? plan?.samples ?? run.requestedSamples ?? 1,
     ...(options.rerun ? { rerun: true } : {}),
   });
 }
 
 function aggregateJobScore(jobs: readonly WorkbenchJob[]): number | undefined {
-  return averageScores(jobs.map(jobQualityScore));
+  return averageScores(jobs.map(workbenchJobScore));
 }
 
 export function runQualityScoreFromJobs(
-  run: Pick<WorkbenchRun, "id" | "status"> & { jobIds?: readonly string[] },
+  run: Pick<WorkbenchRun, "status" | "jobIds">,
   jobs: readonly WorkbenchJob[],
 ): number | undefined {
   if (run.status === "canceled") {
     return undefined;
   }
-  const referencedJobIds = new Set(run.jobIds ?? []);
-  return aggregateJobScore(jobs.filter((job) =>
-    (job.runId === run.id || referencedJobIds.has(job.id)) && job.role === "grade"
-  ));
-}
-
-export function jobQualityScore(job: Pick<WorkbenchJob, "result">): number | undefined {
-  const scoreItem = job.result?.items?.find((item) =>
-    item.kind === "score" && typeof item.score === "number" && Number.isFinite(item.score)
-  );
-  return typeof scoreItem?.score === "number" ? scoreItem.score : undefined;
+  return aggregateJobScore(jobs.filter((job) => workbenchRunOwnsJob(run, job) && job.role === "grade"));
 }
 
 function averageScores(values: readonly (number | undefined)[]): number | undefined {
@@ -8209,21 +7267,14 @@ function latestRunProgressAt(runs: readonly WorkbenchRun[], jobs: readonly Workb
     .at(-1);
 }
 
-function isTerminalJob(job: WorkbenchJob): boolean {
-  return job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
-}
-
-function isTerminalRun(run: WorkbenchRun): boolean {
-  return run.status === "succeeded" || run.status === "failed" || run.status === "canceled";
-}
-
 function defaultWorkbenchOperationRequest(
   snapshot: WorkbenchInspectionSnapshot,
   kind: WorkbenchSchedulableRunKind,
   variant: WorkbenchOperationVariant,
+  selectedEval: { hash: string; caseIds: string[] } | undefined,
 ): WorkbenchOperationRequest {
   const versionId = variant === "cloud" ? snapshot.refs.current ?? latestSnapshotVersionId(snapshot) : undefined;
-  const evalHash = latestSnapshotEvalHash(snapshot);
+  const evalHash = selectedEval?.hash;
   const target: WorkbenchOperationTarget = {
     ...(versionId ? { versionId } : {}),
   };
@@ -8238,17 +7289,13 @@ function defaultWorkbenchOperationRequest(
       budget: 1,
     };
   }
-  const phases = phasesForRunKind(kind);
   return {
     kind: "eval",
     variant,
-    caseIds: snapshot.evals
-      .slice()
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.hash.localeCompare(left.hash))[0]
-      ?.cases.map((entry) => entry.id) ?? [],
+    ...(evalHash ? { evalHash } : {}),
+    caseIds: selectedEval?.caseIds ?? [],
     targets: [target],
-    phases,
-    grader: phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
+    steps: stepsForRunKind(kind),
     samples: 1,
   };
 }
@@ -8260,16 +7307,25 @@ function latestSnapshotVersionId(snapshot: WorkbenchInspectionSnapshot): string 
     ?.id;
 }
 
-function latestSnapshotEvalHash(snapshot: WorkbenchInspectionSnapshot): string | undefined {
-  return snapshot.evals
-    .slice()
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.hash.localeCompare(left.hash))[0]
-    ?.hash;
+function snapshotEvalSelection(
+  snapshot: WorkbenchInspectionSnapshot,
+  ref?: string,
+): { hash: string; caseIds: string[] } | undefined {
+  const hash = ref === undefined
+    ? snapshot.evals
+        .slice()
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.hash.localeCompare(left.hash))[0]
+        ?.hash
+    : snapshot.evalVersions.find((entry) => entry.id === ref || entry.hash === ref)?.hash ??
+      snapshot.evals.find((entry) => entry.hash === ref)?.hash;
+  const selected = hash ? snapshot.evals.find((entry) => entry.hash === hash) : undefined;
+  return selected ? { hash: selected.hash, caseIds: selected.cases.map((entry) => entry.id) } : undefined;
 }
 
-function hasActionableImproveEvidence(snapshot: WorkbenchInspectionSnapshot): boolean {
+function hasActionableImproveEvidence(snapshot: WorkbenchInspectionSnapshot, evalHash?: string): boolean {
   return snapshot.runs.some((run) =>
     run.kind === "eval" &&
+    (!evalHash || run.evalHash === evalHash) &&
     (
       run.status === "failed" ||
       run.status === "canceled" ||
@@ -8283,19 +7339,19 @@ function workbenchAcquisitionOptions(
   options: WorkbenchActionCapabilitiesOptions,
 ): WorkbenchActionCapabilities["acquisition"] {
   const acquisition: WorkbenchActionCapabilities["acquisition"][number][] = [];
-  const handle = options.handle ?? snapshot.publication?.installHandle;
+  const handle = snapshot.publication ? options.handle ?? snapshot.publication.installHandle : undefined;
   if (handle) {
     acquisition.push({
       id: "install-package",
       label: "Install package",
       kind: "copy-command",
-      value: `workbench install ${handle}`,
+      value: `workbench skill install ${handle}`,
     });
     acquisition.push({
       id: "editable-source",
       label: "Create editable project",
       kind: "copy-command",
-      value: `workbench clone ${handle} ${normalizeWorkbenchSkillName(options.skillName ?? handle.split("/").at(-1) ?? "skill") || "skill"}`,
+      value: `workbench skill clone ${handle} ${normalizeWorkbenchSkillName(options.skillName ?? handle.split("/").at(-1) ?? "skill") || "skill"}`,
     });
   }
   if (options.variant === "local") {
@@ -8309,195 +7365,24 @@ function workbenchAcquisitionOptions(
   return acquisition;
 }
 
-function normalizeWorkbenchOperationRequest(
-  request: WorkbenchOperationRequest,
-): WorkbenchOperationRequest {
-  const samples = positiveIntegerOrUndefined(request.samples);
-  if (request.kind === "improve") {
-    const budget = positiveIntegerOrUndefined(request.budget);
-    return {
-      kind: "improve",
-      variant: request.variant,
-      ...(request.runId ? { runId: request.runId } : {}),
-      ...(request.target ? { target: copyWorkbenchOperationTarget(request.target) } : {}),
-      ...(request.versionId ? { versionId: request.versionId } : {}),
-      ...(request.evalHash ? { evalHash: request.evalHash } : {}),
-      samples: samples ?? 1,
-      budget: budget ?? 1,
-      ...(request.evidenceTraceIds?.length ? { evidenceTraceIds: [...request.evidenceTraceIds] } : {}),
-      ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId } : {}),
-    };
-  }
-  const phases = uniqueOperationPhases(request.phases);
-  const targets = request.targets.map(copyWorkbenchOperationTarget);
-  return {
-    kind: "eval",
-    variant: request.variant,
-    ...(request.runId ? { runId: request.runId } : {}),
-    caseIds: uniqueStrings([...request.caseIds]),
-    targets,
-    phases,
-    grader: request.grader ? copyWorkbenchOperationGrader(request.grader) : phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
-    samples: samples ?? 1,
-    ...(request.rerun === true ? { rerun: true } : {}),
-    ...(request.gradeOfRunId ? { gradeOfRunId: request.gradeOfRunId } : {}),
-    ...(request.retryOfRunId ? { retryOfRunId: request.retryOfRunId } : {}),
-  };
-}
-
-function uniqueOperationPhases(phases: readonly WorkbenchOperationPhase[]): WorkbenchOperationPhase[] {
-  const result: WorkbenchOperationPhase[] = [];
-  for (const phase of phases) {
-    if ((phase === "execute" || phase === "grade") && !result.includes(phase)) {
-      result.push(phase);
-    }
-  }
-  return result.length > 0 ? result : ["execute", "grade"];
-}
-
-function positiveIntegerOrUndefined(value: number | undefined): number | undefined {
-  return Number.isInteger(value) && value !== undefined && value > 0 ? value : undefined;
-}
-
-function operationPreviewFromEvalPreview(
-  request: WorkbenchOperationRequest,
-  preview: WorkbenchEvalPreview,
-): WorkbenchOperationPreview {
-  if (request.kind !== "eval") {
-    throw new WorkbenchUserError("Eval preview requires an eval operation request.");
-  }
-  return {
-    kind: request.kind,
-    variant: request.variant,
-    caseIds: [...request.caseIds],
-    targets: request.targets.map(copyWorkbenchOperationTarget),
-    phases: [...request.phases],
-    grader: copyWorkbenchOperationGrader(request.grader ?? (request.phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" })),
-    ...operationPreviewReadiness(preview.readiness),
-    versionId: preview.versionId,
-    evalHash: preview.evalHash,
-    skills: preview.skills.map(operationSelection),
-    agents: preview.agents.map(operationSelection),
-    caseCount: preview.cases,
-    samples: preview.samples,
-    cliEquivalent: workbenchOperationCliEquivalent(request),
-  };
-}
-
-function operationPreviewFromImprovePreview(
-  request: WorkbenchOperationRequest,
-  preview: WorkbenchImprovePreview,
-): WorkbenchOperationPreview {
-  return {
-    kind: "improve",
-    variant: request.variant,
-    ...operationPreviewReadiness(preview.readiness),
-    versionId: preview.versionId,
-    evalHash: preview.evalHash,
-    skills: [operationSelection(preview.skill)],
-    agents: [operationSelection(preview.agent)],
-    caseCount: preview.proofCases,
-    samples: preview.samples,
-    budget: preview.budget,
-    evidenceTraceIds: preview.evidenceTraceIds,
-    evidenceCount: preview.evidenceCount,
-    cliEquivalent: workbenchOperationCliEquivalent(request),
-  };
-}
-
-function operationPreviewReadiness(
-  readiness: WorkbenchLaunchReadiness,
-): Pick<WorkbenchOperationPreview, "canStart" | "disabledReason" | "setupCommands"> {
-  if (readiness.ready) {
-    return { canStart: true };
-  }
-  const setupCommands = uniqueSetupCommands(readiness.issues.flatMap((issue) => {
-    const commands = setupCommandsFromSubject(issue.subject);
-    return commands.length > 0 ? commands : issue.remediation ? [issue.remediation] : [];
-  }));
-  return {
-    canStart: false,
-    disabledReason: readiness.issues.map((issue) => issue.message).join(" ") || "Launch readiness is blocked.",
-    ...(setupCommands.length ? { setupCommands } : {}),
-  };
-}
-
-function setupCommandsFromSubject(subject: Json | undefined): string[] {
-  if (!subject || typeof subject !== "object" || Array.isArray(subject)) {
-    return [];
-  }
-  const commands = (subject as Record<string, Json>).setupCommands;
-  return Array.isArray(commands)
-    ? commands.filter((command): command is string => typeof command === "string" && command.trim().length > 0)
-    : [];
-}
-
-function uniqueSetupCommands(commands: readonly string[]): string[] {
-  return [...new Set(commands.map((command) => command.trim()).filter(Boolean))];
-}
-
-function operationSelection(value: { name: string; hash?: string }): WorkbenchOperationSelection {
-  return {
-    name: value.name,
-    ...(value.hash ? { hash: value.hash } : {}),
-  };
-}
-
-function disabledOperationPreviewFromError(
-  request: WorkbenchOperationRequest,
-  error: unknown,
-): WorkbenchOperationPreview {
-  const coded = codedErrorFromUnknown(error);
-  const subjectSetupCommands = setupCommandsFromSubject(coded.subject);
-  const setupCommands = uniqueSetupCommands(subjectSetupCommands.length > 0
-    ? subjectSetupCommands
-    : coded.remediation ? [coded.remediation] : []);
-  return {
-    kind: request.kind,
-    variant: request.variant,
-    ...(request.kind === "eval" ? {
-      caseIds: [...request.caseIds],
-      targets: request.targets.map(copyWorkbenchOperationTarget),
-      phases: [...request.phases],
-      grader: copyWorkbenchOperationGrader(request.grader ?? (request.phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" })),
-    } : request.target ? {
-      targets: [copyWorkbenchOperationTarget(request.target)],
-    } : {}),
-    canStart: false,
-    skills: request.kind === "eval"
-      ? uniqueStrings(request.targets.flatMap((target) => target.skill ? [target.skill] : [])).map((name) => ({ name }))
-      : request.target?.skill ? [{ name: request.target.skill }] : [],
-    agents: request.kind === "eval"
-      ? uniqueStrings(request.targets.flatMap((target) => target.agent ? [target.agent] : [])).map((name) => ({ name }))
-      : request.target?.agent ? [{ name: request.target.agent }] : [],
-    caseCount: 0,
-    samples: request.samples ?? 1,
-    ...(request.kind === "improve" ? { budget: request.budget ?? 1 } : {}),
-    disabledReason: coded.message,
-    ...(setupCommands.length ? { setupCommands } : {}),
-    cliEquivalent: workbenchOperationCliEquivalent(request),
-  };
-}
-
 export async function requestLocalWorkbenchRunCancellation(
   options: WorkbenchCommandOptions & { runId: string; reason?: string },
 ): Promise<WorkbenchRunCancellationResult> {
   const root = resolveRoot(options.dir);
   await requireInitialized(root);
   const loadedState = await loadStateReadOnlyWithRetry(root);
-  const stateWithHostedHandles = await applyLocalHostedRunHandles(root, loadedState);
-  const state = await applyLocalRunCancellationRequests(root, stateWithHostedHandles);
+  const state = await applyLocalRunCancellationRequests(root, loadedState);
   const run = state.runs.find((entry) => entry.id === options.runId);
   if (!run) {
     throw new WorkbenchCodedError("run_not_found", `Run not found: ${options.runId}`, {
-      remediation: "workbench log --runs",
+      remediation: "workbench eval results",
       subject: { runId: options.runId },
       exitCode: 1,
     });
   }
-  if (isTerminalRunStatus(run.status)) {
+  if (isWorkbenchRunStatusTerminal(run.status)) {
     throw new WorkbenchCodedError("run_terminal", `Run ${run.id} is already ${run.status}.`, {
-      remediation: `workbench show ${run.id}`,
+      remediation: `workbench eval show ${run.id}`,
       subject: { runId: run.id, status: run.status },
       exitCode: 2,
     });
@@ -8512,7 +7397,7 @@ export async function requestLocalWorkbenchRunCancellation(
   await withWorkbenchProjectLockRootIfAvailable(root, async () => {
     const lockedState = await loadState(root);
     const lockedRun = lockedState.runs.find((entry) => entry.id === run.id);
-    if (!lockedRun || isTerminalRunStatus(lockedRun.status)) {
+    if (!lockedRun || isWorkbenchRunStatusTerminal(lockedRun.status)) {
       return;
     }
     upsertRunObject(lockedState.runs, runWithLocalCancellationRequest(lockedRun, requestedAt), { replace: true });
@@ -8521,16 +7406,46 @@ export async function requestLocalWorkbenchRunCancellation(
   return { run: copyRun(cancelingRun), requestedAt, requestPath };
 }
 
-export async function hasWorkbenchLocalHostedRunHandle(
-  options: WorkbenchCommandOptions & { runId: string },
-): Promise<boolean> {
+export async function readWorkbenchPendingCloudOperation(
+  options: WorkbenchCommandOptions & { operationId: string },
+): Promise<WorkbenchPendingCloudOperation | null> {
   const root = resolveRoot(options.dir);
   await requireInitialized(root);
-  if (!await exists(localHostedRunHandlePath(root, options.runId))) {
-    return false;
+  const operationPath = pendingCloudOperationPath(root, options.operationId);
+  if (!await exists(operationPath)) {
+    return null;
   }
-  const state = await loadStateReadOnlyWithRetry(root);
-  return !state.runs.some((run) => run.id === options.runId);
+  const value = asRecord(await readJson(operationPath));
+  if (
+    value?.schema !== "workbench.pending-cloud-operation.v1" ||
+    typeof value.id !== "string" ||
+    typeof value.command !== "string" ||
+    typeof value.remoteName !== "string" ||
+    typeof value.createdAt !== "string"
+  ) {
+    throw new WorkbenchUserError(`Invalid pending Cloud operation: ${operationPath}`);
+  }
+  return value as unknown as WorkbenchPendingCloudOperation;
+}
+
+export async function recordWorkbenchPendingCloudOperation(
+  options: WorkbenchCommandOptions & { operation: WorkbenchPendingCloudOperation },
+): Promise<WorkbenchPendingCloudOperation> {
+  const root = resolveRoot(options.dir);
+  await requireInitialized(root);
+  await writeJson(pendingCloudOperationPath(root, options.operation.id), options.operation);
+  return { ...options.operation };
+}
+
+export async function clearWorkbenchPendingCloudOperation(
+  options: WorkbenchCommandOptions & { operationId: string },
+): Promise<void> {
+  const root = resolveRoot(options.dir);
+  await requireInitialized(root);
+  await Promise.all([
+    fs.rm(pendingCloudOperationPath(root, options.operationId), { force: true }),
+    fs.rm(localRunCancellationRequestPath(root, options.operationId), { force: true }),
+  ]);
 }
 
 export async function hasWorkbenchLocalRunCancellationRequest(
@@ -8541,69 +7456,25 @@ export async function hasWorkbenchLocalRunCancellationRequest(
   return await hasLocalRunCancellationRequest(root, options.runId);
 }
 
-export async function recordWorkbenchLocalHostedRunCancellation(
-  options: WorkbenchCommandOptions & {
-    run: WorkbenchRun;
-    requestedAt: string;
-  },
-): Promise<WorkbenchRun> {
+export async function requestWorkbenchPendingCloudOperationCancellation(
+  options: WorkbenchCommandOptions & { operationId: string; reason?: string },
+): Promise<WorkbenchPendingCloudOperationCancellation> {
   const root = resolveRoot(options.dir);
   await requireInitialized(root);
-  const canceledRun: WorkbenchRun = {
-    ...copyRun(options.run),
-    status: "canceled",
-    location: "cloud",
-    cancelRequestedAt: options.run.cancelRequestedAt ?? options.requestedAt,
-    finishedAt: options.run.finishedAt ?? options.requestedAt,
-    lastProgressAt: options.requestedAt,
-    error: options.run.error ?? "Canceled before Workbench Cloud accepted the run.",
-  };
-  await writeJson(localHostedRunHandlePath(root, canceledRun.id), canceledRun);
-  await advanceLocalWorkbenchLiveState(root);
-  const persisted = await withWorkbenchProjectLockRootIfAvailable(root, async () => {
-    const state = await loadState(root);
-    upsertRunObject(state.runs, canceledRun, { replace: true });
-    await saveState(root, state);
-    return true;
-  });
-  if (persisted) {
-    await fs.rm(localHostedRunHandlePath(root, canceledRun.id), { force: true });
-    await advanceLocalWorkbenchLiveState(root);
+  const operation = await readWorkbenchPendingCloudOperation(options);
+  if (!operation) {
+    throw new WorkbenchCodedError("run_not_found", `Pending Cloud operation not found: ${options.operationId}`, {
+      remediation: "workbench eval results",
+      exitCode: 1,
+    });
   }
-  return copyRun(canceledRun);
-}
-
-export async function recordWorkbenchLocalHostedRunFailure(
-  options: WorkbenchCommandOptions & {
-    run: WorkbenchRun;
-    error: string;
-    failedAt?: string;
-  },
-): Promise<WorkbenchRun> {
-  const root = resolveRoot(options.dir);
-  await requireInitialized(root);
-  const failedAt = options.failedAt ?? now();
-  const failedRun: WorkbenchRun = {
-    ...copyRun(options.run),
-    status: "failed",
-    location: "cloud",
-    finishedAt: options.run.finishedAt ?? failedAt,
-    lastProgressAt: failedAt,
-    error: options.error,
-  };
-  await writeJson(localHostedRunHandlePath(root, failedRun.id), failedRun);
-  await advanceLocalWorkbenchLiveState(root);
-  const persisted = await withWorkbenchProjectLockRootIfAvailable(root, async () => {
-    const state = await loadState(root);
-    upsertRunObject(state.runs, failedRun, { replace: true });
-    await saveState(root, state);
-    return true;
+  const requestedAt = now();
+  const requestPath = await writeLocalRunCancellationRequest(root, {
+    runId: operation.id,
+    requestedAt,
+    reason: options.reason ?? "user_requested",
   });
-  if (persisted) {
-    await fs.rm(localHostedRunHandlePath(root, failedRun.id), { force: true });
-    await advanceLocalWorkbenchLiveState(root);
-  }
-  return copyRun(failedRun);
+  return { operation, requestedAt, requestPath };
 }
 
 export async function recordWorkbenchCloudRunSnapshot(
@@ -8623,30 +7494,6 @@ export async function recordWorkbenchCloudRunSnapshot(
     await saveState(root, state);
     return copyRun(run);
   });
-}
-
-export async function recordWorkbenchLocalHostedRunHandle(
-  options: WorkbenchCommandOptions & {
-    run: WorkbenchRun;
-  },
-): Promise<WorkbenchRun> {
-  const root = resolveRoot(options.dir);
-  await requireInitialized(root);
-  const run = copyRun(options.run);
-  await writeJson(localHostedRunHandlePath(root, run.id), run);
-  await advanceLocalWorkbenchLiveState(root);
-  return run;
-}
-
-export async function clearWorkbenchLocalHostedRunHandle(
-  options: WorkbenchCommandOptions & {
-    runId: string;
-  },
-): Promise<void> {
-  const root = resolveRoot(options.dir);
-  await requireInitialized(root);
-  await fs.rm(localHostedRunHandlePath(root, options.runId), { force: true });
-  await advanceLocalWorkbenchLiveState(root);
 }
 
 async function writeLocalRunCancellationRequest(
@@ -8694,7 +7541,9 @@ export async function recordWorkbenchCloudInspectionSnapshot(
       upsertJobObject(state.jobs, copyJob(job), { replace: true });
     }
     for (const trace of options.snapshot.traces) {
-      upsertById(state.traces, copyTrace(trace));
+      const copied = copyTrace(trace);
+      await writeWorkbenchTraceRecord(copied, { projectRoot: root });
+      upsertById(state.traces, copied);
     }
     for (const batch of options.snapshot.executionEvents) {
       upsertExecutionEventBatch(state.executionEvents, copyExecutionEventBatch(batch), { replace: true });
@@ -8721,7 +7570,7 @@ function requireWorkbenchImproveTarget(
       .map((agent) => agent.name)
       .sort();
     throw new WorkbenchCodedError("usage", [
-      "workbench improve requires exactly one version and one eval agent.",
+      "workbench skill improve requires exactly one version and one eval agent.",
       `Configured versions: ${configuredVersions.length > 0 ? configuredVersions.join(", ") : "none"}.`,
       `Configured agents: ${configuredAgents.length > 0 ? configuredAgents.join(", ") : "none"}.`,
       ...(improvementCapableAgents.length > 0
@@ -8738,7 +7587,7 @@ function requireWorkbenchImproveTarget(
     throw new WorkbenchUserError("No current skill version selected for improve.");
   }
   if (skillBundle.skillName !== CURRENT_SKILL_VERSION_NAME) {
-    throw new WorkbenchUserError("workbench improve can edit only the current local project skill. Vendor or clone another skill before improving it.");
+    throw new WorkbenchUserError("workbench skill improve can edit only the current local project skill. Vendor or clone another skill before improving it.");
   }
   const [evalAgent] = runtime.selectedAgents;
   if (!evalAgent) {
@@ -8757,7 +7606,7 @@ function requireWorkbenchImproveAgentAdapter(agent: WorkbenchAgent): void {
 }
 
 export function workbenchImproveEvidenceRequirementMessage(): string {
-  return "workbench improve needs graded below-perfect, failed, or reviewed eval evidence for the selected skill on this eval. Perfect eval runs do not qualify. Ungraded runtime or auth failures do not qualify. Add or edit an eval case that captures an actual failure, review a run as improvement evidence, or edit the package source directly.";
+  return "workbench skill improve needs graded below-perfect, failed, or reviewed eval evidence for the selected skill on this eval. Perfect eval runs do not qualify. Ungraded runtime or auth failures do not qualify. Add or edit an eval case that captures an actual failure, review a run as improvement evidence, or edit the package source directly.";
 }
 
 function workbenchImproveEvidenceRequirementError(args: {
@@ -8802,8 +7651,8 @@ function workbenchImproveEvidenceRequirementRemediation(args: {
     return latestAuthRemediation;
   }
   if (!currentEvalRuns.some((run) => runQualityScoreFromJobs(run, args.state.jobs) !== undefined)) {
-    const latestTerminal = currentEvalRuns.find(isTerminalRun);
-    return latestTerminal ? `workbench show ${latestTerminal.id}` : workbenchImproveEvidenceEvalCommand(args);
+    const latestTerminal = currentEvalRuns.find((run) => isWorkbenchRunStatusTerminal(run.status));
+    return latestTerminal ? `workbench eval show ${latestTerminal.id}` : workbenchImproveEvidenceEvalCommand(args);
   }
   return nextWorkbenchEvalCaseCommand(args.cases);
 }
@@ -8813,9 +7662,9 @@ function workbenchImproveEvidenceEvalCommand(args: {
   preserveAgentSelection?: boolean;
 }): string {
   if (args.preserveAgentSelection && args.agentName) {
-    return `workbench eval --agents ${quoteShellArg(args.agentName)}`;
+    return `workbench eval run --agents ${quoteShellArg(args.agentName)}`;
   }
-  return "workbench eval";
+  return "workbench eval run";
 }
 
 function workbenchRunObservedAt(run: WorkbenchRun): string {
@@ -8839,7 +7688,7 @@ function improveSelectorRemediation(
   const version = configuredVersions[0] ?? CURRENT_SKILL_VERSION_NAME;
   const agent = improvementCapableAgents[0];
   if (agent) {
-    return `workbench improve --versions ${version} --agents ${agent}`;
+    return `workbench skill improve --versions ${version} --agents ${agent}`;
   }
   return providerAgentSetupCommand("codex", "default");
 }
@@ -8960,7 +7809,7 @@ function resultsVersionSelectionError(
   const message = error instanceof Error ? error.message : String(error);
   const configuredVersions = resultsConfiguredVersionRefs(state);
   return new WorkbenchCodedError("usage", message, {
-    remediation: "workbench results --versions current",
+    remediation: "workbench eval results --versions current",
     subject: { configuredVersions },
     exitCode: 2,
   });
@@ -8980,6 +7829,9 @@ function resultEvalVersionSummaries(
   includeEvalHashes: readonly string[] = [],
 ): WorkbenchEvalVersionSummary[] {
   const versionedEvalHashes = resultEvalVersionHashes(state);
+  if (currentEvalHash) {
+    versionedEvalHashes.add(currentEvalHash);
+  }
   for (const hash of includeEvalHashes) {
     versionedEvalHashes.add(hash);
   }
@@ -9008,7 +7860,7 @@ function resultEvalVersionSummaries(
       ordinal,
       current: evalSnapshot.hash === currentHash,
       caseCount: evalSnapshot.caseCount,
-      gradeAdapter: evalSnapshot.gradeAdapter,
+      gradeAdapter: evalSnapshot.grade.adapter,
       createdAt: evalSnapshot.createdAt,
       updatedAt: evalSnapshot.updatedAt,
       runCount: runCountByEvalHash.get(evalSnapshot.hash) ?? 0,
@@ -9077,13 +7929,13 @@ function resolveEvalVersionHash(
   }
   if (candidates.length > 1) {
     throw new WorkbenchCodedError("usage", `Eval version ref is ambiguous: ${ref}.`, {
-      remediation: "workbench evals",
+      remediation: "workbench eval list",
       subject: { ref, candidates: candidates.map((entry) => entry.id) },
       exitCode: 2,
     });
   }
   throw new WorkbenchCodedError("usage", `Eval version not found: ${ref}.`, {
-    remediation: "workbench evals",
+    remediation: "workbench eval list",
     subject: { ref, configuredEvalVersions: summaries.map((entry) => entry.id) },
     exitCode: 2,
   });
@@ -9096,7 +7948,7 @@ function maybeResolveEvalVersionHash(
   const candidates = evalVersionRefCandidates(summaries, ref);
   if (candidates.length > 1) {
     throw new WorkbenchCodedError("usage", `Eval version ref is ambiguous: ${ref}.`, {
-      remediation: "workbench evals",
+      remediation: "workbench eval list",
       subject: { ref, candidates: candidates.map((entry) => entry.id) },
       exitCode: 2,
     });
@@ -9135,8 +7987,7 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
     await requireInitialized(root);
     const state = await loadState(root);
     const selection = normalizeWorkbenchResultsSelection(state, options);
-    const runtimeAgents = await runtimeAgentOptionsForRoot(root, state);
-    const runtimeSkillSources = await runtimeSkillSourceOptionsForRoot(root, state);
+    const runtimeSelection = await runtimeSelectionOptionsForRoot(root, state);
     const currentEvalSnapshot = await readEvalSnapshot(root).catch(() => selectActiveEvalSnapshot(state));
     if (currentEvalSnapshot) {
       upsertEvalSnapshotObject(state.evals, currentEvalSnapshot);
@@ -9147,8 +7998,8 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
       skills: selection.skills,
       agents: options.agents,
       evalHashes: selectedEvalHashes,
-      availableAgents: runtimeAgents.agents,
-      ...(runtimeAgents.defaultAgent ? { defaultAgent: runtimeAgents.defaultAgent } : {}),
+      availableAgents: runtimeSelection.agents,
+      ...(runtimeSelection.defaultAgent ? { defaultAgent: runtimeSelection.defaultAgent } : {}),
     };
     const recordedComparison = buildInternalComparisonFromState(state, internalSelection);
     if (recordedComparison.cells.some((cell) => cell.runId || cell.status)) {
@@ -9156,9 +8007,10 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
         ...options,
         controlRoot: root,
         versions: selection.skills,
-        availableAgents: runtimeAgents.agents,
-        ...runtimeSkillSources,
-        ...(runtimeAgents.defaultAgent ? { defaultAgent: runtimeAgents.defaultAgent } : {}),
+        availableAgents: runtimeSelection.agents,
+        skillSources: runtimeSelection.skillSources,
+        ...(runtimeSelection.defaultAgent ? { defaultAgent: runtimeSelection.defaultAgent } : {}),
+        ...(runtimeSelection.defaultSkill ? { defaultSkill: runtimeSelection.defaultSkill } : {}),
       });
       return resultsFromInternalComparison(completedComparison, state, { currentEvalHash: currentEvalSnapshot?.hash });
     }
@@ -9188,8 +8040,7 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
           agent: options.agents,
           authToken: options.authToken,
           selectionRemediationCommand: "results",
-          ...runtimeSkillSources,
-          ...runtimeAgents,
+          ...runtimeSelection,
         });
       } catch (error) {
         const selectionError = await resultsSelectionErrorWithLiveControls(root, error, options);
@@ -9221,16 +8072,11 @@ export async function resultsWorkbench(options: WorkbenchResultsOptions = {}): P
       }
       for (const skill of runtime.skillBundles) {
         for (const agent of runtime.selectedAgents) {
-          const evidence = bestComparableEvidence({
-            runs: state.runs,
-            jobs: state.jobs,
-            traces: state.traces,
-            versionId: version.id,
-            skillName: skill.skillName,
-            skillBundleHash: skill.hash,
-            evalHash: runtime.evalSnapshot.hash,
-            agentName: agent.name,
-            agentHash: hashJson(agent),
+          const evidence = bestCompatibleEvalEvidence({
+            state,
+            skillBundle: skill,
+            evalSnapshot: runtime.evalSnapshot,
+            agent,
           });
           cells.push({
             versionId: version.id,
@@ -9340,17 +8186,17 @@ async function completeRecordedResultsSelectionMatrix(
           if (existingCellKeys.has(key)) {
             continue;
           }
-          const evidence = bestComparableEvidence({
-            runs: state.runs,
-            jobs: state.jobs,
-            traces: state.traces,
-            versionId: version.id,
-            skillName: skill.skillName,
-            skillBundleHash: skill.hash,
-            evalHash,
-            agentName: agent.name,
-            agentHash,
-          });
+          const evalSnapshot = evalHash === runtime.evalSnapshot.hash
+            ? runtime.evalSnapshot
+            : state.evals.find((entry) => entry.hash === evalHash);
+          const evidence = evalSnapshot
+            ? bestCompatibleEvalEvidence({
+                state,
+                skillBundle: skill,
+                evalSnapshot,
+                agent,
+              })
+            : undefined;
           cells.push({
             ...cell,
             ...(evidence ? comparisonCellEvidenceFields(evidence) : {}),
@@ -9432,6 +8278,7 @@ function resultsFromInternalComparison(
       evalVersionId: evalVersion.id,
       agentVersionId: cell.agentHash,
       ...(cell.runId ? { runId: cell.runId } : {}),
+      ...(cell.jobIds && cell.jobIds.length > 0 ? { jobIds: [...cell.jobIds] } : {}),
       ...(cell.status ? { status: cell.status } : {}),
       ...(cell.score !== undefined ? { quality: cell.score } : {}),
       ...(cell.coverage ? { coverage: cell.coverage } : {}),
@@ -9446,8 +8293,8 @@ function resultsFromInternalComparison(
     const existingCell = resultCells.get(resultCellKey);
     if (!existingCell || compareResultCellEvidence(resultCell, existingCell, createdAtByRunId) > 0) {
       resultCells.set(resultCellKey, resultCell);
+      resultVersions.set(skillVersion.id, skillVersion);
     }
-    resultVersions.set(skillVersion.id, skillVersion);
     resultAgents.set(cell.agentHash, {
       id: cell.agentHash,
       name: agent.agent.name,
@@ -9460,7 +8307,7 @@ function resultsFromInternalComparison(
 
   return {
     skillVersions: [...resultVersions.values()].sort((left, right) =>
-      resultVersionSortKey(left).localeCompare(resultVersionSortKey(right))
+      workbenchSkillVersionIdentity(left).localeCompare(workbenchSkillVersionIdentity(right))
     ),
     evalVersions: [...resultEvalVersions.values()].sort((left, right) =>
       left.ordinal - right.ordinal || left.id.localeCompare(right.id)
@@ -9469,7 +8316,7 @@ function resultsFromInternalComparison(
       left.label.localeCompare(right.label) || left.id.localeCompare(right.id)
     ),
     cells: [...resultCells.values()].sort((left, right) =>
-      resultVersionSortKey(resultVersions.get(left.skillVersionId)).localeCompare(resultVersionSortKey(resultVersions.get(right.skillVersionId))) ||
+      workbenchSkillVersionIdentity(resultVersions.get(left.skillVersionId)).localeCompare(workbenchSkillVersionIdentity(resultVersions.get(right.skillVersionId))) ||
       left.evalVersionId.localeCompare(right.evalVersionId) ||
       left.agentVersionId.localeCompare(right.agentVersionId)
     ),
@@ -9571,7 +8418,7 @@ function skillFrontmatterName(content: string): string | undefined {
 }
 
 function resultLocalVersionOrdinals(state: WorkbenchProjectState): Map<string, number> {
-  const sorted = [...state.versions].sort(compareVersionIds);
+  const sorted = [...state.versions].sort(compareWorkbenchVersions);
   return new Map(sorted.map((version, index) => [version.id, index + 1]));
 }
 
@@ -9580,8 +8427,8 @@ function compareResultCellEvidence(
   right: WorkbenchResults["cells"][number],
   createdAtByRunId: ReadonlyMap<string, string>,
 ): number {
-  const leftTerminal = left.status ? isTerminalRunStatus(left.status) : false;
-  const rightTerminal = right.status ? isTerminalRunStatus(right.status) : false;
+  const leftTerminal = left.status ? isWorkbenchRunStatusTerminal(left.status) : false;
+  const rightTerminal = right.status ? isWorkbenchRunStatusTerminal(right.status) : false;
   if (leftTerminal !== rightTerminal) {
     return leftTerminal ? 1 : -1;
   }
@@ -9592,10 +8439,6 @@ function compareResultCellEvidence(
   const leftCreated = left.runId ? createdAtByRunId.get(left.runId) ?? "" : "";
   const rightCreated = right.runId ? createdAtByRunId.get(right.runId) ?? "" : "";
   return leftCreated.localeCompare(rightCreated);
-}
-
-function resultVersionSortKey(version: WorkbenchResults["skillVersions"][number] | undefined): string {
-  return version?.projectVersionId ?? version?.id ?? "";
 }
 
 function remoteCurrentRefPromotesVersionInState(state: WorkbenchProjectState, versionId: string): boolean {
@@ -9619,12 +8462,12 @@ export function buildInternalComparisonFromState(
     version: WorkbenchVersion;
     bundle: WorkbenchSkillBundleSnapshot;
     evalHash: string;
+    allowEvidence: boolean;
   }>();
 
   for (const run of [...state.runs].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
     if (
       !versionIds.has(run.versionId) ||
-      (selectedEvalHashes && !selectedEvalHashes.has(run.evalHash)) ||
       !skillSelectionIncludes(options.skills, run.skillName, run.skillBundleHash)
     ) {
       continue;
@@ -9634,14 +8477,15 @@ export function buildInternalComparisonFromState(
     if (!version || !bundle) {
       continue;
     }
-    const key = comparisonEntryKey(run.versionId, run.skillName, run.skillBundleHash, run.evalHash);
-    entriesByKey.set(key, { version, bundle, evalHash: run.evalHash });
+    for (const evalHash of selectedEvalHashes ? [...selectedEvalHashes] : [run.evalHash]) {
+      const key = comparisonEntryKey(run.versionId, run.skillName, run.skillBundleHash, evalHash);
+      entriesByKey.set(key, { version, bundle, evalHash, allowEvidence: true });
+    }
   }
 
   for (const job of [...state.jobs].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
     if (
       !versionIds.has(job.versionId) ||
-      (selectedEvalHashes && !selectedEvalHashes.has(job.evalHash)) ||
       !skillSelectionIncludes(options.skills, job.skillName, job.skillBundleHash)
     ) {
       continue;
@@ -9651,8 +8495,10 @@ export function buildInternalComparisonFromState(
     if (!version || !bundle) {
       continue;
     }
-    const key = comparisonEntryKey(job.versionId, job.skillName, job.skillBundleHash, job.evalHash);
-    entriesByKey.set(key, { version, bundle, evalHash: job.evalHash });
+    for (const evalHash of selectedEvalHashes ? [...selectedEvalHashes] : [job.evalHash]) {
+      const key = comparisonEntryKey(job.versionId, job.skillName, job.skillBundleHash, evalHash);
+      entriesByKey.set(key, { version, bundle, evalHash, allowEvidence: true });
+    }
   }
 
   if (versions.length > 0) {
@@ -9673,7 +8519,7 @@ export function buildInternalComparisonFromState(
         for (const bundle of selectedBundles) {
           const key = comparisonEntryKey(version.id, bundle.skillName, bundle.hash, evalHash);
           if (!entriesByKey.has(key)) {
-            entriesByKey.set(key, { version, bundle, evalHash });
+            entriesByKey.set(key, { version, bundle, evalHash, allowEvidence: false });
           }
         }
       }
@@ -9681,7 +8527,7 @@ export function buildInternalComparisonFromState(
   }
 
   const entries = [...entriesByKey.values()].sort((left, right) =>
-    compareVersionIds(left.version, right.version) ||
+    compareWorkbenchVersions(left.version, right.version) ||
     left.bundle.skillName.localeCompare(right.bundle.skillName) ||
     left.bundle.hash.localeCompare(right.bundle.hash) ||
     left.evalHash.localeCompare(right.evalHash)
@@ -9704,17 +8550,16 @@ export function buildInternalComparisonFromState(
   for (const entry of entries) {
     const agents = agentsByVersionId.get(entry.version.id) ?? [];
     for (const agent of agents) {
-      const evidence = bestComparableEvidence({
-        runs: state.runs,
-        jobs: state.jobs,
-        traces: state.traces,
-        versionId: entry.version.id,
-        skillName: entry.bundle.skillName,
-        skillBundleHash: entry.bundle.hash,
-        evalHash: entry.evalHash,
-        agentName: agent.agent.name,
-        agentHash: agent.hash,
-      });
+      const evalSnapshot = state.evals.find((snapshot) => snapshot.hash === entry.evalHash);
+      const resolvedAgent = state.agents.find((candidate) => hashJson(candidate) === agent.hash) ?? agent.agent;
+      const evidence = entry.allowEvidence && evalSnapshot && hashJson(resolvedAgent) === agent.hash
+        ? bestCompatibleEvalEvidence({
+            state,
+            skillBundle: entry.bundle,
+            evalSnapshot,
+            agent: resolvedAgent,
+          })
+        : undefined;
       cells.push({
         versionId: entry.version.id,
         skillName: entry.bundle.skillName,
@@ -9736,13 +8581,6 @@ export function buildInternalComparisonFromState(
   };
 }
 
-export function buildWorkbenchResultsFromState(
-  state: WorkbenchProjectState,
-  options: InternalComparisonSelection = {},
-): WorkbenchResults {
-  return resultsFromInternalComparison(buildInternalComparisonFromState(state, options), state);
-}
-
 export async function switchWorkbenchVersion(versionRef: string, options: WorkbenchSwitchOptions = {}): Promise<WorkbenchSwitchResult> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
@@ -9758,9 +8596,9 @@ export async function switchWorkbenchVersion(versionRef: string, options: Workbe
     if (requiresOverwrite && !options.overwrite && !options.dryRun) {
       throw new WorkbenchCodedError(
         "worktree_changed",
-        "Local package source has unsaved edits; refusing to overwrite it with workbench switch.",
+        "Local package source has unsaved edits; refusing to overwrite it with workbench skill switch.",
         {
-          remediation: `workbench switch ${version.id} --yes`,
+          remediation: `workbench skill switch ${version.id} --yes`,
           subject: {
             versionId: version.id,
             added: changes.added,
@@ -9829,8 +8667,8 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
   const state = await loadStateReadOnlyWithRetry(root);
   if (objectRef === CURRENT_SKILL_VERSION_NAME) {
     if (filePath) {
-      throw new WorkbenchCodedError("usage", `Use a path directly for live project files: workbench show ${filePath}`, {
-        remediation: `workbench show ${quoteShellArg(filePath)}`,
+      throw new WorkbenchCodedError("usage", `Use a path directly for live project files: workbench skill show ${filePath}`, {
+        remediation: `workbench skill show ${quoteShellArg(filePath)}`,
         subject: { ref, path: filePath },
         exitCode: 2,
       });
@@ -9846,7 +8684,7 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
     const file = evalSnapshot.files.find((entry) => entry.path === filePath);
     if (!file) {
       throw new WorkbenchCodedError("ref_not_found", `File not found in ${objectRef}: ${filePath}`, {
-        remediation: `workbench show ${objectRef}`,
+        remediation: `workbench eval show ${objectRef}`,
         subject: { ref: objectRef, path: filePath },
         exitCode: 1,
       });
@@ -9861,28 +8699,28 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
     const file = version.files.find((entry) => entry.path === filePath);
     if (!file) {
       throw new WorkbenchCodedError("ref_not_found", `File not found in ${version.id}: ${filePath}`, {
-        remediation: `workbench show ${version.id}`,
+        remediation: `workbench skill show ${version.id}`,
         subject: { ref: version.id, path: filePath },
         exitCode: 1,
       });
     }
     return file;
   }
-  const run = resolveStateObjectByRef(state.runs, objectRef, "run");
+  const run = resolveWorkbenchObjectByRef(state.runs, objectRef, "run");
   if (run) {
     return run;
   }
-  const job = resolveStateObjectByRef(state.jobs, objectRef, "job");
+  const job = resolveWorkbenchObjectByRef(state.jobs, objectRef, "job");
   if (job) {
     return job;
   }
-  const trace = resolveStateObjectByRef(state.traces, objectRef, "trace");
+  const trace = resolveWorkbenchObjectByRef(state.traces, objectRef, "trace");
   if (trace) {
     if (filePath) {
       const file = trace.files.filter(isUserFacingTraceFile).find((entry) => entry.path === filePath);
       if (!file) {
         throw new WorkbenchCodedError("ref_not_found", `File not found in ${trace.id}: ${filePath}`, {
-          remediation: `workbench show ${trace.id}`,
+          remediation: `workbench eval show ${trace.id}`,
           subject: { ref: trace.id, path: filePath },
           exitCode: 1,
         });
@@ -9891,13 +8729,13 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
     }
     return trace;
   }
-  const artifact = resolveStateObjectByRef(state.artifacts, objectRef, "artifact");
+  const artifact = resolveWorkbenchObjectByRef(state.artifacts, objectRef, "artifact");
   if (artifact) {
     if (filePath) {
       const file = artifact.files.find((entry) => entry.path === filePath);
       if (!file) {
         throw new WorkbenchCodedError("ref_not_found", `File not found in ${artifact.id}: ${filePath}`, {
-          remediation: `workbench show ${artifact.id}`,
+          remediation: `workbench eval show ${artifact.id}`,
           subject: { ref: artifact.id, path: filePath },
           exitCode: 1,
         });
@@ -9907,7 +8745,7 @@ export async function showWorkbenchRef(ref: string, options: WorkbenchCommandOpt
     return artifact;
   }
   throw new WorkbenchCodedError("ref_not_found", `Workbench object not found: ${objectRef}`, {
-    remediation: "workbench log --json",
+    remediation: "workbench eval results --json",
     subject: { ref: objectRef },
     exitCode: 1,
   });
@@ -9922,7 +8760,7 @@ async function readLiveInspectableProjectFile(root: string, filePath: string): P
   }
   if (isWorkbenchRuntimeMetadataPath(normalized)) {
     throw new WorkbenchCodedError("runtime_metadata_not_inspectable", `Runtime metadata is not inspectable: ${normalized}`, {
-      remediation: "Use workbench log, workbench results, or workbench show RUN_ID to inspect durable evidence.",
+      remediation: "Use workbench eval results or workbench eval show RUN_ID to inspect durable evidence.",
       subject: { path: normalized },
       exitCode: 1,
     });
@@ -9942,7 +8780,7 @@ async function readLiveInspectableProjectFile(root: string, filePath: string): P
     path.basename(normalized) === SKILL_FILE;
   if (pathLike) {
     throw new WorkbenchCodedError("ref_not_found", `Live project file not found: ${normalized}`, {
-      remediation: "workbench show",
+      remediation: "workbench skill show",
       subject: { path: normalized },
       exitCode: 1,
     });
@@ -9950,7 +8788,7 @@ async function readLiveInspectableProjectFile(root: string, filePath: string): P
   return null;
 }
 
-function resolveStateObjectByRef<T extends { id: string }>(
+export function resolveWorkbenchObjectByRef<T extends { id: string }>(
   entries: readonly T[],
   ref: string,
   kind: "run" | "job" | "trace" | "artifact",
@@ -9980,38 +8818,6 @@ function objectIdRefMatches(id: string, ref: string): boolean {
   }
   const separator = id.indexOf("_");
   return separator !== -1 && id.slice(separator + 1).startsWith(ref);
-}
-
-export async function filesForWorkbenchRef(ref: string, options: WorkbenchCommandOptions = {}): Promise<SurfaceSnapshotFile[]> {
-  const root = resolveRoot(options.dir);
-  return withWorkbenchProjectLockIfInitialized(root, async () => {
-  await requireInitialized(root);
-  const state = await loadStateReadOnlyWithRetry(root);
-  if (ref.trim() === CURRENT_SKILL_VERSION_NAME) {
-    return (await liveWorkbenchVersion(root, state)).files.map(copyFile);
-  }
-  const version = findVersion(state, ref);
-  if (version) {
-    return version.files.map(copyFile);
-  }
-  const evalSnapshot = evalSnapshotByVersionRef(state, ref);
-  if (evalSnapshot) {
-    return evalSnapshot.files.map(copyFile);
-  }
-  const trace = resolveStateObjectByRef(state.traces, ref, "trace");
-  if (trace) {
-    return trace.files.filter(isUserFacingTraceFile).map(copyFile);
-  }
-  const artifact = resolveStateObjectByRef(state.artifacts, ref, "artifact");
-  if (artifact) {
-    return artifact.files.map(copyFile);
-  }
-  throw new WorkbenchCodedError("ref_not_found", `Workbench file object not found: ${ref}`, {
-    remediation: "workbench log --json",
-    subject: { ref },
-    exitCode: 1,
-  });
-  });
 }
 
 function isUserFacingTraceFile(file: SurfaceSnapshotFile): boolean {
@@ -10088,26 +8894,6 @@ export async function removeWorkbenchAgent(name: string, options: WorkbenchComma
   });
 }
 
-export async function setDefaultWorkbenchAgent(name: string, options: WorkbenchCommandOptions = {}): Promise<{ defaultAgent: string }> {
-  const root = resolveRoot(options.dir);
-  return withWorkbenchProjectLockIfInitialized(root, async () => {
-    await requireInitialized(root);
-    const agents = await readAgents(root);
-    const selection = name.trim();
-    if (!selection) {
-      throw new WorkbenchUserError(`Agent not found: ${name}`);
-    }
-    if (selection !== ALL_SELECTOR && !agents.some((entry) => entry.name === selection)) {
-      throw new WorkbenchUserError(`Agent not found: ${selection}`);
-    }
-    await writeAgents(root, agents, selection);
-    const state = await loadState(root);
-    upsertAgentSnapshots(state.agents, agents);
-    await saveState(root, state);
-    return { defaultAgent: selection };
-  });
-}
-
 export async function addWorkbenchRemote(name: string, url: string, options: WorkbenchAddRemoteOptions = {}): Promise<WorkbenchAddRemoteResult> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
@@ -10150,20 +8936,6 @@ async function clearRemoteLocalState(root: string, state: WorkbenchProjectState,
     }
   }
   await fs.rm(remoteSyncStateFile(root, remoteName), { force: true });
-}
-
-export async function removeWorkbenchRemote(name: string, options: WorkbenchCommandOptions = {}): Promise<{ remote: string; removed: boolean }> {
-  const root = resolveRoot(options.dir);
-  return withWorkbenchProjectLockIfInitialized(root, async () => {
-    await requireInitialized(root);
-    const remoteName = validateRemoteName(name);
-    const state = await loadState(root);
-    const removed = Boolean(state.remotes[remoteName]);
-    delete state.remotes[remoteName];
-    await clearRemoteLocalState(root, state, remoteName);
-    await saveState(root, state);
-    return { remote: remoteName, removed };
-  });
 }
 
 export async function clearDeletedWorkbenchCloudProjectLocalState(options: WorkbenchCommandOptions & {
@@ -10237,15 +9009,6 @@ function normalizedBaseUrl(value: string): string {
   }
 }
 
-export async function listWorkbenchRemotes(options: WorkbenchCommandOptions = {}): Promise<WorkbenchRemote[]> {
-  const root = resolveRoot(options.dir);
-  return withWorkbenchProjectLockIfInitialized(root, async () => {
-    await requireInitialized(root);
-    const state = await loadStateReadOnlyWithRetry(root);
-    return Object.values(state.remotes).sort((left, right) => left.name.localeCompare(right.name));
-  });
-}
-
 export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}): Promise<WorkbenchSyncResult> {
   const root = resolveRoot(options.dir);
   return withWorkbenchProjectLockIfInitialized(root, async () => {
@@ -10312,6 +9075,7 @@ export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}):
       if (!remoteIsHttp || objectPackSize(remoteWritePack) > 0) {
         await writeRemoteObjectPack(remote, remoteWritePack, state, { authToken: options.authToken, signal: options.signal });
       }
+      await writeObjectPackTraceBundles(root, remotePack);
       state.refs = withRemoteTrackingRefs(state.refs, remote.name, remoteTrackingRefs);
       await saveState(root, state);
       await writeRemoteSyncState(root, {
@@ -10328,9 +9092,7 @@ export async function syncWorkbenchRemote(options: WorkbenchRemoteOptions = {}):
       });
       return result;
     } catch (error) {
-      if (options.signal?.aborted) {
-        throw error;
-      }
+      if (options.signal?.aborted) throw error;
       const syncError = syncFailureError(error, remote);
       await writeRemoteSyncState(root, {
         schema: "workbench.remote-sync-state.v1",
@@ -10353,9 +9115,9 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
     const current = options.dryRun === true
       ? (await planWorkbenchLaunchSource(root, state, {
           commit: false,
-          message: SOURCE_SNAPSHOT_MESSAGE,
+          message: PACKAGE_SNAPSHOT_MESSAGE,
         })).version
-      : await reconcileWorkbenchVersion(root, state, SOURCE_SNAPSHOT_MESSAGE);
+      : await reconcileWorkbenchVersion(root, state, PACKAGE_SNAPSHOT_MESSAGE);
     const version = options.version ? resolveVersion(state, options.version) : current;
     const remote = resolveRemote(state, options.remote);
     assertPublishableRemote(remote);
@@ -10408,7 +9170,7 @@ export async function publishWorkbenchVersion(options: WorkbenchPublishOptions =
         unchanged: true,
       };
     }
-    const publication = await writeRemotePublishedSource(sync.remote, version, {
+    const publication = await writeRemoteSkillPackage(sync.remote, version, {
       authToken: options.authToken,
       state: syncedState,
       visibility,
@@ -10466,7 +9228,7 @@ export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptio
       : publicationStatusFromRefs(syncedState.refs, sync.remote.name);
     if (publication.status !== "published" || !publication.publishedVersionIds?.includes(version.id)) {
       throw new WorkbenchCodedError("published_version_not_found", `Published version not found: ${version.id}.`, {
-        remediation: "workbench publish VERSION",
+        remediation: "workbench skill publish VERSION",
         subject: { versionId: version.id },
         exitCode: 1,
       });
@@ -10474,7 +9236,7 @@ export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptio
     if (publication.currentVersionId === version.id) {
       const replacementVersionId = unpublishReplacementVersionId(publication, version.id, syncedState.versions);
       throw new WorkbenchCodedError("published_version_current", `Version ${version.id} is the current published version and cannot be unpublished directly.`, {
-        remediation: replacementVersionId ? `workbench publish ${replacementVersionId}` : "workbench versions",
+        remediation: replacementVersionId ? `workbench skill publish ${replacementVersionId}` : "workbench skill versions",
         subject: {
           versionId: version.id,
           currentVersionId: publication.currentVersionId,
@@ -10489,7 +9251,7 @@ export async function unpublishWorkbenchVersion(options: WorkbenchUnpublishOptio
       return {
         remote: sync.remote,
         version,
-        visibility: normalizePublishVisibilityRef(publication.visibility),
+        visibility: isWorkbenchSkillVisibility(publication.visibility) ? publication.visibility : undefined,
         installHandle: publication.installHandle,
         currentVersionId: publication.currentVersionId,
         publishedVersionIds: publication.publishedVersionIds ?? [],
@@ -10535,7 +9297,7 @@ function unpublishReplacementVersionId(
   }
   const latestKnownVersion = versions
     .filter((version) => replacementIds.has(version.id))
-    .sort(compareVersionIds)
+    .sort(compareWorkbenchVersions)
     .at(-1);
   return latestKnownVersion?.id ?? [...replacementIds].sort().at(-1);
 }
@@ -10544,8 +9306,8 @@ function assertPublishableRemote(remote: WorkbenchRemote): void {
   if (remote.kind === "workbench-cloud") {
     return;
   }
-  throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can publish installable source.`, {
-    remediation: "workbench login && workbench publish",
+  throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can publish skill packages.`, {
+    remediation: "workbench login && workbench skill publish",
     subject: { remote: remote.name, kind: remote.kind, url: remote.url },
     exitCode: 1,
   });
@@ -10555,8 +9317,6 @@ export interface WorkbenchInspectionSnapshotFromStateOptions {
   root?: string;
   state: WorkbenchProjectState;
   liveVersion?: WorkbenchVersion;
-  evaluationFiles?: readonly SurfaceSnapshotFile[];
-  environmentStatus?: WorkbenchEnvironmentStatus;
   skillSources?: readonly WorkbenchSkillSource[];
   authoredAgents?: readonly WorkbenchAgent[];
   remotes?: readonly WorkbenchRemote[];
@@ -10573,11 +9333,6 @@ export function createWorkbenchInspectionSnapshotFromState(
   const state = options.state;
   const root = options.root ?? state.root;
   const current = options.currentVersionId ?? currentWorkbenchVersionIdFromState(state);
-  const currentVersion = current
-    ? options.liveVersion?.id === current
-      ? options.liveVersion
-      : state.versions.find((version) => version.id === current)
-    : undefined;
   const skillSources = (options.skillSources ?? state.skillSources).map(copySkillSource);
   const authoredAgents = options.authoredAgents ?? [];
   const agents = uniqueAgentSnapshots([...state.agents, ...authoredAgents]);
@@ -10592,11 +9347,7 @@ export function createWorkbenchInspectionSnapshotFromState(
   const remotes = [...(options.remotes ?? Object.values(state.remotes))]
     .map((remote) => ({ ...remote }))
     .sort((left, right) => left.name.localeCompare(right.name));
-  const lastRun = state.runs
-    .filter((run) => runQualityScoreFromJobs(run, state.jobs) !== undefined)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-  const lastRunScore = lastRun ? runQualityScoreFromJobs(lastRun, state.jobs) : undefined;
-  const currentEvalHash = state.evals[0]?.hash ?? selectActiveEvalSnapshot(state)?.hash;
+  const currentEvalHash = state.evals[0]?.hash;
   const evalVersions = resultEvalVersionSummaries(state, currentEvalHash);
   const resultEvalHashes = evalVersions.length > 0
     ? evalVersions.map((entry) => entry.hash)
@@ -10604,18 +9355,11 @@ export function createWorkbenchInspectionSnapshotFromState(
   const status: WorkbenchStatus = {
     root,
     initialized: true,
-    ...(currentVersion?.hash ? { currentSkillHash: currentVersion.hash } : {}),
     ...(current ? { currentVersionId: current } : {}),
     ...(defaultSkill ? { defaultSkill } : {}),
     ...(defaultAgent ? { defaultAgent } : {}),
-    versionCount: state.versions.length,
-    skillCount: skillSources.length,
-    agentCount: authoredAgents.length > 0 ? authoredAgents.length : state.agents.length,
     runCount: state.runs.length,
-    remoteCount: remotes.length,
     ...(options.pendingSyncCount !== undefined ? { pendingSyncCount: options.pendingSyncCount } : {}),
-    ...(lastRunScore !== undefined ? { lastScore: lastRunScore } : {}),
-    ...(options.environmentStatus ? { environment: options.environmentStatus } : {}),
   };
   return {
     root,
@@ -10628,7 +9372,6 @@ export function createWorkbenchInspectionSnapshotFromState(
     skillBundles: state.skillBundles.map(copySkillBundle),
     evals: state.evals.map(copyEval),
     evalVersions,
-    evaluationFiles: (options.evaluationFiles ?? state.evals[0]?.files ?? []).map(copyFile),
     agents,
     ...(state.versions.length > 0 ? {
       results: resultsFromInternalComparison(buildInternalComparisonFromState(state, {
@@ -10648,282 +9391,6 @@ export function createWorkbenchInspectionSnapshotFromState(
     refs: { ...state.refs },
     ...(options.publication ? { publication: options.publication } : {}),
   };
-}
-
-async function inspectionTraceOverlay(
-  root: string,
-  options: Pick<WorkbenchCommandOptions, "homeDir">,
-): Promise<WorkbenchTrace[]> {
-  const includeHome = options.homeDir !== undefined;
-  if (includeHome) {
-    await compactWorkbenchTraceSpool({
-      homeDir: options.homeDir,
-    });
-  }
-  return await listWorkbenchTraceRecords({
-    homeDir: options.homeDir,
-    projectRoot: root,
-    includeCandidates: true,
-    includeHome,
-  });
-}
-
-function mergeInspectionTraces(
-  overlay: readonly WorkbenchTrace[],
-  stateTraces: readonly WorkbenchTrace[],
-): WorkbenchTrace[] {
-  const byId = new Map<string, WorkbenchTrace>();
-  for (const trace of [...overlay, ...stateTraces]) {
-    if (!byId.has(trace.id)) {
-      byId.set(trace.id, copyTrace(trace));
-    }
-  }
-  return [...byId.values()].sort((left, right) =>
-    (right.updatedAt ?? right.createdAt).localeCompare(left.updatedAt ?? left.createdAt) ||
-    right.id.localeCompare(left.id)
-  );
-}
-
-function projectStateWithLiveTraceRuns(state: WorkbenchProjectState, root: string): WorkbenchProjectState {
-  const existingRunIds = new Set(state.runs.map((run) => run.id));
-  const existingJobIds = new Set(state.jobs.map((job) => job.id));
-  const groups = new Map<string, WorkbenchTrace[]>();
-  for (const trace of state.traces) {
-    if (trace.origin !== "live" || existingRunIds.has(trace.runId) || !liveTraceBelongsToRoot(trace, root)) {
-      continue;
-    }
-    const group = groups.get(trace.runId);
-    if (group) {
-      group.push(trace);
-    } else {
-      groups.set(trace.runId, [trace]);
-    }
-  }
-  if (groups.size === 0) {
-    return state;
-  }
-
-  const liveRuns: WorkbenchRun[] = [];
-  const liveJobs: WorkbenchJob[] = [];
-  for (const [runId, traces] of groups.entries()) {
-    const ordered = [...traces].sort((left, right) =>
-      left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
-    );
-    const first = ordered[0];
-    if (!first) {
-      continue;
-    }
-    const runJobs = ordered.map((trace) => liveJobFromTrace(trace)).filter((job) => !existingJobIds.has(job.id));
-    if (runJobs.length === 0) {
-      continue;
-    }
-    for (const job of runJobs) {
-      existingJobIds.add(job.id);
-    }
-    const finishedAt = liveTraceRunFinishedAt(runJobs);
-    const lastProgressAt = ordered
-      .map((trace) => trace.updatedAt ?? trace.createdAt)
-      .sort()
-      .at(-1);
-    liveJobs.push(...runJobs);
-    liveRuns.push({
-      id: runId,
-      kind: "live",
-      versionId: first.versionId,
-      skillName: first.skillName,
-      skillBundleHash: first.skillBundleHash,
-      evalHash: first.evalHash ?? "live",
-      agentName: first.agentName,
-      agentHash: first.agentHash ?? liveTraceAgentHash(first),
-      status: liveTraceRunStatus(runJobs),
-      jobIds: runJobs.map((job) => job.id),
-      traceIds: ordered.map((trace) => trace.id),
-      createdAt: first.createdAt,
-      ...(finishedAt ? { finishedAt } : {}),
-      location: "local",
-      ...(lastProgressAt ? { lastProgressAt } : {}),
-    });
-  }
-  if (liveRuns.length === 0) {
-    return state;
-  }
-  return {
-    ...state,
-    runs: [...state.runs, ...liveRuns],
-    jobs: [...state.jobs, ...liveJobs],
-  };
-}
-
-function liveJobFromTrace(trace: WorkbenchTrace): WorkbenchJob {
-  const status = liveJobStatusFromTrace(trace);
-  const finishedAt = status === "running" || status === "queued" ? undefined : trace.updatedAt ?? trace.createdAt;
-  const durationMs = finishedAt ? timestampDeltaMs(trace.createdAt, finishedAt) : undefined;
-  const result = liveJobResultFromTrace(trace);
-  return {
-    id: trace.jobId ?? `job_live_${safeObjectFileName(trace.id)}`,
-    runId: trace.runId,
-    kind: "live",
-    role: "agent-session",
-    versionId: trace.versionId,
-    skillName: trace.skillName,
-    skillBundleHash: trace.skillBundleHash,
-    evalHash: trace.evalHash ?? "live",
-    agentName: trace.agentName,
-    agentHash: trace.agentHash ?? liveTraceAgentHash(trace),
-    caseId: "current",
-    sample: 0,
-    status,
-    adapter: { use: trace.agentName },
-    ...(trace.source?.command ? { command: trace.source.command } : {}),
-    ...(result ? { result } : {}),
-    artifactIds: [],
-    traceIds: [trace.id],
-    createdAt: trace.createdAt,
-    startedAt: trace.createdAt,
-    ...(finishedAt ? { finishedAt } : {}),
-    ...(durationMs !== undefined ? { durationMs } : {}),
-    ...(status === "failed" ? { error: liveTraceError(trace) ?? "Live agent session failed." } : {}),
-  };
-}
-
-function liveJobStatusFromTrace(trace: WorkbenchTrace): WorkbenchJobStatus {
-  const lifecycleStatus = liveJobStatusFromLifecycle(trace.status);
-  if (lifecycleStatus) {
-    return lifecycleStatus;
-  }
-  const resultStatus = liveJobStatusFromResult(trace.result);
-  if (resultStatus) {
-    return resultStatus;
-  }
-  return trace.output?.assistantText ? "succeeded" : "running";
-}
-
-function liveJobStatusFromLifecycle(status: WorkbenchTrace["status"]): WorkbenchJobStatus | null {
-  if (!status) {
-    return null;
-  }
-  if (status.capture === "discarded" || status.execution === "canceled") {
-    return "canceled";
-  }
-  if (status.execution === "failed") {
-    return "failed";
-  }
-  if (status.execution === "running" || status.execution === "unknown" || status.capture === "capturing") {
-    return "running";
-  }
-  if (status.execution === "completed") {
-    return "succeeded";
-  }
-  return "running";
-}
-
-function liveJobStatusFromResult(result: Json): WorkbenchJobStatus | null {
-  if (!result || typeof result !== "object" || Array.isArray(result)) {
-    return null;
-  }
-  const record = result as Record<string, Json>;
-  const status = typeof record.status === "string"
-    ? record.status.trim().toLowerCase()
-    : null;
-  if (!status) {
-    return null;
-  }
-  if (status === "completed" || status === "succeeded") {
-    return "succeeded";
-  }
-  if (status === "failed") {
-    return "failed";
-  }
-  if (status === "canceled") {
-    return "canceled";
-  }
-  if (status === "queued") {
-    return "queued";
-  }
-  if (status === "running" || status === "unknown") {
-    return "running";
-  }
-  return null;
-}
-
-function liveTraceRunStatus(jobs: readonly WorkbenchJob[]): WorkbenchRun["status"] {
-  const statuses = jobs.map((job) => job.status);
-  if (statuses.includes("running")) {
-    return "running";
-  }
-  if (statuses.includes("queued")) {
-    return "queued";
-  }
-  if (statuses.includes("failed")) {
-    return "failed";
-  }
-  if (statuses.length > 0 && statuses.every((status) => status === "canceled")) {
-    return "canceled";
-  }
-  return "succeeded";
-}
-
-function liveTraceRunFinishedAt(jobs: readonly WorkbenchJob[]): string | undefined {
-  if (jobs.some((job) => job.status === "queued" || job.status === "running")) {
-    return undefined;
-  }
-  return jobs
-    .map((job) => job.finishedAt)
-    .filter((value): value is string => Boolean(value))
-    .sort()
-    .at(-1);
-}
-
-function liveJobResultFromTrace(trace: WorkbenchTrace): WorkbenchJobResult | undefined {
-  const summary = trace.output?.assistantText;
-  if (!summary && !trace.usage && !trace.result) {
-    return undefined;
-  }
-  return {
-    ...(summary ? { summary } : {}),
-    ...(trace.usage ? { usage: JSON.parse(JSON.stringify(trace.usage)) as UsageSummary } : {}),
-    ...(trace.result ? { payload: JSON.parse(JSON.stringify(trace.result)) as Json } : {}),
-  };
-}
-
-function liveTraceError(trace: WorkbenchTrace): string | undefined {
-  if (!trace.result || typeof trace.result !== "object" || Array.isArray(trace.result)) {
-    return undefined;
-  }
-  const record = trace.result as Record<string, Json>;
-  return typeof record.error === "string"
-    ? record.error
-    : typeof record.error_message === "string"
-      ? record.error_message
-      : undefined;
-}
-
-function timestampDeltaMs(start: string, end: string): number | undefined {
-  const startMs = Date.parse(start);
-  const endMs = Date.parse(end);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
-    return undefined;
-  }
-  return endMs - startMs;
-}
-
-function liveTraceAgentHash(trace: Pick<WorkbenchTrace, "agentName" | "source">): string {
-  return `agent_live_${hashJson({ agentName: trace.agentName, source: trace.source?.host ?? null }).slice(0, 12)}`;
-}
-
-function liveTraceBelongsToRoot(trace: WorkbenchTrace, root: string): boolean {
-  if (!trace.source?.workspaceRoot) {
-    return false;
-  }
-  return canonicalRootPath(trace.source.workspaceRoot) === canonicalRootPath(root);
-}
-
-function canonicalRootPath(value: string): string {
-  try {
-    return realpathSync.native(value);
-  } catch {
-    return path.resolve(value);
-  }
 }
 
 export function currentWorkbenchVersionIdFromState(state: WorkbenchProjectState): string | undefined {
@@ -10947,17 +9414,13 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
   const root = resolveRoot(options.dir);
   await requireInitialized(root);
   const loadedState = await loadStateReadOnlyWithRetry(root);
-  const stateWithHostedHandles = await applyLocalHostedRunHandles(root, loadedState);
-  const state = await applyLocalRunCancellationRequests(root, stateWithHostedHandles);
-  const [authoredAgents, skillSources, syncCount, liveVersion, evalSnapshot, evaluationFiles, environmentStatus, traceOverlay] = await Promise.all([
+  const state = await applyLocalRunCancellationRequests(root, loadedState);
+  const [authoredAgents, skillSources, syncCount, liveVersion, evalSnapshot] = await Promise.all([
     readAgents(root).catch(() => []),
     readSkillSources(root).catch(() => state.skillSources),
     pendingSyncCount(root).catch(() => undefined),
     liveWorkbenchVersion(root, state).catch(() => undefined),
-    readEvalSnapshot(root).catch(() => undefined),
-    readWorkbenchEvaluationSourceFiles(root).catch(() => []),
-    readSkillEvalEnvironmentStatus(root).catch(() => undefined),
-    inspectionTraceOverlay(root, options).catch(() => []),
+    readEvalSnapshot(root),
   ]);
   const defaultSkill = await readDefaultSkillSelection(root, skillSources)
     .catch(() => defaultWorkbenchSkillSelectionFromState({ ...state, skillSources }));
@@ -10973,19 +9436,16 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
           copyEval(evalSnapshot),
           ...state.evals.filter((entry) => entry.hash !== evalSnapshot.hash).map(copyEval),
         ],
-        traces: mergeInspectionTraces(traceOverlay, state.traces),
+        traces: state.traces.map(copyTrace),
       }
     : {
         ...state,
-        traces: mergeInspectionTraces(traceOverlay, state.traces),
+      traces: state.traces.map(copyTrace),
       };
-  const snapshotState = projectStateWithLiveTraceRuns(snapshotStateWithTraces, root);
   return createWorkbenchInspectionSnapshotFromState({
     root,
-    state: snapshotState,
+    state: snapshotStateWithTraces,
     liveVersion,
-    evaluationFiles,
-    ...(environmentStatus ? { environmentStatus } : {}),
     skillSources,
     authoredAgents,
     currentVersionId: liveVersion ? CURRENT_SKILL_VERSION_NAME : currentWorkbenchVersionIdFromState(state),
@@ -10997,6 +9457,23 @@ export async function createWorkbenchReadOnlyInspectionSnapshot(
       Object.values(state.remotes).sort((left, right) => left.name.localeCompare(right.name)),
     ),
   });
+}
+
+/** The first Eval in an inspection is always the freshly read local Eval. */
+export function currentWorkbenchEvalSnapshot(
+  snapshot: Pick<WorkbenchInspectionSnapshot, "evals">,
+): WorkbenchEvalSnapshot | undefined {
+  return snapshot.evals[0];
+}
+
+/** The Agent Skill name declared by the checkout's current SKILL.md. */
+export function currentWorkbenchSkillName(
+  snapshot: Pick<WorkbenchInspectionSnapshot, "status" | "versions">,
+): string | undefined {
+  const current = snapshot.versions.find((version) => version.id === snapshot.status.currentVersionId);
+  const skillFile = current?.files.find((file) => file.path === SKILL_FILE &&
+    (file.kind ?? "text") === "text" && (file.encoding ?? "utf8") === "utf8");
+  return skillFile ? skillFrontmatterName(skillFile.content) : undefined;
 }
 
 export async function readWorkbenchReadOnlyInspectionCursor(
@@ -11032,50 +9509,6 @@ export async function waitForWorkbenchReadOnlyInspectionNotice(
   });
 }
 
-export async function createWorkbenchInspectionSnapshot(options: WorkbenchCommandOptions = {}): Promise<WorkbenchInspectionSnapshot> {
-  const root = resolveRoot(options.dir);
-  return withWorkbenchProjectLockIfInitialized(root, async () => {
-    const status = await workbenchStatus({ dir: root, authToken: options.authToken });
-    const state = await loadState(root);
-    const remotes = Object.values(state.remotes).sort((left, right) => left.name.localeCompare(right.name));
-    const authoredAgents = await readAgents(root).catch(() => []);
-    const liveVersion = await liveWorkbenchVersion(root, state).catch(() => undefined);
-    const evalSnapshot = await readEvalSnapshot(root).catch(() => undefined);
-    const evaluationFiles = await readWorkbenchEvaluationSourceFiles(root).catch(() => []);
-    const environmentStatus = await readSkillEvalEnvironmentStatus(root).catch(() => undefined);
-    const traceOverlay = await inspectionTraceOverlay(root, options).catch(() => []);
-    const snapshotStateWithTraces = evalSnapshot
-      ? {
-          ...state,
-          evals: [
-            copyEval(evalSnapshot),
-            ...state.evals.filter((entry) => entry.hash !== evalSnapshot.hash).map(copyEval),
-          ],
-          traces: mergeInspectionTraces(traceOverlay, state.traces),
-        }
-      : {
-          ...state,
-          traces: mergeInspectionTraces(traceOverlay, state.traces),
-        };
-    const snapshotState = projectStateWithLiveTraceRuns(snapshotStateWithTraces, root);
-    return createWorkbenchInspectionSnapshotFromState({
-      root,
-      skillSources: await readSkillSources(root).catch(() => state.skillSources),
-      authoredAgents,
-      remotes,
-      state: snapshotState,
-      liveVersion,
-      evaluationFiles,
-      ...(environmentStatus ? { environmentStatus } : {}),
-      currentVersionId: liveVersion ? CURRENT_SKILL_VERSION_NAME : status.currentVersionId,
-      defaultSkill: status.defaultSkill,
-      defaultAgent: status.defaultAgent,
-      pendingSyncCount: status.pendingSyncCount,
-      ...workbenchPublicationForSnapshot(state, remotes),
-    });
-  });
-}
-
 export function workbenchJobEvidenceForSnapshot(
   snapshot: WorkbenchInspectionSnapshot,
   selector: { runId: string; jobId: string },
@@ -11084,7 +9517,7 @@ export function workbenchJobEvidenceForSnapshot(
   if (!run) {
     return null;
   }
-  const job = snapshot.jobs.find((entry) => entry.id === selector.jobId && entry.runId === run.id) ?? null;
+  const job = snapshot.jobs.find((entry) => entry.id === selector.jobId && workbenchRunOwnsJob(run, entry)) ?? null;
   if (!job) {
     return null;
   }
@@ -11094,7 +9527,7 @@ export function workbenchJobEvidenceForSnapshot(
   const role = job.kind === "improve" ? "improver" : "engine";
   const fileSessions = traces.flatMap((trace) =>
     buildWorkbenchTraceSessionsFromFiles({
-      job: remoteJobForInspectionJob(job, run),
+      job,
       files: trace.files,
       purpose: job.kind,
       fallbackRole: role,
@@ -11105,9 +9538,7 @@ export function workbenchJobEvidenceForSnapshot(
         run,
         job,
         role,
-        batches: snapshot.executionEvents.filter((batch) =>
-          batch.runId === run.id && batch.jobId === job.id
-        ),
+        batches: snapshot.executionEvents.filter((batch) => batch.jobId === job.id),
       })
     : [];
   const sessions = fileSessions.length > 0 ? fileSessions : progressSessions;
@@ -11119,7 +9550,7 @@ export function workbenchJobEvidenceForSnapshot(
     kind: job.kind,
     executionId: null,
     role,
-    status: remoteStatusForInspectionJob(job.status),
+    status: job.status,
     jobIds: [job.id],
     executionIds: [],
     versionId: job.versionId,
@@ -11189,7 +9620,7 @@ function executionTraceFromEventBatches(
       if (event.schema !== "workbench.trace.delta.v1") {
         continue;
       }
-      const delta = workbenchExecutionTraceFromJson(event.payload);
+      const delta = readWorkbenchExecutionTrace(event.payload, "live-progress");
       if (!delta) {
         continue;
       }
@@ -11200,7 +9631,7 @@ function executionTraceFromEventBatches(
         events.set(traceEvent.id, traceEvent);
       }
       for (const summary of delta.summaries) {
-        summaries.set(traceSummaryIdentity(summary), summary);
+        summaries.set(traceSummaryKey(summary), summary);
       }
     }
   }
@@ -11216,239 +9647,9 @@ function executionTraceFromEventBatches(
       left.at.localeCompare(right.at) || left.id.localeCompare(right.id)
     ),
     summaries: [...summaries.values()].sort((left, right) =>
-      left.started_at.localeCompare(right.started_at) || traceSummaryIdentity(left).localeCompare(traceSummaryIdentity(right))
+      left.started_at.localeCompare(right.started_at) || traceSummaryKey(left).localeCompare(traceSummaryKey(right))
     ),
   };
-}
-
-function workbenchExecutionTraceFromJson(value: Json): WorkbenchExecutionTrace | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, Json>;
-  const spans = Array.isArray(record.spans)
-    ? record.spans.flatMap((entry) => {
-        const span = workbenchTraceSpanFromJson(entry);
-        return span ? [span] : [];
-      })
-    : [];
-  const events = Array.isArray(record.events)
-    ? record.events.flatMap((entry) => {
-        const event = workbenchTraceEventFromJson(entry);
-        return event ? [event] : [];
-      })
-    : [];
-  const summaries = Array.isArray(record.summaries)
-    ? record.summaries.flatMap((entry) => {
-        const summary = workbenchTraceSummaryFromJson(entry);
-        return summary ? [summary] : [];
-      })
-    : [];
-  if (spans.length === 0 && events.length === 0 && summaries.length === 0) {
-    return null;
-  }
-  return {
-    trace_id: typeof record.trace_id === "string" ? record.trace_id : "live-progress",
-    spans,
-    events,
-    summaries,
-  };
-}
-
-function workbenchTraceSpanFromJson(value: Json): WorkbenchExecutionTrace["spans"][number] | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, Json>;
-  const id = typeof record.id === "string" ? record.id : "";
-  const kind = workbenchTraceSpanKind(record.kind);
-  const status = workbenchTraceStatus(record.status);
-  const startedAt = typeof record.started_at === "string" ? record.started_at : "";
-  if (!id || !kind || !status || !startedAt) {
-    return null;
-  }
-  return {
-    id,
-    parent_id: typeof record.parent_id === "string" ? record.parent_id : null,
-    attempt_number: positiveInteger(record.attempt_number) ?? 1,
-    stage_id: typeof record.stage_id === "string" ? record.stage_id : null,
-    stage_run_index: integerOrNull(record.stage_run_index),
-    kind,
-    title: typeof record.title === "string" ? record.title : id,
-    status,
-    started_at: startedAt,
-    ended_at: typeof record.ended_at === "string" ? record.ended_at : null,
-    attributes: jsonRecord(record.attributes) as Record<string, Json>,
-  };
-}
-
-function workbenchTraceEventFromJson(value: Json): WorkbenchExecutionTrace["events"][number] | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, Json>;
-  const id = typeof record.id === "string" ? record.id : "";
-  const spanId = typeof record.span_id === "string" ? record.span_id : "";
-  const kind = workbenchTraceEventKind(record.kind);
-  const at = typeof record.at === "string" ? record.at : "";
-  if (!id || !spanId || !kind || !at) {
-    return null;
-  }
-  return {
-    id,
-    span_id: spanId,
-    attempt_number: positiveInteger(record.attempt_number) ?? 1,
-    stage_id: typeof record.stage_id === "string" ? record.stage_id : null,
-    stage_run_index: integerOrNull(record.stage_run_index),
-    kind,
-    at,
-    message: typeof record.message === "string" ? record.message : kind,
-    attributes: jsonRecord(record.attributes) as Record<string, Json>,
-  };
-}
-
-function workbenchTraceSummaryFromJson(value: Json): WorkbenchExecutionTrace["summaries"][number] | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, Json>;
-  const status = workbenchTraceStatus(record.status);
-  const startedAt = typeof record.started_at === "string" ? record.started_at : "";
-  if (!status || !startedAt) {
-    return null;
-  }
-  return {
-    attempt_number: positiveInteger(record.attempt_number) ?? 1,
-    stage_id: typeof record.stage_id === "string" ? record.stage_id : null,
-    stage_run_index: integerOrNull(record.stage_run_index),
-    status,
-    started_at: startedAt,
-    ended_at: typeof record.ended_at === "string" ? record.ended_at : null,
-    duration_ms: nonNegativeInteger(record.duration_ms) ?? 0,
-    tool_call_count: nonNegativeInteger(record.tool_call_count) ?? 0,
-    input_tokens: nonNegativeInteger(record.input_tokens),
-    output_tokens: nonNegativeInteger(record.output_tokens),
-    usage: workbenchTraceUsageSummaryFromJson(record.usage),
-    final_output_present: record.final_output_present === true,
-    error_message: typeof record.error_message === "string" ? record.error_message : null,
-  };
-}
-
-function traceSummaryIdentity(summary: WorkbenchExecutionTrace["summaries"][number]): string {
-  return [
-    summary.attempt_number,
-    summary.stage_id ?? "",
-    summary.stage_run_index ?? "",
-  ].join(":");
-}
-
-function workbenchTraceUsageSummaryFromJson(value: unknown): WorkbenchExecutionTrace["summaries"][number]["usage"] {
-  const record = asRecord(value);
-  if (!record) {
-    return null;
-  }
-  return {
-    provider: typeof record.provider === "string" ? record.provider : null,
-    model: typeof record.model === "string" ? record.model : null,
-    input_tokens: nonNegativeInteger(record.input_tokens),
-    uncached_input_tokens: nonNegativeInteger(record.uncached_input_tokens),
-    cached_input_tokens: nonNegativeInteger(record.cached_input_tokens),
-    cache_creation_input_tokens: nonNegativeInteger(record.cache_creation_input_tokens),
-    cache_read_input_tokens: nonNegativeInteger(record.cache_read_input_tokens),
-    output_tokens: nonNegativeInteger(record.output_tokens),
-    reasoning_output_tokens: nonNegativeInteger(record.reasoning_output_tokens),
-    total_tokens: nonNegativeInteger(record.total_tokens),
-    total_cost_usd: nonNegativeNumber(record.total_cost_usd),
-    cost_source: typeof record.cost_source === "string" ? record.cost_source : null,
-    pricing_source: typeof record.pricing_source === "string" ? record.pricing_source : null,
-  };
-}
-
-function workbenchTraceSpanKind(value: unknown): WorkbenchExecutionTrace["spans"][number]["kind"] | null {
-  return value === "hook" ||
-    value === "stage" ||
-    value === "turn" ||
-    value === "tool_call" ||
-    value === "assistant_output" ||
-    value === "usage" ||
-    value === "gate" ||
-    value === "action" ||
-    value === "error"
-    ? value
-    : null;
-}
-
-function workbenchTraceEventKind(value: unknown): WorkbenchExecutionTrace["events"][number]["kind"] | null {
-  return value === "status" ||
-    value === "message" ||
-    value === "output" ||
-    value === "usage" ||
-    value === "error" ||
-    value === "note"
-    ? value
-    : null;
-}
-
-function workbenchTraceStatus(value: unknown): WorkbenchExecutionTrace["summaries"][number]["status"] | null {
-  return value === "running" ||
-    value === "completed" ||
-    value === "failed" ||
-    value === "canceled" ||
-    value === "warning"
-    ? value
-    : null;
-}
-
-function integerOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) ? value : null;
-}
-
-function positiveInteger(value: unknown): number | null {
-  const integer = integerOrNull(value);
-  return integer !== null && integer > 0 ? integer : null;
-}
-
-function nonNegativeInteger(value: unknown): number | null {
-  const integer = integerOrNull(value);
-  return integer !== null && integer >= 0 ? integer : null;
-}
-
-function nonNegativeNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-function remoteJobForInspectionJob(job: WorkbenchJob, run: WorkbenchRun): RemoteWorkbenchJob {
-  const input: Record<string, Json> = {
-    execution: {
-      purpose: job.kind === "improve" ? "improve" : "attempt",
-      metadata: {
-        caseId: job.caseId,
-        sampleIndex: job.sample,
-      },
-    },
-  };
-  return {
-    id: job.id,
-    projectId: run.versionId,
-    runId: run.id,
-    versionId: job.versionId,
-    kind: "execute",
-    status: remoteStatusForInspectionJob(job.status),
-    attempt: 1,
-    createdAt: job.createdAt,
-    updatedAt: job.finishedAt ?? job.startedAt ?? job.createdAt,
-    ...(job.startedAt ? { startedAt: job.startedAt } : {}),
-    ...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
-    input,
-    ...(job.error ? { error: job.error } : {}),
-  };
-}
-
-function remoteStatusForInspectionJob(status: WorkbenchJob["status"]): RemoteWorkbenchJob["status"] {
-  if (status === "canceled") {
-    return "cancelled";
-  }
-  return status;
 }
 
 function traceStatusForInspectionJob(status: WorkbenchJob["status"]): WorkbenchExecutionTrace["summaries"][number]["status"] {
@@ -11467,7 +9668,7 @@ function traceStatusForInspectionJob(status: WorkbenchJob["status"]): WorkbenchE
 function syntheticTraceForInspectionJob(job: WorkbenchJob, run: WorkbenchRun): WorkbenchExecutionTrace {
   const startedAt = job.startedAt ?? job.createdAt;
   const endedAt = job.finishedAt ?? run.finishedAt ?? null;
-  const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
+  const terminal = isWorkbenchJobStatusTerminal(job.status);
   return {
     trace_id: `job-${job.id}`,
     spans: [],
@@ -11531,6 +9732,14 @@ export function exportObjectPack(state: WorkbenchProjectState): WorkbenchObjectP
   return {
     schema: PACK_SCHEMA,
     createdAt: now(),
+    ...copyProjectObjectGraph(state),
+  };
+}
+
+function copyProjectObjectGraph(
+  state: WorkbenchProjectState,
+): Omit<WorkbenchObjectPack, "schema" | "createdAt"> {
+  return {
     refs: { ...state.refs },
     versions: state.versions.map(copyVersion),
     skillSources: state.skillSources.map(copySkillSource),
@@ -11542,7 +9751,7 @@ export function exportObjectPack(state: WorkbenchProjectState): WorkbenchObjectP
     traces: state.traces.map(copyTrace),
     executionEvents: state.executionEvents.map(copyExecutionEventBatch),
     artifacts: state.artifacts.map(copyArtifact),
-    lineage: state.lineage.map((entry) => ({ ...entry, parentId: entry.parentId, childId: entry.childId })),
+    lineage: state.lineage.map((entry) => ({ ...entry })),
   };
 }
 
@@ -11638,7 +9847,7 @@ function withMergedRemoteTrackingRefs(
 function publicationRefsForVersion(
   versionId: string,
   publication?: { installHandle: string },
-  visibility?: WorkbenchPublishVisibility,
+  visibility?: WorkbenchSkillVisibility,
 ): WorkbenchRefs {
   return {
     "publication/current-version": versionId,
@@ -11656,11 +9865,12 @@ function publicationFromRefs(
   if (!installHandle) {
     return undefined;
   }
+  const visibility = refs["publication/visibility"];
   return {
     currentVersionId: versionId,
     publishedVersionIds: publishedVersionIdsFromRefs(refs),
     installHandle,
-    ...(refs["publication/visibility"] ? { visibility: refs["publication/visibility"] } : {}),
+    ...(isWorkbenchSkillVisibility(visibility) ? { visibility } : {}),
   };
 }
 
@@ -11676,17 +9886,18 @@ function publishedVersionIdsFromRefs(refs: WorkbenchRefs): string[] {
 function publicationStatusFromRefs(
   refs: WorkbenchRefs,
   remoteName?: string,
-): WorkbenchStatusSnapshot["remotes"][number]["publication"] {
+): WorkbenchSyncPublication {
   const prefix = remoteName ? `remotes/${safeObjectFileName(remoteName)}/` : "";
   const versionId = publishedVersionIdFromRefsWithPrefix(refs, prefix);
   if (!versionId) {
     return { status: "unpublished" };
   }
+  const visibility = refs[`${prefix}publication/visibility`];
   return {
     status: "published",
     currentVersionId: versionId,
     publishedVersionIds: publishedVersionIdsFromRefsWithPrefix(refs, prefix),
-    ...(refs[`${prefix}publication/visibility`] ? { visibility: refs[`${prefix}publication/visibility`] } : {}),
+    ...(isWorkbenchSkillVisibility(visibility) ? { visibility } : {}),
     ...(refs[`${prefix}publication/install-handle`] ? { installHandle: refs[`${prefix}publication/install-handle`] } : {}),
   };
 }
@@ -11717,17 +9928,17 @@ function removeRemotePublishedVersionRef(refs: WorkbenchRefs, remoteName: string
 function publicationVisibilityFromRefs(
   refs: WorkbenchRefs,
   remoteName?: string,
-): WorkbenchPublishVisibility | undefined {
+): WorkbenchSkillVisibility | undefined {
   const prefix = remoteName ? `remotes/${safeObjectFileName(remoteName)}/` : "";
-  return normalizePublishVisibilityRef(refs["publication/visibility"]) ??
-    (remoteName ? normalizePublishVisibilityRef(refs[`${prefix}publication/visibility`]) : undefined);
+  const local = refs["publication/visibility"];
+  if (isWorkbenchSkillVisibility(local)) {
+    return local;
+  }
+  const remote = remoteName ? refs[`${prefix}publication/visibility`] : undefined;
+  return isWorkbenchSkillVisibility(remote) ? remote : undefined;
 }
 
-function normalizePublishVisibilityRef(value: string | undefined): WorkbenchPublishVisibility | undefined {
-  return value === "private" || value === "internal" || value === "public" ? value : undefined;
-}
-
-function unpublishedPublicationStatus(): WorkbenchStatusSnapshot["remotes"][number]["publication"] {
+function unpublishedPublicationStatus(): WorkbenchSyncPublication {
   return { status: "unpublished" };
 }
 
@@ -11737,7 +9948,8 @@ function withPublicationRefsFromRemote(
 ): WorkbenchRefs {
   const nonPublicationRefs = Object.fromEntries(Object.entries(refs)
     .filter(([name]) => !isCanonicalPublicationRef(name)));
-  const localVisibility = normalizePublishVisibilityRef(refs["publication/visibility"]);
+  const visibility = refs["publication/visibility"];
+  const localVisibility = isWorkbenchSkillVisibility(visibility) ? visibility : undefined;
   return {
     ...nonPublicationRefs,
     ...publicationRefs(remoteRefs),
@@ -11823,11 +10035,16 @@ export function importObjectPack(
   }
 }
 
-function emptyObjectPack(): WorkbenchObjectPack {
+async function writeObjectPackTraceBundles(root: string, pack: WorkbenchObjectPack): Promise<void> {
+  await Promise.all(pack.traces.map((trace) =>
+    writeWorkbenchTraceRecord(copyTrace(trace), { projectRoot: root })
+  ));
+}
+
+type WorkbenchProjectObjects = Omit<WorkbenchProjectState, "schema" | "root" | "refs" | "remotes">;
+
+function emptyWorkbenchProjectObjects(): WorkbenchProjectObjects {
   return {
-    schema: PACK_SCHEMA,
-    createdAt: now(),
-    refs: {},
     versions: [],
     skillSources: [],
     skillBundles: [],
@@ -11839,6 +10056,15 @@ function emptyObjectPack(): WorkbenchObjectPack {
     executionEvents: [],
     artifacts: [],
     lineage: [],
+  };
+}
+
+function emptyObjectPack(): WorkbenchObjectPack {
+  return {
+    schema: PACK_SCHEMA,
+    createdAt: now(),
+    refs: {},
+    ...emptyWorkbenchProjectObjects(),
   };
 }
 
@@ -11973,19 +10199,6 @@ function sameSkillBundleObject(
     hashJson(comparableSkillBundle(existing)) === hashJson(comparableSkillBundle(incoming));
 }
 
-export function hashJson(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
-}
-
-export function hashFiles(files: readonly SurfaceSnapshotFile[]): string {
-  return hashJson(files.map((file) => ({
-    path: file.path,
-    encoding: file.encoding ?? "utf8",
-    executable: file.executable === true,
-    content: file.content,
-  })).sort((left, right) => left.path.localeCompare(right.path)));
-}
-
 export function workbenchExecutionEventBatchId(batch: WorkbenchExecutionEventBatch): string {
   return [
     "evt_progress",
@@ -12040,7 +10253,8 @@ interface WorkbenchEvaluationRunTarget {
 }
 
 interface PlannedWorkbenchEvaluationJob {
-  role: "execute" | "grade";
+  role: "run" | "grade";
+  inputHash: string;
   input: WorkbenchExecutionRuntimeInput;
   runtimeCase: WorkbenchEvalCaseRuntime;
   sample: number;
@@ -12054,7 +10268,7 @@ interface PlannedWorkbenchEvaluationJob {
 }
 
 interface CompletedWorkbenchEvaluationJob {
-  remoteJob: RemoteWorkbenchJob;
+  remoteJob: WorkbenchExecutionJob;
   plannedJob: PlannedWorkbenchEvaluationJob;
   objects: ReturnType<typeof skillEvalObjectsFromRemoteJob>;
 }
@@ -12073,8 +10287,7 @@ async function executeWorkbenchEvaluationRun(args: {
   cases?: readonly WorkbenchEvalCaseRuntime[];
   environmentDockerfile: string;
   operationTargets?: readonly WorkbenchOperationTarget[];
-  operationPhases?: readonly WorkbenchOperationPhase[];
-  operationGrader?: WorkbenchOperationGrader;
+  operationSteps?: readonly WorkbenchOperationStep[];
   gradeOfRunId?: string;
   parentRunId?: string;
   location?: WorkbenchRun["location"];
@@ -12134,8 +10347,7 @@ async function executeWorkbenchEvaluationRun(args: {
           kind: args.kind,
           variant: args.location ?? args.run?.location ?? "local",
           targets: args.operationTargets,
-          phases: args.operationPhases,
-          grader: args.operationGrader,
+          steps: args.operationSteps,
           versionId: args.kind === "improve" ? args.baseVersionId ?? args.version.id : args.version.id,
           evalHash: args.evalSnapshot.hash,
           skillNames: targets.map((target) => target.skillBundle.skillName),
@@ -12152,7 +10364,7 @@ async function executeWorkbenchEvaluationRun(args: {
   delete run.finishedAt;
   delete run.error;
   const environmentDockerfile = args.environmentDockerfile;
-  const terminalDependencyJobs = new Map<string, RemoteWorkbenchJob>();
+  const terminalDependencyJobs = new Map<string, WorkbenchExecutionJob>();
   const reusableJobsById = new Map<string, WorkbenchJob>();
   const plannedDagJobs: PlannedWorkbenchEvaluationJob[] = [];
   const addReusableJob = (job: WorkbenchJob): void => {
@@ -12163,10 +10375,19 @@ async function executeWorkbenchEvaluationRun(args: {
     addReusableJob(completed.objects.job);
   };
   const planGradeForSubject = (subject: WorkbenchGradeSubject): void => {
+    if (!skillEvalCaseHasConcreteGrader({
+      evalSnapshot: args.evalSnapshot,
+      runtimeCase: subject.runtimeCase,
+      agent: subject.agent,
+    })) {
+      return;
+    }
     const reusableGradeJob = args.rerun !== true
-      ? latestReusableTerminalGradeJobForExecution({
+      ? selectReusableWorkbenchGradeJob({
           state: args.state,
-          evalHash: args.evalSnapshot.hash,
+          evalSnapshot: args.evalSnapshot,
+          runtimeCase: subject.runtimeCase,
+          agent: subject.agent,
           executionJob: subject.job,
         })
       : undefined;
@@ -12208,6 +10429,13 @@ async function executeWorkbenchEvaluationRun(args: {
       selectedSamples: args.selectedSamples,
       executeRunId: args.gradeOfRunId,
     });
+    const gradeableSubjects = subjects.filter((subject) =>
+      skillEvalCaseHasConcreteGrader({
+        evalSnapshot: args.evalSnapshot,
+        runtimeCase: subject.runtimeCase,
+        agent: subject.agent,
+      })
+    );
     if (subjects.length === 0) {
       throw new WorkbenchCodedError("no_grade_subjects", "No execution jobs found for the selected skill, agent, and cases.", {
         remediation: gradeNoSubjectsRemediation({
@@ -12220,81 +10448,111 @@ async function executeWorkbenchEvaluationRun(args: {
         exitCode: 2,
       });
     }
-    for (const subject of subjects) {
+    if (gradeableSubjects.length === 0) {
+      throw new WorkbenchCodedError("no_case_graders", "No selected cases have a grader configured.", {
+        remediation: "Set an eval default grader or edit selected cases to choose a case-level grader.",
+        exitCode: 2,
+      });
+    }
+    for (const subject of gradeableSubjects) {
       addReusableJob(subject.job);
       planGradeForSubject(subject);
     }
   } else {
-    for (const target of targets) {
-      for (const runtimeCase of cases) {
-        for (const sample of sampleIndexesForRun(runtimeCase, samples, args.selectedSamples)) {
-          const jobId = nextJobId();
-          const plannedJob: PlannedWorkbenchEvaluationJob = {
-            role: "execute",
-            input: createWorkbenchSkillEvalRuntimeInput({
-              ownerUserId: "local",
-              projectId: "local",
-              runId: run.id,
-              jobId,
-              versionId: args.version.id,
-              skillName: target.skillBundle.skillName,
-              skillBundleHash: target.skillBundle.hash,
-              evalHash: args.evalSnapshot.hash,
-              evalSnapshot: args.evalSnapshot,
-              agent: target.agent,
-              versionFiles: target.skillBundle.files,
-              runtimeCase,
-              sample,
-              createdAt,
-              environmentDockerfile,
-            }),
+    const graph = planWorkbenchOperationGraph({
+      kind: args.kind === "improve" ? "eval" : args.kind,
+      targetCount: targets.length,
+      cases: cases.map((runtimeCase) => ({
+        id: runtimeCase.id,
+        path: runtimeCase.path,
+        gradableTargetIndexes: targets.flatMap((target, targetIndex) =>
+          skillEvalCaseHasConcreteGrader({
+            evalSnapshot: args.evalSnapshot,
             runtimeCase,
-            sample,
-            artifactId: nextArtifactId(),
-            traceId: `trace_${jobId}`,
-            skillBundle: target.skillBundle,
             agent: target.agent,
-          };
-          const reusableSubject = args.rerun !== true
-            ? reusableExecutionSubjectForPlannedJob({
-                state: args.state,
-                version: args.version,
-                evalSnapshot: args.evalSnapshot,
-                plannedJob,
-              })
-            : undefined;
-          if (reusableSubject) {
-            const completed = completedEvaluationJobFromGradeSubject({
-              root: args.root,
-              state: args.state,
-              run,
-              version: args.version,
-              evalSnapshot: args.evalSnapshot,
-              environmentDockerfile,
-              subject: reusableSubject,
-            });
-            addTerminalDependency(completed);
-            if (shouldRunGradersForEvaluationRun(args.kind)) {
-              planGradeForSubject(reusableSubject);
-            }
-            continue;
-          }
-          plannedDagJobs.push(plannedJob);
-          if (shouldRunGradersForEvaluationRun(args.kind)) {
-            plannedDagJobs.push(createPlannedWorkbenchGradeJob({
-              run,
-              version: args.version,
-              evalSnapshot: args.evalSnapshot,
-              skillBundle: target.skillBundle,
-              agent: target.agent,
-              runtimeCase,
-              sample,
-              createdAt,
-              environmentDockerfile,
-              subjectJobId: plannedJob.input.job.id,
-            }));
-          }
+          }) ? [targetIndex] : []),
+      })),
+      samples,
+      selectedSamples: args.selectedSamples,
+    });
+    const gradeDependencies = new Set(graph.nodes
+      .filter((node) => node.role === "grade")
+      .flatMap((node) => node.dependencies));
+    for (const node of graph.nodes.filter((entry) => entry.role === "run")) {
+      const target = targets[node.targetIndex]!;
+      const runtimeCase = cases.find((entry) => entry.id === node.caseId)!;
+      const jobId = nextJobId();
+      const plannedJob: PlannedWorkbenchEvaluationJob = {
+        role: "run",
+        inputHash: workbenchRunInputHash({
+          evalSnapshot: args.evalSnapshot,
+          target,
+          runtimeCase,
+          sample: node.sample,
+        }),
+        input: createWorkbenchSkillEvalRuntimeInput({
+          ownerUserId: "local",
+          projectId: "local",
+          runId: run.id,
+          jobId,
+          versionId: args.version.id,
+          skillName: target.skillBundle.skillName,
+          skillBundleHash: target.skillBundle.hash,
+          evalHash: args.evalSnapshot.hash,
+          evalSnapshot: args.evalSnapshot,
+          agent: target.agent,
+          versionFiles: target.skillBundle.files,
+          runtimeCase,
+          sample: node.sample,
+          createdAt,
+          environmentDockerfile,
+        }),
+        runtimeCase,
+        sample: node.sample,
+        artifactId: nextArtifactId(),
+        traceId: `trace_${jobId}`,
+        skillBundle: target.skillBundle,
+        agent: target.agent,
+      };
+      const reusableSubject = args.rerun !== true
+        ? reusableExecutionSubjectForPlannedJob({
+            state: args.state,
+            version: args.version,
+            evalSnapshot: args.evalSnapshot,
+            plannedJob,
+          })
+        : undefined;
+      if (reusableSubject) {
+        const completed = completedEvaluationJobFromGradeSubject({
+          root: args.root,
+          state: args.state,
+          run,
+          version: args.version,
+          evalSnapshot: args.evalSnapshot,
+          environmentDockerfile,
+          subject: reusableSubject,
+        });
+        addTerminalDependency(completed);
+        if (gradeDependencies.has(node.id)) {
+          planGradeForSubject(reusableSubject);
         }
+        continue;
+      }
+      plannedDagJobs.push(plannedJob);
+      if (gradeDependencies.has(node.id)) {
+        plannedDagJobs.push(createPlannedWorkbenchGradeJob({
+          run,
+          version: args.version,
+          evalSnapshot: args.evalSnapshot,
+          skillBundle: target.skillBundle,
+          agent: target.agent,
+          runtimeCase,
+          sample: node.sample,
+          createdAt,
+          environmentDockerfile,
+          subjectJobId: plannedJob.input.job.id,
+          subjectInputHash: plannedJob.inputHash,
+        }));
       }
     }
   }
@@ -12322,6 +10580,7 @@ async function executeWorkbenchEvaluationRun(args: {
       runtimeCase: plannedJob.runtimeCase,
       sample: plannedJob.sample,
       role: plannedJob.role,
+      inputHash: plannedJob.inputHash,
       dependencies: plannedJob.dependencies,
     }));
   }
@@ -12336,7 +10595,7 @@ async function executeWorkbenchEvaluationRun(args: {
     await next;
   };
   const persistedTerminalJobs = new Map<string, ReturnType<typeof skillEvalObjectsFromRemoteJob>>();
-  const persistTerminalJob = async (completed: RemoteWorkbenchJob): Promise<void> => {
+  const persistTerminalJob = async (completed: WorkbenchExecutionJob): Promise<void> => {
     const plannedJob = inputsByJobId.get(completed.id);
     if (!plannedJob) {
       return;
@@ -12353,19 +10612,21 @@ async function executeWorkbenchEvaluationRun(args: {
       artifactId: plannedJob.artifactId,
       traceId: plannedJob.traceId,
       role: plannedJob.role,
+      inputHash: plannedJob.inputHash,
       dependencies: dependenciesForPlannedWorkbenchEvaluationJob(args.state, plannedJob),
       request: requestForPlannedWorkbenchEvaluationJob(args.request, args.state, plannedJob),
       result: args.result,
     });
     persistedTerminalJobs.set(completed.id, result);
-    run.jobIds = Array.from(new Set([...(run.jobIds ?? []), result.job.id]));
+    run.jobIds = Array.from(new Set([...run.jobIds, result.job.id]));
     run.traceIds = Array.from(new Set([...run.traceIds, result.trace.id]));
     upsertJobObject(args.state.jobs, result.job);
     upsertImmutableById(args.state.artifacts, result.artifact, "artifact");
+    await writeWorkbenchTraceRecord(result.trace, { projectRoot: args.root });
     upsertImmutableById(args.state.traces, result.trace, "trace");
     await enqueueRunStateSave();
   };
-  let dagJobs: RemoteWorkbenchJob[] = [];
+  let dagJobs: WorkbenchExecutionJob[] = [];
   if (plannedDagJobs.length > 0) {
     try {
       const dag = await runWorkbenchExecutionDag({
@@ -12390,6 +10651,7 @@ async function executeWorkbenchEvaluationRun(args: {
             runtimeCase: plannedJob.runtimeCase,
             sample: plannedJob.sample,
             role: plannedJob.role,
+            inputHash: plannedJob.inputHash,
             dependencies: plannedJob.dependencies,
           }));
           run.lastProgressAt = job.startedAt ?? now();
@@ -12446,33 +10708,15 @@ async function executeWorkbenchEvaluationRun(args: {
   }
   const jobs: WorkbenchJob[] = [...reusableJobs];
   for (const completed of dagJobs) {
-    const plannedJob = inputsByJobId.get(completed.id);
-    if (!plannedJob) {
+    if (!inputsByJobId.has(completed.id)) {
       continue;
     }
-    const result = persistedTerminalJobs.get(completed.id) ?? skillEvalObjectsFromRemoteJob({
-      remoteJob: completed,
-      run,
-      version: args.version,
-      skillBundle: plannedJob.skillBundle,
-      evalSnapshot: args.evalSnapshot,
-      agent: plannedJob.agent,
-      runtimeCase: plannedJob.runtimeCase,
-      sample: plannedJob.sample,
-      artifactId: plannedJob.artifactId,
-      traceId: plannedJob.traceId,
-      role: plannedJob.role,
-      dependencies: dependenciesForPlannedWorkbenchEvaluationJob(args.state, plannedJob),
-      request: requestForPlannedWorkbenchEvaluationJob(args.request, args.state, plannedJob),
-      result: args.result,
-    });
+    const result = persistedTerminalJobs.get(completed.id);
+    if (!result) {
+      throw new Error(`Terminal skill eval job was not persisted: ${completed.id}`);
+    }
     jobs.push(result.job);
-    run.jobIds = Array.from(new Set([...(run.jobIds ?? []), result.job.id]));
-    run.traceIds = Array.from(new Set([...run.traceIds, result.trace.id]));
     run.lastProgressAt = result.job.finishedAt ?? result.job.startedAt ?? now();
-    upsertJobObject(args.state.jobs, result.job);
-    upsertImmutableById(args.state.artifacts, result.artifact, "artifact");
-    upsertImmutableById(args.state.traces, result.trace, "trace");
   }
   const finishedAt = now();
   run.finishedAt = finishedAt;
@@ -12483,7 +10727,7 @@ async function executeWorkbenchEvaluationRun(args: {
       ? "failed"
       : "canceled";
   const allRunJobs = args.run
-    ? args.state.jobs.filter((job) => job.runId === run.id && (run.jobIds ?? []).includes(job.id))
+    ? args.state.jobs.filter((job) => workbenchRunOwnsJob(run, job))
     : jobs;
   const errors = allRunJobs.flatMap((job) => job.error ? [job.error] : []);
   if (errors.length > 0) {
@@ -12503,7 +10747,7 @@ function gradeNoSubjectsRemediation(args: {
   const runCommand = runCommandForGradeSelection(args);
   const failedJob = latestFailedExecuteJobForGradeSelection(args);
   return failedJob
-    ? `workbench show ${quoteShellArg(failedJob.id)} && ${runCommand}`
+    ? `workbench eval show ${quoteShellArg(failedJob.id)} && ${runCommand}`
     : runCommand;
 }
 
@@ -12524,8 +10768,7 @@ function runCommandForGradeSelection(args: {
       ...(skills[0] ? { skill: skills[0] } : {}),
       agent,
     })),
-    phases: ["execute"],
-    grader: { kind: "none" },
+    steps: ["run"],
   });
 }
 
@@ -12541,7 +10784,7 @@ function latestFailedExecuteJobForGradeSelection(args: {
   ));
   return args.state.jobs
     .filter((job) =>
-      (job.role ?? "execute") === "execute" &&
+      job.role === "run" &&
       job.status === "failed" &&
       job.evalHash === args.evalSnapshot.hash &&
       targetKeys.has(gradeTargetKey(job.skillBundleHash, job.agentHash)) &&
@@ -12552,10 +10795,6 @@ function latestFailedExecuteJobForGradeSelection(args: {
 
 function jobTerminalSortKey(job: WorkbenchJob): string {
   return job.finishedAt ?? job.startedAt ?? job.createdAt;
-}
-
-function shouldRunGradersForEvaluationRun(kind: WorkbenchSchedulableRunKind): boolean {
-  return kind !== "run";
 }
 
 function createPlannedWorkbenchGradeJob(args: {
@@ -12570,10 +10809,22 @@ function createPlannedWorkbenchGradeJob(args: {
   environmentDockerfile: string;
   subject?: WorkbenchGradeSubject;
   subjectJobId?: string;
+  subjectInputHash?: string;
 }): PlannedWorkbenchEvaluationJob {
+  if (!skillEvalCaseHasConcreteGrader({
+    evalSnapshot: args.evalSnapshot,
+    runtimeCase: args.runtimeCase,
+    agent: args.agent,
+  })) {
+    throw new Error(`Case ${args.runtimeCase.id} does not have a grader configured.`);
+  }
   const subjectJobId = args.subject?.job.id ?? args.subjectJobId;
   if (!subjectJobId) {
     throw new Error("Grade job planning requires a subject job id.");
+  }
+  const subjectInputHash = args.subject?.job.inputHash ?? args.subjectInputHash;
+  if (!subjectInputHash) {
+    throw new Error("Grade job planning requires a subject input hash.");
   }
   const gradeJobId = nextJobId();
   const input = createWorkbenchSkillEvalRuntimeInput({
@@ -12593,12 +10844,19 @@ function createPlannedWorkbenchGradeJob(args: {
     createdAt: args.createdAt,
     environmentDockerfile: args.environmentDockerfile,
   });
-  const jobInput = jsonRecord(input.job.input);
+  const jobInput = readWorkbenchPlannedExecutionJobInput(input.job);
   const dependencies = args.subject
     ? gradeDependenciesForSubject(args.subject)
     : [gradeDependencyForSubjectJobId(subjectJobId)];
   return {
     role: "grade",
+    inputHash: workbenchGradeInputHash({
+      evalSnapshot: args.evalSnapshot,
+      runtimeCase: args.runtimeCase,
+      agent: args.agent,
+      subjectJobId,
+      subjectInputHash,
+    }),
     input: {
       ...input,
       job: {
@@ -12608,7 +10866,7 @@ function createPlannedWorkbenchGradeJob(args: {
           dependsOn: [subjectJobId],
           subjectJobId,
           role: "grade",
-        } as unknown as Json,
+        },
       },
     },
     runtimeCase: args.runtimeCase,
@@ -12626,7 +10884,7 @@ function createPlannedWorkbenchGradeJob(args: {
 function createLocalPlannedGradeRuntimeInput(args: {
   state: WorkbenchProjectState;
   plannedJob: PlannedWorkbenchEvaluationJob;
-  job: RemoteWorkbenchJob;
+  job: WorkbenchExecutionJob;
   run: WorkbenchRun;
   version: WorkbenchVersion;
   evalSnapshot: WorkbenchEvalSnapshot;
@@ -12679,7 +10937,7 @@ function gradeSubjectForPlannedWorkbenchEvaluationJob(
     throw new Error(`Grade job ${plannedJob.input.job.id} has no subject dependency.`);
   }
   const job = state.jobs.find((entry) => entry.id === plannedJob.subjectJobId);
-  if (!job || (job.role ?? "execute") !== "execute" || job.status !== "succeeded") {
+  if (!job || job.role !== "run" || job.status !== "succeeded") {
     throw new Error(`Grade job ${plannedJob.input.job.id} cannot start before subject ${plannedJob.subjectJobId} succeeds.`);
   }
   const artifact = job.artifactIds.flatMap((id) => state.artifacts.find((entry) => entry.id === id) ?? [])[0];
@@ -12778,15 +11036,11 @@ function summarizeJobErrors(errors: readonly string[]): string {
     .join("\n");
 }
 
-function publicWorkbenchJobError(error: string | undefined): string | undefined {
-  return error === "Dependency cancelled." ? "Dependency canceled." : error;
-}
-
 function noEvalCasesError(): WorkbenchCodedError {
   const issue = noEvalCasesReadinessIssue();
   return new WorkbenchCodedError(issue.code, issue.message, {
     remediation: issue.remediation,
-    subject: issue.subject as Record<string, Json>,
+    subject: issue.subject,
     exitCode: 2,
   });
 }
@@ -12805,17 +11059,7 @@ function assertDraftCaseReadinessReady(
   kind: WorkbenchCaseRunKind,
   evalSnapshot: WorkbenchEvalSnapshot,
 ): void {
-  const issue = draftCaseReadinessIssues(cases, kind, evalSnapshot)[0];
-  if (!issue) {
-    return;
-  }
-  throw new WorkbenchCodedError(issue.code, issue.message, {
-    ...(issue.remediation ? { remediation: issue.remediation } : {}),
-    ...(issue.subject && typeof issue.subject === "object" && !Array.isArray(issue.subject)
-      ? { subject: issue.subject as Record<string, Json> }
-      : {}),
-    exitCode: 1,
-  });
+  assertWorkbenchLaunchReadinessReady(readinessFromIssues(draftCaseReadinessIssues(cases, kind, evalSnapshot)));
 }
 
 function draftCaseReadinessIssues(
@@ -12844,20 +11088,29 @@ function caseEffectiveGradeContainsDraftPlaceholder(
   runtimeCase: WorkbenchEvalCaseRuntime,
 ): boolean {
   const resolved = skillEvalCaseGradePlan({ evalSnapshot, runtimeCase });
-  return gradeConfigContainsDraftPlaceholder(resolved.config);
-}
-
-function gradeConfigContainsDraftPlaceholder(value: Json): boolean {
-  if (typeof value === "string") {
-    return value.trim() === DRAFT_CASE_GRADE_CRITERION_PLACEHOLDER;
+  if (resolved.adapter === "rubric") {
+    return rubricCriteriaContainDraftPlaceholder(resolved.config.criteria);
   }
-  if (Array.isArray(value)) {
-    return value.some((entry) => gradeConfigContainsDraftPlaceholder(entry));
+  if (resolved.adapter === "tests") {
+    return gradePlanTestFiles(runtimeCase.files).some((file) =>
+      file.content.includes(DRAFT_CASE_TEST_PLACEHOLDER_FRAGMENT)
+    );
   }
-  if (value && typeof value === "object") {
-    return Object.values(value).some((entry) => gradeConfigContainsDraftPlaceholder(entry));
+  if (resolved.adapter === "command") {
+    return (configString(resolved.config, "command") ?? "").includes(DRAFT_CASE_COMMAND_GRADER_PLACEHOLDER_FRAGMENT);
   }
   return false;
+}
+
+function rubricCriteriaContainDraftPlaceholder(value: Json | undefined): boolean {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  return value.some((entry) => {
+    const criterion = asRecord(entry);
+    return typeof criterion?.description === "string" &&
+      criterion.description.includes(DRAFT_CASE_GRADE_CRITERION_PLACEHOLDER);
+  });
 }
 
 function draftCaseReadinessIssue(
@@ -12868,7 +11121,7 @@ function draftCaseReadinessIssue(
   const command = `\${EDITOR:-vi} ${quoteShellArg(descriptorPath)}`;
   return {
     code: `draft_case_${field}`,
-    message: `Eval case ${runtimeCase.id} still contains the draft ${field === "prompt" ? "prompt" : "grade criteria"} placeholder. Edit ${descriptorPath} before using ${field === "prompt" ? "run" : "grade"} evidence.`,
+    message: `Eval case ${runtimeCase.id} still contains the draft ${field === "prompt" ? "prompt" : "grader input"} placeholder. Edit ${descriptorPath} before using ${field === "prompt" ? "run" : "grade"} evidence.`,
     remediation: command,
     subject: { caseId: runtimeCase.id, path: descriptorPath, field },
   };
@@ -12927,7 +11180,7 @@ function sampleIndexesForRun(
 }
 
 function skillEvalLifecycleJobFromRemoteJob(args: {
-  remoteJob: RemoteWorkbenchJob;
+  remoteJob: WorkbenchExecutionJob;
   run: WorkbenchRun;
   version: WorkbenchVersion;
   skillBundle: WorkbenchSkillBundleSnapshot;
@@ -12935,21 +11188,18 @@ function skillEvalLifecycleJobFromRemoteJob(args: {
   agent: WorkbenchAgent;
   runtimeCase: WorkbenchEvalCaseRuntime;
   sample: number;
-  role?: WorkbenchJob["role"];
+  role: WorkbenchJob["role"];
+  inputHash: string;
   dependencies?: readonly WorkbenchJobDependency[];
-}): WorkbenchJob {
+}): WorkbenchExecutionJob {
   const finishedAt = args.remoteJob.finishedAt;
-  const status: WorkbenchJob["status"] =
-    args.remoteJob.status === "queued" ? "queued" :
-      args.remoteJob.status === "running" ? "running" :
-        args.remoteJob.status === "succeeded" ? "succeeded" :
-          args.remoteJob.status === "cancelled" ? "canceled" : "failed";
-  const error = publicWorkbenchJobError(args.remoteJob.error);
+  const error = args.remoteJob.error;
+  const execution = readWorkbenchPlannedExecutionJobInput(args.remoteJob).execution;
   return {
-    id: args.remoteJob.id,
-    runId: args.run.id,
+    ...args.remoteJob,
     kind: args.run.kind,
-    role: args.role ?? "execute",
+    role: args.role,
+    inputHash: args.inputHash,
     versionId: args.version.id,
     skillName: args.skillBundle.skillName,
     skillBundleHash: args.skillBundle.hash,
@@ -12958,20 +11208,15 @@ function skillEvalLifecycleJobFromRemoteJob(args: {
     agentHash: hashJson(args.agent),
     caseId: args.runtimeCase.id,
     sample: args.sample,
-    status,
-    ...(args.dependencies && args.dependencies.length > 0 ? { dependencies: args.dependencies.map(copyJobDependency) } : {}),
-    command: configString(asRuntimeRecord(asRuntimeRecord(jsonRecord(args.remoteJob.input).execution).adapter).with as Record<string, Json>, "command"),
-    artifactIds: [],
-    traceIds: [],
-    createdAt: args.remoteJob.createdAt,
-    ...(args.remoteJob.startedAt ? { startedAt: args.remoteJob.startedAt } : {}),
-    ...(finishedAt ? { finishedAt, durationMs: durationMsBetween(args.remoteJob.startedAt, finishedAt) } : {}),
+    ...(args.dependencies?.length ? { dependencies: args.dependencies.map(copyJobDependency) } : {}),
+    command: configString(jsonRecord(execution.adapter.with), "command"),
+    ...(finishedAt ? { durationMs: durationMsBetween(args.remoteJob.startedAt, finishedAt) } : {}),
     ...(error ? { error } : {}),
   };
 }
 
 function skillEvalObjectsFromRemoteJob(args: {
-  remoteJob: RemoteWorkbenchJob;
+  remoteJob: WorkbenchExecutionJob;
   run: WorkbenchRun;
   version: WorkbenchVersion;
   skillBundle: WorkbenchSkillBundleSnapshot;
@@ -12981,26 +11226,26 @@ function skillEvalObjectsFromRemoteJob(args: {
   sample: number;
   artifactId?: string;
   traceId?: string;
-  role?: WorkbenchJob["role"];
+  role: WorkbenchJob["role"];
+  inputHash: string;
   dependencies?: readonly WorkbenchJobDependency[];
   request?: Record<string, Json>;
   result?: Record<string, Json>;
 }): { job: WorkbenchJob; artifact: WorkbenchArtifact; trace: WorkbenchTrace } {
   const finishedAt = args.remoteJob.finishedAt ?? now();
   const output = asRuntimeRecord(args.remoteJob.output);
-  const remoteStatus: WorkbenchJob["status"] =
-    args.remoteJob.status === "succeeded" ? "succeeded" :
-      args.remoteJob.status === "cancelled" ? "canceled" : "failed";
-  const status: WorkbenchJob["status"] = remoteStatus;
+  const status = args.remoteJob.status === "succeeded"
+    ? "succeeded"
+    : args.remoteJob.status === "canceled" ? "canceled" : "failed";
   const usage = readWorkbenchSkillRunOutputUsage(output);
   const outputResult = jsonRecord(output.result);
-  const jobError = publicWorkbenchJobError(args.remoteJob.error);
+  const jobError = args.remoteJob.error;
   if (status !== "succeeded") {
     stripResultScores(outputResult);
   }
   const resultPayload = {
     ...outputResult,
-    ...(usage ? { usage: usage as unknown as Json } : {}),
+    ...(usage ? { usage: toJson(usage) } : {}),
     ...(args.result ?? {}),
     status: status === "succeeded" ? "succeeded" : "failed",
     ...(jobError ? { error: jobError } : {}),
@@ -13009,20 +11254,11 @@ function skillEvalObjectsFromRemoteJob(args: {
     stripResultScores(resultPayload);
   }
   const files = artifactFilesFromRemoteOutput(output);
-  const artifact: WorkbenchArtifact = {
-    id: args.artifactId ?? nextArtifactIdForRun(args.run, args.remoteJob.id),
-    runId: args.run.id,
-    jobId: args.remoteJob.id,
-    kind: "directory",
-    path: `artifacts/${args.remoteJob.id}`,
-    createdAt: finishedAt,
-    files,
-  };
   const request = {
     versionId: args.version.id,
     runId: args.run.id,
     jobId: args.remoteJob.id,
-    role: args.role ?? "execute",
+    role: args.role,
     caseId: args.runtimeCase.id,
     sample: args.sample,
     smoke: args.runtimeCase.smoke === true,
@@ -13036,56 +11272,26 @@ function skillEvalObjectsFromRemoteJob(args: {
   const executionAdapter = asRuntimeRecord(asRuntimeRecord(execution).adapter);
   const adapterUse = typeof executionAdapter.use === "string" ? executionAdapter.use : undefined;
   const jobCommand = configString(asRuntimeRecord(asRuntimeRecord(jsonRecord(args.remoteJob.input).execution).adapter).with as Record<string, Json>, "command");
-  const jobResult = jobResultFromPayload(resultPayload, files, (args.role ?? "execute") === "grade");
-  const traceRole = args.role ?? "execute";
-  const outputSummary = textFromJson((resultPayload as Record<string, Json>).summary) ??
-    textFromJson((resultPayload as Record<string, Json>).error) ??
-    undefined;
-  const trace: WorkbenchTrace = {
-    id: args.traceId ?? `trace_${args.remoteJob.id}`,
-    runId: args.run.id,
-    jobId: args.remoteJob.id,
-    versionId: args.version.id,
-    skillName: args.skillBundle.skillName,
-    skillBundleHash: args.skillBundle.hash,
-    evalHash: args.evalSnapshot.hash,
-    agentName: args.agent.name,
-    agentHash: hashJson(args.agent),
-    createdAt: finishedAt,
+  const jobResult = jobResultFromPayload(resultPayload, files, args.role === "grade");
+  const lifecycleJob = skillEvalLifecycleJobFromRemoteJob(args);
+  const { artifact, trace } = remoteExecutionEvidence({
+    remoteJob: args.remoteJob,
+    run: args.run,
+    files,
+    finishedAt,
     request,
     result: resultPayload,
-    files: [
-      textFile("request.json", JSON.stringify(request, null, 2) + "\n"),
-      textFile("result.json", JSON.stringify(resultPayload, null, 2) + "\n"),
-      ...files.map(copyFile),
-    ],
-    protocol: "workbench.trace.v1",
-    origin: "eval",
-    updatedAt: finishedAt,
-    source: {
-      host: adapterUse ?? args.agent.adapter,
-      sessionId: args.run.id,
-      turnId: args.remoteJob.id,
-      ...(jobCommand ? { command: jobCommand } : {}),
+    status,
+    identity: {
+      versionId: args.version.id,
+      skillName: args.skillBundle.skillName,
+      skillBundleHash: args.skillBundle.hash,
+      evalHash: args.evalSnapshot.hash,
+      agentName: args.agent.name,
+      agentHash: hashJson(args.agent),
     },
-    status: {
-      capture: "captured",
-      execution: status === "succeeded" ? "completed" : status,
-      grade: traceRole === "grade" ? "graded" : "ungraded",
-      review: "unreviewed",
-      promotion: "none",
-    },
-    subjects: [
-      {
-        type: "skill",
-        id: args.skillBundle.skillName,
-        versionId: args.version.id,
-        confidence: "exact",
-        activation: "workbench-owned",
-      },
-      { type: "case", id: args.runtimeCase.id, confidence: "exact" },
-      { type: "agent", id: args.agent.name, confidence: "exact" },
-    ],
+    adapterId: adapterUse ?? args.agent.adapter,
+    ...(jobCommand ? { command: jobCommand } : {}),
     links: [
       { type: "run", id: args.run.id },
       { type: "job", id: args.remoteJob.id },
@@ -13093,35 +11299,18 @@ function skillEvalObjectsFromRemoteJob(args: {
       { type: "version", id: args.version.id },
       { type: "agent", id: args.agent.name },
     ],
-    input: { prompt: skillEvalCasePrompt(args.runtimeCase) },
-    ...(outputSummary ? { output: { assistantText: outputSummary } } : {}),
-    ...(usage ? { usage } : {}),
-    artifacts: files.map(copyFile),
-    review: { status: "unreviewed" },
-    resultIds: [],
-  };
-  const job: WorkbenchJob = {
-    id: args.remoteJob.id,
-    runId: args.run.id,
-    kind: args.run.kind,
-    role: args.role ?? "execute",
-    versionId: args.version.id,
-    skillName: args.skillBundle.skillName,
-    skillBundleHash: args.skillBundle.hash,
-    evalHash: args.evalSnapshot.hash,
-    agentName: args.agent.name,
-    agentHash: hashJson(args.agent),
-    caseId: args.runtimeCase.id,
-    sample: args.sample,
+    prompt: skillEvalCasePrompt(args.runtimeCase),
+    ...(args.artifactId ? { artifactId: args.artifactId } : {}),
+    ...(args.traceId ? { traceId: args.traceId } : {}),
+  });
+  const job: WorkbenchExecutionJob = {
+    ...lifecycleJob,
     status,
     ...(adapterUse ? { adapter: { use: adapterUse, hash: hashJson(executionAdapter) } } : {}),
-    ...(args.dependencies && args.dependencies.length > 0 ? { dependencies: args.dependencies.map(copyJobDependency) } : {}),
     ...(jobResult ? { result: jobResult } : {}),
     command: jobCommand,
     artifactIds: [artifact.id],
     traceIds: [trace.id],
-    createdAt: args.remoteJob.createdAt,
-    startedAt: args.remoteJob.startedAt,
     finishedAt,
     durationMs: durationMsBetween(args.remoteJob.startedAt, finishedAt),
     ...(jobError ? { error: jobError } : {}),
@@ -13143,7 +11332,7 @@ function artifactFilesFromRemoteOutput(output: Record<string, unknown>): Surface
   const workspaceFiles = Array.isArray(output.workspaceFiles)
     ? output.workspaceFiles.filter(isSurfaceSnapshotFile).map(copyFile)
     : [];
-  return dedupeRuntimeSurfaceFiles([
+  return dedupeSurfaceFiles([
     ...outputFiles,
     ...prefixSurfaceFiles("workspace", workspaceFiles),
   ]);
@@ -13154,7 +11343,7 @@ function copyJobResult(result: WorkbenchJobResult): WorkbenchJobResult {
     ...result,
     ...(result.usage ? { usage: JSON.parse(JSON.stringify(result.usage)) as UsageSummary } : {}),
     ...(result.items ? { items: result.items.map((item) => ({ ...item, data: item.data, value: item.value })) } : {}),
-    ...(result.payload !== undefined ? { payload: JSON.parse(JSON.stringify(result.payload)) as Json } : {}),
+    ...(result.payload !== undefined ? { payload: toJson(JSON.parse(JSON.stringify(result.payload))) } : {}),
   };
 }
 
@@ -13175,7 +11364,7 @@ function jobResultFromPayload(
     ...(error ? { error } : {}),
     ...(usage ? { usage } : {}),
     ...(items.length > 0 ? { items } : {}),
-    payload: JSON.parse(JSON.stringify(payload)) as Json,
+    payload: toJson(JSON.parse(JSON.stringify(payload))),
   };
 }
 
@@ -13201,7 +11390,7 @@ function resultItemsFromPayload(
         id: "score",
         label: "score",
         score,
-        value: score as Json,
+        value: toJson(score),
       });
     }
     const metrics = asRuntimeRecord(payload.metrics);
@@ -13213,7 +11402,7 @@ function resultItemsFromPayload(
         kind: "metric",
         id: name,
         label: name,
-        value: value as Json,
+        value: toJson(value),
         ...(name === "score" ? { score: value } : {}),
       });
     }
@@ -13237,7 +11426,7 @@ function resultItemsFromPayload(
           ...(textFromJson(criterion.summary) ?? textFromJson(criterion.rationale)
             ? { summary: textFromJson(criterion.summary) ?? textFromJson(criterion.rationale) }
             : {}),
-          data: JSON.parse(JSON.stringify(criterion)) as Json,
+          data: toJson(JSON.parse(JSON.stringify(criterion))),
         });
       }
     }
@@ -13250,7 +11439,7 @@ function resultItemsFromPayload(
       label: "summary",
       summary,
       body: summary,
-      value: summary as Json,
+      value: toJson(summary),
     });
   }
   for (const file of files) {
@@ -13283,7 +11472,7 @@ function dedupeResultItems(items: readonly WorkbenchResultItem[]): WorkbenchResu
 }
 
 function skillImproveObjectsFromRemoteJob(args: {
-  remoteJob: RemoteWorkbenchJob;
+  remoteJob: WorkbenchExecutionJob;
   run: WorkbenchRun;
   job: WorkbenchJob;
   agent: WorkbenchAgent;
@@ -13295,25 +11484,16 @@ function skillImproveObjectsFromRemoteJob(args: {
   const output = asRuntimeRecord(args.remoteJob.output);
   const usage = readWorkbenchSkillRunOutputUsage(output);
   const patch = args.patch ?? readWorkbenchSkillImprovementPatchFromRemoteJob(args.remoteJob) ?? undefined;
-  const status: WorkbenchJob["status"] = args.remoteJob.status === "succeeded" && patch
+  const status = args.remoteJob.status === "succeeded" && patch
     ? "succeeded"
-    : args.remoteJob.status === "cancelled"
+    : args.remoteJob.status === "canceled"
       ? "canceled"
       : "failed";
-  const jobError = publicWorkbenchJobError(args.remoteJob.error) ??
+  const jobError = args.remoteJob.error ??
     (status === "failed" ? textFromJson(output.error) ?? "Improve adapter did not produce a usable skill patch." : undefined);
   const files = Array.isArray(output.files)
     ? output.files.filter(isSurfaceSnapshotFile).map(copyFile)
     : [];
-  const artifact: WorkbenchArtifact = {
-    id: nextArtifactIdForRun(args.run, args.remoteJob.id),
-    runId: args.run.id,
-    jobId: args.remoteJob.id,
-    kind: "directory",
-    path: `artifacts/${args.remoteJob.id}`,
-    createdAt: finishedAt,
-    files,
-  };
   const request = {
     versionId: args.job.versionId,
     runId: args.run.id,
@@ -13323,16 +11503,16 @@ function skillImproveObjectsFromRemoteJob(args: {
     skillName: args.job.skillName,
     skillBundleHash: args.job.skillBundleHash,
     agent: toJson(args.agent),
-    evidenceTraceIds: args.evidenceTraceIds as unknown as Json,
+    evidenceTraceIds: toJson(args.evidenceTraceIds),
     samples: args.samples,
     execution: jsonRecord(args.remoteJob.input).execution ?? null,
   } satisfies Record<string, Json>;
   const resultPayload = {
     status: status === "succeeded" ? "succeeded" : "failed",
-    ...(usage ? { usage: usage as unknown as Json } : {}),
+    ...(usage ? { usage: toJson(usage) } : {}),
     ...(patch
       ? {
-          fileChanges: patch.fileChanges as unknown as Json,
+          fileChanges: toJson(patch.fileChanges),
           ...(patch.summary ? { summary: patch.summary } : {}),
           ...(patch.feedback !== undefined ? { feedback: patch.feedback } : {}),
         }
@@ -13342,51 +11522,23 @@ function skillImproveObjectsFromRemoteJob(args: {
   const execution = jsonRecord(args.remoteJob.input).execution;
   const executionAdapter = asRuntimeRecord(asRuntimeRecord(execution).adapter);
   const adapterUse = typeof executionAdapter.use === "string" ? executionAdapter.use : undefined;
-  const outputSummary = textFromJson(resultPayload.summary) ?? textFromJson(resultPayload.error) ?? undefined;
-  const trace: WorkbenchTrace = {
-    id: `trace_${args.remoteJob.id}`,
-    runId: args.run.id,
-    jobId: args.remoteJob.id,
-    versionId: args.job.versionId,
-    skillName: args.job.skillName,
-    skillBundleHash: args.job.skillBundleHash,
-    evalHash: args.job.evalHash,
-    agentName: args.agent.name,
-    agentHash: args.job.agentHash,
-    createdAt: finishedAt,
+  const { artifact, trace } = remoteExecutionEvidence({
+    remoteJob: args.remoteJob,
+    run: args.run,
+    files,
+    finishedAt,
     request,
     result: resultPayload,
-    files: [
-      textFile("request.json", JSON.stringify(request, null, 2) + "\n"),
-      textFile("result.json", JSON.stringify(resultPayload, null, 2) + "\n"),
-      ...files.map(copyFile),
-    ],
-    protocol: "workbench.trace.v1",
-    origin: "eval",
-    updatedAt: finishedAt,
-    source: {
-      host: adapterUse ?? args.agent.adapter,
-      sessionId: args.run.id,
-      turnId: args.remoteJob.id,
+    status,
+    identity: {
+      versionId: args.job.versionId,
+      skillName: args.job.skillName,
+      skillBundleHash: args.job.skillBundleHash,
+      evalHash: args.job.evalHash,
+      agentName: args.agent.name,
+      agentHash: args.job.agentHash,
     },
-    status: {
-      capture: "captured",
-      execution: status === "succeeded" ? "completed" : status,
-      grade: "ungraded",
-      review: "unreviewed",
-      promotion: "none",
-    },
-    subjects: [
-      {
-        type: "skill",
-        id: args.job.skillName,
-        versionId: args.job.versionId,
-        confidence: "exact",
-        activation: "workbench-owned",
-      },
-      { type: "agent", id: args.agent.name, confidence: "exact" },
-      { type: "run", id: args.run.id, confidence: "exact" },
-    ],
+    adapterId: adapterUse ?? args.agent.adapter,
     links: [
       { type: "run", id: args.run.id },
       { type: "job", id: args.remoteJob.id },
@@ -13394,13 +11546,8 @@ function skillImproveObjectsFromRemoteJob(args: {
       { type: "agent", id: args.agent.name },
       ...args.evidenceTraceIds.map((id) => ({ type: "trace" as const, id })),
     ],
-    input: { prompt: "Improve the Workbench skill using the supplied trace evidence." },
-    ...(outputSummary ? { output: { assistantText: outputSummary } } : {}),
-    ...(usage ? { usage } : {}),
-    artifacts: files.map(copyFile),
-    review: { status: "unreviewed" },
-    resultIds: [],
-  };
+    prompt: "Improve the Workbench skill using the supplied trace evidence.",
+  });
   const job: WorkbenchJob = {
     ...args.job,
     status,
@@ -13412,6 +11559,58 @@ function skillImproveObjectsFromRemoteJob(args: {
     ...(jobError ? { error: jobError } : {}),
   };
   return { job, artifact, trace };
+}
+
+function remoteExecutionEvidence(args: {
+  remoteJob: WorkbenchExecutionJob;
+  run: WorkbenchRun;
+  files: readonly SurfaceSnapshotFile[];
+  finishedAt: string;
+  request: Record<string, Json>;
+  result: Record<string, Json>;
+  status: "succeeded" | "failed" | "canceled";
+  identity: Pick<WorkbenchTrace, "versionId" | "skillName" | "skillBundleHash" | "evalHash" | "agentName" | "agentHash">;
+  adapterId: string;
+  command?: string;
+  links: WorkbenchTrace["links"];
+  prompt: string;
+  artifactId?: string;
+  traceId?: string;
+}): { artifact: WorkbenchArtifact; trace: WorkbenchTrace } {
+  const artifact: WorkbenchArtifact = {
+    id: args.artifactId ?? nextArtifactIdForRun(args.run, args.remoteJob.id),
+    runId: args.run.id,
+    jobId: args.remoteJob.id,
+    createdAt: args.finishedAt,
+    files: args.files.map(copyFile),
+  };
+  const outputSummary = textFromJson(args.result.summary) ?? textFromJson(args.result.error) ?? undefined;
+  const trace: WorkbenchTrace = {
+    id: args.traceId ?? `trace_${args.remoteJob.id}`,
+    runId: args.run.id,
+    jobId: args.remoteJob.id,
+    ...args.identity,
+    createdAt: args.finishedAt,
+    request: args.request,
+    result: args.result,
+    files: [
+      textFile("request.json", JSON.stringify(args.request, null, 2) + "\n"),
+      textFile("result.json", JSON.stringify(args.result, null, 2) + "\n"),
+      ...args.files.map(copyFile),
+    ],
+    updatedAt: args.finishedAt,
+    source: {
+      adapterId: args.adapterId,
+      sessionId: args.run.id,
+      turnId: args.remoteJob.id,
+      ...(args.command ? { command: args.command } : {}),
+    },
+    status: args.status === "succeeded" ? "completed" : args.status,
+    links: args.links,
+    input: { prompt: args.prompt },
+    ...(outputSummary ? { output: { assistantText: outputSummary } } : {}),
+  };
+  return { artifact, trace };
 }
 
 export function readWorkbenchSkillRunOutputUsage(output: unknown): UsageSummary | undefined {
@@ -13453,26 +11652,9 @@ async function readSkillEvalEnvironmentDockerfile(root: string): Promise<string>
   return source;
 }
 
-async function readSkillEvalEnvironmentStatus(root: string): Promise<WorkbenchEnvironmentStatus> {
-  const environmentPath = path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile");
-  try {
-    await readSkillEvalEnvironmentDockerfile(root);
-    return {
-      path: environmentPath,
-      state: "ready",
-    };
-  } catch (error) {
-    return {
-      path: environmentPath,
-      state: isMissingSkillEvalEnvironmentDockerfileError(error) ? "missing" : "invalid",
-      message: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
 function missingSkillEvalEnvironmentDockerfileError(): WorkbenchCodedError {
   return new WorkbenchCodedError("environment_missing", `${path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile")} is required.`, {
-    remediation: `Create ${path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile")} or rerun workbench init in a fresh project.`,
+    remediation: `Create ${path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile")} or rerun workbench skill init in a fresh project.`,
     subject: { path: path.join(".workbench", ENVIRONMENT_DIR, "Dockerfile") },
     exitCode: 1,
   });
@@ -13548,6 +11730,25 @@ function skillEvalGradeInvocation(args: {
   };
 }
 
+function skillEvalRuntimeGradeInvocation(args: {
+  evalSnapshot: WorkbenchEvalSnapshot;
+  agent: WorkbenchAgent;
+  runtimeCase: WorkbenchEvalCaseRuntime;
+}): WorkbenchAdapterInvocation {
+  const resolved = skillEvalCaseGradePlan({
+    evalSnapshot: args.evalSnapshot,
+    runtimeCase: args.runtimeCase,
+    agent: args.agent,
+  });
+  const invocation: WorkbenchAdapterInvocation = {
+    use: resolved.adapter,
+    with: resolved.config,
+  };
+  return invocation.use === "none"
+    ? { use: "command", with: { command: "true" } }
+    : invocation;
+}
+
 function skillEvalGradeDeclaration(
   evalSnapshot: WorkbenchEvalSnapshot,
 ): SkillEvalGradeDeclaration {
@@ -13562,7 +11763,7 @@ interface SkillEvalGradeDeclaration {
 interface SkillEvalCaseGradePlanResolution {
   adapter: string;
   config: Record<string, Json>;
-  plan: WorkbenchEvalCaseGradePlan;
+  plan: WorkbenchGradePlan;
 }
 
 interface RubricCriterion {
@@ -13575,28 +11776,94 @@ interface ResolvedRubricCriterion extends RubricCriterion {
   source: "global" | "case" | "case_override";
 }
 
+const SUPPORTED_SKILL_EVAL_GRADE_ADAPTERS = ["none", "rubric", "tests", "command"] as const;
+
 function skillEvalGradeDeclarationFromFiles(
   files: readonly SurfaceSnapshotFile[],
 ): SkillEvalGradeDeclaration {
   const evalFile = files.find((file) => file.path === EVAL_FILE);
   if (!evalFile) {
-    throw new WorkbenchUserError(`${EVAL_FILE} grade.adapter must be rubric, tests, or command.`);
+    throw new WorkbenchUserError(`${EVAL_FILE} grade.adapter must be none, rubric, tests, or command.`);
   }
   const record = parseYamlRecord(evalFile.content);
+  assertOnlyEvalKeys(record, ["grade"], EVAL_FILE);
   const grade = asRecord(record.grade);
   if (!grade) {
-    throw new WorkbenchUserError(`${EVAL_FILE} grade.adapter must be rubric, tests, or command.`);
+    throw new WorkbenchUserError(`${EVAL_FILE} grade.adapter must be none, rubric, tests, or command.`);
   }
   assertOnlyGradeKeys(grade, ["adapter", "with"], EVAL_FILE);
   const adapter = typeof grade.adapter === "string" ? grade.adapter.trim().toLowerCase() : "";
   if (!adapter) {
-    throw new WorkbenchUserError(`${EVAL_FILE} grade.adapter must be rubric, tests, or command.`);
+    throw new WorkbenchUserError(`${EVAL_FILE} grade.adapter must be none, rubric, tests, or command.`);
   }
   const withConfig = grade.with === undefined ? {} : asRecord(grade.with);
   if (!withConfig) {
     throw new WorkbenchUserError(`${EVAL_FILE} grade.with must be a mapping.`);
   }
   return { adapter, config: jsonRecord(withConfig) };
+}
+
+function assertOnlyEvalKeys(record: Record<string, unknown>, allowed: readonly string[], pathLabel: string): void {
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(record)) {
+    if (!allowedSet.has(key)) {
+      throw new WorkbenchUserError(
+        `${pathLabel} ${key} is not supported. Use only grade.adapter plus optional grade.with.`,
+      );
+    }
+  }
+}
+
+function assertSupportedSkillEvalGradeAdapter(adapter: string): void {
+  if (!(SUPPORTED_SKILL_EVAL_GRADE_ADAPTERS as readonly string[]).includes(adapter)) {
+    throw new WorkbenchUserError(
+      `Unsupported skill eval grade adapter ${adapter}. Use grade.adapter: none, rubric, tests, or command.`,
+    );
+  }
+}
+
+function skillEvalGradePlanFromDeclaration(args: {
+  evalFiles: readonly SurfaceSnapshotFile[];
+  evalGradeDeclaration: SkillEvalGradeDeclaration;
+}): WorkbenchGradePlan {
+  const declared = args.evalGradeDeclaration;
+  const adapter = declared.adapter;
+  assertSupportedSkillEvalGradeAdapter(adapter);
+  if (adapter === "rubric") {
+    const criteria = rubricCriteriaFromConfig(declared.config.criteria, `${EVAL_FILE} grade.with.criteria`)
+      .map((criterion): ResolvedRubricCriterion => ({ ...criterion, source: "global" }));
+    const config: Record<string, Json> = {
+      ...declared.config,
+      criteria: criteria.map(rubricCriterionConfig),
+    };
+    return {
+      adapter,
+      adapterSource: "eval",
+      label: gradeAdapterLabel(adapter),
+      summary: criteria.length === 0 ? "No grading criteria configured" : formatCount(criteria.length, "criterion"),
+      sources: gradePlanSources({
+        evalFiles: args.evalFiles,
+        hasEvalGrade: true,
+        hasCaseGrade: false,
+      }),
+      display: rubricGradePlanDisplay(criteria, config),
+      authoring: gradePlanAuthoringControls(adapter, config),
+    };
+  }
+  const config: Record<string, Json> = { ...declared.config };
+  return {
+    adapter,
+    adapterSource: "eval",
+    label: gradeAdapterLabel(adapter),
+    summary: genericGradePlanSummary(adapter, config, []),
+    sources: gradePlanSources({
+      evalFiles: args.evalFiles,
+      hasEvalGrade: true,
+      hasCaseGrade: false,
+    }),
+    display: genericGradePlanDisplay(adapter, config, []),
+    authoring: gradePlanAuthoringControls(adapter, config),
+  };
 }
 
 function skillEvalCaseGradePlan(args: {
@@ -13617,6 +11884,18 @@ function skillEvalCaseGradePlan(args: {
   });
 }
 
+export function skillEvalCaseHasConcreteGrader(args: {
+  evalSnapshot: WorkbenchEvalSnapshot;
+  runtimeCase: WorkbenchEvalCaseRuntime;
+  agent?: WorkbenchAgent;
+}): boolean {
+  return skillEvalCaseGradePlan({
+    evalSnapshot: args.evalSnapshot,
+    runtimeCase: args.runtimeCase,
+    agent: args.agent,
+  }).adapter !== "none";
+}
+
 function skillEvalCaseGradePlanFromCaseRecord(args: {
   evalFiles: readonly SurfaceSnapshotFile[];
   evalGradeDeclaration: SkillEvalGradeDeclaration;
@@ -13628,16 +11907,16 @@ function skillEvalCaseGradePlanFromCaseRecord(args: {
   strict?: boolean;
 }): SkillEvalCaseGradePlanResolution {
   const declared = args.evalGradeDeclaration;
-  const adapter = declared.adapter;
-  if (!["tests", "rubric", "command"].includes(adapter)) {
-    throw new WorkbenchUserError(
-      `Unsupported skill eval grade adapter ${adapter}. Use grade.adapter: rubric, tests, or command.`,
-    );
-  }
-
   const caseGradeConfig = skillEvalCaseGradeConfig(args.caseRecord, args.caseSourcePath);
+  const adapter = caseGradeConfig.adapter ?? declared.adapter;
+  assertSupportedSkillEvalGradeAdapter(adapter);
+  const inheritsEvalGrade = caseGradeConfig.adapter === undefined && adapter === declared.adapter;
+  const adapterSource: WorkbenchGradePlan["adapterSource"] = caseGradeConfig.adapter ? "case" : "eval";
+
   if (adapter === "rubric") {
-    const globalCriteria = rubricCriteriaFromConfig(declared.config.criteria, `${EVAL_FILE} grade.with.criteria`);
+    const globalCriteria = inheritsEvalGrade
+      ? rubricCriteriaFromConfig(declared.config.criteria, `${EVAL_FILE} grade.with.criteria`)
+      : [];
     const caseCriteria = rubricCriteriaFromConfig(
       caseGradeConfig.config.criteria,
       `${args.caseSourcePath} grade.with.criteria`,
@@ -13649,37 +11928,37 @@ function skillEvalCaseGradePlanFromCaseRecord(args: {
         `Grading requires effective criteria for case ${args.caseId}. Add grade.with.criteria to ${EVAL_FILE} or ${args.caseSourcePath}.`,
       );
     }
-    const usesDerivedJudge = args.agent !== undefined &&
-      declared.config.judge === undefined &&
-      caseGradeConfig.config.judge === undefined;
     const config: Record<string, Json> = {
-      ...declared.config,
+      ...(inheritsEvalGrade ? declared.config : {}),
       ...caseGradeConfig.config,
       criteria: criteria.map(rubricCriterionConfig),
-      ...(usesDerivedJudge && args.agent
-        ? { judge: toJson(agentAdapterInvocation(args.agent)) }
-        : {}),
     };
+    const judge = jsonRecord(config.judge);
+    if (args.strict && (typeof judge.use !== "string" || judge.use.trim().length === 0)) {
+      throw new WorkbenchUserError("Rubric grading requires grade.with.judge.use.");
+    }
     return {
       adapter,
       config,
       plan: {
         adapter,
+        adapterSource,
         label: gradeAdapterLabel(adapter),
         summary: criteria.length === 0 ? "No grading criteria configured" : formatCount(criteria.length, "criterion"),
         sources: gradePlanSources({
           evalFiles: args.evalFiles,
           caseSourcePath: args.caseSourcePath,
+          hasEvalGrade: inheritsEvalGrade,
           hasCaseGrade: caseGradeConfig.hasGrade,
-          hasDerived: usesDerivedJudge,
         }),
         display: rubricGradePlanDisplay(criteria, config),
+        authoring: gradePlanAuthoringControls(adapter, config),
       },
     };
   }
 
   const config: Record<string, Json> = {
-    ...declared.config,
+    ...(inheritsEvalGrade ? declared.config : {}),
     ...caseGradeConfig.config,
   };
   return {
@@ -13687,15 +11966,17 @@ function skillEvalCaseGradePlanFromCaseRecord(args: {
     config,
     plan: {
       adapter,
+      adapterSource,
       label: gradeAdapterLabel(adapter),
       summary: genericGradePlanSummary(adapter, config, args.caseFiles),
       sources: gradePlanSources({
         evalFiles: args.evalFiles,
         caseSourcePath: args.caseSourcePath,
+        hasEvalGrade: inheritsEvalGrade,
         hasCaseGrade: caseGradeConfig.hasGrade,
-        hasDerived: false,
       }),
       display: genericGradePlanDisplay(adapter, config, args.caseFiles),
+      authoring: gradePlanAuthoringControls(adapter, config),
     },
   };
 }
@@ -13714,7 +11995,7 @@ function assertOnlyGradeKeys(record: Record<string, unknown>, allowed: readonly 
 function skillEvalCaseGradeConfig(
   caseRecord: Record<string, unknown>,
   caseSourcePath: string,
-): { config: Record<string, Json>; hasGrade: boolean } {
+): { adapter?: string; config: Record<string, Json>; hasGrade: boolean } {
   if (caseRecord.rubric !== undefined) {
     throw new WorkbenchUserError(
       `${caseSourcePath} rubric is not supported. Use grade.with.criteria for grading criteria.`,
@@ -13728,12 +12009,27 @@ function skillEvalCaseGradeConfig(
   if (!gradeRecord) {
     throw new WorkbenchUserError(`${caseSourcePath} grade must be a mapping.`);
   }
-  assertOnlyGradeKeys(gradeRecord, ["with"], caseSourcePath);
+  assertOnlyGradeKeys(gradeRecord, ["adapter", "with"], caseSourcePath);
+  const adapter = gradeRecord.adapter === undefined
+    ? undefined
+    : typeof gradeRecord.adapter === "string" && gradeRecord.adapter.trim()
+      ? gradeRecord.adapter.trim().toLowerCase()
+      : "";
+  if (adapter === "") {
+    throw new WorkbenchUserError(`${caseSourcePath} grade.adapter must be none, rubric, tests, or command.`);
+  }
+  if (adapter !== undefined) {
+    assertSupportedSkillEvalGradeAdapter(adapter);
+  }
   const withConfig = gradeRecord.with === undefined ? {} : asRecord(gradeRecord.with);
   if (!withConfig) {
     throw new WorkbenchUserError(`${caseSourcePath} grade.with must be a mapping.`);
   }
-  return { config: jsonRecord(withConfig), hasGrade: true };
+  return {
+    ...(adapter ? { adapter } : {}),
+    config: jsonRecord(withConfig),
+    hasGrade: true,
+  };
 }
 
 function rubricCriteriaFromConfig(
@@ -13808,6 +12104,9 @@ function rubricCriterionConfig(criterion: RubricCriterion): Json {
 }
 
 function gradeAdapterLabel(adapter: string): string {
+  if (adapter === "none") {
+    return "None";
+  }
   if (adapter === "rubric") {
     return "Criteria";
   }
@@ -13820,21 +12119,49 @@ function gradeAdapterLabel(adapter: string): string {
   return adapter;
 }
 
+function gradeAdapterOptions(): WorkbenchGradeAdapterOption[] {
+  return SUPPORTED_SKILL_EVAL_GRADE_ADAPTERS.map((adapter) => ({
+    adapter,
+    label: gradeAdapterLabel(adapter),
+    authoring: gradePlanAuthoringControls(adapter),
+  }));
+}
+
+function gradePlanForAdapter(args: {
+  adapter: string;
+  adapterSource: WorkbenchGradePlan["adapterSource"];
+  config?: Record<string, Json>;
+  caseFiles?: readonly SurfaceSnapshotFile[];
+}): WorkbenchGradePlan {
+  const config = args.config ?? {};
+  const caseFiles = args.caseFiles ?? [];
+  return {
+    adapter: args.adapter,
+    adapterSource: args.adapterSource,
+    label: gradeAdapterLabel(args.adapter),
+    summary: args.adapter === "rubric"
+      ? "No grading criteria configured"
+      : genericGradePlanSummary(args.adapter, config, caseFiles),
+    sources: [],
+    display: args.adapter === "rubric"
+      ? rubricGradePlanDisplay([], config)
+      : genericGradePlanDisplay(args.adapter, config, caseFiles),
+    authoring: gradePlanAuthoringControls(args.adapter, config),
+  };
+}
+
 function gradePlanSources(args: {
   evalFiles: readonly SurfaceSnapshotFile[];
-  caseSourcePath: string;
+  caseSourcePath?: string;
+  hasEvalGrade: boolean;
   hasCaseGrade: boolean;
-  hasDerived: boolean;
 }): WorkbenchGradePlanSource[] {
   const sources: WorkbenchGradePlanSource[] = [];
-  if (args.evalFiles.some((file) => file.path === EVAL_FILE)) {
+  if (args.hasEvalGrade && args.evalFiles.some((file) => file.path === EVAL_FILE)) {
     sources.push({ path: EVAL_FILE, role: "global" });
   }
-  if (args.hasCaseGrade) {
+  if (args.hasCaseGrade && args.caseSourcePath) {
     sources.push({ path: args.caseSourcePath, role: "case" });
-  }
-  if (args.hasDerived) {
-    sources.push({ path: "selected agent", role: "derived", note: "Default grading judge" });
   }
   return sources;
 }
@@ -13876,6 +12203,9 @@ function genericGradePlanSummary(
   config: Record<string, Json>,
   caseFiles: readonly SurfaceSnapshotFile[],
 ): string {
+  if (adapter === "none") {
+    return "No grader";
+  }
   if (adapter === "tests") {
     const testFiles = gradePlanTestFiles(caseFiles);
     return testFiles.length > 0 ? `${formatCount(testFiles.length, "test file")}` : "Case test harness";
@@ -13891,6 +12221,9 @@ function genericGradePlanDisplay(
   config: Record<string, Json>,
   caseFiles: readonly SurfaceSnapshotFile[],
 ): WorkbenchGradePlanDisplayBlock[] {
+  if (adapter === "none") {
+    return [];
+  }
   const display: WorkbenchGradePlanDisplayBlock[] = [];
   const testFiles = adapter === "tests" ? gradePlanTestFiles(caseFiles) : [];
   if (testFiles.length > 0) {
@@ -13908,6 +12241,69 @@ function genericGradePlanDisplay(
     display.push({ kind: "text", text: "No adapter-specific grading details are configured." });
   }
   return display;
+}
+
+function gradePlanAuthoringControls(
+  adapter: string,
+  config: Record<string, Json> = {},
+): WorkbenchGradePlanAuthoringControl[] {
+  if (adapter === "none") {
+    return [];
+  }
+  if (adapter === "rubric") {
+    return [{
+      kind: "list",
+      name: "criteria",
+      label: "Acceptance criteria",
+      itemLabel: "Criterion",
+      minItems: 1,
+      fields: [{
+        kind: "text",
+        name: "description",
+        label: "Criterion",
+        placeholder: "One observable behavior that makes the result good.",
+        required: true,
+      }],
+      defaultItems: [{ description: "" }],
+    }];
+  }
+  if (adapter === "tests") {
+    return [{
+      kind: "file",
+      name: "testScript",
+      label: "Test script",
+      description: "Runs inside the case sandbox and writes JSON to $OUTPUT_DIR/result.json.",
+      path: "tests/test.sh",
+      language: "shell",
+      defaultValue: defaultWorkbenchCaseTestScript(),
+      executable: true,
+      required: true,
+    }];
+  }
+  if (adapter === "command") {
+    return [{
+      kind: "text",
+      name: "command",
+      label: "Command",
+      description: "Runs in the grader workspace and writes JSON to $OUTPUT_DIR/result.json.",
+      ...(typeof config.command === "string" && config.command ? { defaultValue: config.command } : {}),
+      multiline: true,
+      required: true,
+    }];
+  }
+  return [{
+    kind: "notice",
+    name: "grade",
+    label: "Grade",
+    message: "This grader does not expose case authoring fields.",
+  }];
+}
+
+function evalGradePlanAuthoringControls(
+  adapter: string,
+  config: Record<string, Json> = {},
+): WorkbenchGradePlanAuthoringControl[] {
+  return gradePlanAuthoringControls(adapter, config).filter((control) => control.kind !== "file");
 }
 
 function gradePlanTestFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
@@ -14083,7 +12479,7 @@ function agentAdapterInvocation(agent: WorkbenchAgent): WorkbenchAdapterInvocati
     use: agent.adapter.trim().toLowerCase(),
     with: config,
     ...(typeof auth === "string" || (auth && typeof auth === "object" && !Array.isArray(auth))
-      ? { auth: auth as Json }
+      ? { auth: toJson(auth) }
       : {}),
   };
 }
@@ -14099,7 +12495,7 @@ function agentImproveAdapterInvocation(agent: WorkbenchAgent): WorkbenchAdapterI
         }
       : null;
   }
-  if (SKILL_EVAL_PROVIDER_AGENT_ADAPTERS.has(adapter)) {
+  if (isHarnessBackedSkillEvalAdapter(adapter)) {
     return agentAdapterInvocation(agent);
   }
   return null;
@@ -14122,11 +12518,16 @@ const SKILL_EVAL_AGENT_RUNTIME_CONFIG_KEYS = new Set([
 ]);
 
 function isProviderBackedSkillEvalAgent(agent: WorkbenchAgent): boolean {
-  return SKILL_EVAL_PROVIDER_AGENT_ADAPTERS.has(agent.adapter.trim().toLowerCase());
+  return isHarnessBackedSkillEvalAdapter(agent.adapter);
 }
 
 function isProviderBackedSkillEvalInvocation(invocation: WorkbenchAdapterInvocation): boolean {
-  return SKILL_EVAL_PROVIDER_AGENT_ADAPTERS.has(invocation.use.trim().toLowerCase());
+  return isHarnessBackedSkillEvalAdapter(invocation.use);
+}
+
+function isHarnessBackedSkillEvalAdapter(adapterId: string): boolean {
+  const manifest = builtinWorkbenchAdapterManifest(adapterId.trim().toLowerCase());
+  return Boolean(manifest?.operations["skill.run"] && manifest.auth);
 }
 
 function skillEvalEngineCaseFiles(
@@ -14224,12 +12625,12 @@ function assertSkillEvalAgentSupported(agent: WorkbenchAgent): void {
   if (SKILL_EVAL_COMMAND_AGENT_ADAPTERS.has(adapter)) {
     return;
   }
-  if (SKILL_EVAL_PROVIDER_AGENT_ADAPTERS.has(adapter)) {
+  if (isHarnessBackedSkillEvalAdapter(adapter)) {
     assertProviderBackedAgentNetwork(agent);
     return;
   }
   throw new WorkbenchUserError(
-    `Agent ${agent.name} uses unsupported skill execution adapter ${agent.adapter}. Execute jobs support --adapter local, --adapter command, --adapter codex, or --adapter claude.`,
+    `Agent ${agent.name} uses unsupported skill run adapter ${agent.adapter}.`,
   );
 }
 
@@ -14291,7 +12692,7 @@ function improvementEvidenceFromTraces(traces: readonly WorkbenchTrace[]): strin
 interface SkillImprovementResult {
   mode: "command" | "provider";
   patch: WorkbenchSkillPatch;
-  remoteJob: RemoteWorkbenchJob;
+  remoteJob: WorkbenchExecutionJob;
   command?: string;
 }
 
@@ -14378,20 +12779,20 @@ async function executeAdapterBackedSkillImprovementPatch(args: {
 }
 
 function improvePatchExecutionError(
-  remoteJob: RemoteWorkbenchJob,
+  remoteJob: WorkbenchExecutionJob,
   agent: WorkbenchAgent,
   message: string,
-): WorkbenchCodedError & { remoteJob: RemoteWorkbenchJob } {
+): WorkbenchCodedError & { remoteJob: WorkbenchExecutionJob } {
   return Object.assign(new WorkbenchCodedError("improve_failed", message, {
-    remediation: adapterAuthRemediationFromError(remoteJob.error) ?? "workbench improve",
+    remediation: adapterAuthRemediationFromError(remoteJob.error) ?? "workbench skill improve",
     subject: { agent: agent.name, status: remoteJob.status },
     exitCode: 1,
   }), { remoteJob });
 }
 
-function improvePatchRemoteJob(error: unknown): RemoteWorkbenchJob | undefined {
+function improvePatchRemoteJob(error: unknown): WorkbenchExecutionJob | undefined {
   return error && typeof error === "object" && "remoteJob" in error
-    ? (error as { remoteJob?: RemoteWorkbenchJob }).remoteJob
+    ? (error as { remoteJob?: WorkbenchExecutionJob }).remoteJob
     : undefined;
 }
 
@@ -14585,7 +12986,7 @@ async function planWorkbenchLaunchSource(
   const version: WorkbenchVersion = {
     id: versionIdForHash(hash),
     hash,
-    message: options.message ?? SOURCE_SNAPSHOT_MESSAGE,
+    message: options.message ?? PACKAGE_SNAPSHOT_MESSAGE,
     parentIds: parent ? [parent] : [],
     createdAt: now(),
     files,
@@ -14624,7 +13025,7 @@ async function resolveOrCreateRunVersion(root: string, state: WorkbenchProjectSt
   return (await planWorkbenchLaunchSource(root, state, {
     ref,
     commit: true,
-    message: SOURCE_SNAPSHOT_MESSAGE,
+    message: PACKAGE_SNAPSHOT_MESSAGE,
   })).version;
 }
 
@@ -14643,11 +13044,11 @@ function resolveVersionSelection(state: WorkbenchProjectState, selection: string
   const trimmed = selection.trim();
   if (!trimmed || trimmed === "all") {
     return [...state.versions]
-      .sort(compareVersionIds);
+      .sort(compareWorkbenchVersions);
   }
   if (trimmed.includes("..")) {
     const [startRef, endRef] = trimmed.split("..", 2);
-    const versions = [...state.versions].sort(compareVersionIds);
+    const versions = [...state.versions].sort(compareWorkbenchVersions);
     const start = startRef ? versions.findIndex((version) => version.id === resolveVersion(state, startRef).id) : 0;
     const end = endRef ? versions.findIndex((version) => version.id === resolveVersion(state, endRef).id) : versions.length - 1;
     return versions.slice(Math.max(0, start), Math.max(start, end) + 1);
@@ -14664,35 +13065,34 @@ async function resolveRequestedAgents(
   return resolveNamedSelection(agents, agentSelection, await readDefaultAgentSelection(root, agents), "agent", remediationCommand);
 }
 
-async function runtimeAgentOptionsForRoot(
+async function runtimeSelectionOptionsForRoot(
   root: string,
   state: WorkbenchProjectState,
-): Promise<Pick<NonNullable<Parameters<typeof createWorkbenchVersionRuntimeSnapshot>[1]>, "agents" | "defaultAgent">> {
-  const agents = await readAgents(root).catch(() => state.agents.map(copyAgent));
-  const defaultAgent = await readDefaultAgentSelection(root, agents).catch(() =>
-    defaultWorkbenchAgentSelectionFromState({
-      ...state,
-      agents: agents.map(copyAgent),
-    })
-  );
+): Promise<Pick<
+  NonNullable<Parameters<typeof createWorkbenchVersionRuntimeSnapshot>[1]>,
+  "agents" | "defaultAgent" | "skillSources" | "defaultSkill"
+>> {
+  const [agents, skillSources] = await Promise.all([
+    readAgents(root).catch(() => state.agents.map(copyAgent)),
+    readSkillSources(root).catch(() => state.skillSources.map(copySkillSource)),
+  ]);
+  const [defaultAgent, defaultSkill] = await Promise.all([
+    readDefaultAgentSelection(root, agents).catch(() =>
+      defaultWorkbenchAgentSelectionFromState({
+        ...state,
+        agents: agents.map(copyAgent),
+      })
+    ),
+    readDefaultSkillSelection(root, skillSources).catch(() =>
+      defaultWorkbenchSkillSelectionFromState({
+        ...state,
+        skillSources: skillSources.map(copySkillSource),
+      })
+    ),
+  ]);
   return {
     agents,
     ...(defaultAgent ? { defaultAgent } : {}),
-  };
-}
-
-async function runtimeSkillSourceOptionsForRoot(
-  root: string,
-  state: WorkbenchProjectState,
-): Promise<Pick<NonNullable<Parameters<typeof createWorkbenchVersionRuntimeSnapshot>[1]>, "skillSources" | "defaultSkill">> {
-  const skillSources = await readSkillSources(root).catch(() => state.skillSources.map(copySkillSource));
-  const defaultSkill = await readDefaultSkillSelection(root, skillSources).catch(() =>
-    defaultWorkbenchSkillSelectionFromState({
-      ...state,
-      skillSources: skillSources.map(copySkillSource),
-    })
-  );
-  return {
     skillSources,
     ...(defaultSkill ? { defaultSkill } : {}),
   };
@@ -14705,7 +13105,7 @@ async function readAgents(root: string): Promise<WorkbenchAgent[]> {
     source = await fs.readFile(filePath, "utf8");
   } catch (error) {
     if (fileErrorCode(error) === "ENOENT") {
-      throw new WorkbenchUserError(`Missing ${path.join(".workbench", AGENTS_FILE)}. Run \`workbench new\` or restore the agent file before continuing.`);
+      throw new WorkbenchUserError(`Missing ${path.join(".workbench", AGENTS_FILE)}. Run \`workbench skill new\` or restore the agent file before continuing.`);
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new WorkbenchUserError(`Unable to read ${path.join(".workbench", AGENTS_FILE)}: ${message}`);
@@ -14727,7 +13127,7 @@ function parseAgentsYaml(source: string, fileLabel: string): WorkbenchAgent[] {
   }
   const agents = Object.entries(agentsRecord).map(([name, raw]) => {
     const value = asRecord(raw) ?? {};
-    const config = asRecord(value.with) ?? asRecord(value.config) ?? {};
+    const config = asRecord(value.with) ?? {};
     const normalizedName = normalizeManifestEntryName(name, fileLabel, "agent");
     if (typeof value.adapter !== "string" || !value.adapter.trim()) {
       throw new WorkbenchUserError(`Agent ${name} in ${fileLabel} must define a non-empty adapter.`);
@@ -14839,13 +13239,13 @@ function namedSelectionRemediation<T extends { name: string }>(
   if (configured.length === 0) {
     return noun === "agent"
       ? providerAgentSetupCommand("codex", "default")
-      : "workbench new";
+      : "workbench skill new";
   }
   const firstConfigured = configured[0];
   if (!firstConfigured) {
     return noun === "agent"
       ? providerAgentSetupCommand("codex", "default")
-      : "workbench new";
+      : "workbench skill new";
   }
   const improvementAgent = command === "improve" && noun === "agent"
     ? firstImprovementCapableAgentName(entries)
@@ -14855,7 +13255,7 @@ function namedSelectionRemediation<T extends { name: string }>(
   }
   const first = improvementAgent ?? closestConfiguredSelectionName(missingName, configured) ?? firstConfigured;
   const selection = missingName || command === "improve" || configured.length === 1 ? first : ALL_SELECTOR;
-  return `workbench ${command} ${flag} ${selection}`;
+  return `${WORKBENCH_SELECTOR_INVOCATIONS[command]} ${flag} ${selection}`;
 }
 
 function closestConfiguredSelectionName(missingName: string | undefined, configured: readonly string[]): string | undefined {
@@ -14952,7 +13352,7 @@ async function readEvalCases(root: string): Promise<WorkbenchEvalCaseRuntime[]> 
     const caseRecord = parseCaseRecord(descriptor.content, path.join(entry.name, descriptor.path));
     const command = caseCommandFromRecord(caseRecord);
     cases.push({
-      id: caseIdFromRecord(caseRecord, entry.name),
+      id: entry.name,
       path: entry.name,
       content: descriptor.content,
       files,
@@ -14980,16 +13380,7 @@ async function readEvalSnapshot(
   });
 }
 
-async function readWorkbenchEvaluationSourceFiles(root: string): Promise<SurfaceSnapshotFile[]> {
-  return [
-    ...await readOptionalFile(path.join(workbenchDir(root), EVAL_FILE), EVAL_FILE),
-    ...await readOptionalFile(path.join(workbenchDir(root), AGENTS_FILE), AGENTS_FILE),
-    ...await readFilesUnder(path.join(workbenchDir(root), ENVIRONMENT_DIR), ENVIRONMENT_DIR),
-    ...await readFilesUnder(path.join(workbenchDir(root), CASES_DIR), CASES_DIR),
-  ].sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function createWorkbenchEvalSnapshotFromEvalFiles(
+export function createWorkbenchEvalSnapshotFromEvalFiles(
   files: readonly SurfaceSnapshotFile[],
   timestamps: { createdAt?: string; updatedAt?: string } = {},
 ): WorkbenchEvalSnapshot {
@@ -14998,18 +13389,22 @@ function createWorkbenchEvalSnapshotFromEvalFiles(
     .map((file) => ({ ...file, path: normalizeRelativePath(file.path) }))
     .sort((left, right) => left.path.localeCompare(right.path));
   const gradeDeclaration = skillEvalGradeDeclarationFromFiles(normalizedFiles);
+  const grade = skillEvalGradePlanFromDeclaration({
+    evalFiles: normalizedFiles,
+    evalGradeDeclaration: gradeDeclaration,
+  });
   const cases = evalCaseSnapshotsFromEvalFiles(normalizedFiles, gradeDeclaration);
   const updatedAt = timestamps.updatedAt ?? now();
   const createdAt = timestamps.createdAt ?? updatedAt;
-  const gradeAdapter = gradeDeclaration.adapter;
   return {
     hash: hashFiles(normalizedFiles),
     files: normalizedFiles,
+    grade,
+    gradeAdapters: gradeAdapterOptions(),
     cases,
     caseCount: cases.length,
     createdAt,
     updatedAt,
-    gradeAdapter,
   };
 }
 
@@ -15041,9 +13436,8 @@ function evalCaseSnapshotsFromEvalFiles(
         return null;
       }
       const record = parseCaseSnapshotRecord(descriptor.content);
-      const id = caseIdFromRecord(record, fallbackId);
+      const id = fallbackId;
       const command = caseCommandFromRecord(record);
-      const title = caseTitleFromRecord(record);
       const description = caseDescriptionFromRecord(record);
       const grade = skillEvalCaseGradePlanFromCaseRecord({
         evalFiles: files,
@@ -15056,7 +13450,6 @@ function evalCaseSnapshotsFromEvalFiles(
       return {
         id,
         path: caseSourcePath,
-        ...(title ? { title } : {}),
         ...(description ? { description } : {}),
         ...(command ? { command } : {}),
         grade,
@@ -15457,10 +13850,10 @@ async function readRemoteSkillFiles(
   }
   const parsed = tryParseGithubSkillRef(from, ref.trim());
   if (!parsed && /^https?:\/\//u.test(from.trim())) {
-    return readWorkbenchSourceSkillFiles(from, ref.trim(), prefix, options);
+    return readWorkbenchSkillPackageFiles(from, ref.trim(), prefix, options);
   }
   if (!parsed) {
-    throw new WorkbenchUserError(`Unsupported remote skill ref ${from}. Use OWNER/REPO[/path], github:OWNER/REPO//path, a GitHub URL, or a Workbench source URL.`);
+    throw new WorkbenchUserError(`Unsupported remote skill ref ${from}. Use OWNER/REPO[/path], github:OWNER/REPO//path, a GitHub URL, or a Workbench skill URL.`);
   }
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "workbench-remote-skill-"));
   try {
@@ -15499,14 +13892,14 @@ async function readRemoteSkillFiles(
   }
 }
 
-async function readWorkbenchSourceSkillFiles(
+async function readWorkbenchSkillPackageFiles(
   from: string,
   ref: string,
   prefix: string,
   options: { authToken?: string } = {},
 ): Promise<SurfaceSnapshotFile[]> {
-  const sourceUrl = workbenchSourceSnapshotUrl(from, ref);
-  const manifest = await fetchWorkbenchSourceJson<{
+  const packageUrl = workbenchSkillPackageUrl(from, ref);
+  const manifest = await fetchWorkbenchSkillPackageJson<{
     schema?: string;
     versionId?: string;
     files?: Array<{
@@ -15516,12 +13909,12 @@ async function readWorkbenchSourceSkillFiles(
       executable?: boolean;
       content?: string;
     }>;
-  }>(sourceUrl, options);
-  if (manifest.schema !== "workbench.source.snapshot.v1") {
-    throw new WorkbenchUserError(`Workbench source URL did not return a source snapshot: ${from}`);
+  }>(packageUrl, options);
+  if (manifest.schema !== "workbench.skill-package.snapshot.v1") {
+    throw new WorkbenchUserError(`Workbench skill URL did not return a skill package: ${from}`);
   }
   if (manifest.versionId !== ref) {
-    throw new WorkbenchUserError(`Workbench source ${from} resolved ${manifest.versionId ?? "unknown"} instead of requested ref ${ref}.`);
+    throw new WorkbenchUserError(`Workbench skill package ${from} resolved ${manifest.versionId ?? "unknown"} instead of requested ref ${ref}.`);
   }
   const manifestFiles = (manifest.files ?? [])
     .filter((file): file is {
@@ -15545,7 +13938,7 @@ async function readWorkbenchSourceSkillFiles(
     .filter((file) => isInstallableSkillBundleFilePath(file.path, prefix))
     .sort((left, right) => left.path.localeCompare(right.path));
   if (manifestFiles.length === 0) {
-    throw new WorkbenchUserError(`Workbench source ${from} contains no installable skill files at ${ref}.`);
+    throw new WorkbenchUserError(`Workbench skill package ${from} contains no installable skill files at ${ref}.`);
   }
   return manifestFiles.map((file) => ({
     path: file.path,
@@ -15574,16 +13967,16 @@ function normalizeWorkbenchSourceManifestPath(filePath: string, from: string): s
     return normalizeWorkbenchSourcePath(filePath);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new WorkbenchUserError(`Workbench source ${from} returned an unsafe file path ${JSON.stringify(filePath)}: ${message}`);
+    throw new WorkbenchUserError(`Workbench skill package ${from} returned an unsafe file path ${JSON.stringify(filePath)}: ${message}`);
   }
 }
 
-function workbenchSourceSnapshotUrl(from: string, ref: string): URL {
+function workbenchSkillPackageUrl(from: string, ref: string): URL {
   let url: URL;
   try {
     url = new URL(from);
   } catch {
-    throw new WorkbenchUserError(`Invalid Workbench source URL: ${from}`);
+    throw new WorkbenchUserError(`Invalid Workbench skill URL: ${from}`);
   }
   const segments = url.pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
   if (segments[0] !== "skills" || !segments[1] || !segments[2]) {
@@ -15598,39 +13991,37 @@ function workbenchSourceSnapshotUrl(from: string, ref: string): URL {
     }
     version = segments[4];
     if (version !== ref) {
-      throw new WorkbenchUserError(`Workbench source URL ${url.toString()} is pinned to ${version}, not requested ref ${ref}.`);
+      throw new WorkbenchUserError(`Workbench skill URL ${url.toString()} is pinned to ${version}, not requested ref ${ref}.`);
     }
   } else if (segments.length !== 3) {
     throw new WorkbenchUserError(`Invalid Workbench skill URL: ${from}`);
   }
-  url.pathname = `/api/workbench/source/skills/${encodeURIComponent(owner)}/${encodeURIComponent(skill)}/versions/${encodeURIComponent(version)}/source`;
+  url.pathname = `/api/workbench/skills/${encodeURIComponent(owner)}/${encodeURIComponent(skill)}/versions/${encodeURIComponent(version)}/package`;
   url.search = "";
   url.hash = "";
   return url;
 }
 
-async function fetchWorkbenchSourceJson<T>(
+async function fetchWorkbenchSkillPackageJson<T>(
   url: URL,
   options: { authToken?: string } = {},
 ): Promise<T> {
-  const response = await fetchWorkbenchSourceResponse(url, options);
+  const response = await fetchWorkbenchSkillPackageResponse(url, options);
   return JSON.parse(await response.text()) as T;
 }
 
-async function fetchWorkbenchSourceResponse(
+async function fetchWorkbenchSkillPackageResponse(
   url: URL,
   options: { authToken?: string } = {},
 ): Promise<Response> {
-  const token = options.authToken?.trim() ||
-    process.env.WORKBENCH_API_TOKEN?.trim() ||
-    process.env.WORKBENCH_SMOKE_BEARER_TOKEN?.trim();
+  const token = options.authToken?.trim() || process.env.WORKBENCH_API_TOKEN?.trim();
   const response = await fetch(url, {
     headers: {
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
   });
   if (!response.ok) {
-    throw new WorkbenchUserError(`Unable to download Workbench source ${url.toString()}: ${response.status} ${response.statusText}`);
+    throw new WorkbenchUserError(`Unable to download Workbench skill package ${url.toString()}: ${response.status} ${response.statusText}`);
   }
   return response;
 }
@@ -15638,7 +14029,7 @@ async function fetchWorkbenchSourceResponse(
 function parseGithubSkillRef(from: string): { owner: string; repo: string; subpath: string } {
   const parsed = tryParseGithubSkillRef(from);
   if (!parsed) {
-    throw new WorkbenchUserError(`Unsupported remote skill ref ${from}. Use OWNER/REPO[/path], github:OWNER/REPO//path, a GitHub URL, or a Workbench source URL.`);
+    throw new WorkbenchUserError(`Unsupported remote skill ref ${from}. Use OWNER/REPO[/path], github:OWNER/REPO//path, a GitHub URL, or a Workbench skill URL.`);
   }
   return parsed;
 }
@@ -15719,31 +14110,21 @@ function remoteSkillPathName(from: string): string {
   if (github) {
     return path.posix.basename(github.subpath === "." ? github.repo : github.subpath);
   }
-  const workbench = workbenchSourceName(from);
+  const workbench = workbenchSkillNameFromUrl(from);
   if (workbench) {
     return workbench;
   }
   return parseGithubSkillRef(from).repo;
 }
 
-function workbenchSourceName(from: string): string | null {
+function workbenchSkillNameFromUrl(from: string): string | null {
   try {
     const url = new URL(from);
     const segments = url.pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
     if (segments[0] === "skills" && segments[2]) {
       return safeName(segments[2]);
     }
-    const sourceIndex = segments.lastIndexOf("source");
-    if (sourceIndex < 0) {
-      return null;
-    }
-    const beforeSource = segments.slice(0, sourceIndex);
-    const skillsIndex = beforeSource.lastIndexOf("skills");
-    if (skillsIndex >= 0 && beforeSource[skillsIndex + 1]) {
-      const maybeOwnerName = beforeSource[skillsIndex + 2];
-      return safeName(maybeOwnerName ?? beforeSource[skillsIndex + 1]!);
-    }
-    return safeName(beforeSource.at(-1) ?? "workbench-skill");
+    return null;
   } catch {
     return null;
   }
@@ -15798,9 +14179,7 @@ async function walkFiles(root: string, current: string, files: SurfaceSnapshotFi
 async function materializeSkillFiles(root: string, files: readonly SurfaceSnapshotFile[]): Promise<void> {
   assertPackageSourceFilesOnly(files);
   await removeInstallableFiles(root);
-  for (const file of files) {
-    await writeSurfaceFile(root, file);
-  }
+  await writeSurfaceFiles(root, files);
 }
 
 function compareSwitchFiles(
@@ -15864,12 +14243,13 @@ async function materializeWorkbenchFiles(root: string, state: WorkbenchProjectSt
   await fs.rm(path.join(workbenchRoot, ENVIRONMENT_DIR), { recursive: true, force: true });
 
   const evalSnapshot = evalHash
-    ? state.evals.find((entry) => entry.hash === evalHash) ?? selectActiveEvalSnapshot(state)
+    ? state.evals.find((entry) => entry.hash === evalHash)
     : selectActiveEvalSnapshot(state);
+  if (evalHash && !evalSnapshot) {
+    throw new WorkbenchUserError(`Eval snapshot not found: ${evalHash}`);
+  }
   if (evalSnapshot) {
-    for (const file of evalSnapshot.files) {
-      await writeSurfaceFile(workbenchRoot, file);
-    }
+    await writeSurfaceFiles(workbenchRoot, evalSnapshot.files);
   }
 }
 
@@ -15890,13 +14270,6 @@ interface WorkbenchProjectLockOwner {
   pid: number;
   hostname: string;
   startedAt: string;
-}
-
-export async function withWorkbenchProjectLock<T>(
-  dir: string | undefined,
-  fn: () => Promise<T>,
-): Promise<T> {
-  return withWorkbenchProjectLockRoot(resolveRoot(dir), fn);
 }
 
 async function withWorkbenchProjectLockRoot<T>(
@@ -15971,10 +14344,9 @@ async function withWorkbenchProjectLockRootIfAvailable<T>(
 async function tryAcquireWorkbenchProjectLock(root: string): Promise<(() => Promise<void>) | null> {
   await ensureWorkbenchLocalMetadataIgnore(root);
   const lockRoot = projectLockDir(root);
-  const ownerPath = path.join(lockRoot, "owner.json");
   await fs.mkdir(path.dirname(lockRoot), { recursive: true });
   try {
-    await fs.mkdir(lockRoot);
+    return await createWorkbenchProjectLock(lockRoot);
   } catch (error) {
     if (fileErrorCode(error) !== "EEXIST") {
       throw error;
@@ -15983,7 +14355,7 @@ async function tryAcquireWorkbenchProjectLock(root: string): Promise<(() => Prom
       return null;
     }
     try {
-      await fs.mkdir(lockRoot);
+      return await createWorkbenchProjectLock(lockRoot);
     } catch (retryError) {
       if (fileErrorCode(retryError) !== "EEXIST") {
         throw retryError;
@@ -15991,15 +14363,6 @@ async function tryAcquireWorkbenchProjectLock(root: string): Promise<(() => Prom
       return null;
     }
   }
-  await writeJson(ownerPath, {
-    schema: "workbench.project-lock.v1",
-    pid: process.pid,
-    hostname: os.hostname(),
-    startedAt: now(),
-  } satisfies WorkbenchProjectLockOwner);
-  return async () => {
-    await fs.rm(lockRoot, { recursive: true, force: true });
-  };
 }
 
 async function acquireWorkbenchProjectLock(root: string): Promise<() => Promise<void>> {
@@ -16008,19 +14371,10 @@ async function acquireWorkbenchProjectLock(root: string): Promise<() => Promise<
   const ownerPath = path.join(lockRoot, "owner.json");
   const deadline = Date.now() + projectLockTimeoutMs();
   let attempts = 0;
+  await fs.mkdir(path.dirname(lockRoot), { recursive: true });
   while (true) {
-    await fs.mkdir(path.dirname(lockRoot), { recursive: true });
     try {
-      await fs.mkdir(lockRoot);
-      await writeJson(ownerPath, {
-        schema: "workbench.project-lock.v1",
-        pid: process.pid,
-        hostname: os.hostname(),
-        startedAt: now(),
-      } satisfies WorkbenchProjectLockOwner);
-      return async () => {
-        await fs.rm(lockRoot, { recursive: true, force: true });
-      };
+      return await createWorkbenchProjectLock(lockRoot);
     } catch (error) {
       if (fileErrorCode(error) !== "EEXIST") {
         throw error;
@@ -16039,6 +14393,17 @@ async function acquireWorkbenchProjectLock(root: string): Promise<() => Promise<
     await sleep(Math.min(1000, PROJECT_LOCK_RETRY_MS + attempts * 25));
     attempts += 1;
   }
+}
+
+async function createWorkbenchProjectLock(lockRoot: string): Promise<() => Promise<void>> {
+  await fs.mkdir(lockRoot);
+  await writeJson(path.join(lockRoot, "owner.json"), {
+    schema: "workbench.project-lock.v1",
+    pid: process.pid,
+    hostname: os.hostname(),
+    startedAt: now(),
+  } satisfies WorkbenchProjectLockOwner);
+  return async () => await fs.rm(lockRoot, { recursive: true, force: true });
 }
 
 async function removeStaleWorkbenchProjectLock(lockRoot: string): Promise<boolean> {
@@ -16095,15 +14460,11 @@ function projectLockTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : PROJECT_LOCK_TIMEOUT_MS;
 }
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function loadState(root: string, options: { allowMissing?: boolean } = {}): Promise<WorkbenchProjectState> {
   const workbenchRoot = workbenchDir(root);
   if (!await exists(workbenchRoot)) {
     if (!options.allowMissing) {
-      throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench new` first.");
+      throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench skill new` first.");
     }
     return emptyWorkbenchState(root);
   }
@@ -16139,7 +14500,7 @@ async function loadStateReadOnlyWithRetry(root: string): Promise<WorkbenchProjec
 async function loadStateReadOnly(root: string): Promise<WorkbenchProjectState> {
   const workbenchRoot = workbenchDir(root);
   if (!await exists(workbenchRoot)) {
-    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench new` first.");
+    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench skill new` first.");
   }
   await recoverAtomicStateCommit(root);
   await assertStateDirsAvailableForReadOnly(root);
@@ -16154,7 +14515,6 @@ type WorkbenchStateObjectType =
   | "agent"
   | "run"
   | "job"
-  | "trace"
   | "execution-event"
   | "artifact"
   | "lineage";
@@ -16174,24 +14534,23 @@ async function readStateFromObjectStore(
 ): Promise<WorkbenchProjectState> {
   const refs = await readWorkbenchRefs(root);
   const remotes = await readWorkbenchRemotesFile(root);
-  const state: WorkbenchProjectState = {
+  return parseWorkbenchState({
     schema: STATE_SCHEMA,
     root,
     refs,
     remotes,
-    versions: readStateArray(await readObjects<unknown>("version"), "versions", validateStateVersion),
-    skillSources: readStateArray(await readObjects<unknown>("skill-source"), "skillSources", validateStateSkillSource),
-    skillBundles: readStateArray(await readObjects<unknown>("skill-bundle"), "skillBundles", validateStateSkillBundle),
-    evals: readStateArray(await readObjects<unknown>("eval"), "evals", validateStateEvalSnapshot),
-    agents: readStateArray(await readObjects<unknown>("agent"), "agents", validateStateAgent),
-    runs: readStateArray(await readObjects<unknown>("run"), "runs", validateStateRun),
-    jobs: readStateArray(await readObjects<unknown>("job"), "jobs", validateStateJob),
-    traces: readStateArray(await readObjects<unknown>("trace"), "traces", validateStateTrace),
-    executionEvents: readStateArray(await readObjects<unknown>("execution-event"), "executionEvents", validateStateExecutionEventBatch),
-    artifacts: readStateArray(await readObjects<unknown>("artifact"), "artifacts", validateStateArtifact),
-    lineage: readStateArray(await readObjects<unknown>("lineage"), "lineage", validateStateLineageEdge),
-  };
-  return state;
+    versions: await readObjects<unknown>("version"),
+    skillSources: await readObjects<unknown>("skill-source"),
+    skillBundles: await readObjects<unknown>("skill-bundle"),
+    evals: await readObjects<unknown>("eval"),
+    agents: await readObjects<unknown>("agent"),
+    runs: await readObjects<unknown>("run"),
+    jobs: await readObjects<unknown>("job"),
+    traces: await listWorkbenchTraceRecords({ projectRoot: root }),
+    executionEvents: await readObjects<unknown>("execution-event"),
+    artifacts: await readObjects<unknown>("artifact"),
+    lineage: await readObjects<unknown>("lineage"),
+  });
 }
 
 async function readObjectTypeDirReadOnly<T>(
@@ -16237,7 +14596,6 @@ async function saveState(root: string, state: WorkbenchProjectState): Promise<vo
         await writeObjectCollectionToDir(tempObjectsDir, "agent", state.agents, (agent) => hashJson(agent));
         await writeObjectCollectionToDir(tempObjectsDir, "run", state.runs, (run) => run.id);
         await writeObjectCollectionToDir(tempObjectsDir, "job", state.jobs, (job) => job.id);
-        await writeObjectCollectionToDir(tempObjectsDir, "trace", state.traces, (trace) => trace.id);
         await writeObjectCollectionToDir(tempObjectsDir, "execution-event", state.executionEvents, workbenchExecutionEventBatchId);
         await writeObjectCollectionToDir(tempObjectsDir, "artifact", state.artifacts, (artifact) => artifact.id);
         await writeObjectCollectionToDir(tempObjectsDir, "lineage", state.lineage, (edge) => hashJson(edge).slice(0, 24));
@@ -16275,7 +14633,7 @@ interface WorkbenchHttpRemoteOptions {
 
 interface WorkbenchRemoteWriteOptions extends WorkbenchHttpRemoteOptions {
   state: WorkbenchProjectState;
-  visibility?: WorkbenchPublishVisibility;
+  visibility?: WorkbenchSkillVisibility;
 }
 
 class WorkbenchRemoteNotFoundError extends Error {
@@ -16329,7 +14687,7 @@ async function writeRemoteObjectPack(
   await writeObjectPackFiles(root, pack);
 }
 
-async function writeRemotePublishedSource(
+async function writeRemoteSkillPackage(
   remote: WorkbenchRemote,
   version: WorkbenchVersion,
   options: WorkbenchRemoteWriteOptions,
@@ -16358,8 +14716,8 @@ async function writeRemotePublishedSource(
     );
     return publication;
   }
-  throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can publish installable source.`, {
-    remediation: "workbench login && workbench publish",
+  throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can publish skill packages.`, {
+    remediation: "workbench login && workbench skill publish",
     subject: { remote: remote.name, kind: remote.kind, url: remote.url },
     exitCode: 1,
   });
@@ -16373,7 +14731,7 @@ async function deleteRemotePublishedVersion(
   currentVersionId: string;
   publishedVersionIds: string[];
   installHandle?: string;
-  visibility?: WorkbenchPublishVisibility;
+  visibility?: WorkbenchSkillVisibility;
 }> {
   if (isHttpRemote(remote)) {
     const target = await resolveHttpRemoteSkill(remote, options, options.state);
@@ -16389,7 +14747,7 @@ async function deleteRemotePublishedVersion(
       };
     }>(
       target.baseUrl,
-      `/api/workbench/source/skills/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/versions/${encodeURIComponent(versionId)}`,
+      `/api/workbench/skills/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.name)}/versions/${encodeURIComponent(versionId)}/package`,
       {
         authToken: options.authToken,
         signal: options.signal,
@@ -16411,13 +14769,13 @@ async function deleteRemotePublishedVersion(
       currentVersionId,
       publishedVersionIds,
       ...(typeof publication?.installHandle === "string" ? { installHandle: publication.installHandle } : {}),
-      ...(publication?.visibility === "private" || publication?.visibility === "internal" || publication?.visibility === "public"
+      ...(isWorkbenchSkillVisibility(publication?.visibility)
         ? { visibility: publication.visibility }
         : {}),
     };
   }
-  throw new WorkbenchCodedError("unpublish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can unpublish source.`, {
-    remediation: "workbench login && workbench unpublish VERSION",
+  throw new WorkbenchCodedError("unpublish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes can unpublish skill packages.`, {
+    remediation: "workbench login && workbench skill unpublish VERSION",
     subject: { remote: remote.name, kind: remote.kind, url: remote.url },
     exitCode: 1,
   });
@@ -16441,28 +14799,6 @@ function workbenchRemoteInstallHandle(remote: WorkbenchRemote): string {
   }
   const parsed = parseHttpRemote(remote);
   return `${parsed.owner}/${parsed.name}`;
-}
-
-function workbenchRemoteSourceUrl(remote: WorkbenchRemote): string {
-  if (!isHttpRemote(remote)) {
-    throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes have install URLs.`, {
-      subject: { remote: remote.name, kind: remote.kind, url: remote.url },
-      exitCode: 1,
-    });
-  }
-  const parsed = parseHttpRemote(remote);
-  return `${parsed.baseUrl}/skills/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}`;
-}
-
-function workbenchRemoteVersionSourceUrl(remote: WorkbenchRemote, versionId: string): string {
-  if (!isHttpRemote(remote)) {
-    throw new WorkbenchCodedError("publish_failed", `Remote ${remote.name} is a file remote; only Workbench Cloud remotes have install URLs.`, {
-      subject: { remote: remote.name, kind: remote.kind, url: remote.url, versionId },
-      exitCode: 1,
-    });
-  }
-  const parsed = parseHttpRemote(remote);
-  return `${parsed.baseUrl}/skills/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}/versions/${encodeURIComponent(versionId)}`;
 }
 
 function isHttpRemote(remote: WorkbenchRemote): boolean {
@@ -16560,87 +14896,42 @@ async function httpRemoteJson<T>(
   apiPath: string,
   options: WorkbenchHttpRemoteOptions & { method?: string; body?: unknown } = {},
 ): Promise<T> {
-  const token = options.authToken?.trim() ||
-    process.env.WORKBENCH_API_TOKEN?.trim() ||
-    process.env.WORKBENCH_SMOKE_BEARER_TOKEN?.trim();
-  const method = options.method ?? "GET";
-  const canRetry = isIdempotentHttpRemoteMethod(method);
-  const requestBody = encodeHttpRemoteJsonBody(options.body);
-  let lastError: unknown = null;
-  for (let attempt = 1; attempt <= HTTP_REMOTE_MAX_ATTEMPTS; attempt += 1) {
-    let response: Response;
-    try {
-      response = await fetch(`${baseUrl}${apiPath}`, {
-        method,
-        signal: options.signal,
-        headers: {
-          ...requestBody.headers,
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-        },
-        body: requestBody.body,
-      });
-    } catch (error) {
-      lastError = error;
-      if (canRetry && attempt < HTTP_REMOTE_MAX_ATTEMPTS && isTransientHttpRemoteError(error)) {
-        await sleep(250 * attempt);
-        continue;
-      }
-      throw httpRemoteTransportError(error, apiPath);
-    }
-    const text = await response.text();
-    if (!response.ok) {
-      const cloudError = parseWorkbenchCloudErrorBody(text);
+  const token = options.authToken?.trim() || process.env.WORKBENCH_API_TOKEN?.trim();
+  return await requestWorkbenchCloudJson<T>(baseUrl, apiPath, {
+    method: options.method,
+    body: options.body,
+    signal: options.signal,
+    token,
+    mapTransportError: httpRemoteTransportError,
+    mapHttpError: ({ status, text, cloudError }) => {
       if (cloudError) {
         const normalizedCloudError = normalizeWorkbenchCloudError(cloudError);
-        if (response.status === 404 && isNotFoundCloudErrorCode(cloudError.code)) {
-          throw new WorkbenchRemoteNotFoundError(normalizedCloudError.message);
+        if (status === 404 && isNotFoundCloudErrorCode(cloudError.code)) {
+          return new WorkbenchRemoteNotFoundError(normalizedCloudError.message);
         }
-        const codedError = new WorkbenchCodedError(normalizedCloudError.code, normalizedCloudError.message, {
+        return new WorkbenchCodedError(normalizedCloudError.code, normalizedCloudError.message, {
           retryable: normalizedCloudError.retryable,
           ...(normalizedCloudError.remediation ? { remediation: normalizedCloudError.remediation } : {}),
           ...(normalizedCloudError.subject ? { subject: normalizedCloudError.subject } : {}),
-          exitCode: response.status === 400 ? 2 : 1,
+          exitCode: status === 400 ? 2 : 1,
         });
-        lastError = codedError;
-        if (canRetry && attempt < HTTP_REMOTE_MAX_ATTEMPTS && normalizedCloudError.retryable) {
-          await sleep(250 * attempt);
-          continue;
-        }
-        throw codedError;
       }
-      if (response.status === 401 && !token) {
-        throw new WorkbenchCodedError("auth_required", "Workbench Cloud remote requires login.", {
+      if (status === 401 && !token) {
+        return new WorkbenchCodedError("auth_required", "Workbench Cloud remote requires login.", {
           remediation: "workbench login",
           exitCode: 1,
         });
       }
-      if (response.status === 404) {
-        throw new WorkbenchRemoteNotFoundError(`Workbench Cloud object not found: ${apiPath}`);
+      if (status === 404) {
+        return new WorkbenchRemoteNotFoundError(`Workbench Cloud object not found: ${apiPath}`);
       }
-      const codedError = new WorkbenchCodedError("remote_protocol_error", `Workbench Cloud remote request failed (${response.status}): ${readHttpErrorMessage(text)}`, {
-        retryable: response.status === 429 || response.status >= 500,
-        subject: { status: response.status, path: apiPath },
+      return new WorkbenchCodedError("remote_protocol_error", `Workbench Cloud remote request failed (${status}): ${readHttpErrorMessage(text)}`, {
+        retryable: status === 429 || status >= 500,
+        subject: { status, path: apiPath },
         exitCode: 1,
       });
-      lastError = codedError;
-      if (canRetry && attempt < HTTP_REMOTE_MAX_ATTEMPTS && codedError.retryable) {
-        await sleep(250 * attempt);
-        continue;
-      }
-      throw codedError;
-    }
-    return (text ? JSON.parse(text) : {}) as T;
-  }
-  throw lastError instanceof WorkbenchCodedError ? lastError : httpRemoteTransportError(lastError, apiPath);
-}
-
-function isIdempotentHttpRemoteMethod(method: string): boolean {
-  return method === "GET" || method === "PUT" || method === "DELETE";
-}
-
-function isTransientHttpRemoteError(error: unknown): boolean {
-  return /\b(?:fetch failed|socket hang up|network error|terminated|timeout|TimeoutError|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ECONNREFUSED|EPIPE|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT)\b/iu
-    .test(httpRemoteErrorMessage(error));
+    },
+  });
 }
 
 function httpRemoteTransportError(error: unknown, apiPath: string): WorkbenchCodedError {
@@ -16660,31 +14951,6 @@ function isNotFoundCloudErrorCode(code: string): boolean {
   return code === "not_found" || code.endsWith("_not_found");
 }
 
-function parseWorkbenchCloudErrorBody(text: string): {
-  code: string;
-  message: string;
-  retryable: boolean;
-  remediation?: string;
-  subject?: Record<string, Json>;
-} | null {
-  try {
-    const record = asRecord(JSON.parse(text) as unknown);
-    if (record?.schema !== "workbench.cloud.error.v1" || typeof record.code !== "string" || typeof record.message !== "string") {
-      return null;
-    }
-    const subject = asRecord(record.subject);
-    return {
-      code: record.code,
-      message: record.message,
-      retryable: record.retryable === true,
-      ...(typeof record.remediation === "string" ? { remediation: record.remediation } : {}),
-      ...(subject ? { subject: subject as Record<string, Json> } : {}),
-    };
-  } catch {
-    return null;
-  }
-}
-
 function normalizeWorkbenchCloudError(error: {
   code: string;
   message: string;
@@ -16701,58 +14967,15 @@ function normalizeWorkbenchCloudError(error: {
   if (
     error.code === "validation_failed" &&
     error.subject?.visibility === "internal" &&
-    /\b(?:internal|team) source visibility requires an organization-owned skill\b/iu.test(error.message)
+    /\b(?:internal|team) skill visibility requires an organization-owned skill\b/iu.test(error.message)
   ) {
-    const remediation = cloudCommandRemediationOrUndefined(error.remediation);
-    const { remediation: _staleRemediation, ...rest } = error;
     return {
-      ...rest,
-      message: "Team source visibility requires an organization-owned skill.",
-      ...(remediation ? { remediation } : {}),
+      ...error,
+      message: "Team skill visibility requires an organization-owned skill.",
       subject: { ...error.subject, visibility: "team" },
     };
   }
-  const remediation = cloudCommandRemediationOrUndefined(error.remediation);
-  if (remediation === error.remediation) {
-    return error;
-  }
-  const { remediation: _staleRemediation, ...rest } = error;
-  return {
-    ...rest,
-    ...(remediation ? { remediation } : {}),
-  };
-}
-
-function cloudCommandRemediationOrUndefined(remediation: string | undefined): string | undefined {
-  const trimmed = remediation?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  if (!/^(?:workbench|codex|claude|npm|mkdir)\b/u.test(trimmed) && !/^[A-Z_][A-Z0-9_]*=.*\bworkbench\b/u.test(trimmed)) {
-    return undefined;
-  }
-  return trimmed;
-}
-
-function encodeHttpRemoteJsonBody(body: unknown): {
-  body?: BodyInit;
-  headers: Record<string, string>;
-} {
-  if (body === undefined) {
-    return { headers: { "content-type": "application/json" } };
-  }
-  const text = JSON.stringify(body);
-  if (Buffer.byteLength(text) < HTTP_REMOTE_GZIP_THRESHOLD_BYTES) {
-    return { body: text, headers: { "content-type": "application/json" } };
-  }
-  const compressed = gzipSync(text);
-  return {
-    body: compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength),
-    headers: {
-      "content-encoding": "gzip",
-      "content-type": "application/json",
-    },
-  };
+  return error;
 }
 
 function readHttpErrorMessage(text: string): string {
@@ -16823,21 +15046,39 @@ async function readObjectPackFiles(root: string): Promise<WorkbenchObjectPack> {
   if (asRecord(manifest)?.schema !== PACK_SCHEMA) {
     throw new WorkbenchUserError("Remote does not contain a Workbench object pack.");
   }
+  const refs = asStringMap(await readJson(path.join(root, "refs.json"))) ?? {};
+  const state = parseWorkbenchState({
+    schema: STATE_SCHEMA,
+    root,
+    refs,
+    remotes: {},
+    versions: await readObjectDir<unknown>(path.join(root, "objects", "version")),
+    skillSources: await readObjectDir<unknown>(path.join(root, "objects", "skill-source")),
+    skillBundles: await readObjectDir<unknown>(path.join(root, "objects", "skill-bundle")),
+    evals: await readObjectDir<unknown>(path.join(root, "objects", "eval")),
+    agents: await readObjectDir<unknown>(path.join(root, "objects", "agent")),
+    runs: await readObjectDir<unknown>(path.join(root, "objects", "run")),
+    jobs: await readObjectDir<unknown>(path.join(root, "objects", "job")),
+    traces: await readObjectDir<unknown>(path.join(root, "objects", "trace")),
+    executionEvents: await readObjectDir<unknown>(path.join(root, "objects", "execution-event")),
+    artifacts: await readObjectDir<unknown>(path.join(root, "objects", "artifact")),
+    lineage: await readJsonl(path.join(root, "indexes", "lineage.jsonl")),
+  });
   return {
     schema: PACK_SCHEMA,
     createdAt: typeof asRecord(manifest)?.createdAt === "string" ? asRecord(manifest)?.createdAt as string : now(),
-    refs: asStringMap(await readJson(path.join(root, "refs.json"))) ?? {},
-    versions: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "version")), "versions", validateStateVersion),
-    skillSources: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "skill-source")), "skillSources", validateStateSkillSource),
-    skillBundles: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "skill-bundle")), "skillBundles", validateStateSkillBundle),
-    evals: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "eval")), "evals", validateStateEvalSnapshot),
-    agents: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "agent")), "agents", validateStateAgent),
-    runs: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "run")), "runs", validateStateRun),
-    jobs: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "job")), "jobs", validateStateJob),
-    traces: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "trace")), "traces", validateStateTrace),
-    executionEvents: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "execution-event")), "executionEvents", validateStateExecutionEventBatch),
-    artifacts: readStateArray(await readObjectDir<unknown>(path.join(root, "objects", "artifact")), "artifacts", validateStateArtifact),
-    lineage: readStateArray(await readJsonl(path.join(root, "indexes", "lineage.jsonl")), "lineage", validateStateLineageEdge),
+    refs: state.refs,
+    versions: state.versions,
+    skillSources: state.skillSources,
+    skillBundles: state.skillBundles,
+    evals: state.evals,
+    agents: state.agents,
+    runs: state.runs,
+    jobs: state.jobs,
+    traces: state.traces,
+    executionEvents: state.executionEvents,
+    artifacts: state.artifacts,
+    lineage: state.lineage,
   };
 }
 
@@ -16998,7 +15239,7 @@ async function writeWorkbenchRefsToDir(dir: string, refs: WorkbenchRefs): Promis
     }
     const filePath = path.join(dir, ...name.split("/"));
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await writeTextFileAtomically(filePath, `${value}\n`);
+    await writeFileAtomically(filePath, `${value}\n`);
   }
 }
 
@@ -17010,7 +15251,7 @@ async function readWorkbenchRemotesFile(root: string): Promise<Record<string, Wo
   const parsed = parseYamlRecord(await fs.readFile(filePath, "utf8"));
   if (parsed.schema !== "workbench.remotes.v1") {
     throw new WorkbenchCodedError("remote_invalid_url", `${path.join(WORKBENCH_DIR, REMOTES_FILE)} must use schema workbench.remotes.v1.`, {
-      remediation: "workbench publish",
+      remediation: "workbench skill publish",
       subject: { path: path.join(WORKBENCH_DIR, REMOTES_FILE) },
       exitCode: 2,
     });
@@ -17055,13 +15296,7 @@ async function writeWorkbenchRemotesFile(root: string, remotes: Record<string, W
     ])),
   };
   await fs.mkdir(workbenchDir(root), { recursive: true });
-  await writeTextFileAtomically(remotesFile(root), `${YAML.stringify(value).trimEnd()}\n`);
-}
-
-async function writeSurfaceFiles(root: string, files: readonly SurfaceSnapshotFile[]): Promise<void> {
-  for (const file of files) {
-    await writeSurfaceFile(root, file);
-  }
+  await writeFileAtomically(remotesFile(root), `${YAML.stringify(value).trimEnd()}\n`);
 }
 
 async function withMaterializedVersionRoot<T>(
@@ -17076,13 +15311,6 @@ async function withMaterializedVersionRoot<T>(
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
-}
-
-async function writeSurfaceFile(root: string, file: SurfaceSnapshotFile): Promise<void> {
-  const target = safeJoin(root, file.path);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, file.content, file.encoding === "base64" ? "base64" : "utf8");
-  await fs.chmod(target, file.executable === true ? 0o755 : 0o644);
 }
 
 function surfaceFileFromBuffer(
@@ -17139,12 +15367,12 @@ function resolveRemote(state: WorkbenchProjectState, name?: string): WorkbenchRe
     }
     if (remotes.length === 0) {
       throw new WorkbenchCodedError("remote_required", "No remotes are configured.", {
-        remediation: "workbench publish",
+        remediation: "workbench skill publish",
         exitCode: 2,
       });
     }
     throw new WorkbenchCodedError("remote_required", "Multiple remotes are configured and none is named origin; name the remote to use.", {
-      remediation: "workbench status",
+      remediation: "workbench skill show",
       subject: { remotes: remotes.map((entry) => entry.name) },
       exitCode: 2,
     });
@@ -17153,7 +15381,7 @@ function resolveRemote(state: WorkbenchProjectState, name?: string): WorkbenchRe
   const remote = state.remotes[remoteName];
   if (!remote) {
     throw new WorkbenchCodedError("remote_not_found", `Remote not found: ${remoteName}`, {
-      remediation: "workbench status",
+      remediation: "workbench skill show",
       subject: { remote: remoteName },
       exitCode: 1,
     });
@@ -17177,7 +15405,7 @@ function resolveVersion(state: WorkbenchProjectState, ref: string): WorkbenchVer
   const version = findVersion(state, ref);
   if (!version) {
     throw new WorkbenchCodedError("version_not_found", `Version not found: ${ref}. Configured versions: ${configuredVersionRefs(state)}.`, {
-      remediation: "workbench log --versions",
+      remediation: "workbench skill versions",
       subject: { ref },
       exitCode: 1,
     });
@@ -17199,10 +15427,6 @@ function findVersion(state: WorkbenchProjectState, ref: string): WorkbenchVersio
     });
   }
   return candidates[0];
-}
-
-function findVersionById(state: WorkbenchProjectState, id: string | undefined): WorkbenchVersion | undefined {
-  return id ? state.versions.find((version) => version.id === id) : undefined;
 }
 
 function versionRefMatches(version: WorkbenchVersion, ref: string): boolean {
@@ -17266,6 +15490,7 @@ function bestScoredComparableRun(args: {
 
 type InternalComparisonEvidence = {
   runId: string;
+  jobIds: string[];
   status: WorkbenchRun["status"];
   createdAt: string;
   score?: number;
@@ -17274,26 +15499,131 @@ type InternalComparisonEvidence = {
   error?: string;
 };
 
-function bestComparableEvidence(args: {
-  runs: readonly WorkbenchRun[];
-  jobs: readonly WorkbenchJob[];
-  traces?: readonly WorkbenchTrace[];
-  versionId: string;
-  skillName: string;
-  skillBundleHash: string;
-  evalHash: string;
-  agentName: string;
-  agentHash: string;
+function bestCompatibleEvalEvidence(args: {
+  state: WorkbenchProjectState;
+  skillBundle: WorkbenchSkillBundleSnapshot;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  agent: WorkbenchAgent;
 }): InternalComparisonEvidence | undefined {
-  const measurements = matchingComparisonMeasurements(args);
-  const terminalMeasurements = measurements.filter((measurement) => isTerminalRunStatus(measurement.status));
-  if (terminalMeasurements.length > 0) {
-    return terminalMeasurements.sort((left, right) =>
-      (right.coverage?.planned ?? 0) - (left.coverage?.planned ?? 0) ||
-      right.createdAt.localeCompare(left.createdAt)
-    )[0];
+  const target: WorkbenchEvaluationRunTarget = {
+    skillBundle: args.skillBundle,
+    agent: args.agent,
+  };
+  const runtimeCases = args.evalSnapshot.cases.map(evalRuntimeCaseFromSnapshot);
+  if (runtimeCases.length === 0) {
+    return undefined;
   }
-  return measurements.sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  const runsById = new Map(args.state.runs.map((run) => [run.id, run]));
+  const agentHash = hashJson(args.agent);
+  const compatibleJobs: WorkbenchJob[] = [];
+  const completedCaseSamples = new Set<string>();
+  const plannedCaseSamples = new Set<string>();
+  for (const runtimeCase of runtimeCases) {
+    const observedSamples = compatibleObservedSamples(args.state.jobs, {
+      skillBundleHash: args.skillBundle.hash,
+      agentHash,
+      caseId: runtimeCase.id,
+    });
+    for (const sample of observedSamples.length > 0 ? observedSamples : [0]) {
+      plannedCaseSamples.add(`${runtimeCase.id}\0${sample}`);
+      const runInputHash = workbenchRunInputHash({
+        evalSnapshot: args.evalSnapshot,
+        target,
+        runtimeCase,
+        sample,
+      });
+      const runJob = args.state.jobs
+        .filter((job) =>
+          job.role === "run" &&
+          job.skillBundleHash === args.skillBundle.hash &&
+          job.agentHash === agentHash &&
+          job.caseId === runtimeCase.id &&
+          job.sample === sample &&
+          job.inputHash === runInputHash
+        )
+        .sort(compareJobsNewestFirst)[0];
+      if (!runJob) {
+        continue;
+      }
+      compatibleJobs.push(runJob);
+      const caseRequiresGrade = skillEvalCaseHasConcreteGrader({
+        evalSnapshot: args.evalSnapshot,
+        runtimeCase,
+        agent: args.agent,
+      });
+      if (!caseRequiresGrade && runJob.status === "succeeded") {
+        completedCaseSamples.add(`${runtimeCase.id}\0${sample}`);
+        continue;
+      }
+      const gradeJob = selectReusableWorkbenchGradeJob({
+        state: args.state,
+        evalSnapshot: args.evalSnapshot,
+        runtimeCase,
+        agent: args.agent,
+        executionJob: runJob,
+      });
+      if (gradeJob) {
+        compatibleJobs.push(gradeJob);
+        if (workbenchJobScore(gradeJob) !== undefined || gradeJob.status === "succeeded") {
+          completedCaseSamples.add(`${runtimeCase.id}\0${sample}`);
+        }
+      }
+    }
+  }
+  const jobs = dedupeJobs(compatibleJobs);
+  if (jobs.length === 0) {
+    return undefined;
+  }
+  const representativeRun = representativeRunForCompatibleJobs(jobs, runsById);
+  const createdAt = representativeRun?.createdAt ?? jobs.map(jobObservedAt).sort().at(-1) ?? now();
+  const status = workbenchRunStatusFromJobs(jobs, representativeRun?.status ?? "succeeded");
+  const scoredJobs = jobs.filter((job) => workbenchJobScore(job) !== undefined);
+  const score = status === "canceled" || scoredJobs.length === 0
+    ? undefined
+    : averageScores(scoredJobs.map(workbenchJobScore));
+  const errors = jobs.flatMap((job) => job.error ? [job.error] : []);
+  const coverage = workbenchSampleCoverage(completedCaseSamples.size, plannedCaseSamples.size);
+  return {
+    runId: representativeRun?.id ?? jobs[0]!.runId,
+    jobIds: jobs.map((job) => job.id),
+    status,
+    createdAt,
+    ...(score !== undefined ? { score } : {}),
+    ...(coverage ? { coverage } : {}),
+    report: buildWorkbenchJobReport(jobs, args.state.traces),
+    ...(errors.length > 0 ? { error: summarizeJobErrors(errors) } : representativeRun?.error ? { error: representativeRun.error } : {}),
+  };
+}
+
+function representativeRunForCompatibleJobs(
+  jobs: readonly WorkbenchJob[],
+  runsById: ReadonlyMap<string, WorkbenchRun>,
+): WorkbenchRun | undefined {
+  const jobIds = new Set(jobs.map((job) => job.id));
+  return [...runsById.values()]
+    .map((run) => ({ run, jobCount: run.jobIds.filter((jobId) => jobIds.has(jobId)).length }))
+    .filter(({ jobCount }) => jobCount > 0)
+    .sort((left, right) =>
+      right.jobCount - left.jobCount ||
+      right.run.createdAt.localeCompare(left.run.createdAt) ||
+      right.run.id.localeCompare(left.run.id)
+    )[0]?.run;
+}
+
+function compatibleObservedSamples(
+  jobs: readonly WorkbenchJob[],
+  args: { skillBundleHash: string; agentHash: string; caseId: string },
+): number[] {
+  const samples = jobs
+    .filter((job) =>
+      job.skillBundleHash === args.skillBundleHash &&
+      job.agentHash === args.agentHash &&
+      job.caseId === args.caseId &&
+      Number.isInteger(job.sample) &&
+      job.sample >= 0
+    )
+    .map((job) => job.sample);
+  return [...new Set(samples)].sort((left, right) => left - right);
 }
 
 function bestScoredComparableEvidence(args: {
@@ -17329,14 +15659,11 @@ function matchingComparisonMeasurements(args: {
   agentName: string;
   agentHash: string;
 }): InternalComparisonEvidence[] {
-  const runsById = new Map(args.runs.map((run) => [run.id, run]));
-  const runJobsByRunId = new Map<string, WorkbenchJob[]>();
-  const matchingJobsByRunId = new Map<string, WorkbenchJob[]>();
-  for (const job of args.jobs) {
-    const runJobs = runJobsByRunId.get(job.runId) ?? [];
-    runJobs.push(job);
-    runJobsByRunId.set(job.runId, runJobs);
-    if (
+  const jobsById = new Map(args.jobs.map((job) => [job.id, job]));
+  const measurements: InternalComparisonEvidence[] = [];
+  for (const run of matchingRuns(args)) {
+    const runJobs = run.jobIds.flatMap((jobId) => jobsById.get(jobId) ?? []);
+    const matchingJobs = runJobs.filter((job) =>
       job.caseId !== "current" &&
       job.versionId === args.versionId &&
       job.skillName === args.skillName &&
@@ -17344,23 +15671,10 @@ function matchingComparisonMeasurements(args: {
       job.evalHash === args.evalHash &&
       job.agentName === args.agentName &&
       job.agentHash === args.agentHash
-    ) {
-      const matching = matchingJobsByRunId.get(job.runId) ?? [];
-      matching.push(job);
-      matchingJobsByRunId.set(job.runId, matching);
-    }
-  }
-  const measurements: InternalComparisonEvidence[] = [];
-  for (const [runId, jobs] of matchingJobsByRunId) {
-    const run = runsById.get(runId);
-    if (!run) {
-      continue;
-    }
-    measurements.push(comparisonEvidenceFromJobs(run, jobs, runJobsByRunId.get(runId) ?? [], args.traces ?? []));
-  }
-  const measuredRunIds = new Set(measurements.map((measurement) => measurement.runId));
-  for (const run of matchingRuns(args)) {
-    if (!measuredRunIds.has(run.id)) {
+    );
+    if (matchingJobs.length > 0) {
+      measurements.push(comparisonEvidenceFromJobs(run, matchingJobs, runJobs, args.traces ?? []));
+    } else {
       measurements.push(comparisonEvidenceFromRun(run, args.jobs, args.traces ?? []));
     }
   }
@@ -17386,23 +15700,6 @@ function matchingRuns(args: {
   );
 }
 
-function latestMatchingRun(
-  args: {
-    runs: readonly WorkbenchRun[];
-    versionId: string;
-    skillName: string;
-    skillBundleHash: string;
-    evalHash: string;
-    agentName: string;
-    agentHash: string;
-  },
-  predicate: (run: WorkbenchRun) => boolean = () => true,
-): WorkbenchRun | undefined {
-  return matchingRuns(args)
-    .filter(predicate)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-}
-
 function comparisonEntryKey(
   versionId: string,
   skillName: string,
@@ -17417,11 +15714,12 @@ function comparisonEvidenceFromRun(
   jobs: readonly WorkbenchJob[],
   traces: readonly WorkbenchTrace[] = [],
 ): InternalComparisonEvidence {
-  const runJobs = jobs.filter((job) => runOwnsJob(run, job) && job.caseId !== "current");
+  const runJobs = jobs.filter((job) => workbenchRunOwnsJob(run, job) && job.caseId !== "current");
   const score = runQualityScoreFromJobs(run, jobs);
   const coverage = workbenchSampleCoverageForJobs(runJobs);
   return {
     runId: run.id,
+    jobIds: runJobs.map((job) => job.id),
     status: run.status,
     createdAt: run.createdAt,
     ...(score !== undefined ? { score } : {}),
@@ -17437,16 +15735,17 @@ function comparisonEvidenceFromJobs(
   allRunJobs: readonly WorkbenchJob[],
   traces: readonly WorkbenchTrace[] = [],
 ): InternalComparisonEvidence {
-  const scoredJobs = jobs.filter((job) => jobQualityScore(job) !== undefined);
+  const scoredJobs = jobs.filter((job) => workbenchJobScore(job) !== undefined);
   const coverage = workbenchSampleCoverageForJobs(jobs);
   const errors = jobs.flatMap((job) => job.error ? [job.error] : []);
   const everyRunJobMatches = allRunJobs.filter((job) => job.caseId !== "current").every((job) => jobs.some((entry) => entry.id === job.id));
-  const status = comparisonJobStatus(jobs, run.status);
+  const status = workbenchRunStatusFromJobs(jobs, run.status);
   const score = status === "canceled" || scoredJobs.length === 0
     ? undefined
-    : averageScores(scoredJobs.map(jobQualityScore));
+    : averageScores(scoredJobs.map(workbenchJobScore));
   return {
     runId: run.id,
+    jobIds: jobs.map((job) => job.id),
     status,
     createdAt: run.createdAt,
     ...(score !== undefined ? { score } : {}),
@@ -17456,28 +15755,9 @@ function comparisonEvidenceFromJobs(
   };
 }
 
-function comparisonJobStatus(jobs: readonly WorkbenchJob[], fallback: WorkbenchRun["status"]): WorkbenchRun["status"] {
-  if (jobs.length === 0) {
-    return fallback;
-  }
-  if (jobs.some((job) => job.status === "running")) {
-    return "running";
-  }
-  if (jobs.some((job) => job.status === "queued")) {
-    return "queued";
-  }
-  if (jobs.some((job) => job.status === "failed")) {
-    return "failed";
-  }
-  if (jobs.some((job) => job.status === "canceled")) {
-    return "canceled";
-  }
-  return "succeeded";
-}
-
 function comparisonCellEvidenceFields(
   evidence: InternalComparisonEvidence,
-): Pick<InternalComparisonCell, "runId" | "status" | "score" | "coverage" | "report" | "error"> {
+): Pick<InternalComparisonCell, "runId" | "jobIds" | "status" | "score" | "coverage" | "report" | "error"> {
   const { createdAt: _createdAt, ...fields } = evidence;
   return fields;
 }
@@ -17574,10 +15854,7 @@ function resolveComparisonAgentsForVersionFromState(
 
 function sortComparisonAgentSnapshots(agents: WorkbenchAgentSnapshot[]): WorkbenchAgentSnapshot[] {
   return agents.sort((left, right) =>
-    left.agent.name.localeCompare(right.agent.name, undefined, {
-      numeric: true,
-      sensitivity: "base",
-    }) || left.hash.localeCompare(right.hash)
+    compareWorkbenchNaturalText(left.agent.name, right.agent.name) || left.hash.localeCompare(right.hash)
   );
 }
 
@@ -17701,20 +15978,32 @@ export function createWorkbenchRunId(): string {
   return nextRunId();
 }
 
-function nextJobId(): string {
+export function nextJobId(): string {
   return nextObjectId("job");
 }
 
-function nextArtifactId(): string {
+export function nextArtifactId(): string {
   return nextObjectId("artifact");
+}
+
+export function hashWorkbenchImproveInput(input: {
+  baseVersionId: string;
+  skillBundleHash: string;
+  evalHash: string;
+  agentHash: string;
+  evidenceTraceIds: readonly string[];
+  samples: number;
+  budget: number;
+}): string {
+  return hashJson({
+    schema: "workbench.improve-input.v1",
+    ...input,
+    evidenceTraceIds: [...input.evidenceTraceIds].sort(),
+  });
 }
 
 function nextObjectId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${randomBytes(8).toString("hex")}`;
-}
-
-function compareVersionIds(left: WorkbenchVersion, right: WorkbenchVersion): number {
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
 function splitObjectPath(ref: string): [string, string | null] {
@@ -17858,8 +16147,8 @@ function upsertRunObject(
     records[index] = run;
     return;
   }
-  const existingTerminal = isTerminalRunStatus(existing.status);
-  const incomingTerminal = isTerminalRunStatus(run.status);
+  const existingTerminal = isWorkbenchRunStatusTerminal(existing.status);
+  const incomingTerminal = isWorkbenchRunStatusTerminal(run.status);
   if (existingTerminal && !incomingTerminal) {
     return;
   }
@@ -17894,8 +16183,8 @@ function upsertJobObject(
     records[index] = job;
     return;
   }
-  const existingTerminal = isTerminalJobStatus(existing.status);
-  const incomingTerminal = isTerminalJobStatus(job.status);
+  const existingTerminal = isWorkbenchJobStatusTerminal(existing.status);
+  const incomingTerminal = isWorkbenchJobStatusTerminal(job.status);
   if (existingTerminal && !incomingTerminal) {
     return;
   }
@@ -17946,14 +16235,6 @@ function assertLifecycleIdentityCompatible<T>(
   }
 }
 
-function isTerminalRunStatus(status: WorkbenchRun["status"]): boolean {
-  return status === "succeeded" || status === "failed" || status === "canceled";
-}
-
-function isTerminalJobStatus(status: WorkbenchJob["status"]): boolean {
-  return status !== "queued" && status !== "running";
-}
-
 function runLifecycleIdentity(run: WorkbenchRun): unknown {
   return {
     id: run.id,
@@ -17975,6 +16256,7 @@ function jobLifecycleIdentity(job: WorkbenchJob): unknown {
     id: job.id,
     runId: job.runId,
     kind: job.kind,
+    inputHash: job.inputHash,
     versionId: job.versionId,
     skillName: job.skillName,
     skillBundleHash: job.skillBundleHash,
@@ -17984,7 +16266,6 @@ function jobLifecycleIdentity(job: WorkbenchJob): unknown {
     caseId: job.caseId,
     sample: job.sample,
     command: job.command,
-    dockerImage: job.dockerImage,
     purpose: extra?.purpose,
     improvementTraceIds: extra?.improvementTraceIds,
     improvementSamples: extra?.improvementSamples,
@@ -17992,13 +16273,13 @@ function jobLifecycleIdentity(job: WorkbenchJob): unknown {
 }
 
 function mergeRunningRun(existing: WorkbenchRun, incoming: WorkbenchRun): WorkbenchRun {
-  const preserveCanceling = existing.status === "canceling" && !isTerminalRunStatus(incoming.status);
+  const preserveCanceling = existing.status === "canceling" && !isWorkbenchRunStatusTerminal(incoming.status);
   return {
     ...existing,
     ...incoming,
     status: preserveCanceling ? "canceling" : incoming.status,
     ...(preserveCanceling && existing.cancelRequestedAt ? { cancelRequestedAt: existing.cancelRequestedAt } : {}),
-    jobIds: Array.from(new Set([...(existing.jobIds ?? []), ...(incoming.jobIds ?? [])])),
+    jobIds: Array.from(new Set([...existing.jobIds, ...incoming.jobIds])),
     traceIds: Array.from(new Set([...existing.traceIds, ...incoming.traceIds])),
   };
 }
@@ -18069,16 +16350,6 @@ function upsertLineageObject(
   throw new WorkbenchUserError(`Workbench object conflict for lineage ${edge.parentId}->${edge.childId}; sync the remote state before creating a divergent object id.`);
 }
 
-function upsertImmutableByHash<T extends { hash: string }>(records: T[], record: T, label: string): void {
-  const index = records.findIndex((entry) => entry.hash === record.hash);
-  if (index >= 0) {
-    assertImmutableObjectCompatible(records[index]!, record, `${label} ${record.hash}`);
-    records[index] = record;
-  } else {
-    records.push(record);
-  }
-}
-
 function upsertImmutableByContentHash<T>(records: T[], record: T, label: string): void {
   const hash = hashJson(record);
   const index = records.findIndex((entry) => hashJson(entry) === hash);
@@ -18116,7 +16387,7 @@ function assertImmutableObjectCompatible(existing: unknown, incoming: unknown, l
 
 async function requireInitialized(root: string): Promise<void> {
   if (!await exists(workbenchDir(root))) {
-    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench new` first.");
+    throw new WorkbenchUserError("Workbench is not initialized here. Run `workbench skill new` first.");
   }
 }
 
@@ -18140,16 +16411,16 @@ function refsDir(root: string): string {
   return path.join(workbenchDir(root), REFS_DIR);
 }
 
-function syncDir(root: string): string {
-  return path.join(workbenchDir(root), SYNC_DIR);
-}
-
 function projectLockDir(root: string): string {
   return path.join(workbenchDir(root), LOCKS_DIR, PROJECT_LOCK_DIR);
 }
 
 function stateBackupDir(root: string, name: string): string {
   return path.join(workbenchDir(root), TMP_DIR, `${name}.previous`);
+}
+
+function syncDir(root: string): string {
+  return path.join(workbenchDir(root), SYNC_DIR);
 }
 
 function remoteSyncStateFile(root: string, remoteName: string): string {
@@ -18169,9 +16440,7 @@ async function readRemoteSyncStates(root: string): Promise<WorkbenchRemoteSyncSt
       .map(async (entry) => parseRemoteSyncState(await readJson(path.join(syncDir(root), entry.name)))));
     return states.filter((entry): entry is WorkbenchRemoteSyncState => Boolean(entry));
   } catch (error) {
-    if (fileErrorCode(error) === "ENOENT") {
-      return [];
-    }
+    if (fileErrorCode(error) === "ENOENT") return [];
     throw error;
   }
 }
@@ -18194,13 +16463,8 @@ function parseRemoteSyncState(value: unknown): WorkbenchRemoteSyncState | null {
     typeof url !== "string" ||
     (status !== "synced" && status !== "error") ||
     typeof lastAttemptAt !== "string" ||
-    (status === "synced" && (
-      typeof localHash !== "string" ||
-      typeof lastSyncedAt !== "string"
-    ))
-  ) {
-    return null;
-  }
+    (status === "synced" && (typeof localHash !== "string" || typeof lastSyncedAt !== "string"))
+  ) return null;
   const lastError = asRecord(record.lastError);
   const base = {
     schema: "workbench.remote-sync-state.v1" as const,
@@ -18211,16 +16475,8 @@ function parseRemoteSyncState(value: unknown): WorkbenchRemoteSyncState | null {
     ...(typeof record.pulled === "number" ? { pulled: record.pulled } : {}),
   };
   if (status === "synced") {
-    if (typeof localHash !== "string" || typeof lastSyncedAt !== "string") {
-      return null;
-    }
-    return {
-      ...base,
-      status: "synced",
-      localHash,
-      lastSyncedAt,
-      lastError: null,
-    };
+    if (typeof localHash !== "string" || typeof lastSyncedAt !== "string") return null;
+    return { ...base, status: "synced", localHash, lastSyncedAt, lastError: null };
   }
   return {
     ...base,
@@ -18274,7 +16530,6 @@ function workbenchLocalMetadataIgnoreContent(): string {
     `/${REFS_DIR}/`,
     `/${SYNC_DIR}/`,
     `/${LIVE_DIR}/`,
-    `/${CANCEL_DIR}/`,
     `/${TMP_DIR}/`,
     `/${LOGS_DIR}/`,
     `/${LOCKS_DIR}/`,
@@ -18289,56 +16544,12 @@ async function ensureWorkbenchLocalMetadataIgnore(root: string): Promise<void> {
   await ensureFile(path.join(workbenchDir(root), WORKBENCH_GITIGNORE_FILE), workbenchLocalMetadataIgnoreContent());
 }
 
-async function applyLocalHostedRunHandles(
-  root: string,
-  state: WorkbenchProjectState,
-): Promise<WorkbenchProjectState> {
-  const handles = await readLocalHostedRunHandles(root);
-  if (handles.length === 0) {
-    return state;
-  }
-  const existing = new Set(state.runs.map((run) => run.id));
-  const runs = [...state.runs];
-  for (const run of handles) {
-    if (existing.has(run.id)) {
-      continue;
-    }
-    existing.add(run.id);
-    runs.push(run);
-  }
-  return { ...state, runs };
+function pendingCloudOperationsDir(root: string): string {
+  return path.join(workbenchDir(root), LIVE_DIR, "pending-cloud-operations");
 }
 
-async function readLocalHostedRunHandles(root: string): Promise<WorkbenchRun[]> {
-  const dir = localHostedRunHandlesDir(root);
-  if (!await exists(dir)) {
-    return [];
-  }
-  const runs: WorkbenchRun[] = [];
-  for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
-    if (!entry.isFile() || !entry.name.endsWith(".json")) {
-      continue;
-    }
-    const value = await readJson(path.join(dir, entry.name)).catch(() => null);
-    try {
-      validateStateRun(value, runs.length);
-      const run = copyRun(value as WorkbenchRun);
-      if ((run.location ?? "local") === "cloud") {
-        runs.push(run);
-      }
-    } catch {
-      // Malformed live handles are ignored; durable state remains authoritative.
-    }
-  }
-  return runs.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-}
-
-function localHostedRunHandlesDir(root: string): string {
-  return path.join(workbenchDir(root), LIVE_DIR, "hosted-runs");
-}
-
-function localHostedRunHandlePath(root: string, runId: string): string {
-  return path.join(localHostedRunHandlesDir(root), `${safeObjectFileName(runId)}.json`);
+function pendingCloudOperationPath(root: string, operationId: string): string {
+  return path.join(pendingCloudOperationsDir(root), `${safeObjectFileName(operationId)}.json`);
 }
 
 async function hasLocalRunCancellationRequest(root: string, runId: string): Promise<boolean> {
@@ -18365,7 +16576,7 @@ async function applyLocalRunCancellationRequests(
     ...state,
     runs: state.runs.map((run) => {
       const requestedAt = requests.get(run.id);
-      return requestedAt && !isTerminalRunStatus(run.status)
+      return requestedAt && !isWorkbenchRunStatusTerminal(run.status)
         ? runWithLocalCancellationRequest(run, requestedAt)
         : run;
     }),
@@ -18414,20 +16625,6 @@ async function exists(filePath: string): Promise<boolean> {
   return fs.stat(filePath).then(() => true, () => false);
 }
 
-function fileErrorCode(error: unknown): string | undefined {
-  const code = (error as { code?: unknown })?.code;
-  return typeof code === "string" ? code : undefined;
-}
-
-function safeJoin(root: string, relativePath: string): string {
-  const target = path.resolve(root, relativePath);
-  const resolvedRoot = path.resolve(root);
-  if (target !== resolvedRoot && !target.startsWith(`${resolvedRoot}${path.sep}`)) {
-    throw new WorkbenchUserError(`Path escapes skill root: ${relativePath}`);
-  }
-  return target;
-}
-
 function textFile(filePath: string, content: string): SurfaceSnapshotFile {
   return {
     path: filePath,
@@ -18468,6 +16665,8 @@ function copyEval(evalSnapshot: WorkbenchEvalSnapshot): WorkbenchEvalSnapshot {
   return {
     ...evalSnapshot,
     files: evalSnapshot.files.map(copyFile),
+    grade: copyGradePlan(evalSnapshot.grade),
+    gradeAdapters: evalSnapshot.gradeAdapters.map(copyGradeAdapterOption),
     cases,
   };
 }
@@ -18475,17 +16674,56 @@ function copyEval(evalSnapshot: WorkbenchEvalSnapshot): WorkbenchEvalSnapshot {
 function copyEvalCase(evalCase: WorkbenchEvalCaseSnapshot): WorkbenchEvalCaseSnapshot {
   return {
     ...evalCase,
-    grade: copyEvalCaseGradePlan(evalCase.grade),
+    grade: copyGradePlan(evalCase.grade),
     files: evalCase.files.map(copyFile),
   };
 }
 
-function copyEvalCaseGradePlan(grade: WorkbenchEvalCaseGradePlan): WorkbenchEvalCaseGradePlan {
+function copyGradePlan(grade: WorkbenchGradePlan): WorkbenchGradePlan {
   return {
     ...grade,
     sources: grade.sources.map((source) => ({ ...source })),
     display: grade.display.map(copyGradePlanDisplayBlock),
+    authoring: grade.authoring.map(copyGradePlanAuthoringControl),
   };
+}
+
+function copyGradeAdapterOption(option: WorkbenchGradeAdapterOption): WorkbenchGradeAdapterOption {
+  return {
+    ...option,
+    authoring: option.authoring.map(copyGradePlanAuthoringControl),
+  };
+}
+
+function copyGradePlanAuthoringControl(
+  control: WorkbenchGradePlanAuthoringControl,
+): WorkbenchGradePlanAuthoringControl {
+  if (control.kind === "list") {
+    return {
+      ...control,
+      fields: control.fields.map(copyGradePlanAuthoringListField),
+      ...(control.defaultItems ? { defaultItems: control.defaultItems.map((entry) => ({ ...entry })) } : {}),
+    };
+  }
+  if (control.kind === "choice") {
+    return {
+      ...control,
+      options: control.options.map((option) => ({ ...option })),
+    };
+  }
+  return { ...control };
+}
+
+function copyGradePlanAuthoringListField(
+  field: WorkbenchGradePlanAuthoringListField,
+): WorkbenchGradePlanAuthoringListField {
+  if (field.kind === "choice") {
+    return {
+      ...field,
+      options: field.options.map((option) => ({ ...option })),
+    };
+  }
+  return { ...field };
 }
 
 function copyGradePlanDisplayBlock(block: WorkbenchGradePlanDisplayBlock): WorkbenchGradePlanDisplayBlock {
@@ -18539,17 +16777,7 @@ function agentSnapshot(agent: WorkbenchAgent): WorkbenchAgentSnapshot {
 }
 
 function uniqueAgentSnapshots(agents: readonly WorkbenchAgent[]): WorkbenchAgentSnapshot[] {
-  const byHash = new Map<string, WorkbenchAgentSnapshot>();
-  for (const agent of agents) {
-    const snapshot = agentSnapshot(agent);
-    byHash.set(snapshot.hash, snapshot);
-  }
-  return [...byHash.values()].sort((left, right) =>
-    left.agent.name.localeCompare(right.agent.name, undefined, {
-      numeric: true,
-      sensitivity: "base",
-    }) || left.hash.localeCompare(right.hash)
-  );
+  return uniqueResolvedAgentSnapshots(agents.map(agentSnapshot));
 }
 
 function uniqueResolvedAgentSnapshots(agents: readonly WorkbenchAgentSnapshot[]): WorkbenchAgentSnapshot[] {
@@ -18561,10 +16789,7 @@ function uniqueResolvedAgentSnapshots(agents: readonly WorkbenchAgentSnapshot[])
     });
   }
   return [...byHash.values()].sort((left, right) =>
-    left.agent.name.localeCompare(right.agent.name, undefined, {
-      numeric: true,
-      sensitivity: "base",
-    }) || left.hash.localeCompare(right.hash)
+    compareWorkbenchNaturalText(left.agent.name, right.agent.name) || left.hash.localeCompare(right.hash)
   );
 }
 
@@ -18580,7 +16805,7 @@ function copyRun(run: WorkbenchRun): WorkbenchRun {
     agentHash: run.agentHash,
     status: run.status,
     ...(run.operationPlan !== undefined ? { operationPlan: copyOperationPlanSummary(run.operationPlan) } : {}),
-    ...(run.jobIds !== undefined ? { jobIds: [...run.jobIds] } : {}),
+    jobIds: [...run.jobIds],
     traceIds: [...run.traceIds],
     createdAt: run.createdAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
@@ -18631,19 +16856,8 @@ function copyStateForRoot(state: WorkbenchProjectState, root: string): Workbench
   return {
     schema: STATE_SCHEMA,
     root,
-    refs: { ...state.refs },
     remotes: Object.fromEntries(Object.entries(state.remotes).map(([name, remote]) => [name, { ...remote }])),
-    versions: state.versions.map(copyVersion),
-    skillSources: state.skillSources.map(copySkillSource),
-    skillBundles: state.skillBundles.map(copySkillBundle),
-    evals: state.evals.map(copyEval),
-    agents: state.agents.map(copyAgent),
-    runs: state.runs.map(copyRun),
-    jobs: state.jobs.map(copyJob),
-    traces: state.traces.map(copyTrace),
-    executionEvents: state.executionEvents.map(copyExecutionEventBatch),
-    artifacts: state.artifacts.map(copyArtifact),
-    lineage: state.lineage.map((entry) => ({ ...entry })),
+    ...copyProjectObjectGraph(state),
   };
 }
 
@@ -18685,37 +16899,14 @@ function parseCaseSnapshotRecord(content: string): Record<string, unknown> {
   }
 }
 
-function caseIdFromRecord(record: Record<string, unknown>, fallback: string): string {
-  return typeof record.id === "string" && record.id.trim()
-    ? record.id.trim()
-    : fallback;
-}
-
 function caseCommandFromRecord(record: Record<string, unknown>): string | undefined {
   if (typeof record.command === "string" && record.command.trim()) {
     return record.command.trim();
-  }
-  const run = asRecord(record.run);
-  if (typeof run?.command === "string" && run.command.trim()) {
-    return run.command.trim();
-  }
-  return undefined;
-}
-
-function caseTitleFromRecord(record: Record<string, unknown>): string | undefined {
-  if (typeof record.title === "string" && record.title.trim()) {
-    return record.title.trim();
-  }
-  if (typeof record.name === "string" && record.name.trim()) {
-    return record.name.trim();
   }
   return undefined;
 }
 
 function caseDescriptionFromRecord(record: Record<string, unknown>): string | undefined {
-  if (typeof record.description === "string" && record.description.trim()) {
-    return record.description.trim();
-  }
   if (typeof record.prompt === "string" && record.prompt.trim()) {
     return record.prompt.trim();
   }
@@ -18731,7 +16922,7 @@ function skillEvalCasePrompt(runtimeCase: WorkbenchEvalCaseRuntime): string {
 }
 
 function caseSmokeFromRecord(record: Record<string, unknown>): boolean {
-  return record.smoke === true || record.kind === "smoke";
+  return record.smoke === true;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -18791,33 +16982,8 @@ function toJson(value: unknown): Json {
   return record ? jsonRecord(record) : null;
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalize);
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return value;
-  }
-  return Object.fromEntries(Object.keys(record).sort().map((key) => [key, canonicalize(record[key])]));
-}
-
 async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await writeTextFileAtomically(filePath, JSON.stringify(value, null, 2) + "\n");
-}
-
-async function writeTextFileAtomically(filePath: string, content: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`,
-  );
-  try {
-    await fs.writeFile(tempPath, content);
-    await fs.rename(tempPath, filePath);
-  } finally {
-    await fs.rm(tempPath, { force: true }).catch(() => undefined);
-  }
+  await writeJsonFileAtomically(filePath, value);
 }
 
 async function readJson(filePath: string): Promise<unknown> {
@@ -18825,7 +16991,7 @@ async function readJson(filePath: string): Promise<unknown> {
 }
 
 async function writeJsonl(filePath: string, values: readonly unknown[]): Promise<void> {
-  await writeTextFileAtomically(filePath, values.map((value) => JSON.stringify(value)).join("\n") + (values.length ? "\n" : ""));
+  await writeFileAtomically(filePath, values.map((value) => JSON.stringify(value)).join("\n") + (values.length ? "\n" : ""));
 }
 
 async function readJsonl(filePath: string): Promise<unknown[]> {
@@ -18836,418 +17002,25 @@ async function readJsonl(filePath: string): Promise<unknown[]> {
   return lines.map((line) => JSON.parse(line) as unknown);
 }
 
-function emptyWorkbenchState(root: string): WorkbenchProjectState {
+export function createEmptyWorkbenchProjectState(root: string): WorkbenchProjectState {
   return {
     schema: STATE_SCHEMA,
     root,
     refs: {},
     remotes: {},
-    versions: [],
-    skillSources: [],
-    skillBundles: [],
-    evals: [],
-    agents: [],
-    runs: [],
-    jobs: [],
-    traces: [],
-    executionEvents: [],
-    artifacts: [],
-    lineage: [],
+    ...emptyWorkbenchProjectObjects(),
   };
 }
 
-function readStateArray<T>(value: unknown, pathLabel: string, validate: (entry: unknown, index: number) => void): T[] {
-  const values = readRequiredArray(value, pathLabel);
-  values.forEach(validate);
-  return values as T[];
-}
+const emptyWorkbenchState = createEmptyWorkbenchProjectState;
 
-function validateStateVersion(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `versions[${index}]`);
-  readRequiredString(record.id, `versions[${index}].id`);
-  readRequiredString(record.hash, `versions[${index}].hash`);
-  readRequiredString(record.message, `versions[${index}].message`);
-  readStringArray(record.parentIds, `versions[${index}].parentIds`);
-  readRequiredString(record.createdAt, `versions[${index}].createdAt`);
-  validateStateSurfaceFiles(record.files, `versions[${index}].files`);
-}
-
-function validateStateEvalSnapshot(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `evals[${index}]`);
-  readRequiredString(record.hash, `evals[${index}].hash`);
-  validateStateSurfaceFiles(record.files, `evals[${index}].files`);
-  readStateArray<WorkbenchEvalCaseSnapshot>(record.cases, `evals[${index}].cases`, (entry, caseIndex) =>
-    validateStateEvalCaseSnapshot(entry, index, caseIndex)
-  );
-  readRequiredNumber(record.caseCount, `evals[${index}].caseCount`);
-  readRequiredString(record.createdAt, `evals[${index}].createdAt`);
-  readRequiredString(record.updatedAt, `evals[${index}].updatedAt`);
-  readRequiredString(record.gradeAdapter, `evals[${index}].gradeAdapter`);
-}
-
-function validateStateEvalCaseSnapshot(value: unknown, evalIndex: number, caseIndex: number): void {
-  const pathLabel = `evals[${evalIndex}].cases[${caseIndex}]`;
-  const record = readRequiredRecord(value, pathLabel);
-  readRequiredString(record.id, `${pathLabel}.id`);
-  readRequiredString(record.path, `${pathLabel}.path`);
-  for (const key of ["title", "description", "command"]) {
-    if (record[key] !== undefined) {
-      readRequiredString(record[key], `${pathLabel}.${key}`);
+function parseWorkbenchState(value: unknown): WorkbenchProjectState {
+  try {
+    return parseWorkbenchProjectState(value);
+  } catch (error) {
+    if (error instanceof WorkbenchStateValidationError) {
+      throw new WorkbenchUserError(error.message);
     }
+    throw error;
   }
-  validateStateEvalCaseGradePlan(record.grade, `${pathLabel}.grade`);
-  validateStateSurfaceFiles(record.files, `${pathLabel}.files`);
-}
-
-function validateStateEvalCaseGradePlan(value: unknown, pathLabel: string): void {
-  const record = readRequiredRecord(value, pathLabel);
-  readRequiredString(record.adapter, `${pathLabel}.adapter`);
-  readRequiredString(record.label, `${pathLabel}.label`);
-  readRequiredString(record.summary, `${pathLabel}.summary`);
-  readRequiredArray(record.sources, `${pathLabel}.sources`).forEach((entry, index) => {
-    const source = readRequiredRecord(entry, `${pathLabel}.sources[${index}]`);
-    readRequiredString(source.path, `${pathLabel}.sources[${index}].path`);
-    readRequiredString(source.role, `${pathLabel}.sources[${index}].role`);
-    if (source.note !== undefined) {
-      readRequiredString(source.note, `${pathLabel}.sources[${index}].note`);
-    }
-  });
-  readRequiredArray(record.display, `${pathLabel}.display`).forEach((entry, index) => {
-    validateStateGradePlanDisplayBlock(entry, `${pathLabel}.display[${index}]`);
-  });
-}
-
-function validateStateGradePlanDisplayBlock(value: unknown, pathLabel: string): void {
-  const record = readRequiredRecord(value, pathLabel);
-  const kind = readRequiredString(record.kind, `${pathLabel}.kind`);
-  if (record.title !== undefined) {
-    readRequiredString(record.title, `${pathLabel}.title`);
-  }
-  if (kind === "text") {
-    readRequiredString(record.text, `${pathLabel}.text`);
-    return;
-  }
-  if (kind === "key_value") {
-    readRequiredArray(record.items, `${pathLabel}.items`).forEach((entry, index) => {
-      const item = readRequiredRecord(entry, `${pathLabel}.items[${index}]`);
-      readRequiredString(item.label, `${pathLabel}.items[${index}].label`);
-      readRequiredString(item.value, `${pathLabel}.items[${index}].value`);
-    });
-    return;
-  }
-  if (kind === "list") {
-    readRequiredArray(record.items, `${pathLabel}.items`).forEach((entry, index) => {
-      const item = readRequiredRecord(entry, `${pathLabel}.items[${index}]`);
-      readRequiredString(item.label, `${pathLabel}.items[${index}].label`);
-      for (const key of ["description", "meta"]) {
-        if (item[key] !== undefined) {
-          readRequiredString(item[key], `${pathLabel}.items[${index}].${key}`);
-        }
-      }
-    });
-    return;
-  }
-  if (kind === "files") {
-    readRequiredArray(record.files, `${pathLabel}.files`).forEach((entry, index) => {
-      const file = readRequiredRecord(entry, `${pathLabel}.files[${index}]`);
-      readRequiredString(file.path, `${pathLabel}.files[${index}].path`);
-      if (file.role !== undefined) {
-        readRequiredString(file.role, `${pathLabel}.files[${index}].role`);
-      }
-    });
-    return;
-  }
-  throw new WorkbenchUserError(`${pathLabel}.kind is unsupported: ${kind}`);
-}
-
-function validateStateSkillSource(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `skillSources[${index}]`);
-  readRequiredString(record.name, `skillSources[${index}].name`);
-  readRequiredString(record.kind, `skillSources[${index}].kind`);
-  for (const key of ["path", "from", "ref", "resolvedRef", "hash"]) {
-    if (record[key] !== undefined) {
-      readRequiredString(record[key], `skillSources[${index}].${key}`);
-    }
-  }
-  if (record.includes !== undefined) {
-    readRequiredArray(record.includes, `skillSources[${index}].includes`)
-      .forEach((entry, includeIndex) => validateStateSkillInclude(entry, `skillSources[${index}].includes[${includeIndex}]`));
-  }
-}
-
-function validateStateSkillInclude(value: unknown, pathLabel: string): void {
-  const record = readRequiredRecord(value, pathLabel);
-  readRequiredString(record.name, `${pathLabel}.name`);
-  readRequiredString(record.kind, `${pathLabel}.kind`);
-  for (const key of ["path", "from", "ref", "resolvedRef", "hash"]) {
-    if (record[key] !== undefined) {
-      readRequiredString(record[key], `${pathLabel}.${key}`);
-    }
-  }
-  if (record.files !== undefined) {
-    validateStateSurfaceFiles(record.files, `${pathLabel}.files`);
-  }
-}
-
-function validateStateSkillBundle(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `skillBundles[${index}]`);
-  readRequiredString(record.hash, `skillBundles[${index}].hash`);
-  readRequiredString(record.skillName, `skillBundles[${index}].skillName`);
-  readRequiredString(record.entryName, `skillBundles[${index}].entryName`);
-  validateStateSkillSource(record.source, index);
-  validateStateSurfaceFiles(record.files, `skillBundles[${index}].files`);
-  readRequiredArray(record.includedSkills, `skillBundles[${index}].includedSkills`)
-    .forEach((entry, includeIndex) => validateStateSkillInclude(entry, `skillBundles[${index}].includedSkills[${includeIndex}]`));
-  readRequiredString(record.createdAt, `skillBundles[${index}].createdAt`);
-}
-
-function validateStateAgent(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `agents[${index}]`);
-  readRequiredString(record.name, `agents[${index}].name`);
-  readRequiredString(record.adapter, `agents[${index}].adapter`);
-  if (record.model !== undefined) {
-    readRequiredString(record.model, `agents[${index}].model`);
-  }
-  readJsonRecord(record.config, `agents[${index}].config`);
-}
-
-function validateStateRun(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `runs[${index}]`);
-  for (const key of ["id", "kind", "versionId", "skillName", "skillBundleHash", "evalHash", "agentName", "agentHash", "status", "createdAt"]) {
-    readRequiredString(record[key], `runs[${index}].${key}`);
-  }
-  if (record.operationPlan !== undefined) {
-    validateStateRunOperationPlan(record.operationPlan, `runs[${index}].operationPlan`);
-  }
-  if (record.jobIds !== undefined) {
-    readStringArray(record.jobIds, `runs[${index}].jobIds`);
-  }
-  readStringArray(record.traceIds, `runs[${index}].traceIds`);
-  for (const key of ["finishedAt", "parentRunId", "location", "remoteName", "baseVersionId", "retryOfRunId", "cancelRequestedAt", "lastProgressAt", "outputVersionId", "error"]) {
-    if (record[key] !== undefined) {
-      readRequiredString(record[key], `runs[${index}].${key}`);
-    }
-  }
-  if (record.location !== undefined && record.location !== "local" && record.location !== "cloud") {
-    throw new WorkbenchUserError(`Workbench state field runs[${index}].location must be local or cloud.`);
-  }
-  if (record.requestedSamples !== undefined) {
-    readRequiredNumber(record.requestedSamples, `runs[${index}].requestedSamples`);
-  }
-  if (record.requestedBudget !== undefined) {
-    readRequiredNumber(record.requestedBudget, `runs[${index}].requestedBudget`);
-  }
-}
-
-function validateStateRunOperationPlan(value: unknown, pathLabel: string): void {
-  const record = readRequiredRecord(value, pathLabel);
-  readRequiredString(record.kind, `${pathLabel}.kind`);
-  if (!isWorkbenchRunKind(record.kind)) {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel}.kind must be run, grade, eval, improve, or live.`);
-  }
-  readRequiredString(record.variant, `${pathLabel}.variant`);
-  if (record.variant !== "local" && record.variant !== "cloud") {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel}.variant must be local or cloud.`);
-  }
-  if (record.versionId !== undefined) {
-    readRequiredString(record.versionId, `${pathLabel}.versionId`);
-  }
-  if (record.evalHash !== undefined) {
-    readRequiredString(record.evalHash, `${pathLabel}.evalHash`);
-  }
-  readStringArray(record.skills, `${pathLabel}.skills`);
-  readStringArray(record.agents, `${pathLabel}.agents`);
-  if (record.caseIds !== undefined) {
-    readStringArray(record.caseIds, `${pathLabel}.caseIds`);
-  }
-  if (record.samples !== undefined) {
-    readRequiredNumber(record.samples, `${pathLabel}.samples`);
-  }
-  if (record.budget !== undefined) {
-    readRequiredNumber(record.budget, `${pathLabel}.budget`);
-  }
-  if (record.rerun !== undefined && typeof record.rerun !== "boolean") {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel}.rerun must be a boolean.`);
-  }
-  if (record.retryOfRunId !== undefined) {
-    readRequiredString(record.retryOfRunId, `${pathLabel}.retryOfRunId`);
-  }
-}
-
-function validateStateJob(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `jobs[${index}]`);
-  for (const key of ["id", "runId", "kind", "versionId", "skillName", "skillBundleHash", "evalHash", "agentName", "agentHash", "caseId", "status", "createdAt"]) {
-    readRequiredString(record[key], `jobs[${index}].${key}`);
-  }
-  readRequiredNumber(record.sample, `jobs[${index}].sample`);
-  if (record.exitCode !== undefined) {
-    readRequiredNumber(record.exitCode, `jobs[${index}].exitCode`);
-  }
-  if (record.durationMs !== undefined) {
-    readRequiredNumber(record.durationMs, `jobs[${index}].durationMs`);
-  }
-  readStringArray(record.artifactIds, `jobs[${index}].artifactIds`);
-  readStringArray(record.traceIds, `jobs[${index}].traceIds`);
-  for (const key of ["command", "dockerImage", "startedAt", "finishedAt", "error"]) {
-    if (record[key] !== undefined) {
-      readRequiredString(record[key], `jobs[${index}].${key}`);
-    }
-  }
-}
-
-function validateStateTrace(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `traces[${index}]`);
-  for (const key of ["id", "runId", "versionId", "skillName", "skillBundleHash", "agentName", "createdAt"]) {
-    readRequiredString(record[key], `traces[${index}].${key}`);
-  }
-  if (record.jobId !== undefined) {
-    readRequiredString(record.jobId, `traces[${index}].jobId`);
-  }
-  readRequiredJson(record.request, `traces[${index}].request`);
-  readRequiredJson(record.result, `traces[${index}].result`);
-  validateStateSurfaceFiles(record.files, `traces[${index}].files`);
-}
-
-function validateStateExecutionEventBatch(value: unknown, index: number): void {
-  const pathLabel = `executionEvents[${index}]`;
-  const record = readRequiredRecord(value, pathLabel);
-  for (const key of ["projectId", "runId", "jobId", "executionId", "emittedAt"]) {
-    readRequiredString(record[key], `${pathLabel}.${key}`);
-  }
-  for (const key of ["attempt", "seqStart", "seqEnd"]) {
-    readRequiredNumber(record[key], `${pathLabel}.${key}`);
-  }
-  readRequiredArray(record.events, `${pathLabel}.events`)
-    .forEach((entry, eventIndex) => validateStateExecutionEvent(entry, `${pathLabel}.events[${eventIndex}]`));
-}
-
-function validateStateExecutionEvent(value: unknown, pathLabel: string): void {
-  const record = readRequiredRecord(value, pathLabel);
-  readRequiredNumber(record.seq, `${pathLabel}.seq`);
-  readRequiredString(record.at, `${pathLabel}.at`);
-  const source = readRequiredString(record.source, `${pathLabel}.source`);
-  if (source !== "sandbox" && source !== "adapter" && source !== "command") {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel}.source must be sandbox, adapter, or command.`);
-  }
-  if (record.role !== undefined) {
-    const role = readRequiredString(record.role, `${pathLabel}.role`);
-    if (role !== "improver" && role !== "runner" && role !== "engine") {
-      throw new WorkbenchUserError(`Workbench state field ${pathLabel}.role must be improver, runner, or engine.`);
-    }
-  }
-  const schema = readRequiredString(record.schema, `${pathLabel}.schema`);
-  if (schema !== "workbench.execution.step.v1" && schema !== "workbench.trace.delta.v1") {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel}.schema must be a supported execution event schema.`);
-  }
-  readRequiredJson(record.payload, `${pathLabel}.payload`);
-}
-
-function validateStateArtifact(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `artifacts[${index}]`);
-  for (const key of ["id", "runId", "jobId", "kind", "path", "createdAt"]) {
-    readRequiredString(record[key], `artifacts[${index}].${key}`);
-  }
-  validateStateSurfaceFiles(record.files, `artifacts[${index}].files`);
-}
-
-function validateStateLineageEdge(value: unknown, index: number): void {
-  const record = readRequiredRecord(value, `lineage[${index}]`);
-  for (const key of ["parentId", "childId", "reason", "createdAt"]) {
-    readRequiredString(record[key], `lineage[${index}].${key}`);
-  }
-  if (!["version", "improve"].includes(record.reason as string)) {
-    throw new WorkbenchUserError(`Workbench state field lineage[${index}].reason must be version or improve.`);
-  }
-  if (record.runId !== undefined) {
-    readRequiredString(record.runId, `lineage[${index}].runId`);
-  }
-  if (record.message !== undefined) {
-    readRequiredString(record.message, `lineage[${index}].message`);
-  }
-}
-
-function validateStateSurfaceFiles(value: unknown, pathLabel: string): void {
-  readRequiredArray(value, pathLabel).forEach((entry, index) => {
-    const record = readRequiredRecord(entry, `${pathLabel}[${index}]`);
-    const filePath = readRequiredString(record.path, `${pathLabel}[${index}].path`);
-    try {
-      normalizeWorkbenchSourcePath(filePath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new WorkbenchUserError(`Workbench state field ${pathLabel}[${index}].path is invalid: ${message}`);
-    }
-    readRequiredStringContent(record.content, `${pathLabel}[${index}].content`);
-    if (record.kind !== undefined && record.kind !== "text" && record.kind !== "binary") {
-      throw new WorkbenchUserError(`Workbench state field ${pathLabel}[${index}].kind must be text or binary.`);
-    }
-    if (record.encoding !== undefined && record.encoding !== "utf8" && record.encoding !== "base64") {
-      throw new WorkbenchUserError(`Workbench state field ${pathLabel}[${index}].encoding must be utf8 or base64.`);
-    }
-    if (record.executable !== undefined) {
-      readRequiredBoolean(record.executable, `${pathLabel}[${index}].executable`);
-    }
-  });
-}
-
-function readJsonRecord(value: unknown, pathLabel: string): Record<string, Json> {
-  const record = readRequiredRecord(value, pathLabel);
-  for (const [key, entry] of Object.entries(record)) {
-    readRequiredJson(entry, `${pathLabel}.${key}`);
-  }
-  return record as Record<string, Json>;
-}
-
-function readRequiredJson(value: unknown, pathLabel: string): Json {
-  if (!isJsonPayload(value)) {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel} must be JSON.`);
-  }
-  return value;
-}
-
-function readStringArray(value: unknown, pathLabel: string): string[] {
-  return readRequiredArray(value, pathLabel).map((entry, index) =>
-    readRequiredString(entry, `${pathLabel}[${index}]`)
-  );
-}
-
-function readRequiredArray(value: unknown, pathLabel: string): unknown[] {
-  if (!Array.isArray(value)) {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel} must be an array.`);
-  }
-  return value;
-}
-
-function readRequiredRecord(value: unknown, pathLabel: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel} must be an object.`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function readRequiredString(value: unknown, pathLabel: string): string {
-  if (typeof value !== "string" || !value) {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel} must be a non-empty string.`);
-  }
-  return value;
-}
-
-function readRequiredStringContent(value: unknown, pathLabel: string): string {
-  if (typeof value !== "string") {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel} must be a string.`);
-  }
-  return value;
-}
-
-function readRequiredNumber(value: unknown, pathLabel: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel} must be a finite number.`);
-  }
-  return value;
-}
-
-function readRequiredBoolean(value: unknown, pathLabel: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new WorkbenchUserError(`Workbench state field ${pathLabel} must be a boolean.`);
-  }
-  return value;
 }

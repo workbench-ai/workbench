@@ -3,17 +3,17 @@ import type {
   WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 
-export function defaultSourceVersion(
+export function defaultPackageVersion(
   snapshot: WorkbenchInspectionSnapshot,
   explicitVersionId?: string | null,
 ): WorkbenchVersion | null {
-  const selectedId = defaultSourceVersionId(snapshot, explicitVersionId);
+  const selectedId = defaultPackageVersionId(snapshot, explicitVersionId);
   return selectedId
     ? snapshot.versions.find((version) => version.id === selectedId) ?? null
     : null;
 }
 
-export function defaultSourceVersionId(
+export function defaultPackageVersionId(
   snapshot: WorkbenchInspectionSnapshot,
   explicitVersionId?: string | null,
 ): string | null {
@@ -39,5 +39,5 @@ export function orderedVersions(snapshot: WorkbenchInspectionSnapshot): Workbenc
 }
 
 export function publishedVersionId(snapshot: WorkbenchInspectionSnapshot): string | null {
-  return snapshot.publication?.currentVersionId ?? snapshot.refs["publication/current-version"] ?? null;
+  return snapshot.publication?.currentVersionId ?? null;
 }

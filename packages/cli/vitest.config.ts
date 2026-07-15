@@ -2,19 +2,15 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig } from "vitest/config";
 
-function workspaceSource(relativePath: string): string {
-  return fileURLToPath(new URL(relativePath, import.meta.url));
-}
-
 export default defineConfig({
   resolve: {
     alias: {
-      "@workbench-ai/workbench": workspaceSource("./src/index.ts"),
-      "@workbench-ai/workbench-built-in-adapters": workspaceSource("../built-in-adapters/src/index.ts"),
-      "@workbench-ai/workbench-contract": workspaceSource("../contract/src/index.ts"),
-      "@workbench-ai/workbench-core": workspaceSource("../core/src/index.ts"),
-      "@workbench-ai/workbench-protocol": workspaceSource("../protocol/src/index.ts"),
-      "@workbench-ai/workbench-ui": workspaceSource("../workbench-ui/src/index.tsx"),
+      "@workbench-ai/workbench": fileURLToPath(new URL("./src/index.ts", import.meta.url)),
+      "@workbench-ai/workbench-built-in-adapters": fileURLToPath(new URL("../built-in-adapters/src/index.ts", import.meta.url)),
+      "@workbench-ai/workbench-contract": fileURLToPath(new URL("../contract/src/index.ts", import.meta.url)),
+      "@workbench-ai/workbench-core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
+      "@workbench-ai/workbench-protocol": fileURLToPath(new URL("../protocol/src/index.ts", import.meta.url)),
+      "@workbench-ai/workbench-ui": fileURLToPath(new URL("../workbench-ui/src/index.tsx", import.meta.url)),
     },
   },
   test: {

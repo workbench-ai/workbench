@@ -11,13 +11,12 @@ export interface WorkbenchAdapterManifest {
   slots?: Record<string, WorkbenchAdapterSlotManifest>;
 }
 
-export type WorkbenchPrimitiveAdapterOperation =
+export type WorkbenchAdapterOperation =
   | "engine.resolve"
   | "grade.run"
   | "skill.run"
   | "skill.improve";
 
-export type WorkbenchAdapterOperation = WorkbenchPrimitiveAdapterOperation;
 export type WorkbenchAdapterOperationExecutor = "sandbox" | "host";
 
 export interface WorkbenchAdapterOperationManifest {
@@ -85,24 +84,26 @@ export function workbenchAdapterOperationCommand(
   manifest: WorkbenchAdapterManifest,
   operation: WorkbenchAdapterOperation,
 ): string {
-  const normalizedOperation = normalizeWorkbenchAdapterOperation(operation, "adapter operation");
-  const operationManifest = manifest.operations[normalizedOperation];
-  if (!operationManifest) {
-    throw new Error(`Adapter ${manifest.id} does not implement ${normalizedOperation}.`);
-  }
-  return operationManifest.command;
+  return requiredWorkbenchAdapterOperation(manifest, operation).command;
 }
 
 export function workbenchAdapterOperationExecutor(
   manifest: WorkbenchAdapterManifest,
   operation: WorkbenchAdapterOperation,
 ): WorkbenchAdapterOperationExecutor {
+  return requiredWorkbenchAdapterOperation(manifest, operation).executor ?? "sandbox";
+}
+
+function requiredWorkbenchAdapterOperation(
+  manifest: WorkbenchAdapterManifest,
+  operation: WorkbenchAdapterOperation,
+): WorkbenchAdapterOperationManifest {
   const normalizedOperation = normalizeWorkbenchAdapterOperation(operation, "adapter operation");
   const operationManifest = manifest.operations[normalizedOperation];
   if (!operationManifest) {
     throw new Error(`Adapter ${manifest.id} does not implement ${normalizedOperation}.`);
   }
-  return operationManifest.executor ?? "sandbox";
+  return operationManifest;
 }
 
 export function cloneWorkbenchAdapterManifest(
@@ -159,7 +160,7 @@ function readAdapterOperations(
   }
   const operations: WorkbenchAdapterManifest["operations"] = {};
   for (const [operation, rawConfig] of Object.entries(value as Record<string, unknown>).sort()) {
-    const normalizedOperation = readAdapterOperation(operation, `${label}.${operation}`);
+    const normalizedOperation = normalizeWorkbenchAdapterOperation(operation, `${label}.${operation}`);
     if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
       throw new Error(`${label}.${operation} must be an object.`);
     }
@@ -214,7 +215,7 @@ function readAdapterSlots(
     const slotPath = readJsonPointer(config.path, `${label}.${slot}.path`);
     slots[slot] = {
       path: slotPath,
-      operation: readAdapterOperation(config.operation, `${label}.${slot}.operation`),
+      operation: normalizeWorkbenchAdapterOperation(config.operation, `${label}.${slot}.operation`),
     };
   }
   if (Object.keys(slots).length === 0) {
@@ -614,23 +615,21 @@ function readStringArray(value: unknown, label: string): string[] {
   return value.map((entry) => entry.trim());
 }
 
-function readAdapterOperation(value: unknown, label: string): WorkbenchAdapterOperation {
-  return normalizeWorkbenchAdapterOperation(value, label);
-}
-
 export function normalizeWorkbenchAdapterOperation(
   value: unknown,
   label: string,
 ): WorkbenchAdapterOperation {
-  if (
-    value === "engine.resolve" ||
-    value === "grade.run" ||
-    value === "skill.run" ||
-    value === "skill.improve"
-  ) {
+  if (isWorkbenchAdapterOperation(value)) {
     return value;
   }
   throw new Error(`${label} must be engine.resolve, grade.run, skill.run, or skill.improve.`);
+}
+
+export function isWorkbenchAdapterOperation(value: unknown): value is WorkbenchAdapterOperation {
+  return value === "engine.resolve" ||
+    value === "grade.run" ||
+    value === "skill.run" ||
+    value === "skill.improve";
 }
 
 function readJsonPointer(value: unknown, label: string): string {

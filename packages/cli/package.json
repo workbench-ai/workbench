@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench",
-  "version": "0.0.225",
+  "version": "0.0.226",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/workbench-ai/workbench.git",
@@ -11,8 +11,6 @@
     "registry": "https://registry.npmjs.org/",
     "access": "public"
   },
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "bin": {
     "workbench": "dist/workbench.js"
   },
@@ -26,10 +24,11 @@
     "test:e2e": "vitest run --config vitest.config.ts tests/cli.test.ts"
   },
   "dependencies": {
+    "@workbench-ai/agent-driver": "workspace:*",
+    "@workbench-ai/agent-driver-openai-codex": "workspace:*",
     "@workbench-ai/workbench-built-in-adapters": "workspace:*",
     "@workbench-ai/workbench-contract": "workspace:*",
     "@workbench-ai/workbench-core": "workspace:*",
-    "@workbench-ai/workbench-protocol": "workspace:*",
     "skills": "1.5.12",
     "yaml": "^2.8.2"
   },
@@ -41,6 +40,7 @@
     "postcss": "^8.5.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }

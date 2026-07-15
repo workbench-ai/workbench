@@ -3,12 +3,12 @@ export interface HumanFormatOptions {
   columns?: number;
 }
 
-export interface HumanOutputStream {
+interface HumanOutputStream {
   isTTY?: boolean;
   columns?: number;
 }
 
-export interface TableColumn<Row> {
+interface TableColumn<Row> {
   header: string;
   cell: (row: Row, options: HumanFormatOptions) => string;
   align?: "left" | "right";

@@ -3,8 +3,6 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "declaration": true,
-    "declarationMap": true,
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
     "lib": [
@@ -16,6 +14,7 @@
     "src/local-worker-control.ts",
     "src/local-worker.ts",
     "src/open-server.ts",
+    "src/sources.ts",
     "src/workbench.ts"
   ]
 }

@@ -13,7 +13,7 @@
       "title": "Author a minimal skill eval",
       "category": "skill_authoring",
       "prompt": "Create a Workbench-managed skill for earnings prep, add a representative eval case, run the default eval loop, and explain how package versions are created.",
-      "expected_output": "The response uses the Workbench skill, creates SKILL.md, .workbench/eval.yaml, .workbench/agents.yaml, and at least one .workbench/cases/*/case.yaml file, runs or proposes workbench eval --agents default -n 1 after the case exists, and explains that Workbench versions are automatic.",
+      "expected_output": "The response uses the Workbench skill, creates SKILL.md, .workbench/eval.yaml, .workbench/agents.yaml, and at least one .workbench/cases/*/case.yaml file, runs or proposes workbench eval run --agents default -n 1 after the case exists, and explains that Workbench versions are automatic.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -34,13 +34,13 @@
           "text": "uses skill-first source shape",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+new\\b|SKILL\\.md|\\.workbench/eval\\.yaml"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+new\\b|SKILL\\.md|\\.workbench/eval\\.yaml"
         },
         {
           "text": "runs the authored-case eval",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+eval\\b"
+          "value": "(?:^|\\s)workbench\\s+eval\\s+run\\b"
         }
       ]
     },
@@ -49,7 +49,7 @@
       "title": "Evaluate runtime configurations",
       "category": "agent_comparison",
       "prompt": "Evaluate a skill across two runtime configurations and explain how to review quality, coverage, latency, and cost.",
-      "expected_output": "The response uses workbench agent add for named agents, workbench eval --agents all --samples 1, and workbench results --versions all --agents all. It explains that local/command agents run Docker-style tests and Codex/Claude agents require adapter auth for provider-backed execution.",
+      "expected_output": "The response uses workbench eval agent add for named agents, workbench eval run --agents all -n 1, workbench eval grade --agents all, and workbench eval results --versions all --agents all. It explains that local/command agents run tests and Codex/Claude agents require adapter auth for provider-backed execution.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -64,19 +64,19 @@
           "text": "adds an agent",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+agent\\s+add\\b"
+          "value": "(?:^|\\s)workbench\\s+eval\\s+agent\\s+add\\b"
         },
         {
           "text": "evaluates all agents",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+eval\\b[^\\n]*--agents\\s+all\\b"
+          "value": "(?:^|\\s)workbench\\s+eval\\s+run\\b[^\\n]*--agents\\s+all\\b"
         },
         {
           "text": "reviews agent results",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+results\\b(?=[^\\n]*--versions\\s+all\\b)(?=[^\\n]*--agents\\s+all\\b)"
+          "value": "(?:^|\\s)workbench\\s+eval\\s+results\\b(?=[^\\n]*--versions\\s+all\\b)(?=[^\\n]*--agents\\s+all\\b)"
         }
       ]
     },
@@ -84,8 +84,8 @@
       "id": "inspect-and-switch-version",
       "title": "Inspect and switch improved version",
       "category": "version_inspection",
-      "prompt": "An improved Workbench skill version id is available from `workbench log --versions`. Inspect SKILL.md, compare it to its base version, and accept that version locally.",
-      "expected_output": "The response uses workbench log --versions, workbench show <version-id>:SKILL.md, workbench diff <base-version-id>..<improved-version-id>, workbench switch <improved-version-id> --dry-run, and workbench switch <improved-version-id> --yes.",
+      "prompt": "An improved Workbench Skill version id is available from `workbench skill versions`. Inspect SKILL.md, compare it to its base version, and accept that version locally.",
+      "expected_output": "The response uses workbench skill versions, workbench skill show <version-id>:SKILL.md, workbench skill diff <base-version-id>..<improved-version-id>, workbench skill switch <improved-version-id> --dry-run, and workbench skill switch <improved-version-id> --yes.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -100,25 +100,25 @@
           "text": "lists versions",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+log\\b[^\\n]*--versions\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+versions\\b"
         },
         {
           "text": "shows skill file",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+show\\s+v_[a-f0-9]{64}:SKILL\\.md\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+show\\s+v_[a-f0-9]{64}:SKILL\\.md\\b"
         },
         {
           "text": "diffs versions",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+diff\\s+v_[a-f0-9]{64}\\.\\.v_[a-f0-9]{64}\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+diff\\s+v_[a-f0-9]{64}\\.\\.v_[a-f0-9]{64}\\b"
         },
         {
           "text": "switches version",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+switch\\s+v_[a-f0-9]{64}\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+switch\\s+v_[a-f0-9]{64}\\b"
         }
       ]
     },
@@ -127,7 +127,7 @@
       "title": "Publish and install a Workbench skill",
       "category": "sharing",
       "prompt": "Share a Workbench-managed skill through Workbench Cloud and explain what gets published.",
-      "expected_output": "The response uses workbench publish, workbench install OWNER/SKILL, workbench skills, and workbench clone OWNER/SKILL DIR. It explains that publish exposes an installable Workbench agent skill package for use and editable Workbench source for evaluation or improvement, while Workbench sync carries versions, evidence, refs, traces, and artifacts. It distinguishes this from external Agent Skill fallback installs, which are not Workbench-versioned and do not support clone, eval evidence, improve lineage, or Workbench Cloud visibility.",
+      "expected_output": "The response uses workbench skill publish, workbench skill install OWNER/SKILL, workbench skill list, and workbench skill clone OWNER/SKILL DIR. It explains that publish exposes an installable Agent Skill package and editable Workbench source, while workbench skill sync is explicit repair or portability plumbing. It distinguishes this from external Agent Skill fallback installs, which are not Workbench-versioned and do not support clone, Eval evidence, improvement lineage, or Workbench Cloud visibility.",
       "files": [],
       "required_skills": [
         "workbench"
@@ -142,25 +142,25 @@
           "text": "publishes source",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+publish\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+publish\\b"
         },
         {
           "text": "installs by handle",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+install\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+install\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\b"
         },
         {
           "text": "lists accessible skills",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+skills\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+list\\b"
         },
         {
           "text": "hydrates editable source",
           "kind": "matches",
           "path": "tool_commands",
-          "value": "(?:^|\\s)workbench\\s+clone\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\s+\\S+\\b"
+          "value": "(?:^|\\s)workbench\\s+skill\\s+clone\\s+[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\\s+\\S+\\b"
         },
         {
           "text": "describes Workbench sync",

@@ -1,10 +1,12 @@
 import {
+  encodeAddress,
+} from "./spreadsheet-viewer-address";
+import {
   decodeCellAddress,
   findNearestVisibleCol,
   findNearestVisibleRow,
   findNextVisibleCol,
   findNextVisibleRow,
-  getCellAddress,
   getDefaultSelectionAddress,
   getFirstVisibleCol,
   getFirstVisibleRow,
@@ -155,8 +157,8 @@ export function extendSelectionToColumn(
 }
 
 export function getSelectionAddress(sheet: SheetModel, selection: GridSelection): string {
-  return resolveSelectionAddress(sheet, getCellAddress(selection.focus.col, selection.focus.row))
-    ?? getCellAddress(selection.focus.col, selection.focus.row);
+  return resolveSelectionAddress(sheet, encodeAddress(selection.focus.col, selection.focus.row))
+    ?? encodeAddress(selection.focus.col, selection.focus.row);
 }
 
 export function getSelectionRange(
@@ -365,7 +367,7 @@ function normalizeCoord(
   const maxCol = Math.max(Math.min(MAX_SHEET_COL_INDEX, coord.col), extent.endCol);
   const row = findNearestVisibleRow(sheet, coord.row, maxRow);
   const col = findNearestVisibleCol(sheet, coord.col, maxCol);
-  const resolvedAddress = resolveSelectionAddress(sheet, getCellAddress(col, row));
+  const resolvedAddress = resolveSelectionAddress(sheet, encodeAddress(col, row));
 
   return decodeCellAddress(resolvedAddress) ?? { row, col };
 }

@@ -59,7 +59,7 @@ const HIDDEN_HANDLE_STYLE = {
 
 interface LineageGraphProps {
   className?: string;
-  currentVersionId?: string | null;
+  selectedVersionId?: string | null;
   defaultViewport?: Viewport;
   fitView?: boolean;
   fitViewOptions?: FitViewOptions<VersionLineageNode>;
@@ -86,7 +86,7 @@ export function LineageGraph(props: LineageGraphProps) {
 
 function LineageGraphCanvas({
   className,
-  currentVersionId,
+  selectedVersionId,
   defaultViewport,
   fitView = true,
   fitViewOptions,
@@ -110,14 +110,14 @@ function LineageGraphCanvas({
     () =>
       flowState.nodes.map((node) => ({
         ...node,
-        selected: node.data.version.id === currentVersionId,
-        className: cn(node.className, node.data.version.id === currentVersionId && "ring-2 ring-primary/60"),
+        selected: node.data.version.id === selectedVersionId,
+        className: cn(node.className, node.data.version.id === selectedVersionId && "ring-2 ring-primary/60"),
         domAttributes: createVersionLineageNodeDomAttributes({
           ...node.domAttributes,
-          "aria-selected": node.data.version.id === currentVersionId ? "true" : undefined,
+          "aria-selected": node.data.version.id === selectedVersionId ? "true" : undefined,
         }),
       })) satisfies VersionLineageNode[],
-    [currentVersionId, flowState.nodes],
+    [flowState.nodes, selectedVersionId],
   );
 
   useEffect(() => {
@@ -131,7 +131,7 @@ function LineageGraphCanvas({
       return;
     }
     setFlowState((current) => ({ ...current, loading: true }));
-    void buildVersionLineageFlow({ versions, lineage, currentVersionId, publishedVersionId, runs, jobs }).then((flow) => {
+    void buildVersionLineageFlow({ versions, lineage, selectedVersionId, publishedVersionId, runs, jobs }).then((flow) => {
       if (!cancelled) {
         setFlowState({ loading: false, nodes: flow.nodes, edges: flow.edges });
       }
@@ -139,7 +139,7 @@ function LineageGraphCanvas({
     return () => {
       cancelled = true;
     };
-  }, [currentVersionId, initialFlow, jobs, lineage, publishedVersionId, runs, versions]);
+  }, [initialFlow, jobs, lineage, publishedVersionId, runs, selectedVersionId, versions]);
 
   useEffect(() => {
     if (!fitView) {
@@ -148,22 +148,22 @@ function LineageGraphCanvas({
     if (flowState.nodes.length === 0) {
       return;
     }
-    // Center on the active version when there is one; large graphs then open
+    // Center on the selected version when there is one; large graphs then open
     // focused on the node that matters instead of a zoomed-out overview.
-    const activeNode = flowState.nodes.find((node) => node.data.version.id === currentVersionId);
+    const selectedNode = flowState.nodes.find((node) => node.data.version.id === selectedVersionId);
     const frameId = requestAnimationFrame(() => {
-      void reactFlow.fitView(activeNode
+      void reactFlow.fitView(selectedNode
         ? {
             ...resolvedFitViewOptions,
             maxZoom: Math.min(resolvedFitViewOptions.maxZoom ?? FIT_VIEW_OPTIONS.maxZoom, 1),
-            nodes: [{ id: activeNode.id }],
+            nodes: [{ id: selectedNode.id }],
           }
         : resolvedFitViewOptions);
     });
     return () => {
       cancelAnimationFrame(frameId);
     };
-  }, [currentVersionId, fitView, flowState.nodes, reactFlow, resolvedFitViewOptions]);
+  }, [fitView, flowState.nodes, reactFlow, resolvedFitViewOptions, selectedVersionId]);
 
   if (versions.length === 0) {
     return (
@@ -250,16 +250,13 @@ const VersionNode = memo(function VersionNode(props: NodeProps<VersionLineageNod
     <>
       <Handle type="target" position={Position.Top} style={HIDDEN_HANDLE_STYLE} />
       <Handle type="source" position={Position.Bottom} style={HIDDEN_HANDLE_STYLE} />
-      <div
-        aria-current={flowData.active ? "page" : undefined}
-        className="grid min-w-0 gap-2 text-left text-sm text-foreground"
-      >
+      <div className="grid min-w-0 gap-2 text-left text-sm text-foreground">
         <div className="grid min-w-0 gap-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="break-words font-semibold [overflow-wrap:anywhere]">
               {flowData.label}
             </span>
-            {flowData.active ? <Badge variant="outline">current</Badge> : null}
+            {flowData.selected ? <Badge variant="outline">selected</Badge> : null}
             {flowData.published ? <Badge variant="outline">published</Badge> : null}
           </div>
           {flowData.improvedFromLabel ? (

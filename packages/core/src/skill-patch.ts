@@ -3,7 +3,7 @@ import type {
   WorkbenchSkillPatch,
 } from "@workbench-ai/workbench-contract";
 
-export interface ApplyWorkbenchSkillPatchInput {
+interface ApplyWorkbenchSkillPatchInput {
   baseFiles: readonly SurfaceSnapshotFile[];
   patch: WorkbenchSkillPatch;
   edits: readonly string[];
@@ -65,7 +65,7 @@ export function applyWorkbenchSkillPatch(input: ApplyWorkbenchSkillPatchInput): 
     });
 }
 
-function isAllowedEditPath(filePath: string, edits: readonly string[]): boolean {
+export function isAllowedEditPath(filePath: string, edits: readonly string[]): boolean {
   const normalizedPath = normalizeRelativePath(filePath);
   return edits.some((entry) => {
     const normalizedEditPath = normalizeRelativePath(entry).replace(/\/+$/u, "");
@@ -76,18 +76,18 @@ function isAllowedEditPath(filePath: string, edits: readonly string[]): boolean 
   });
 }
 
-function isWorkbenchControlPath(filePath: string): boolean {
+export function isWorkbenchControlPath(filePath: string): boolean {
   const normalized = normalizeRelativePath(filePath);
   return normalized === ".workbench" || normalized.startsWith(".workbench/");
 }
 
-function isSafeRelativePath(filePath: string): boolean {
+export function isSafeRelativePath(filePath: string): boolean {
   const normalized = normalizeRelativePath(filePath);
   return normalized.length > 0
     && !normalized.startsWith("/")
     && !normalized.split("/").includes("..");
 }
 
-function normalizeRelativePath(filePath: string): string {
+export function normalizeRelativePath(filePath: string): string {
   return filePath.replace(/\\/gu, "/").replace(/^\.\/+/u, "").replace(/\/+/gu, "/");
 }

@@ -14,7 +14,28 @@ export interface WorkbenchExecutionProgressTarget {
   appendBatch?: (batch: WorkbenchExecutionEventBatch) => Promise<void>;
 }
 
-export interface WorkbenchExecutionEventPublisherContext {
+export function readOptionalWorkbenchExecutionProgressTarget(
+  value: unknown,
+): WorkbenchExecutionProgressTarget | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.url !== "string" || typeof record.token !== "string") {
+    return undefined;
+  }
+  return {
+    url: record.url,
+    token: record.token,
+    ...(typeof record.ownerUserId === "string" ? { ownerUserId: record.ownerUserId } : {}),
+    ...(typeof record.flushWindowMs === "number" ? { flushWindowMs: record.flushWindowMs } : {}),
+    ...(record.transport === "stdout" || record.transport === "both" || record.transport === "http"
+      ? { transport: record.transport }
+      : {}),
+  };
+}
+
+interface WorkbenchExecutionEventPublisherContext {
   projectId: string;
   runId: string;
   jobId: string;
@@ -23,7 +44,7 @@ export interface WorkbenchExecutionEventPublisherContext {
   target?: WorkbenchExecutionProgressTarget;
 }
 
-export interface WorkbenchExecutionEventInput {
+interface WorkbenchExecutionEventInput {
   at?: string;
   source: WorkbenchExecutionEventSource;
   role?: WorkbenchExecutionEvent["role"];
@@ -158,7 +179,7 @@ export interface WorkbenchProgressStdoutEnvelope {
   };
 }
 
-export interface PublishWorkbenchProgressStdoutEnvelopeOptions {
+interface PublishWorkbenchProgressStdoutEnvelopeOptions {
   forwardStdout?: boolean;
 }
 

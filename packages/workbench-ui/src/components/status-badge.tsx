@@ -12,6 +12,8 @@ const TONE_BY_STATUS: Record<string, Tone> = {
   cancelled: "destructive",
   failed: "destructive",
   insufficient: "warning",
+  "needs grade": "warning",
+  "needs run": "warning",
   review: "warning",
   running: "warning",
   queued: "warning",

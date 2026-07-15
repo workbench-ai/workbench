@@ -3,6 +3,7 @@ import { AlertCircle, Maximize2 } from "lucide-react";
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
 
 import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 
 // Keep the API and worker on the same installed pdfjs-dist version.
@@ -225,13 +226,14 @@ export function PdfPreview({
       {expanded || !onExpand ? (
         pagesSurface
       ) : (
-        <button
+        <Button
           type="button"
-          className="block cursor-zoom-in rounded-md text-left"
+          className="h-auto justify-start p-0 text-left"
           onClick={onExpand}
           aria-label={`Expand rendered PDF preview for ${filePath}`}
           data-testid="pdf-preview-trigger"
           title="Click to expand"
+          variant="ghost"
         >
           <div className="relative">
             {pagesSurface}
@@ -240,7 +242,7 @@ export function PdfPreview({
               Expand
             </span>
           </div>
-        </button>
+        </Button>
       )}
     </div>
   );

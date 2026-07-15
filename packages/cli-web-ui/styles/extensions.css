@@ -75,7 +75,6 @@
   --chart-cost: var(--chart-3);
   --checkerboard-base: oklch(0.985 0 0);
   --checkerboard-accent: oklch(0.94 0 0);
-  --monaco-shell-background: oklch(0.205 0 0);
 }
 
 .dark {
@@ -99,7 +98,6 @@
   --chart-cost: var(--chart-3);
   --checkerboard-base: oklch(0.205 0 0);
   --checkerboard-accent: oklch(0.255 0 0);
-  --monaco-shell-background: oklch(0.165 0 0);
 }
 
 @media (prefers-reduced-motion: reduce) {

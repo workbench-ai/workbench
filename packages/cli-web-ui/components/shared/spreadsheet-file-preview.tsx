@@ -9,7 +9,6 @@ import { PreviewRendererLoadingState } from "./preview-loading-state";
 
 type SpreadsheetFilePreviewProps = {
   preview: FilePreviewData;
-  fillHeight?: boolean;
 };
 
 type ParsedSpreadsheetWorkbook = Awaited<
@@ -18,18 +17,13 @@ type ParsedSpreadsheetWorkbook = Awaited<
 
 type SpreadsheetPreviewState =
   | { status: "loading" }
-  | { status: "ready"; workbookFile: ParsedSpreadsheetWorkbook }
+  | { status: "ready"; workbook: ParsedSpreadsheetWorkbook }
   | { status: "error"; message: string };
 
-const workbookPreviewCache = new Map<string, Promise<ParsedSpreadsheetWorkbook>>();
-
-export function clearSpreadsheetFilePreviewCache(): void {
-  workbookPreviewCache.clear();
-}
+const workbookPreviewCache = new Map<string, ParsedSpreadsheetWorkbook>();
 
 export function SpreadsheetFilePreview({
   preview,
-  fillHeight = false,
 }: SpreadsheetFilePreviewProps) {
   const [state, setState] = useState<SpreadsheetPreviewState>({
     status: "loading",
@@ -47,8 +41,6 @@ export function SpreadsheetFilePreview({
     let cancelled = false;
     setState({ status: "loading" });
 
-    const fileName =
-      preview.path.split("/").filter(Boolean).at(-1) ?? preview.path;
     let bytes: Uint8Array;
     try {
       bytes = decodeBase64ToBytes(preview.source.content);
@@ -63,8 +55,8 @@ export function SpreadsheetFilePreview({
       return;
     }
 
-    void getCachedWorkbookPreview(preview.path, fileName, bytes)
-      .then((workbookFile) => {
+    void getCachedWorkbookPreview(preview.path, bytes)
+      .then((workbook) => {
         if (cancelled) {
           return;
         }
@@ -72,7 +64,7 @@ export function SpreadsheetFilePreview({
         startTransition(() => {
           setState({
             status: "ready",
-            workbookFile,
+            workbook,
           });
         });
       })
@@ -115,41 +107,27 @@ export function SpreadsheetFilePreview({
 
   return (
     <div
-      className={fillHeight ? "flex h-full min-h-0 flex-1 overflow-hidden" : undefined}
+      className="flex h-[min(36rem,70vh)] min-h-0 overflow-hidden"
       data-testid="preview-spreadsheet"
     >
-      <SpreadsheetViewer workbookFile={state.workbookFile} />
+      <SpreadsheetViewer workbook={state.workbook} />
     </div>
   );
 }
 
 async function getCachedWorkbookPreview(
   path: string,
-  fileName: string,
   bytes: Uint8Array,
 ): Promise<ParsedSpreadsheetWorkbook> {
   const cacheKey = await createWorkbookPreviewCacheKey(path, bytes);
-  let workbookPromise = workbookPreviewCache.get(cacheKey);
+  let workbook = workbookPreviewCache.get(cacheKey);
 
-  if (!workbookPromise) {
-    const byteBuffer = toArrayBuffer(bytes);
-    workbookPromise = parseSpreadsheetViewerWorkbook(
-      {
-        name: fileName,
-        size: bytes.byteLength,
-      },
-      byteBuffer,
-      {
-        source: path,
-      },
-    ).catch((error) => {
-      workbookPreviewCache.delete(cacheKey);
-      throw error;
-    });
-    workbookPreviewCache.set(cacheKey, workbookPromise);
+  if (!workbook) {
+    workbook = parseSpreadsheetViewerWorkbook(toArrayBuffer(bytes));
+    workbookPreviewCache.set(cacheKey, workbook);
   }
 
-  return workbookPromise;
+  return workbook;
 }
 
 async function createWorkbookPreviewCacheKey(

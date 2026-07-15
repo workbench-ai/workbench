@@ -1,18 +1,11 @@
 import type {
-  EvaluationUsageStats,
   ExecutionRole,
   ExecutionUsage,
   ExecutionUsageCostSource,
   Json,
-  MetricStats,
   UsageSummary,
 } from "@workbench-ai/workbench-contract";
 
-import {
-  LITELLM_MODEL_PRICES,
-  LITELLM_PRICING_SOURCE,
-  type LiteLLMModelPrice,
-} from "./model-prices-litellm.ts";
 import {
   jsonRecord,
   numberValue,
@@ -72,13 +65,13 @@ export function assignUsageRole(
   });
 }
 
-export function usageSummaryFromExecutionUsage(
+function usageSummaryFromExecutionUsage(
   usage: ExecutionUsage | undefined,
 ): UsageSummary | undefined {
   return usage ? { total: usage } : undefined;
 }
 
-export function completeUsageSummary(
+function completeUsageSummary(
   usage: UsageSummary | undefined,
 ): UsageSummary | undefined {
   if (!usage) {
@@ -133,31 +126,6 @@ export function mergeUsageSummaries(
   });
 }
 
-export function mergeUsageRoles(
-  roles: Partial<Record<ExecutionRole, UsageSummary | undefined>>,
-): UsageSummary | undefined {
-  const improver = completeUsageSummary(roles.improver);
-  const runner = completeUsageSummary(roles.runner);
-  const engine = completeUsageSummary(roles.engine);
-  return completeUsageSummary({
-    improver: improver?.improver ?? improver?.total,
-    runner: runner?.runner ?? runner?.total,
-    engine: engine?.engine ?? engine?.total,
-  });
-}
-
-export function usageStats(
-  summaries: readonly UsageSummary[],
-): EvaluationUsageStats | undefined {
-  const roles = Object.fromEntries(
-    (["total", ...USAGE_ROLES] as const).flatMap((role) => {
-      const stats = executionUsageStats(summaries.map((summary) => summary[role]));
-      return stats ? [[role, stats]] : [];
-    }),
-  ) as EvaluationUsageStats;
-  return Object.keys(roles).length > 0 ? roles : undefined;
-}
-
 function normalizeExecutionUsage(
   value: unknown,
   defaults: { provider?: string; model?: string } = {},
@@ -187,14 +155,7 @@ function normalizeExecutionUsage(
   if (totalTokens !== undefined) {
     usage.totalTokens = totalTokens;
   }
-  if (existingCost === undefined) {
-    const estimate = estimateExecutionCost(usage);
-    if (estimate) {
-      usage.costUsd = estimate.costUsd;
-      usage.costSource = "estimated";
-      usage.pricingSource = estimate.pricingSource;
-    }
-  } else if (providerCost !== undefined) {
+  if (existingCost !== undefined && providerCost !== undefined) {
     usage.costSource = "provider";
     usage.pricingSource = stringValue(record.pricing_source)
       ?? stringValue(record.pricingSource)
@@ -243,28 +204,6 @@ function mergeExecutionUsage(
     merged.pricingSource = pricingSource;
   }
   return hasUsageSignal(merged) ? merged : undefined;
-}
-
-function executionUsageStats(
-  entries: readonly (ExecutionUsage | undefined)[],
-): EvaluationUsageStats["total"] | undefined {
-  const usages = entries.flatMap((entry) => {
-    const normalized = normalizeExecutionUsage(entry);
-    return normalized ? [normalized] : [];
-  });
-  if (usages.length === 0) {
-    return undefined;
-  }
-  const stats = Object.fromEntries(
-    NUMERIC_USAGE_FIELDS.flatMap((field) => {
-      const values = usages.flatMap((usage) => {
-        const value = usage[field];
-        return typeof value === "number" && Number.isFinite(value) ? [value] : [];
-      });
-      return values.length > 0 ? [[field, metricStats(values)]] : [];
-    }),
-  ) as EvaluationUsageStats["total"];
-  return stats && Object.keys(stats).length > 0 ? stats : undefined;
 }
 
 function usageRecordsFromTraceSummaries(trace: unknown): Array<{ at: string; usage: Record<string, Json> }> {
@@ -374,47 +313,6 @@ function usageDetailScore(usage: ExecutionUsage): number {
   return costScore + tokenScore + Math.min(totalScore / 1_000_000_000, 1);
 }
 
-function estimateExecutionCost(
-  usage: ExecutionUsage,
-): { costUsd: number; pricingSource: string } | undefined {
-  if (!usage.model) {
-    return undefined;
-  }
-  const price = LITELLM_MODEL_PRICES[usage.model as keyof typeof LITELLM_MODEL_PRICES] as LiteLLMModelPrice | undefined;
-  if (!price) {
-    return undefined;
-  }
-  const inputPrice = price.input_cost_per_token;
-  const outputPrice = price.output_cost_per_token;
-  if (typeof inputPrice !== "number" && typeof outputPrice !== "number") {
-    return undefined;
-  }
-  const cacheCreationTokens = usage.cacheCreationInputTokens ?? 0;
-  const cacheReadTokens = usage.cacheReadInputTokens
-    ?? (usage.cachedInputTokens !== undefined
-      ? Math.max(usage.cachedInputTokens - cacheCreationTokens, 0)
-      : 0);
-  const uncachedInputTokens = usage.uncachedInputTokens
-    ?? (usage.inputTokens !== undefined
-      ? Math.max(usage.inputTokens - cacheReadTokens - cacheCreationTokens, 0)
-      : 0);
-  const outputTokens = usage.outputTokens ?? 0;
-  if (uncachedInputTokens === 0 && cacheReadTokens === 0 && cacheCreationTokens === 0 && outputTokens === 0) {
-    return undefined;
-  }
-  const costUsd =
-    (uncachedInputTokens * (inputPrice ?? 0)) +
-    (cacheReadTokens * (price.cache_read_input_token_cost ?? inputPrice ?? 0)) +
-    (cacheCreationTokens * (price.cache_creation_input_token_cost ?? inputPrice ?? 0)) +
-    (outputTokens * (outputPrice ?? 0));
-  return Number.isFinite(costUsd) && costUsd > 0
-    ? {
-        costUsd: roundUsageNumber(costUsd),
-        pricingSource: LITELLM_PRICING_SOURCE,
-      }
-    : undefined;
-}
-
 function inferredTotalTokens(usage: ExecutionUsage): number | undefined {
   const inputTokens = usage.inputTokens ?? usage.cachedInputTokens;
   if (inputTokens === undefined && usage.outputTokens === undefined) {
@@ -511,29 +409,4 @@ function roundUsageNumber(value: number): number {
 function uniqueString(values: readonly unknown[]): string | undefined {
   const unique = [...new Set(values.filter((value): value is string => typeof value === "string" && value.length > 0))];
   return unique.length === 1 ? unique[0] : undefined;
-}
-
-function metricStats(values: number[]): MetricStats {
-  const count = values.length;
-  if (count === 0) {
-    return {
-      count: 0,
-      mean: 0,
-      variance: 0,
-      stddev: 0,
-      min: 0,
-      max: 0,
-    };
-  }
-  const mean = values.reduce((sum, value) => sum + value, 0) / count;
-  const variance =
-    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / count;
-  return {
-    count,
-    mean,
-    variance,
-    stddev: Math.sqrt(variance),
-    min: Math.min(...values),
-    max: Math.max(...values),
-  };
 }

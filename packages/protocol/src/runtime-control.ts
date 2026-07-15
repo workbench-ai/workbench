@@ -1,18 +1,20 @@
 import http from "node:http";
 import https from "node:https";
 
-import type {
-  Json,
-  SurfaceSnapshotFile,
-  UsageSummary,
-  WorkbenchResult,
+import {
+  isWorkbenchJson,
+  type Json,
+  type SurfaceSnapshotFile,
+  type UsageSummary,
+  type WorkbenchResult,
 } from "@workbench-ai/workbench-contract";
 
 import type {
   WorkbenchAdapterOperation,
 } from "./adapter-manifest.ts";
-import type {
-  WorkbenchAdapterOperationResult,
+import {
+  isWorkbenchAdapterOperationResult,
+  type WorkbenchAdapterOperationResult,
 } from "./adapter-protocol.ts";
 
 export const WORKBENCH_RUNTIME_CONTROL_URL_ENV = "WORKBENCH_RUNTIME_CONTROL_URL";
@@ -230,7 +232,7 @@ function normalizeRuntimeControlOperationSequenceResult(
     ...(isJsonRecord(record.result) ? { result: record.result as unknown as WorkbenchResult } : {}),
     ...(isJsonRecord(record.usage) ? { usage: record.usage as unknown as UsageSummary } : {}),
     ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
-    ...(record.feedback !== undefined && isJson(record.feedback) ? { feedback: record.feedback } : {}),
+    ...(record.feedback !== undefined && isWorkbenchJson(record.feedback) ? { feedback: record.feedback } : {}),
     ...(typeof record.error === "string" ? { error: record.error } : {}),
   };
 }
@@ -243,16 +245,7 @@ function readResponseError(value: unknown): string | null {
   return typeof error === "string" && error.trim() ? error : null;
 }
 
-function isWorkbenchAdapterOperationResult(value: unknown): value is WorkbenchAdapterOperationResult {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  return record.protocol === "workbench.adapter-result.v1" &&
-    typeof record.operation === "string";
-}
-
-function isSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
+export function isSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
   return Boolean(
     value &&
       typeof value === "object" &&
@@ -266,21 +259,5 @@ function isSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
 }
 
 function isJsonRecord(value: unknown): value is Record<string, Json> {
-  return !!value && typeof value === "object" && !Array.isArray(value) && isJson(value);
-}
-
-function isJson(value: unknown): value is Json {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return true;
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value);
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJson);
-  }
-  if (value && typeof value === "object") {
-    return Object.values(value).every(isJson);
-  }
-  return false;
+  return !!value && typeof value === "object" && !Array.isArray(value) && isWorkbenchJson(value);
 }

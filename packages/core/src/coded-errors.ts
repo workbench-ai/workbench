@@ -1,6 +1,6 @@
 import type { Json } from "@workbench-ai/workbench-contract";
 
-export interface WorkbenchCodedErrorOptions {
+interface WorkbenchCodedErrorOptions {
   retryable?: boolean;
   remediation?: string;
   subject?: Record<string, Json>;

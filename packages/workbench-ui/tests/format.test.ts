@@ -1,27 +1,22 @@
 import { describe, expect, test } from "vitest";
 
-import type {
-  WorkbenchAgent,
-  WorkbenchJob,
-  WorkbenchRun,
+import {
+  workbenchRunOwnsJob,
+  type WorkbenchJob,
+  type WorkbenchRun,
 } from "@workbench-ai/workbench-contract";
 
 import {
-  agentConfigString,
-  agentNetworkLabel,
-  agentTimeoutLabel,
   directoryPathForFile,
   fileName,
   formatCost,
   formatCount,
   formatDurationMs,
-  formatList,
   formatReportCost,
   formatScore,
   formatStatus,
   formatTimestamp,
   jobsForRun,
-  runOwnsJob,
   runScore,
   shortId,
 } from "../src/lib/format";
@@ -55,7 +50,7 @@ describe("format helpers", () => {
       unitCount: 1,
       jobCount: 1,
       roles: [{
-        role: "execute",
+        role: "run",
         jobCount: 1,
         queued: 0,
         running: 0,
@@ -85,7 +80,7 @@ describe("format helpers", () => {
       jobIds: [reusedGradeJob.id],
     });
 
-    expect(runOwnsJob(cachedRun, reusedGradeJob)).toBe(true);
+    expect(workbenchRunOwnsJob(cachedRun, reusedGradeJob)).toBe(true);
     expect(jobsForRun(cachedRun, [reusedGradeJob, unrelatedGradeJob]).map((job) => job.id))
       .toEqual([reusedGradeJob.id]);
     expect(runScore(cachedRun, [reusedGradeJob, unrelatedGradeJob])).toBe(0.82);
@@ -126,37 +121,6 @@ describe("format helpers", () => {
     expect(formatCount(2, "child")).toBe("2 children");
   });
 
-  test("formatList joins values with a configurable empty fallback", () => {
-    expect(formatList(["a", "b"])).toBe("a, b");
-    expect(formatList([])).toBe("none");
-    expect(formatList([], "empty")).toBe("empty");
-  });
-
-  test("agentNetworkLabel maps config aliases to open and isolated", () => {
-    expect(agentNetworkLabel(agent({ network: true }))).toBe("open");
-    expect(agentNetworkLabel(agent({ network: "on" }))).toBe("open");
-    expect(agentNetworkLabel(agent({ network: "bridge" }))).toBe("open");
-    expect(agentNetworkLabel(agent({ network: false }))).toBe("isolated");
-    expect(agentNetworkLabel(agent({ network: "off" }))).toBe("isolated");
-    expect(agentNetworkLabel(agent({ network: "none" }))).toBe("isolated");
-    expect(agentNetworkLabel(agent({ network: "custom-vpc" }))).toBe("custom-vpc");
-    expect(agentNetworkLabel(agent({}))).toBe("default");
-  });
-
-  test("agentTimeoutLabel prefers minutes over seconds", () => {
-    expect(agentTimeoutLabel(agent({ timeoutMinutes: 7 }))).toBe("7m");
-    expect(agentTimeoutLabel(agent({ timeoutSeconds: 30 }))).toBe("30s");
-    expect(agentTimeoutLabel(agent({ timeoutMinutes: 7, timeoutSeconds: 30 }))).toBe("7m");
-    expect(agentTimeoutLabel(agent({}))).toBe("default");
-  });
-
-  test("agentConfigString only returns non-empty strings", () => {
-    expect(agentConfigString(agent({ image: "node:22" }), "image")).toBe("node:22");
-    expect(agentConfigString(agent({ image: "  " }), "image")).toBeNull();
-    expect(agentConfigString(agent({ timeoutMinutes: 7 }), "timeoutMinutes")).toBeNull();
-    expect(agentConfigString(agent({}), "image")).toBeNull();
-  });
-
   test("file path helpers split names and directories", () => {
     expect(fileName("output/result.json")).toBe("result.json");
     expect(fileName("SKILL.md")).toBe("SKILL.md");
@@ -165,15 +129,6 @@ describe("format helpers", () => {
     expect(directoryPathForFile(null)).toBeNull();
   });
 });
-
-function agent(config: WorkbenchAgent["config"]): WorkbenchAgent {
-  return {
-    name: "patcher",
-    adapter: "command",
-    model: "deterministic",
-    config,
-  };
-}
 
 function run(overrides: Partial<WorkbenchRun> & { id: string }): WorkbenchRun {
   return {

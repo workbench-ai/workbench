@@ -1,7 +1,9 @@
 import { getCategoricalChartColor } from "@workbench-ai/cli-web-ui/lib/chart-colors";
 
 import {
+  compareWorkbenchNaturalText,
   workbenchJobReportMetricBreakdown,
+  workbenchSkillVersionIdentity,
   type WorkbenchAgentVersion,
   type WorkbenchEvalVersionSummary,
   type WorkbenchEvalSnapshot,
@@ -25,9 +27,9 @@ import {
   shortId,
 } from "./format";
 
-export type ResultMetricKind = "number" | "duration_ms" | "currency_usd";
-export type ResultMetricDirection = "higher" | "lower";
-export type ResultMetricSemanticRole = "performance" | "speed" | "cost";
+type ResultMetricKind = "number" | "duration_ms" | "currency_usd";
+type ResultMetricDirection = "higher" | "lower";
+type ResultMetricSemanticRole = "performance" | "speed" | "cost";
 
 export interface ResultMetricDescriptor {
   id: string;
@@ -88,7 +90,7 @@ export interface ResultEvalVersionOption {
   gradeAdapter: string;
 }
 
-export interface ResultGroup {
+interface ResultGroup {
   id: string;
   label: string;
   skillName: string;
@@ -96,7 +98,7 @@ export interface ResultGroup {
   cells: ResultResolvedCell[];
 }
 
-export interface ResultResolvedCell {
+interface ResultResolvedCell {
   cell: WorkbenchResultCell;
   version: WorkbenchSkillVersion;
   agent?: WorkbenchAgentVersion;
@@ -131,13 +133,6 @@ export interface ResultTradeoffDatum {
   y: number;
   xDisplay: string;
   yDisplay: string;
-}
-
-export interface ResultLabelContext {
-  allVersions?: readonly WorkbenchVersion[];
-  currentVersionId?: string | null;
-  defaultSkill?: string | null;
-  publishedVersionId?: string | null;
 }
 
 const RESULT_METRIC_DESCRIPTORS: readonly ResultMetricDescriptor[] = [
@@ -187,22 +182,17 @@ export function resultMetricTestId(descriptor: ResultMetricDescriptor): string {
   return descriptor.testId ?? descriptor.id.replace(/[^a-z0-9]+/giu, "-").toLowerCase();
 }
 
-export function resultsForSnapshot(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
-  return snapshot.results ?? { skillVersions: [], evalVersions: [], agentVersions: [], cells: [] };
-}
-
 export function resultsForScorecard(snapshot: WorkbenchInspectionSnapshot): WorkbenchResults {
-  return resultsForSnapshot(snapshot);
+  return snapshot.results ?? { skillVersions: [], evalVersions: [], agentVersions: [], cells: [] };
 }
 
 export function evalVersionOptionsForResults(
   snapshot: WorkbenchInspectionSnapshot,
-  _results: WorkbenchResults,
 ): ResultEvalVersionOption[] {
   return [...snapshot.evalVersions]
     .sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id))
     .map((evaluation) => {
-      const gradeAdapter = normalizeGradeAdapter(evaluation.gradeAdapter) ?? "tests";
+      const gradeAdapter = normalizeGradeAdapter(evaluation.gradeAdapter) ?? "none";
       const detail = evaluationDetail({
         caseCount: evaluation.caseCount,
         gradeAdapter,
@@ -231,7 +221,6 @@ export function defaultEvalVersionIdForResults(
 
 export function buildResultGroups(
   results: WorkbenchResults,
-  _context: ResultLabelContext = {},
 ): ResultGroup[] {
   const versionsById = new Map(results.skillVersions.map((version) => [version.id, version]));
   const agentsById = new Map(results.agentVersions.map((agent) => [agent.id, agent]));
@@ -273,7 +262,7 @@ export function buildResultGroups(
     }];
   }).sort((left, right) =>
     left.setupRank - right.setupRank ||
-    left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: "base" }) ||
+    compareWorkbenchNaturalText(left.label, right.label) ||
     left.id.localeCompare(right.id)
   );
 }
@@ -285,7 +274,6 @@ export function buildResultEvidenceRows({
   runs,
 }: {
   agents: WorkbenchAgentVersion[];
-  context?: ResultLabelContext;
   groups: ResultGroup[];
   jobs?: readonly WorkbenchJob[];
   runs: WorkbenchRun[];
@@ -344,27 +332,12 @@ export function buildResultEvidenceRows({
 export function formatVersionDisplayName(
   versionId: string,
   versions: readonly WorkbenchVersion[],
-  _context: ResultLabelContext = {},
 ): string {
   const version = versions.find((entry) => entry.id === versionId);
   if (!version) {
     return shortId(versionId);
   }
   return versionLabel(version, versions);
-}
-
-export function formatSkillDisplayName(
-  skillName: string,
-  context: ResultLabelContext = {},
-): string {
-  const normalized = skillName.trim();
-  if (isActiveSkillName(normalized, context.defaultSkill?.trim())) {
-    return "Active skill";
-  }
-  if (normalized === "no-skill") {
-    return "No skill baseline";
-  }
-  return readableSkillName(normalized);
 }
 
 export function formatEvaluationDisplayName(
@@ -389,19 +362,6 @@ export function buildResultMetricDescriptors(
   rows: readonly ResultEvidenceRow[],
 ): ResultMetricDescriptor[] {
   return RESULT_METRIC_DESCRIPTORS.filter((descriptor) =>
-    rows.some((row) => getResultMetricValue(row, descriptor) !== undefined)
-  );
-}
-
-export function buildResultTableMetricDescriptors(
-  rows?: readonly ResultEvidenceRow[],
-): ResultMetricDescriptor[] {
-  const descriptors = RESULT_METRIC_DESCRIPTORS.filter((descriptor) => descriptor.primary);
-  if (!rows) {
-    return descriptors;
-  }
-  return descriptors.filter((descriptor) =>
-    descriptor.id !== "costPerSampleUsd" ||
     rows.some((row) => getResultMetricValue(row, descriptor) !== undefined)
   );
 }
@@ -502,17 +462,6 @@ export function formatResultMetricValue(
   return formatScore(value);
 }
 
-export function formatResultTableMetricValue(
-  row: ResultEvidenceRow,
-  descriptor: ResultMetricDescriptor,
-): string {
-  const value = getResultMetricValue(row, descriptor);
-  if (descriptor.id === "costPerSampleUsd" && value === undefined) {
-    return missingCostLabelForStatus(row.statusLabel, Boolean(row.runId));
-  }
-  return formatResultMetricValue(descriptor, value);
-}
-
 export function missingCostLabelForStatus(statusLabel: string | null | undefined, hasRun: boolean): string {
   if (!hasRun) {
     return "Not tested";
@@ -524,7 +473,7 @@ export function missingCostLabelForStatus(statusLabel: string | null | undefined
   return "Not reported";
 }
 
-export function getResultMetricValue(
+function getResultMetricValue(
   row: ResultEvidenceRow,
   descriptor: ResultMetricDescriptor,
 ): number | undefined {
@@ -540,7 +489,7 @@ export function getResultMetricValue(
   return undefined;
 }
 
-export function resolveResultGroupChartColor(
+function resolveResultGroupChartColor(
   groupId: string,
   groupColorById: ReadonlyMap<string, string> | undefined,
   fallbackIndex: number,
@@ -569,17 +518,9 @@ function resultVersionOrdinals(versions: readonly WorkbenchSkillVersion[]): Map<
 }
 
 function compareResultVersions(left: WorkbenchSkillVersion, right: WorkbenchSkillVersion): number {
-  return resultVersionSortKey(left).localeCompare(resultVersionSortKey(right), undefined, {
-    numeric: true,
-    sensitivity: "base",
-  }) || left.label.localeCompare(right.label, undefined, {
-    numeric: true,
-    sensitivity: "base",
-  }) || left.id.localeCompare(right.id);
-}
-
-function resultVersionSortKey(version: WorkbenchSkillVersion): string {
-  return version.projectVersionId ?? version.id;
+  return compareWorkbenchNaturalText(workbenchSkillVersionIdentity(left), workbenchSkillVersionIdentity(right)) ||
+    compareWorkbenchNaturalText(left.label, right.label) ||
+    left.id.localeCompare(right.id);
 }
 
 function resultVersionSetupRank(version: WorkbenchSkillVersion): number {
@@ -598,10 +539,7 @@ function compareResolvedCells(
   versionOrdinalById: ReadonlyMap<string, number>,
 ): number {
   return (versionOrdinalById.get(right.version.id) ?? 0) - (versionOrdinalById.get(left.version.id) ?? 0) ||
-    agentLabel(left.agent).localeCompare(agentLabel(right.agent), undefined, {
-      numeric: true,
-      sensitivity: "base",
-    }) ||
+    compareWorkbenchNaturalText(agentLabel(left.agent), agentLabel(right.agent)) ||
     left.cell.evalVersionId.localeCompare(right.cell.evalVersionId) ||
     left.cell.agentVersionId.localeCompare(right.cell.agentVersionId);
 }
@@ -633,24 +571,7 @@ function versionOrdinal(version: WorkbenchVersion, versions: readonly WorkbenchV
 
 function compareVersionsByCreatedAt(left: WorkbenchVersion, right: WorkbenchVersion): number {
   const created = left.createdAt.localeCompare(right.createdAt);
-  return created || compareVersionLabels(left.id, right.id);
-}
-
-function isActiveSkillName(skillName: string, defaultSkill: string | undefined): boolean {
-  if (!defaultSkill || defaultSkill === "all") {
-    return skillName === "current";
-  }
-  return skillName === defaultSkill;
-}
-
-function readableSkillName(value: string): string {
-  if (value === "current") {
-    return "Current skill";
-  }
-  if (value === "no-skill") {
-    return "No skill baseline";
-  }
-  return sentenceCaseReadable(value, "Skill");
+  return created || compareWorkbenchNaturalText(left.id, right.id);
 }
 
 function sentenceCaseReadable(value: string, fallback: string): string {
@@ -715,7 +636,7 @@ function formatEvalCaseCount(caseCount: number): string {
 }
 
 function evalGradeAdapter(evalSnapshot: WorkbenchEvalSnapshot): string {
-  return normalizeGradeAdapter(evalSnapshot.gradeAdapter) ?? "tests";
+  return normalizeGradeAdapter(evalSnapshot.grade.adapter) ?? "none";
 }
 
 function normalizeGradeAdapter(value: string | undefined): string | null {
@@ -836,13 +757,6 @@ function truncateText(value: string, maxLength: number): string {
     : value;
 }
 
-function compareVersionLabels(left: string, right: string): number {
-  return left.localeCompare(right, undefined, {
-    numeric: true,
-    sensitivity: "base",
-  });
-}
-
 function compareMetricRows(
   left: ResultMetricDatum,
   right: ResultMetricDatum,
@@ -854,10 +768,7 @@ function compareMetricRows(
   if (valueOrder !== 0) {
     return valueOrder;
   }
-  return left.rowLabel.localeCompare(right.rowLabel, undefined, {
-    numeric: true,
-    sensitivity: "base",
-  });
+  return compareWorkbenchNaturalText(left.rowLabel, right.rowLabel);
 }
 
 function finiteNumber(value: number | undefined): number | undefined {

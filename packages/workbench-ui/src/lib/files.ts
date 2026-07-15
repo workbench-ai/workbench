@@ -12,21 +12,15 @@ export function surfaceFileToPreview(
   file: WorkbenchInspectionFileContent,
   view: PreviewMode,
 ): FilePreviewData {
-  const content = file.content ?? file.unavailableReason ?? "";
-  const isUnavailable = Boolean(file.unavailableReason);
   return {
     path: file.path,
     view,
     mime_type: mimeTypeForPath(file.path),
-    preview_kind: isUnavailable ? "unsupported" : previewKindForFile(file),
-    diff: null,
-    source: isUnavailable
-      ? null
-      : {
-          content,
-          encoding: file.encoding === "base64" ? "base64" : "utf8",
-        },
-    rendered_html: null,
+    preview_kind: previewKindForFile(file),
+    source: {
+      content: file.content,
+      encoding: file.encoding === "base64" ? "base64" : "utf8",
+    },
   };
 }
 
@@ -54,6 +48,9 @@ function fileRank(file: SurfaceSnapshotFile): number {
 
 function previewKindForFile(file: Pick<SurfaceSnapshotFile, "path" | "kind" | "encoding">): PreviewKind {
   const path = file.path.toLowerCase();
+  if (path.endsWith(".xlsx")) {
+    return "spreadsheet";
+  }
   if (file.kind === "binary" || file.encoding === "base64") {
     if (path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".svg")) {
       return "image";
@@ -68,9 +65,6 @@ function previewKindForFile(file: Pick<SurfaceSnapshotFile, "path" | "kind" | "e
   }
   if (path.endsWith(".csv") || path.endsWith(".tsv")) {
     return "table";
-  }
-  if (path.endsWith(".xlsx") || path.endsWith(".xls")) {
-    return "spreadsheet";
   }
   return "text";
 }
@@ -91,6 +85,9 @@ function mimeTypeForPath(path: string): string | null {
   }
   if (normalized.endsWith(".tsv")) {
     return "text/tab-separated-values";
+  }
+  if (normalized.endsWith(".xlsx")) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   }
   if (normalized.endsWith(".png")) {
     return "image/png";

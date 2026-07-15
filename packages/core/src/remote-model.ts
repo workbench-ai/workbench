@@ -1,12 +1,10 @@
 import { fileURLToPath } from "node:url";
 
-import { normalizeWorkbenchSkillName, type WorkbenchRemoteKind } from "@workbench-ai/workbench-contract";
+import { normalizeWorkbenchSkillName } from "@workbench-ai/workbench-contract";
 
 import { WorkbenchCodedError } from "./coded-errors.ts";
 
-export type { WorkbenchRemoteKind };
-
-export interface ParsedWorkbenchCloudRemoteUrl {
+interface ParsedWorkbenchCloudRemoteUrl {
   kind: "workbench-cloud";
   url: string;
   baseUrl: string;
@@ -14,13 +12,13 @@ export interface ParsedWorkbenchCloudRemoteUrl {
   skill: string;
 }
 
-export interface ParsedWorkbenchFileRemoteUrl {
+interface ParsedWorkbenchFileRemoteUrl {
   kind: "file";
   url: string;
   path: string;
 }
 
-export type ParsedWorkbenchRemoteUrl = ParsedWorkbenchCloudRemoteUrl | ParsedWorkbenchFileRemoteUrl;
+type ParsedWorkbenchRemoteUrl = ParsedWorkbenchCloudRemoteUrl | ParsedWorkbenchFileRemoteUrl;
 
 export function parseWorkbenchRemoteUrl(rawUrl: string): ParsedWorkbenchRemoteUrl {
   const trimmed = rawUrl.trim();

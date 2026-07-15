@@ -1,12 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import {
-  formatChangeDisplayLabel,
   isPreviewMode,
-  isSnapshotPreviewMode,
-  previewModes,
-  snapshotPreviewModes,
-  supportedDiffPreviewModes,
   supportedPreviewModes,
 } from "../lib/file-preview";
 import {
@@ -17,35 +12,15 @@ import { parseTabularPreview } from "../lib/tabular-preview";
 
 describe("file preview helpers", () => {
   test("orders preview modes with rendered first", () => {
-    expect(previewModes).toEqual(["rendered", "raw", "diff"]);
-    expect(snapshotPreviewModes).toEqual(["rendered", "raw"]);
     expect(supportedPreviewModes()).toEqual(["rendered", "raw"]);
-    expect(supportedDiffPreviewModes()).toEqual(["rendered", "raw", "diff"]);
   });
 
   test("recognizes only the supported preview modes", () => {
     expect(isPreviewMode("rendered")).toBe(true);
     expect(isPreviewMode("raw")).toBe(true);
-    expect(isPreviewMode("diff")).toBe(true);
+    expect(isPreviewMode("diff")).toBe(false);
     expect(isPreviewMode("overview")).toBe(false);
     expect(isPreviewMode(null)).toBe(false);
-    expect(isSnapshotPreviewMode("rendered")).toBe(true);
-    expect(isSnapshotPreviewMode("raw")).toBe(true);
-    expect(isSnapshotPreviewMode("diff")).toBe(false);
-  });
-
-  test("truncates long file labels from the middle of the path", () => {
-    expect(
-      formatChangeDisplayLabel({
-        path: "very/long/path/to/the-important-artifact/results/output.json",
-        old_path: null,
-        status: "modified",
-        mime_type: "application/json",
-        preview_kind: "text",
-        additions: 3,
-        deletions: 1,
-      }, 22),
-    ).toBe(".../output.json");
   });
 
   test("detects source languages from path and pretty prints rendered json", () => {

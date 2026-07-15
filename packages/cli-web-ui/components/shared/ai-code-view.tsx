@@ -7,7 +7,6 @@ export interface AiCodeViewProps {
   language?: string | null;
   className?: string;
   testId?: string;
-  fillHeight?: boolean;
   ariaLabel?: string;
   wrapLongLines?: boolean;
 }
@@ -17,7 +16,6 @@ export function AiCodeView({
   language = null,
   className,
   testId,
-  fillHeight = false,
   ariaLabel,
   wrapLongLines = false,
 }: AiCodeViewProps) {
@@ -27,11 +25,8 @@ export function AiCodeView({
     <div
       aria-label={ariaLabel}
       className={cn(
-        "ai-code-view min-w-0 max-w-full",
-        fillHeight
-          ? "min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
-          : "overflow-visible",
-        wrapLongLines && !fillHeight && "overflow-x-hidden",
+        "ai-code-view min-w-0 max-w-full overflow-visible",
+        wrapLongLines && "overflow-x-hidden",
         className,
       )}
       data-language={normalizedLanguage ?? "plaintext"}

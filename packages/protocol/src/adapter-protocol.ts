@@ -16,11 +16,16 @@ import type {
   WorkbenchAdapterOperation,
 } from "./adapter-manifest.ts";
 import {
+  isWorkbenchAdapterOperation,
   normalizeWorkbenchAdapterOperation,
 } from "./adapter-manifest.ts";
 import {
   normalizeSurfaceSnapshotFiles,
 } from "./snapshot-files.ts";
+import {
+  rejectUnknownKeys as rejectUnknownJsonKeys,
+  requiredRecord as requiredJsonRecord,
+} from "./validation.ts";
 
 export const WORKBENCH_ADAPTER_PROTOCOL = "workbench.adapter.v3";
 export const WORKBENCH_ADAPTER_RESULT_PROTOCOL = "workbench.adapter-result.v1";
@@ -81,7 +86,7 @@ export interface WorkbenchAdapterOperationRequest {
   };
 }
 
-export interface WorkbenchAdapterProgress {
+interface WorkbenchAdapterProgress {
   projectId: string;
   runId: string;
   jobId: string;
@@ -90,7 +95,7 @@ export interface WorkbenchAdapterProgress {
   target: WorkbenchAdapterProgressTarget;
 }
 
-export interface WorkbenchAdapterProgressTarget {
+interface WorkbenchAdapterProgressTarget {
   url: string;
   token: string;
   ownerUserId?: string;
@@ -145,7 +150,7 @@ export function normalizeWorkbenchAdapterOperationRequest(
     "traces",
     "enginePrivate",
   ]);
-  const operation = requiredOperation(record.operation, "adapter request operation");
+  const operation = normalizeWorkbenchAdapterOperation(record.operation, "adapter request operation");
   const use = requiredString(invocation.use, "adapter request invocation.use");
   return {
     protocol: WORKBENCH_ADAPTER_PROTOCOL,
@@ -244,7 +249,10 @@ export function normalizeWorkbenchAdapterOperationResult(
   if (record.protocol !== WORKBENCH_ADAPTER_RESULT_PROTOCOL) {
     throw new Error(`${WORKBENCH_ADAPTER_RESULT_FILE}.protocol must be ${WORKBENCH_ADAPTER_RESULT_PROTOCOL}.`);
   }
-  const resultOperation = requiredOperation(record.operation, `${WORKBENCH_ADAPTER_RESULT_FILE}.operation`);
+  const resultOperation = normalizeWorkbenchAdapterOperation(
+    record.operation,
+    `${WORKBENCH_ADAPTER_RESULT_FILE}.operation`,
+  );
   const expectedOperation = operation
     ? normalizeWorkbenchAdapterOperation(operation, "expected adapter result operation")
     : undefined;
@@ -262,6 +270,15 @@ export function normalizeWorkbenchAdapterOperationResult(
     ...(record.feedback !== undefined ? { feedback: record.feedback as Json } : {}),
     ...(record.usage !== undefined ? { usage: normalizeUsageSummary(record.usage) } : {}),
   };
+}
+
+export function isWorkbenchAdapterOperationResult(value: unknown): value is WorkbenchAdapterOperationResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return record.protocol === WORKBENCH_ADAPTER_RESULT_PROTOCOL &&
+    isWorkbenchAdapterOperation(record.operation);
 }
 
 export function assertWorkbenchAdapterOperationResultOk(
@@ -414,35 +431,6 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
     typeof value === "object" &&
     !Array.isArray(value) &&
     Object.values(value).every((entry) => typeof entry === "number" && Number.isFinite(entry));
-}
-
-function requiredJsonRecord(
-  value: unknown,
-  label: string,
-): Record<string, Json> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value as Record<string, Json>;
-}
-
-function rejectUnknownJsonKeys(
-  record: Record<string, unknown>,
-  label: string,
-  allowed: readonly string[],
-): void {
-  const allowedSet = new Set(allowed);
-  const unknown = Object.keys(record).filter((key) => !allowedSet.has(key));
-  if (unknown.length > 0) {
-    throw new Error(`${label} includes unsupported fields: ${unknown.join(", ")}.`);
-  }
-}
-
-function requiredOperation(
-  value: unknown,
-  label: string,
-): WorkbenchAdapterOperation {
-  return normalizeWorkbenchAdapterOperation(value, label);
 }
 
 function requiredString(value: unknown, label: string): string {

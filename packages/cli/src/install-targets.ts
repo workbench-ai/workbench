@@ -2,28 +2,29 @@ import { promises as fs, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { hashJson, quoteShellArg, WorkbenchCodedError, type Json, type SurfaceSnapshotFile } from "@workbench-ai/workbench-core";
+import type { Json, SurfaceSnapshotFile } from "@workbench-ai/workbench-contract";
+import { hashJson, quoteShellArg, WorkbenchCodedError } from "@workbench-ai/workbench-core";
 import YAML from "yaml";
 
 const INSTALLS_SCHEMA = "workbench.skill-installs.v1";
 const INSTALLS_FILE = ".workbench-installs.json";
 
-export type SkillAccessTargetId = "codex" | "claude";
-export type SkillAccessScope = "folder" | "global";
-export type WorkbenchSkillAccessStatus = "current" | "modified" | "missing" | "project" | "unmanaged" | "duplicate-name";
+type SkillAccessTargetId = "codex" | "claude";
+type SkillAccessScope = "folder" | "global";
+type WorkbenchSkillAccessStatus = "current" | "modified" | "missing" | "project" | "unmanaged" | "duplicate-name";
 
-export interface WorkbenchInstallSnapshot {
+interface WorkbenchInstallSnapshot {
   name: string;
   files: SurfaceSnapshotFile[];
 }
 
-export interface WorkbenchInstallProvenanceInput {
+interface WorkbenchInstallProvenanceInput {
   handle: string;
   versionId: string;
   baseUrl: string;
 }
 
-export interface WorkbenchInstallLedgerRecord extends WorkbenchInstallProvenanceInput {
+interface WorkbenchInstallLedgerRecord extends WorkbenchInstallProvenanceInput {
   targetId: SkillAccessTargetId;
   skillName: string;
   installedAt: string;
@@ -35,16 +36,15 @@ interface WorkbenchInstallLedgerFile {
   skills: Record<string, WorkbenchInstallLedgerRecord>;
 }
 
-export interface SkillAccessTargetRoot {
+interface SkillAccessTargetRoot {
   target: SkillAccessTargetId;
   displayName: string;
   scope: SkillAccessScope;
   root: string;
   writable: boolean;
-  deprecated?: boolean;
 }
 
-export interface SkillAccessTargetView {
+interface SkillAccessTargetView {
   id: SkillAccessTargetId;
   displayName: string;
   scope: SkillAccessScope;
@@ -52,7 +52,7 @@ export interface SkillAccessTargetView {
   writeRoot: string;
 }
 
-export interface WorkbenchInstalledSkill {
+interface WorkbenchInstalledSkill {
   target: SkillAccessTargetId;
   targetDisplayName: string;
   scope: SkillAccessScope;
@@ -68,7 +68,6 @@ export interface WorkbenchInstalledSkill {
   contentHash?: string;
   status: WorkbenchSkillAccessStatus;
   workbenchProject?: boolean;
-  deprecatedRoot?: boolean;
 }
 
 export interface WorkbenchSkillAccessInventory {
@@ -81,7 +80,7 @@ export interface WorkbenchSkillAccessInventory {
   next: null;
 }
 
-export interface WorkbenchInstallTargetResult {
+interface WorkbenchInstallTargetResult {
   target: SkillAccessTargetId;
   scope: SkillAccessScope;
   root: string;
@@ -96,22 +95,13 @@ export interface WorkbenchInstallTargetResult {
   ledgerPath: string;
 }
 
-export interface WorkbenchInstallTargetsResult {
-  result: "installed" | "planned" | "blocked" | "unchanged";
-  requiresOverwrite?: boolean;
-  remediation?: string;
-  scope: SkillAccessScope;
+export interface WorkbenchInstallResult extends WorkbenchInstallTargetResult {
   dir?: string;
-  target: SkillAccessTargetId;
   currentAgent?: SkillAccessTargetId;
   skill: string;
-  metadataChanged?: boolean;
-  filesCopied: number;
-  contentHash: string;
-  targets: WorkbenchInstallTargetResult[];
 }
 
-export function resolveSkillAccessTargets(options: {
+function resolveSkillAccessTargets(options: {
   target?: string;
   scope?: string;
   dir?: string;
@@ -129,10 +119,10 @@ export function resolveSkillAccessTargets(options: {
   const target = parseRequestedTarget(options.target);
   const requestedScope = parseRequestedScope(options.scope);
   if (options.dir && requestedScope === "global") {
-    throw new WorkbenchCodedError("usage", "workbench skills/install --dir is only valid with folder scope.", {
+    throw new WorkbenchCodedError("usage", "workbench skill list/install --dir is only valid with folder scope.", {
       remediation: options.write
-        ? `workbench install ${options.sourceForRemediation ?? "OWNER/SKILL"} --scope folder --dir ${quoteShellArg(path.resolve(options.dir))}`
-        : `workbench skills --scope folder --dir ${quoteShellArg(path.resolve(options.dir))}`,
+        ? `workbench skill install ${options.sourceForRemediation ?? "OWNER/SKILL"} --scope folder --dir ${quoteShellArg(path.resolve(options.dir))}`
+        : `workbench skill list --scope folder --dir ${quoteShellArg(path.resolve(options.dir))}`,
       subject: { scope: requestedScope, dir: path.resolve(options.dir) },
       exitCode: 2,
     });
@@ -169,14 +159,6 @@ export async function readInstalledSkillsInventory(options: {
     write: false,
     env: options.env,
   }));
-}
-
-export async function observeCurrentInstalledSkillsInventory(options: {
-  scope?: string;
-  dir?: string;
-  env?: NodeJS.ProcessEnv;
-} = {}): Promise<WorkbenchSkillAccessInventory> {
-  return readInventoryForRequest(observeCurrentSkillAccessTargets(options));
 }
 
 async function readInventoryForRequest(request: {
@@ -326,7 +308,7 @@ function skillTargetPriority(target: SkillAccessTargetId, currentAgent?: SkillAc
   return target === "codex" ? 1 : 2;
 }
 
-export async function installSnapshotToSkillTargets(options: {
+export async function installSnapshotToSkillTarget(options: {
   snapshot: WorkbenchInstallSnapshot;
   overwrite: boolean;
   dryRun: boolean;
@@ -337,7 +319,7 @@ export async function installSnapshotToSkillTargets(options: {
   dir?: string;
   installedAt?: string;
   env?: NodeJS.ProcessEnv;
-}): Promise<WorkbenchInstallTargetsResult> {
+}): Promise<WorkbenchInstallResult> {
   const request = resolveSkillAccessTargets({
     target: options.target,
     scope: options.scope,
@@ -348,57 +330,35 @@ export async function installSnapshotToSkillTargets(options: {
   });
   const packageFiles = installPackageFiles(options.snapshot.files);
   if (!packageFiles.some((file) => file.path === "SKILL.md")) {
-    throw new WorkbenchCodedError("install_failed", `Published source ${options.provenance.handle} does not contain SKILL.md.`, {
+    throw new WorkbenchCodedError("install_failed", `Published package ${options.provenance.handle} does not contain SKILL.md.`, {
       subject: { source: options.provenance.handle },
       exitCode: 1,
     });
   }
   const skillName = canonicalSkillDirectoryName({ name: options.snapshot.name, files: packageFiles });
   const contentHash = contentHashForFiles(packageFiles);
-  const target = request.targets[0]!.id;
   const overwriteRemediation = installOverwriteRemediation({
     handle: options.sourceForRemediation ?? options.provenance.handle,
     target: request.target,
     scope: request.scopes[0] ?? "folder",
     dir: request.scopes.includes("folder") && options.dir ? request.dir : undefined,
   });
-  const results: WorkbenchInstallTargetResult[] = [];
-  for (const target of request.targets) {
-    results.push(await installPackageInRoot({
-      target,
-      skillName,
-      files: packageFiles,
-      contentHash,
-      overwrite: options.overwrite,
-      dryRun: options.dryRun,
-      provenance: options.provenance,
-      overwriteRemediation,
-      installedAt: options.installedAt,
-    }));
-  }
-  const filesCopied = results.reduce((sum, result) => sum + result.filesCopied, 0);
-  const blocked = results.some((entry) => entry.result === "blocked");
-  const unchanged = results.every((entry) => entry.result === "unchanged");
-  const metadataChanged = results.some((entry) => entry.metadataChanged);
-  const result = options.dryRun
-    ? blocked ? "blocked" : unchanged ? "unchanged" : "planned"
-    : unchanged
-      ? "unchanged"
-      : "installed";
-  const remediation = results.find((entry) => entry.remediation)?.remediation;
+  const result = await installPackageInRoot({
+    target: request.targets[0]!,
+    skillName,
+    files: packageFiles,
+    contentHash,
+    overwrite: options.overwrite,
+    dryRun: options.dryRun,
+    provenance: options.provenance,
+    overwriteRemediation,
+    installedAt: options.installedAt,
+  });
   return {
-    result,
-    ...(blocked ? { requiresOverwrite: true } : {}),
-    ...(remediation ? { remediation } : {}),
-    scope: request.scopes[0] ?? "folder",
+    ...result,
     ...(request.dir ? { dir: request.dir } : {}),
-    target,
     ...(request.currentAgent ? { currentAgent: request.currentAgent } : {}),
     skill: skillName,
-    ...(metadataChanged ? { metadataChanged: true } : {}),
-    filesCopied,
-    contentHash,
-    targets: results,
   };
 }
 
@@ -436,7 +396,6 @@ export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventor
         scope: root.scope,
         path: root.root,
         writable: root.writable,
-        ...(root.deprecated ? { deprecated: true } : {}),
       })),
     })),
     skills: inventory.skills.map((skill) => ({
@@ -455,13 +414,12 @@ export function installedInventoryToJson(inventory: WorkbenchSkillAccessInventor
       ...(skill.handle ? { handle: skill.handle } : {}),
       ...(skill.baseUrl ? { baseUrl: skill.baseUrl } : {}),
       ...(skill.installedAt ? { installedAt: skill.installedAt } : {}),
-      ...(skill.deprecatedRoot ? { deprecatedRoot: true } : {}),
     })),
     next: inventory.next,
   };
 }
 
-export function installResultToJson(result: WorkbenchInstallTargetsResult): Record<string, Json> {
+export function installResultToJson(result: WorkbenchInstallResult): Record<string, Json> {
   return {
     result: result.result,
     ...(result.requiresOverwrite ? { requiresOverwrite: true } : {}),
@@ -471,23 +429,13 @@ export function installResultToJson(result: WorkbenchInstallTargetsResult): Reco
     target: result.target,
     ...(result.currentAgent ? { currentAgent: result.currentAgent } : {}),
     skill: result.skill,
+    root: result.root,
+    destination: result.destination,
+    previous: result.previous,
     ...(result.metadataChanged ? { metadataChanged: true } : {}),
     filesCopied: result.filesCopied,
     contentHash: result.contentHash,
-    targets: result.targets.map((target) => ({
-      target: target.target,
-      scope: target.scope,
-      root: target.root,
-      destination: target.destination,
-      previous: target.previous,
-      result: target.result,
-      ...(target.requiresOverwrite ? { requiresOverwrite: true } : {}),
-      ...(target.remediation ? { remediation: target.remediation } : {}),
-      ...(target.metadataChanged ? { metadataChanged: true } : {}),
-      filesCopied: target.filesCopied,
-      contentHash: target.contentHash,
-      ledgerPath: target.ledgerPath,
-    })),
+    ledgerPath: result.ledgerPath,
     next: result.remediation ?? null,
   };
 }
@@ -520,7 +468,7 @@ export function installPackageFiles(files: readonly SurfaceSnapshotFile[]): Surf
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
-export function canonicalSkillDirectoryName(snapshot: WorkbenchInstallSnapshot): string {
+function canonicalSkillDirectoryName(snapshot: WorkbenchInstallSnapshot): string {
   if (isValidDirectoryName(snapshot.name.trim())) {
     return installStoreSkillDirectoryName(snapshot.name);
   }
@@ -541,8 +489,8 @@ function parseRequestedTarget(value: string | undefined): SkillAccessTargetId | 
   if (value === "codex" || value === "claude") {
     return value;
   }
-  throw new WorkbenchCodedError("usage", "workbench skills/install --target expects codex or claude.", {
-    remediation: "workbench skills --target codex",
+  throw new WorkbenchCodedError("usage", "workbench skill list/install --target expects codex or claude.", {
+    remediation: "workbench skill list --target codex",
     subject: { target: value },
     exitCode: 2,
   });
@@ -555,8 +503,8 @@ function parseRequestedScope(value: string | undefined): SkillAccessScope | unde
   if (value === "folder" || value === "global") {
     return value;
   }
-  throw new WorkbenchCodedError("usage", "workbench skills/install --scope expects folder or global.", {
-    remediation: "workbench skills --scope global",
+  throw new WorkbenchCodedError("usage", "workbench skill list/install --scope expects folder or global.", {
+    remediation: "workbench skill list --scope global",
     subject: { scope: value },
     exitCode: 2,
   });
@@ -564,34 +512,11 @@ function parseRequestedScope(value: string | undefined): SkillAccessScope | unde
 
 function failUndetectedInstallTarget(source: string | undefined): never {
   const remediationSource = source ?? "OWNER/SKILL";
-  throw new WorkbenchCodedError("usage", "workbench install could not detect the current coding agent.", {
-    remediation: `workbench install ${remediationSource} --target codex`,
+  throw new WorkbenchCodedError("usage", "workbench skill install could not detect the current coding agent.", {
+    remediation: `workbench skill install ${remediationSource} --target codex`,
     subject: { supportedTargets: ["codex", "claude"] },
     exitCode: 2,
   });
-}
-
-function observeCurrentSkillAccessTargets(options: {
-  scope?: string;
-  dir?: string;
-  env?: NodeJS.ProcessEnv;
-}): {
-  scopes: SkillAccessScope[];
-  dir?: string;
-  currentAgent?: SkillAccessTargetId;
-  targets: SkillAccessTargetView[];
-} {
-  const env = options.env ?? process.env;
-  const detected = detectCurrentSkillAccessTargets(env);
-  const scope: SkillAccessScope = parseRequestedScope(options.scope) ?? "folder";
-  const resolvedDir = scope === "folder" ? path.resolve(options.dir ?? process.cwd()) : undefined;
-  const currentAgent = detected.length === 1 ? detected[0] : undefined;
-  return {
-    scopes: [scope],
-    ...(resolvedDir ? { dir: resolvedDir } : {}),
-    ...(currentAgent ? { currentAgent } : {}),
-    targets: currentAgent ? [targetView(currentAgent, scope, resolvedDir, env)] : [],
-  };
 }
 
 function detectCurrentSkillAccessTargets(env: NodeJS.ProcessEnv): SkillAccessTargetId[] {
@@ -627,25 +552,13 @@ function targetView(
 
 function codexRoots(scope: SkillAccessScope, dir: string | undefined, env: NodeJS.ProcessEnv): SkillAccessTargetRoot[] {
   if (scope === "global") {
-    const roots: SkillAccessTargetRoot[] = [{
+    return [{
       target: "codex",
       displayName: "Codex",
       scope,
       root: path.join(homeDirectory(env), ".agents", "skills"),
       writable: true,
     }];
-    const codexHome = env.CODEX_HOME?.trim();
-    if (codexHome) {
-      roots.push({
-        target: "codex",
-        displayName: "Codex",
-        scope,
-        root: path.join(codexHome, "skills"),
-        writable: false,
-        deprecated: true,
-      });
-    }
-    return dedupeRoots(roots);
   }
   const folder = dir ?? process.cwd();
   return codexFolderReadRoots(folder).map((root) => ({
@@ -722,17 +635,6 @@ function findGitRootSync(start: string): string | null {
   }
 }
 
-function dedupeRoots(roots: SkillAccessTargetRoot[]): SkillAccessTargetRoot[] {
-  const seen = new Set<string>();
-  return roots.filter((root) => {
-    if (seen.has(root.root)) {
-      return false;
-    }
-    seen.add(root.root);
-    return true;
-  });
-}
-
 async function readRootInventory(root: SkillAccessTargetRoot): Promise<WorkbenchInstalledSkill[]> {
   const ledger = await readInstallLedger(root.root);
   const rows: WorkbenchInstalledSkill[] = [];
@@ -788,7 +690,6 @@ async function readRootInventory(root: SkillAccessTargetRoot): Promise<Workbench
       ...(record?.handle ? { handle: record.handle } : {}),
       ...(record?.baseUrl ? { baseUrl: record.baseUrl } : {}),
       ...(record?.installedAt ? { installedAt: record.installedAt } : {}),
-      ...(root.deprecated ? { deprecatedRoot: true } : {}),
     });
   }
   rows.push(...missingRowsForLedger(root, ledger, seenDirectories));
@@ -824,7 +725,6 @@ function missingRowsForLedger(
       baseUrl: record.baseUrl,
       installedAt: record.installedAt,
       contentHash: record.contentHash,
-      ...(root.deprecated ? { deprecatedRoot: true } : {}),
     }));
 }
 
@@ -1017,25 +917,30 @@ async function writeInstallLedgerRecord(
 }
 
 async function readInstallLedger(root: string): Promise<WorkbenchInstallLedgerFile> {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(await fs.readFile(installsPathForRoot(root), "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    parsed = JSON.parse(await fs.readFile(installsPathForRoot(root), "utf8")) as unknown;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return emptyLedger();
     }
-    const record = parsed as Record<string, unknown>;
-    if (record.schema !== INSTALLS_SCHEMA || !record.skills || typeof record.skills !== "object" || Array.isArray(record.skills)) {
-      return emptyLedger();
-    }
-    return {
-      schema: INSTALLS_SCHEMA,
-      skills: Object.fromEntries(Object.entries(record.skills as Record<string, unknown>).flatMap(([key, value]) => {
-        const valid = validLedgerRecord(value);
-        return valid ? [[key, valid]] : [];
-      })),
-    };
-  } catch {
-    return emptyLedger();
+    throw error;
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new WorkbenchCodedError("install_state_invalid", `Invalid Workbench install ledger: ${installsPathForRoot(root)}`, { exitCode: 1 });
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record.schema !== INSTALLS_SCHEMA || !record.skills || typeof record.skills !== "object" || Array.isArray(record.skills)) {
+    throw new WorkbenchCodedError("install_state_invalid", `Invalid Workbench install ledger: ${installsPathForRoot(root)}`, { exitCode: 1 });
+  }
+  const skills = Object.fromEntries(Object.entries(record.skills as Record<string, unknown>).map(([key, value]) => {
+    const valid = validLedgerRecord(value);
+    if (!valid) {
+      throw new WorkbenchCodedError("install_state_invalid", `Invalid Workbench install ledger record: ${key}`, { exitCode: 1 });
+    }
+    return [key, valid];
+  }));
+  return { schema: INSTALLS_SCHEMA, skills };
 }
 
 function emptyLedger(): WorkbenchInstallLedgerFile {

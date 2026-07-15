@@ -1,32 +1,6 @@
 import type { ReactNode } from "react";
 
-import { cn } from "../../lib/utils";
 import { Skeleton } from "../ui/skeleton";
-
-export function PreviewLoadingState({
-  label = "Preview pending.",
-  testId = "preview-loading-state",
-  className,
-}: {
-  label?: ReactNode;
-  testId?: string;
-  className?: string;
-}) {
-  return (
-    <div
-      className={cn("flex min-w-0 flex-col py-2", className)}
-      aria-busy="true"
-      aria-label={typeof label === "string" ? label : undefined}
-      data-testid={testId}
-    >
-      <span className="sr-only">{label}</span>
-      <div className="flex flex-col gap-3">
-        <Skeleton className="h-5 w-48" />
-        <Skeleton className="h-64 w-full" />
-      </div>
-    </div>
-  );
-}
 
 export function PreviewRendererLoadingState({
   label,

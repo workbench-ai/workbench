@@ -1,4 +1,5 @@
 import { MarkerType, type Edge, type Node } from "@xyflow/react";
+import { compareWorkbenchVersions } from "@workbench-ai/workbench-contract";
 import type {
   WorkbenchJob,
   WorkbenchLineageEdge,
@@ -9,22 +10,22 @@ import type {
 import { formatVersionDisplayName } from "./results-metrics";
 import { runScore } from "./format";
 
-export const VERSION_LINEAGE_NODE_WIDTH = 224;
+const VERSION_LINEAGE_NODE_WIDTH = 224;
 const VERSION_LINEAGE_NODE_INITIAL_HEIGHT = 116;
 const VERSION_LINEAGE_NODE_CLASS_NAME =
-  "nodrag nopan grid min-h-28 w-full content-start gap-1.5 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted/40 data-[active=true]:border-primary/20 data-[active=true]:bg-muted/35 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring";
+  "nodrag nopan grid min-h-28 w-full content-start gap-1.5 rounded-xl border border-border/70 bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted/40 data-[selected=true]:border-primary/20 data-[selected=true]:bg-muted/35 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring";
 
-export interface VersionLineageGraph {
+interface VersionLineageGraph {
   roots: string[];
   nodes: VersionLineageNodeData[];
   edges: WorkbenchLineageEdge[];
   edgeCount: number;
 }
 
-export interface VersionLineageNodeData extends Record<string, unknown> {
+interface VersionLineageNodeData extends Record<string, unknown> {
   version: WorkbenchVersion;
   label: string;
-  active: boolean;
+  selected: boolean;
   published: boolean;
   score: number | null;
   improvedFromLabel: string | null;
@@ -32,10 +33,6 @@ export interface VersionLineageNodeData extends Record<string, unknown> {
 
 export type VersionLineageNode = Node<VersionLineageNodeData, "version">;
 export type VersionLineageEdge = Edge<Record<string, never>>;
-export interface VersionLineageFlow {
-  nodes: VersionLineageNode[];
-  edges: VersionLineageEdge[];
-}
 
 interface ElkInstance {
   layout(graph: Record<string, unknown>): Promise<{
@@ -61,11 +58,11 @@ const BASE_EDGE_STYLE = {
   strokeLinecap: "round" as const,
 };
 
-export function versionLineageNodeId(versionId: string): string {
+function versionLineageNodeId(versionId: string): string {
   return `version:${versionId}`;
 }
 
-export function versionLineageNodeTestId(versionId: string): string {
+function versionLineageNodeTestId(versionId: string): string {
   return `lineage-node-${versionId}`;
 }
 
@@ -78,12 +75,12 @@ export function createVersionLineageNodeDomAttributes(
 export function buildVersionLineageGraph(args: {
   versions: readonly WorkbenchVersion[];
   lineage: readonly WorkbenchLineageEdge[];
-  currentVersionId?: string | null;
+  selectedVersionId?: string | null;
   publishedVersionId?: string | null;
   jobs?: readonly WorkbenchJob[];
   runs?: readonly WorkbenchRun[];
 }): VersionLineageGraph {
-  const versions = [...args.versions].sort(compareVersions);
+  const versions = [...args.versions].sort(compareWorkbenchVersions);
   const versionById = new Map(versions.map((version) => [version.id, version]));
   const childrenByParent = new Map<string, WorkbenchVersion[]>();
   const childIds = new Set<string>();
@@ -108,7 +105,7 @@ export function buildVersionLineageGraph(args: {
   }
 
   for (const children of childrenByParent.values()) {
-    children.sort(compareVersions);
+    children.sort(compareWorkbenchVersions);
   }
 
   const rootVersions = versions.filter((version) => !childIds.has(version.id));
@@ -136,7 +133,7 @@ export function buildVersionLineageGraph(args: {
     return {
       version,
       label: formatVersionDisplayName(version.id, versions),
-      active: args.currentVersionId === version.id,
+      selected: args.selectedVersionId === version.id,
       published: args.publishedVersionId === version.id,
       score: scoreByRunId.get(latestScoredRunByVersion.get(version.id)?.id ?? "") ?? null,
       improvedFromLabel: improvedFromParent
@@ -151,11 +148,11 @@ export function buildVersionLineageGraph(args: {
 export async function buildVersionLineageFlow(args: {
   versions: readonly WorkbenchVersion[];
   lineage: readonly WorkbenchLineageEdge[];
-  currentVersionId?: string | null;
+  selectedVersionId?: string | null;
   publishedVersionId?: string | null;
   jobs?: readonly WorkbenchJob[];
   runs?: readonly WorkbenchRun[];
-}): Promise<VersionLineageFlow> {
+}) {
   const graph = buildVersionLineageGraph(args);
   const nodes = createVersionLineageNodes(graph.nodes);
   const edgeRefs = createVersionLineageEdgeRefs(graph.edges);
@@ -169,12 +166,12 @@ export async function buildVersionLineageFlow(args: {
 export function buildVersionLineageFlowFromPositions(args: {
   versions: readonly WorkbenchVersion[];
   lineage: readonly WorkbenchLineageEdge[];
-  currentVersionId?: string | null;
+  selectedVersionId?: string | null;
   publishedVersionId?: string | null;
   jobs?: readonly WorkbenchJob[];
   runs?: readonly WorkbenchRun[];
   positions: Record<string, { x: number; y: number }>;
-}): VersionLineageFlow {
+}) {
   const graph = buildVersionLineageGraph(args);
   const nodes = createVersionLineageNodes(graph.nodes).map((node) => ({
     ...node,
@@ -201,13 +198,13 @@ function createVersionLineageNodes(nodes: readonly VersionLineageNodeData[]): Ve
     ariaLabel: [
       node.label,
       node.version.message,
-      node.active ? "current" : null,
+      node.selected ? "selected" : null,
       node.published ? "published" : null,
       node.improvedFromLabel ? `improved from ${node.improvedFromLabel}` : null,
     ].filter(Boolean).join(", "),
     domAttributes: createVersionLineageNodeDomAttributes({
       "data-testid": versionLineageNodeTestId(node.version.id),
-      "data-active": node.active ? "true" : undefined,
+      "data-selected": node.selected ? "true" : undefined,
     }),
     style: {
       width: VERSION_LINEAGE_NODE_WIDTH,
@@ -287,8 +284,4 @@ async function getElkInstance(): Promise<ElkInstance> {
     return new Elk();
   });
   return elkInstancePromise;
-}
-
-function compareVersions(left: WorkbenchVersion, right: WorkbenchVersion): number {
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }

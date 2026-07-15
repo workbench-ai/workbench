@@ -12,6 +12,7 @@ import type {
   WorkbenchTrace,
   UsageSummary,
 } from "./index";
+import { compareWorkbenchNaturalText } from "./ordering.js";
 
 export interface WorkbenchRunEvidenceView {
   runId: string;
@@ -19,6 +20,28 @@ export interface WorkbenchRunEvidenceView {
   jobGroups: WorkbenchRunEvidenceJobGroupResult[];
   cases: WorkbenchRunEvidenceCaseResult[];
   jobs: WorkbenchRunEvidenceJob[];
+}
+
+export function workbenchRunOwnsJob(
+  run: Pick<WorkbenchRun, "jobIds">,
+  job: Pick<WorkbenchJob, "id">,
+): boolean {
+  return run.jobIds.includes(job.id);
+}
+
+export function workbenchRunStatusFromJobs(
+  jobs: readonly Pick<WorkbenchJob, "status">[],
+  fallback: WorkbenchRunStatus = "succeeded",
+): WorkbenchRunStatus {
+  if (jobs.length === 0) {
+    return fallback;
+  }
+  for (const status of ["running", "queued", "failed", "canceled"] as const) {
+    if (jobs.some((job) => job.status === status)) {
+      return status;
+    }
+  }
+  return "succeeded";
 }
 
 export interface WorkbenchRunEvidenceSkillIdentity {
@@ -65,7 +88,7 @@ export interface WorkbenchRunEvidenceCaseResult extends WorkbenchRunEvidenceAgen
   sample: number;
   status: WorkbenchJobStatus;
   selectedJobId: string;
-  execute?: WorkbenchRunEvidenceJobPhase;
+  run?: WorkbenchRunEvidenceJobPhase;
   grade?: WorkbenchRunEvidenceJobPhase;
   score?: number;
   report: WorkbenchJobReport;
@@ -75,7 +98,7 @@ export interface WorkbenchRunEvidenceCaseResult extends WorkbenchRunEvidenceAgen
 
 export interface WorkbenchRunEvidenceJobPhase {
   jobId: string;
-  role?: WorkbenchJobRole;
+  role: WorkbenchJobRole;
   status: WorkbenchJobStatus;
   score?: number;
   durationMs?: number;
@@ -86,7 +109,7 @@ export interface WorkbenchRunEvidenceJobPhase {
 export interface WorkbenchRunEvidenceJob extends WorkbenchRunEvidenceAgentIdentity {
   jobId: string;
   runId: string;
-  role?: WorkbenchJobRole;
+  role: WorkbenchJobRole;
   caseId: string;
   sample: number;
   status: WorkbenchJobStatus;
@@ -154,7 +177,7 @@ function preferredSampleResultJobs(jobs: readonly WorkbenchJob[]): readonly Work
 }
 
 function jobHasSampleResult(job: WorkbenchJob): boolean {
-  return job.status === "succeeded" || jobScore(job) !== undefined;
+  return job.status === "succeeded" || workbenchJobScore(job) !== undefined;
 }
 
 function uniqueCaseSampleCount(jobs: readonly Pick<WorkbenchJob, "caseId" | "sample">[]): number {
@@ -217,11 +240,11 @@ export function buildWorkbenchJobReport(
   const unitKeys = new Set<string>();
   const roles = new Map<WorkbenchJobRole, WorkbenchJob[]>();
   for (const job of jobs) {
-    const unitKey = options.unitKey?.(job) ?? defaultJobReportUnitKey(job);
+    const unitKey = options.unitKey?.(job) ?? caseSampleMeasurementKey(job);
     if (unitKey) {
       unitKeys.add(unitKey);
     }
-    const role = normalizedJobReportRole(job);
+    const role = job.role;
     const roleGroup = roles.get(role);
     if (roleGroup) {
       roleGroup.push(job);
@@ -244,11 +267,49 @@ export function buildWorkbenchJobReport(
   };
 }
 
-export function workbenchJobReportRole(
-  report: WorkbenchJobReport | undefined,
-  role: WorkbenchJobRole,
-): WorkbenchJobRoleReport | undefined {
-  return report?.roles.find((entry) => entry.role === role);
+export function mergeWorkbenchJobReports(
+  reports: readonly WorkbenchJobReport[],
+): WorkbenchJobReport | undefined {
+  if (reports.length === 0) {
+    return undefined;
+  }
+  if (reports.length === 1) {
+    return reports[0];
+  }
+
+  const roles = new Map<WorkbenchJobRole, WorkbenchJobRoleReport>();
+  for (const report of reports) {
+    for (const role of report.roles) {
+      roles.set(role.role, mergeWorkbenchJobRoleReports(roles.get(role.role), role));
+    }
+  }
+
+  const totalDurationMs = sumDefinedNumbers(reports.map((report) => report.totalDurationMs));
+  return {
+    unitCount: reports.reduce((sum, report) => sum + report.unitCount, 0),
+    jobCount: reports.reduce((sum, report) => sum + report.jobCount, 0),
+    ...(totalDurationMs !== undefined ? { totalDurationMs } : {}),
+    roles: [...roles.values()].sort(compareRoleReports),
+  };
+}
+
+function mergeWorkbenchJobRoleReports(
+  current: WorkbenchJobRoleReport | undefined,
+  next: WorkbenchJobRoleReport,
+): WorkbenchJobRoleReport {
+  const totalDurationMs = sumDefinedNumbers([current?.totalDurationMs, next.totalDurationMs]);
+  const costUsd = sumCosts([current?.costUsd, next.costUsd]);
+  return {
+    role: next.role,
+    jobCount: (current?.jobCount ?? 0) + next.jobCount,
+    queued: (current?.queued ?? 0) + next.queued,
+    running: (current?.running ?? 0) + next.running,
+    succeeded: (current?.succeeded ?? 0) + next.succeeded,
+    failed: (current?.failed ?? 0) + next.failed,
+    canceled: (current?.canceled ?? 0) + next.canceled,
+    ...(totalDurationMs !== undefined ? { totalDurationMs } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
 }
 
 export function workbenchJobReportTotalCostUsd(report: WorkbenchJobReport | undefined): number | undefined {
@@ -405,26 +466,13 @@ function jobStatusCounts(jobs: readonly WorkbenchJob[]): Record<WorkbenchJobStat
   return counts;
 }
 
-function defaultJobReportUnitKey(job: WorkbenchJob): string {
-  return [
-    job.versionId,
-    job.skillName,
-    job.skillBundleHash,
-    job.evalHash,
-    job.agentName,
-    job.agentHash,
-    job.caseId,
-    job.sample,
-  ].join("\0");
-}
-
-function normalizedJobReportRole(job: Pick<WorkbenchJob, "role">): WorkbenchJobRole {
-  return job.role ?? "execute";
+function caseSampleMeasurementKey(job: WorkbenchJob): string {
+  return `${measurementKeyFromJob(job)}\0${job.caseId}\0${job.sample}`;
 }
 
 function compareRoleReports(left: WorkbenchJobRoleReport, right: WorkbenchJobRoleReport): number {
   return roleOrder(left.role) - roleOrder(right.role) ||
-    left.role.localeCompare(right.role, undefined, { numeric: true, sensitivity: "base" });
+    compareWorkbenchNaturalText(left.role, right.role);
 }
 
 function elapsedMsForJobs(jobs: readonly WorkbenchJob[], nowIso: string | undefined): number | undefined {
@@ -502,25 +550,22 @@ function jobReportCostFromUsage(role: WorkbenchJobRole, usage: UsageSummary | un
 }
 
 function jobReportScopedUsageCost(role: WorkbenchJobRole, usage: UsageSummary): number | undefined {
-  if (role === "execute" || role === "runner") {
+  if (role === "run") {
     return usage.runner?.costUsd;
   }
-  if (role === "grade" || role === "engine") {
+  if (role === "grade") {
     return usage.engine?.costUsd;
   }
-  if (role === "improve" || role === "improver") {
+  if (role === "improve") {
     return usage.improver?.costUsd;
   }
   return undefined;
 }
 
 function jobReportRoleHasScopedUsage(role: WorkbenchJobRole): boolean {
-  return role === "execute" ||
-    role === "runner" ||
+  return role === "run" ||
     role === "grade" ||
-    role === "engine" ||
-    role === "improve" ||
-    role === "improver";
+    role === "improve";
 }
 
 function usageHasRoleScopedCost(usage: UsageSummary): boolean {
@@ -551,15 +596,15 @@ export function buildWorkbenchRunEvidenceView(
   const jobs = jobsForRunEvidence(snapshot, run);
   const evidenceJobs = jobs.map((job) => jobForEvidence(snapshot, job)).sort(compareEvidenceJobs);
   const cases = caseResultsForEvidence(snapshot, jobs).sort(compareCaseResults);
-  const measurements = measurementResultsForEvidence(snapshot, run, jobs, cases).sort(compareMeasurementResults);
-  const jobGroups = jobGroupResultsForEvidence(snapshot, run, jobs).sort(compareJobGroupResults);
+  const measurements = measurementResultsForEvidence(snapshot, run, jobs, cases).sort(compareAgentIdentity);
+  const jobGroups = jobGroupResultsForEvidence(snapshot, run, jobs).sort(compareAgentIdentity);
   return { runId: run.id, measurements, jobGroups, cases, jobs: evidenceJobs };
 }
 
 function jobsForRunEvidence(snapshot: WorkbenchInspectionSnapshot, run: WorkbenchRun): WorkbenchJob[] {
-  const runJobIds = new Set(run.jobIds ?? []);
+  const runJobIds = new Set(run.jobIds);
   return snapshot.jobs
-    .filter((job) => job.runId === run.id || runJobIds.has(job.id))
+    .filter((job) => runJobIds.has(job.id))
     .sort(compareJobs);
 }
 
@@ -568,11 +613,11 @@ function jobForEvidence(snapshot: WorkbenchInspectionSnapshot, job: WorkbenchJob
     ...agentIdentityForJob(snapshot, job),
     jobId: job.id,
     runId: job.runId,
-    ...(job.role ? { role: job.role } : {}),
+    role: job.role,
     caseId: job.caseId,
     sample: job.sample,
     status: job.status,
-    ...(jobScore(job) !== undefined ? { score: jobScore(job) } : {}),
+    ...(workbenchJobScore(job) !== undefined ? { score: workbenchJobScore(job) } : {}),
     ...(job.durationMs !== undefined ? { durationMs: job.durationMs } : {}),
     ...(job.error ? { error: job.error } : {}),
     dependencies: (job.dependencies ?? []).map(evidenceDependency),
@@ -594,7 +639,7 @@ function caseResultsForEvidence(
 ): WorkbenchRunEvidenceCaseResult[] {
   const groups = new Map<string, WorkbenchJob[]>();
   for (const job of jobs.filter((entry) => entry.caseId !== "current")) {
-    const key = caseResultKey(job);
+    const key = caseSampleMeasurementKey(job);
     const groupJobs = groups.get(key);
     if (groupJobs) {
       groupJobs.push(job);
@@ -606,27 +651,27 @@ function caseResultsForEvidence(
   const cases: WorkbenchRunEvidenceCaseResult[] = [];
   for (const groupJobs of groups.values()) {
     const sorted = [...groupJobs].sort(compareJobs);
-    const executeJob = latestJobForRole(sorted, "execute");
+    const runJob = latestJobForRole(sorted, "run");
     const gradeJob = latestJobForRole(sorted, "grade");
-    const selected = gradeJob ?? executeJob ?? sorted.at(-1);
+    const selected = gradeJob ?? runJob ?? sorted.at(-1);
     if (!selected) {
       continue;
     }
-    const execute = executeJob ? jobPhase(executeJob, sorted) : undefined;
-    const grade = gradeJob ? jobPhase(gradeJob, sorted) : undefined;
-    const score = grade?.score ?? execute?.score ?? jobScore(selected);
+    const run = runJob ? workbenchRunEvidenceJobPhase(runJob, sorted) : undefined;
+    const grade = gradeJob ? workbenchRunEvidenceJobPhase(gradeJob, sorted) : undefined;
+    const score = grade?.score ?? run?.score ?? workbenchJobScore(selected);
     const report = buildWorkbenchJobReport(sorted, snapshot.traces);
-    const error = executeJob?.status === "failed" && executeJob.error
-      ? executeJob.error
-      : gradeJob?.error ?? executeJob?.error;
-    const dependencyReason = grade?.dependencyReason ?? execute?.dependencyReason;
+    const error = runJob?.status === "failed" && runJob.error
+      ? runJob.error
+      : gradeJob?.error ?? runJob?.error;
+    const dependencyReason = grade?.dependencyReason ?? run?.dependencyReason;
     cases.push({
       ...agentIdentityForJob(snapshot, selected),
       caseId: selected.caseId,
       sample: selected.sample,
-      status: caseStatus(executeJob, gradeJob, selected),
+      status: caseStatus(runJob, gradeJob, selected),
       selectedJobId: selected.id,
-      ...(execute ? { execute } : {}),
+      ...(run ? { run } : {}),
       ...(grade ? { grade } : {}),
       ...(score !== undefined ? { score } : {}),
       report,
@@ -643,50 +688,27 @@ function measurementResultsForEvidence(
   jobs: readonly WorkbenchJob[],
   cases: readonly WorkbenchRunEvidenceCaseResult[],
 ): WorkbenchRunEvidenceMeasurementResult[] {
-  const jobGroups = new Map<string, WorkbenchJob[]>();
-  for (const job of jobs.filter(isMeasuredSampleJob)) {
-    const key = measurementKeyFromJob(job);
-    const groupJobs = jobGroups.get(key);
-    if (groupJobs) {
-      groupJobs.push(job);
-    } else {
-      jobGroups.set(key, [job]);
-    }
-  }
-
   const resultCells = (snapshot.results?.cells ?? []).filter((cell) => cell.runId === run.id);
   const measurements: WorkbenchRunEvidenceMeasurementResult[] = [];
-  for (const groupJobs of jobGroups.values()) {
-    const identitySource = groupJobs[0];
-    if (!identitySource) {
-      continue;
-    }
-    const identity = agentIdentityForJob(snapshot, identitySource);
-    const agentCases = cases.filter((entry) => sameMeasurementAgent(entry, identity));
+  for (const groupJobs of evidenceJobGroups(jobs, isMeasuredSampleJob)) {
+    const group = evidenceJobGroupSummary(snapshot, run, groupJobs);
+    const agentCases = cases.filter((entry) => sameMeasurementAgent(entry, group));
     if (agentCases.length === 0) {
       continue;
     }
-    const cell = resultCellForIdentity(resultCells, identity);
+    const cell = resultCellForIdentity(resultCells, group);
     const caseScores = agentCases
       .map((entry) => entry.score)
       .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
     const score = cell?.quality ?? average(caseScores);
-    const report = buildWorkbenchJobReport(groupJobs, snapshot.traces);
     const coverage = workbenchSampleCoverage(agentCases.filter(caseHasResult).length, agentCases.length);
     if (!coverage) {
       continue;
     }
     measurements.push({
-      ...identity,
-      status: agentStatus(groupJobs, run.status),
+      ...group,
       ...(score !== undefined ? { score } : {}),
-      report,
       coverage,
-      succeededJobs: groupJobs.filter((job) => job.status === "succeeded").length,
-      totalJobs: groupJobs.length,
-      failedJobs: groupJobs.filter((job) => job.status === "failed").length,
-      canceledJobs: groupJobs.filter((job) => job.status === "canceled").length,
-      errors: uniqueStrings(groupJobs.flatMap((job) => job.error ? [job.error] : [])),
     });
   }
   return measurements;
@@ -697,35 +719,37 @@ function jobGroupResultsForEvidence(
   run: WorkbenchRun,
   jobs: readonly WorkbenchJob[],
 ): WorkbenchRunEvidenceJobGroupResult[] {
-  const jobGroups = new Map<string, WorkbenchJob[]>();
-  for (const job of jobs.filter((entry) => !isMeasuredSampleJob(entry))) {
-    const key = measurementKeyFromJob(job);
-    const groupJobs = jobGroups.get(key);
-    if (groupJobs) {
-      groupJobs.push(job);
-    } else {
-      jobGroups.set(key, [job]);
-    }
-  }
+  return evidenceJobGroups(jobs, (job) => !isMeasuredSampleJob(job))
+    .map((groupJobs) => evidenceJobGroupSummary(snapshot, run, groupJobs));
+}
 
-  const groups: WorkbenchRunEvidenceJobGroupResult[] = [];
-  for (const groupJobs of jobGroups.values()) {
-    const identitySource = groupJobs[0];
-    if (!identitySource) {
-      continue;
-    }
-    groups.push({
-      ...agentIdentityForJob(snapshot, identitySource),
-      status: agentStatus(groupJobs, run.status),
-      report: buildWorkbenchJobReport(groupJobs, snapshot.traces),
-      succeededJobs: groupJobs.filter((job) => job.status === "succeeded").length,
-      totalJobs: groupJobs.length,
-      failedJobs: groupJobs.filter((job) => job.status === "failed").length,
-      canceledJobs: groupJobs.filter((job) => job.status === "canceled").length,
-      errors: uniqueStrings(groupJobs.flatMap((job) => job.error ? [job.error] : [])),
-    });
+function evidenceJobGroups(
+  jobs: readonly WorkbenchJob[],
+  include: (job: WorkbenchJob) => boolean,
+): WorkbenchJob[][] {
+  const groups = new Map<string, WorkbenchJob[]>();
+  for (const job of jobs.filter(include)) {
+    const key = measurementKeyFromJob(job);
+    groups.set(key, [...(groups.get(key) ?? []), job]);
   }
-  return groups;
+  return [...groups.values()];
+}
+
+function evidenceJobGroupSummary(
+  snapshot: WorkbenchInspectionSnapshot,
+  run: WorkbenchRun,
+  jobs: readonly WorkbenchJob[],
+): WorkbenchRunEvidenceJobGroupResult {
+  return {
+    ...agentIdentityForJob(snapshot, jobs[0]!),
+    status: agentStatus(jobs, run.status),
+    report: buildWorkbenchJobReport(jobs, snapshot.traces),
+    succeededJobs: jobs.filter((job) => job.status === "succeeded").length,
+    totalJobs: jobs.length,
+    failedJobs: jobs.filter((job) => job.status === "failed").length,
+    canceledJobs: jobs.filter((job) => job.status === "canceled").length,
+    errors: uniqueStrings(jobs.flatMap((job) => job.error ? [job.error] : [])),
+  };
 }
 
 function isMeasuredSampleJob(job: Pick<WorkbenchJob, "caseId">): boolean {
@@ -797,15 +821,18 @@ function uniqueResultVersion<T>(versions: readonly T[]): T | undefined {
   return versions.length === 1 ? versions[0] : undefined;
 }
 
-function jobPhase(job: WorkbenchJob, groupJobs: readonly WorkbenchJob[]): WorkbenchRunEvidenceJobPhase {
+export function workbenchRunEvidenceJobPhase(
+  job: WorkbenchJob,
+  groupJobs: readonly WorkbenchJob[],
+): WorkbenchRunEvidenceJobPhase {
   const dependencyReason = job.status === "canceled" && job.error
     ? dependencyContext(job, groupJobs)
     : undefined;
   return {
     jobId: job.id,
-    ...(job.role ? { role: job.role } : {}),
+    role: job.role,
     status: job.status,
-    ...(jobScore(job) !== undefined ? { score: jobScore(job) } : {}),
+    ...(workbenchJobScore(job) !== undefined ? { score: workbenchJobScore(job) } : {}),
     ...(job.durationMs !== undefined ? { durationMs: job.durationMs } : {}),
     ...(job.error ? { error: job.error } : {}),
     ...(dependencyReason ? { dependencyReason } : {}),
@@ -821,7 +848,7 @@ function dependencyContext(job: WorkbenchJob, groupJobs: readonly WorkbenchJob[]
     .filter((entry): entry is WorkbenchJob => Boolean(entry));
   const failedDependency = dependencyJobs.find((entry) => entry.status === "failed" && entry.error);
   if (failedDependency?.error) {
-    return `${job.error}; ${failedDependency.role ?? "dependency"} failed: ${failedDependency.error}`;
+    return `${job.error}; ${failedDependency.role} failed: ${failedDependency.error}`;
   }
   return job.error;
 }
@@ -831,17 +858,20 @@ function latestJobForRole(jobs: readonly WorkbenchJob[], role: WorkbenchJobRole)
 }
 
 function caseStatus(
-  executeJob: WorkbenchJob | undefined,
+  runJob: WorkbenchJob | undefined,
   gradeJob: WorkbenchJob | undefined,
   selectedJob: WorkbenchJob,
 ): WorkbenchJobStatus {
-  if (executeJob?.status === "failed" || gradeJob?.status === "failed") {
+  if (runJob?.status === "failed" || gradeJob?.status === "failed") {
     return "failed";
+  }
+  if (runJob?.status === "canceled" || gradeJob?.status === "canceled") {
+    return "canceled";
   }
   if (gradeJob) {
     return gradeJob.status;
   }
-  return executeJob?.status ?? selectedJob.status;
+  return runJob?.status ?? selectedJob.status;
 }
 
 function caseHasResult(entry: WorkbenchRunEvidenceCaseResult): boolean {
@@ -882,8 +912,7 @@ function sameMeasurementAgent(
     left.agentName === right.agentName &&
     left.versionId === right.versionId &&
     left.skillName === right.skillName &&
-    left.skillBundleHash === right.skillBundleHash &&
-    left.evalHash === right.evalHash;
+    left.skillBundleHash === right.skillBundleHash;
 }
 
 function average(values: readonly number[]): number | undefined {
@@ -893,7 +922,7 @@ function average(values: readonly number[]): number | undefined {
   return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(3));
 }
 
-function jobScore(job: WorkbenchJob): number | undefined {
+export function workbenchJobScore(job: Pick<WorkbenchJob, "result">): number | undefined {
   const scoreItem = job.result?.items?.find((item) => item.kind === "score" && typeof item.score === "number");
   return typeof scoreItem?.score === "number" && Number.isFinite(scoreItem.score) ? scoreItem.score : undefined;
 }
@@ -918,57 +947,47 @@ function agentStatus(jobs: readonly WorkbenchJob[], fallback: WorkbenchRunStatus
 }
 
 function compareJobs(left: WorkbenchJob, right: WorkbenchJob): number {
-  return left.skillName.localeCompare(right.skillName, undefined, { numeric: true, sensitivity: "base" }) ||
+  return compareWorkbenchNaturalText(left.skillName, right.skillName) ||
     left.skillBundleHash.localeCompare(right.skillBundleHash) ||
     left.versionId.localeCompare(right.versionId) ||
-    left.agentName.localeCompare(right.agentName, undefined, { numeric: true, sensitivity: "base" }) ||
-    left.caseId.localeCompare(right.caseId, undefined, { numeric: true, sensitivity: "base" }) ||
+    compareWorkbenchNaturalText(left.agentName, right.agentName) ||
+    compareWorkbenchNaturalText(left.caseId, right.caseId) ||
     left.sample - right.sample ||
     roleOrder(left.role) - roleOrder(right.role) ||
     (left.createdAt ?? "").localeCompare(right.createdAt ?? "") ||
     left.id.localeCompare(right.id);
 }
 
-function compareMeasurementResults(left: WorkbenchRunEvidenceMeasurementResult, right: WorkbenchRunEvidenceMeasurementResult): number {
+function compareAgentIdentity(left: WorkbenchRunEvidenceAgentIdentity, right: WorkbenchRunEvidenceAgentIdentity): number {
   return compareSkillIdentity(left, right) ||
-    left.agentLabel.localeCompare(right.agentLabel, undefined, { numeric: true, sensitivity: "base" }) ||
-    left.agentHash.localeCompare(right.agentHash);
-}
-
-function compareJobGroupResults(left: WorkbenchRunEvidenceJobGroupResult, right: WorkbenchRunEvidenceJobGroupResult): number {
-  return compareSkillIdentity(left, right) ||
-    left.agentLabel.localeCompare(right.agentLabel, undefined, { numeric: true, sensitivity: "base" }) ||
+    compareWorkbenchNaturalText(left.agentLabel, right.agentLabel) ||
     left.agentHash.localeCompare(right.agentHash);
 }
 
 function compareCaseResults(left: WorkbenchRunEvidenceCaseResult, right: WorkbenchRunEvidenceCaseResult): number {
-  return left.caseId.localeCompare(right.caseId, undefined, { numeric: true, sensitivity: "base" }) ||
+  return compareWorkbenchNaturalText(left.caseId, right.caseId) ||
     left.sample - right.sample ||
     compareSkillIdentity(left, right) ||
-    left.agentLabel.localeCompare(right.agentLabel, undefined, { numeric: true, sensitivity: "base" }) ||
+    compareWorkbenchNaturalText(left.agentLabel, right.agentLabel) ||
     left.agentHash.localeCompare(right.agentHash) ||
     left.selectedJobId.localeCompare(right.selectedJobId);
 }
 
 function compareEvidenceJobs(left: WorkbenchRunEvidenceJob, right: WorkbenchRunEvidenceJob): number {
-  return left.caseId.localeCompare(right.caseId, undefined, { numeric: true, sensitivity: "base" }) ||
+  return compareWorkbenchNaturalText(left.caseId, right.caseId) ||
     left.sample - right.sample ||
     compareSkillIdentity(left, right) ||
-    left.agentLabel.localeCompare(right.agentLabel, undefined, { numeric: true, sensitivity: "base" }) ||
+    compareWorkbenchNaturalText(left.agentLabel, right.agentLabel) ||
     left.agentHash.localeCompare(right.agentHash) ||
     roleOrder(left.role) - roleOrder(right.role) ||
     left.jobId.localeCompare(right.jobId);
 }
 
 function compareSkillIdentity(left: WorkbenchRunEvidenceSkillIdentity, right: WorkbenchRunEvidenceSkillIdentity): number {
-  return left.skillLabel.localeCompare(right.skillLabel, undefined, { numeric: true, sensitivity: "base" }) ||
-    left.skillName.localeCompare(right.skillName, undefined, { numeric: true, sensitivity: "base" }) ||
+  return compareWorkbenchNaturalText(left.skillLabel, right.skillLabel) ||
+    compareWorkbenchNaturalText(left.skillName, right.skillName) ||
     left.skillBundleHash.localeCompare(right.skillBundleHash) ||
     left.versionId.localeCompare(right.versionId);
-}
-
-function caseResultKey(job: WorkbenchJob): string {
-  return `${measurementKeyFromJob(job)}\0${job.caseId}\0${job.sample}`;
 }
 
 function measurementKeyFromJob(job: WorkbenchJob): string {
@@ -976,14 +995,13 @@ function measurementKeyFromJob(job: WorkbenchJob): string {
     job.versionId,
     job.skillName,
     job.skillBundleHash,
-    job.evalHash,
     job.agentHash,
     job.agentName,
   ].join("\0");
 }
 
-function roleOrder(role: WorkbenchJobRole | undefined): number {
-  if (role === "execute") {
+function roleOrder(role: WorkbenchJobRole): number {
+  if (role === "run") {
     return 0;
   }
   if (role === "grade") {

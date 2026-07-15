@@ -2,53 +2,27 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { assertWorkbenchAdapterAuthEnvNameAllowed } from "@workbench-ai/workbench-contract";
+import {
+  normalizeWorkbenchAdapterAuthTarget,
+  sanitizeWorkbenchAdapterAuthBundle,
+  type WorkbenchAdapterAuthBundle,
+  type WorkbenchAdapterAuthEnvVar,
+  type WorkbenchAdapterAuthFile,
+  type WorkbenchAdapterAuthStatus,
+  type WorkbenchAdapterAuthStatusRecord,
+  type WorkbenchAdapterAuthTarget,
+} from "@workbench-ai/workbench-contract";
 
-export type WorkbenchAdapterAuthStatus =
-  | "connected"
-  | "reauth_required"
-  | "disconnected";
-
-export interface WorkbenchAdapterAuthTarget {
-  adapterId: string;
-  slot?: string;
-  profile: string;
-}
-
-export interface WorkbenchAdapterAuthFile {
-  path: string;
-  content: string;
-  encoding: "utf8" | "base64";
-  mode?: number;
-}
-
-export interface WorkbenchAdapterAuthEnvVar {
-  name: string;
-  value: string;
-}
-
-export interface WorkbenchAdapterAuthBundle {
-  adapterId: string;
-  slot?: string;
-  profile: string;
-  method: string;
-  status: "connected";
-  version: number;
-  files: WorkbenchAdapterAuthFile[];
-  env?: WorkbenchAdapterAuthEnvVar[];
-  updatedAt: string;
-}
-
-export interface WorkbenchAdapterAuthStatusRecord {
-  adapterId: string;
-  slot?: string;
-  profile: string;
-  status: WorkbenchAdapterAuthStatus;
-  version: number;
-  method?: string;
-  updatedAt?: string;
-  reason?: string;
-}
+export {
+  normalizeWorkbenchAdapterAuthTarget,
+  sanitizeWorkbenchAdapterAuthBundle,
+  type WorkbenchAdapterAuthBundle,
+  type WorkbenchAdapterAuthEnvVar,
+  type WorkbenchAdapterAuthFile,
+  type WorkbenchAdapterAuthStatus,
+  type WorkbenchAdapterAuthStatusRecord,
+  type WorkbenchAdapterAuthTarget,
+} from "@workbench-ai/workbench-contract";
 
 export interface WorkbenchAdapterAuthStore {
   get(target: WorkbenchAdapterAuthTarget): Promise<WorkbenchAdapterAuthBundle | null>;
@@ -57,6 +31,10 @@ export interface WorkbenchAdapterAuthStore {
   markReauthRequired(target: WorkbenchAdapterAuthTarget, reason: string): Promise<void>;
   status(target: WorkbenchAdapterAuthTarget): Promise<WorkbenchAdapterAuthStatusRecord>;
   listStatus(): Promise<WorkbenchAdapterAuthStatusRecord[]>;
+}
+
+export function workbenchAdapterAuthTargetIdentity(target: WorkbenchAdapterAuthTarget): string {
+  return `${target.adapterId}/${target.slot ?? "_"}/${target.profile}`;
 }
 
 interface StoredWorkbenchAdapterAuthRecord {
@@ -96,27 +74,6 @@ export function parseWorkbenchAdapterAuthTarget(
   });
 }
 
-export function normalizeWorkbenchAdapterAuthTarget(
-  target: {
-    adapterId: string;
-    slot?: string;
-    profile?: string;
-  },
-): WorkbenchAdapterAuthTarget {
-  const adapterId = readAdapterAuthSegment(target.adapterId, "adapter id");
-  const slot = target.slot === undefined
-    ? undefined
-    : readAdapterAuthSegment(target.slot, "auth slot");
-  const profile = target.profile === undefined || target.profile === ""
-    ? DEFAULT_AUTH_PROFILE
-    : readAdapterAuthSegment(target.profile, "auth profile");
-  return {
-    adapterId,
-    ...(slot ? { slot } : {}),
-    profile,
-  };
-}
-
 export function createWorkbenchAdapterAuthBundle(args: {
   target: WorkbenchAdapterAuthTarget;
   method: string;
@@ -146,41 +103,6 @@ export function adapterAuthEnv(
   bundle: WorkbenchAdapterAuthBundle,
 ): Record<string, string> {
   return Object.fromEntries((bundle.env ?? []).map((entry) => [entry.name, entry.value]));
-}
-
-export function sanitizeWorkbenchAdapterAuthBundle(
-  value: unknown,
-): WorkbenchAdapterAuthBundle {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Adapter auth bundle must be an object.");
-  }
-  const record = value as Record<string, unknown>;
-  const target = normalizeWorkbenchAdapterAuthTarget({
-    adapterId: readString(record.adapterId, "adapterId"),
-    ...(record.slot !== undefined ? { slot: readString(record.slot, "slot") } : {}),
-    profile: typeof record.profile === "string" ? record.profile : DEFAULT_AUTH_PROFILE,
-  });
-  if (record.status !== "connected") {
-    throw new Error("Adapter auth bundle must be connected.");
-  }
-  const method = readAdapterAuthSegment(readString(record.method, "method"), "auth method");
-  const files = Array.isArray(record.files)
-    ? record.files.map(sanitizeWorkbenchAdapterAuthFile)
-    : [];
-  const env = Array.isArray(record.env)
-    ? record.env.map(sanitizeWorkbenchAdapterAuthEnvVar)
-    : [];
-  return {
-    ...target,
-    method,
-    status: "connected",
-    version: ADAPTER_AUTH_STORE_VERSION,
-    files,
-    ...(env.length > 0 ? { env } : {}),
-    updatedAt: typeof record.updatedAt === "string"
-      ? record.updatedAt
-      : new Date().toISOString(),
-  };
 }
 
 class FileWorkbenchAdapterAuthStore implements WorkbenchAdapterAuthStore {
@@ -323,52 +245,4 @@ function adapterAuthTargetKey(target: WorkbenchAdapterAuthTarget): string {
     target.slot ?? "_",
     target.profile,
   ].join("__");
-}
-
-function sanitizeWorkbenchAdapterAuthFile(value: unknown): WorkbenchAdapterAuthFile {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Adapter auth file must be an object.");
-  }
-  const record = value as Record<string, unknown>;
-  const filePath = readString(record.path, "file.path").replace(/\\/gu, "/").replace(/^\/+/u, "");
-  if (!filePath || filePath.split("/").some((part) => part === "." || part === ".." || part === "")) {
-    throw new Error(`Unsafe adapter auth file path: ${filePath}`);
-  }
-  return {
-    path: filePath,
-    content: readString(record.content, "file.content"),
-    encoding: record.encoding === "base64" ? "base64" : "utf8",
-    ...(typeof record.mode === "number" && Number.isInteger(record.mode) ? { mode: record.mode } : {}),
-  };
-}
-
-function sanitizeWorkbenchAdapterAuthEnvVar(value: unknown): WorkbenchAdapterAuthEnvVar {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Adapter auth env entry must be an object.");
-  }
-  const record = value as Record<string, unknown>;
-  const name = readString(record.name, "env.name");
-  const envValue = readString(record.value, "env.value");
-  if (!/^[A-Z_][A-Z0-9_]*$/u.test(name)) {
-    throw new Error(`Adapter auth env var is invalid: ${name}`);
-  }
-  assertWorkbenchAdapterAuthEnvNameAllowed(name);
-  if (!envValue.trim()) {
-    throw new Error(`Adapter auth env var ${name} is empty.`);
-  }
-  return { name, value: envValue };
-}
-
-function readString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`Adapter auth ${label} must be a non-empty string.`);
-  }
-  return value;
-}
-
-function readAdapterAuthSegment(value: string, label: string): string {
-  if (!/^[a-z][a-z0-9-]*$/u.test(value)) {
-    throw new Error(`Adapter auth ${label} must be a lowercase identifier.`);
-  }
-  return value;
 }

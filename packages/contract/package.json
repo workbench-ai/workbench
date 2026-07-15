@@ -1,6 +1,6 @@
 {
   "name": "@workbench-ai/workbench-contract",
-  "version": "0.0.225",
+  "version": "0.0.226",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/workbench-ai/workbench.git",
@@ -22,6 +22,9 @@
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@workbench-ai/agent-driver": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.3.1",

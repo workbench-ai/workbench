@@ -1,14 +1,31 @@
 import type { CSSProperties } from "react";
 import { strFromU8, unzipSync } from "fflate";
 
-import type {
-  CellAddress,
-  CellDataType,
-  GridRange,
-  RenderedCellModel,
-  WorkbookRange,
-  WorkbookWorksheet,
-} from "./spreadsheet-viewer-model";
+import {
+  decodeAddress,
+  decodeRangeAddress,
+  encodeColumn,
+  mergeGridRanges,
+  type GridRange,
+} from "./spreadsheet-viewer-address";
+
+type CellDataType =
+  | "unspecified"
+  | "shared-string"
+  | "inline-string"
+  | "string"
+  | "boolean"
+  | "number"
+  | "error"
+  | "date";
+
+export type OoxmlCell = {
+  address: string;
+  text: string;
+  style: CSSProperties;
+  raw: string | number | boolean;
+  formula: string;
+};
 
 export type OoxmlWorkbook = {
   activeSheetName: string;
@@ -25,8 +42,8 @@ export type OoxmlSheet = {
   showGridLines: boolean;
   mergedCells: OoxmlMerge[];
   range: GridRange | null;
-  renderedCells: Map<string, RenderedCellModel>;
-  worksheet: WorkbookWorksheet;
+  freezePanes: { rowCount: number; columnCount: number };
+  cells: Map<string, OoxmlCell>;
 };
 
 export type OoxmlColumn = {
@@ -40,7 +57,6 @@ export type OoxmlRow = {
   index: number;
   height?: number;
   hidden?: boolean;
-  cells: Array<{ address: string }>;
 };
 
 export type OoxmlMerge = {
@@ -59,16 +75,6 @@ type Stylesheet = {
 type Theme = {
   colors: string[];
 };
-type ParsedCell = {
-  address: string;
-  raw: string | number | boolean;
-  formatted: string;
-  formula: string;
-  type: CellDataType;
-  numberFormatCode: string | null;
-  style: CSSProperties;
-};
-
 const WORKBOOK_XML_PATH = "xl/workbook.xml";
 const WORKBOOK_RELS_PATH = "xl/_rels/workbook.xml.rels";
 const SHARED_STRINGS_PATH = "xl/sharedStrings.xml";
@@ -190,49 +196,20 @@ function parseWorksheet(options: {
   const parsedRows = parseRows(options.doc, options.sharedStrings, options.stylesheet);
   const mergedCells = parseMergedCells(options.doc);
   const range = inferSheetRange(options.doc, parsedRows, mergedCells, columns);
-  const cellByAddress = new Map<string, ParsedCell>();
-  const renderedCells = new Map<string, RenderedCellModel>();
-
-  for (const row of parsedRows) {
-    for (const cell of row.cells) {
-      cellByAddress.set(cell.address, cell);
-      renderedCells.set(cell.address, {
-        address: cell.address,
-        html: escapeHtml(cell.formatted) || "&nbsp;",
-        text: cell.formatted,
-        style: cell.style,
-        colSpan: 1,
-        rowSpan: 1,
-      });
-    }
-  }
-
-  const showGridLines = firstElement(options.doc, "sheetView")?.getAttribute("showGridLines") !== "0";
-  const worksheet = createWorksheetModel({
-    name: options.name,
-    showGridLines,
-    freezePanes: readFreezePanes(options.doc),
-    range,
-    cellByAddress,
-  });
+  const showGridLines = readBooleanAttribute(firstElement(options.doc, "sheetView"), "showGridLines", true);
 
   return {
     name: options.name,
     hidden: options.hidden,
     columns,
-    rows: parsedRows.map((row) => ({
-      index: row.index,
-      height: row.height,
-      hidden: row.hidden,
-      cells: row.cells.map((cell) => ({ address: cell.address })),
-    })),
+    rows: parsedRows.map(({ index, height, hidden }) => ({ index, height, hidden })),
     defaultRowHeight: readNumberAttribute(sheetFormat, "defaultRowHeight"),
     defaultColWidth: readNumberAttribute(sheetFormat, "defaultColWidth"),
     showGridLines,
     mergedCells,
     range,
-    renderedCells,
-    worksheet,
+    freezePanes: readFreezePanes(options.doc),
+    cells: new Map(parsedRows.flatMap((row) => row.cells.map((cell) => [cell.address, cell]))),
   };
 }
 
@@ -240,7 +217,7 @@ type ParsedRow = {
   index: number;
   height?: number;
   hidden?: boolean;
-  cells: ParsedCell[];
+  cells: OoxmlCell[];
 };
 
 function parseColumns(doc: Document): OoxmlColumn[] {
@@ -256,7 +233,7 @@ function parseColumns(doc: Document): OoxmlColumn[] {
       min,
       max,
       width: readNumberAttribute(column, "width"),
-      hidden: column.getAttribute("hidden") === "1",
+      hidden: readBooleanAttribute(column, "hidden"),
     }];
   });
 }
@@ -270,7 +247,7 @@ function parseRows(doc: Document, sharedStrings: SharedStringTable, stylesheet: 
     return {
       index: rowIndex,
       height: readNumberAttribute(row, "ht"),
-      hidden: row.getAttribute("hidden") === "1",
+      hidden: readBooleanAttribute(row, "hidden"),
       cells: directChildren(row, "c").map((cell, cellPosition) => {
         const address = cell.getAttribute("r") ?? `${encodeColumn(cellPosition)}${rowIndex}`;
         return parseCell(cell, address, sharedStrings, stylesheet, sharedFormulaByIndex);
@@ -285,7 +262,7 @@ function parseCell(
   sharedStrings: SharedStringTable,
   stylesheet: Stylesheet,
   sharedFormulaByIndex: Map<string, string>,
-): ParsedCell {
+): OoxmlCell {
   const declaredType = cell.getAttribute("t");
   const styleIndex = readIntegerAttribute(cell, "s") ?? 0;
   const style = stylesheet.cellStyles[styleIndex] ?? { numberFormatCode: null, css: {} };
@@ -295,16 +272,14 @@ function parseCell(
   const formula = readFormula(formulaElement, sharedFormulaByIndex);
   const raw = parseRawCellValue(declaredType, rawText, inlineText, sharedStrings);
   const type = inferCellType(declaredType, raw, style.numberFormatCode);
-  const formatted = formatCellValue(raw, type, style.numberFormatCode);
+  const text = formatCellValue(raw, type, style.numberFormatCode);
 
   return {
     address,
-    raw,
-    formatted,
-    formula,
-    type,
-    numberFormatCode: style.numberFormatCode,
+    text,
     style: style.css,
+    raw,
+    formula: formula ? `=${formula}` : "",
   };
 }
 
@@ -607,7 +582,7 @@ function parseAlignmentStyle(alignment: Element | null): CSSProperties {
   return {
     ...(horizontal ? { textAlign: horizontal === "right" ? "right" : horizontal === "center" ? "center" : "left" } : {}),
     ...(vertical ? { verticalAlign: vertical === "bottom" ? "bottom" : vertical === "center" ? "middle" : "top" } : {}),
-    ...(alignment?.getAttribute("wrapText") === "1" ? { whiteSpace: "normal" } : {}),
+    ...(readBooleanAttribute(alignment, "wrapText") ? { whiteSpace: "normal" } : {}),
     ...(indent > 0 ? { paddingLeft: `${indent * 18}px` } : {}),
   };
 }
@@ -621,7 +596,7 @@ function inferSheetRange(
   let range = decodeRangeAddress(firstElement(doc, "dimension")?.getAttribute("ref"));
 
   for (const column of columns) {
-    range = mergeRanges(range, {
+    range = mergeGridRanges(range, {
       startCol: column.min - 1,
       endCol: column.max - 1,
       startRow: 0,
@@ -630,7 +605,7 @@ function inferSheetRange(
   }
 
   for (const row of rows) {
-    range = mergeRanges(range, {
+    range = mergeGridRanges(range, {
       startCol: 0,
       endCol: Math.max(0, ...row.cells.map((cell) => decodeAddress(cell.address).col)),
       startRow: row.index - 1,
@@ -641,7 +616,7 @@ function inferSheetRange(
   for (const merge of merges) {
     const start = decodeAddress(merge.startAddress);
     const end = decodeAddress(merge.endAddress);
-    range = mergeRanges(range, {
+    range = mergeGridRanges(range, {
       startCol: Math.min(start.col, end.col),
       endCol: Math.max(start.col, end.col),
       startRow: Math.min(start.row, end.row),
@@ -650,42 +625,6 @@ function inferSheetRange(
   }
 
   return range;
-}
-
-function createWorksheetModel(options: {
-  name: string;
-  showGridLines: boolean;
-  freezePanes: { rowCount: number; columnCount: number };
-  range: GridRange | null;
-  cellByAddress: Map<string, ParsedCell>;
-}): WorkbookWorksheet {
-  return {
-    name: options.name,
-    showGridLines: options.showGridLines,
-    freezePanes: options.freezePanes,
-    getUsedRange() {
-      return options.range
-        ? {
-            address: encodeRangeAddress(options.range),
-            rowCount: options.range.endRow - options.range.startRow + 1,
-            columnCount: options.range.endCol - options.range.startCol + 1,
-          }
-        : { rowCount: 0, columnCount: 0 };
-    },
-    getRange(address: string): WorkbookRange {
-      const cell = options.cellByAddress.get(address);
-
-      return {
-        address,
-        rowCount: 1,
-        columnCount: 1,
-        rawValues: [[cell?.raw ?? null]],
-        values: [[cell?.formatted ?? ""]],
-        displayFormula: cell?.formula ? `=${cell.formula}` : "",
-        format: { numberFormat: cell?.numberFormatCode ?? undefined },
-      };
-    },
-  };
 }
 
 function readFreezePanes(doc: Document): { rowCount: number; columnCount: number } {
@@ -757,6 +696,15 @@ function readNumberAttribute(element: Element | null | undefined, name: string):
   const value = element?.getAttribute(name);
   const number = value == null ? Number.NaN : Number(value);
   return Number.isFinite(number) ? number : undefined;
+}
+
+function readBooleanAttribute(
+  element: Element | null | undefined,
+  name: string,
+  fallback = false,
+): boolean {
+  const value = element?.getAttribute(name);
+  return value == null ? fallback : value === "1" || value === "true";
 }
 
 function readColor(element: Element | null, theme: Theme): string | null {
@@ -959,14 +907,6 @@ function inferNumberDecimals(value: number): number {
   return Math.min(6, decimals.length);
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 function normalizeArchivePath(baseDirectory: string, target: string): string {
   if (target.startsWith("/")) {
     return target.replace(/^\/+/, "");
@@ -987,84 +927,6 @@ function normalizeArchivePath(baseDirectory: string, target: string): string {
   }
 
   return normalized.join("/");
-}
-
-function decodeRangeAddress(address: string | null | undefined): GridRange | null {
-  if (!address) {
-    return null;
-  }
-
-  const [startAddress, endAddress] = address.split(":");
-  const start = decodeAddress(startAddress ?? "");
-  const end = decodeAddress(endAddress ?? startAddress ?? "");
-
-  return {
-    startCol: Math.min(start.col, end.col),
-    endCol: Math.max(start.col, end.col),
-    startRow: Math.min(start.row, end.row),
-    endRow: Math.max(start.row, end.row),
-  };
-}
-
-function mergeRanges(left: GridRange | null, right: GridRange | null): GridRange | null {
-  if (!left) {
-    return right;
-  }
-
-  if (!right) {
-    return left;
-  }
-
-  return {
-    startCol: Math.min(left.startCol, right.startCol),
-    endCol: Math.max(left.endCol, right.endCol),
-    startRow: Math.min(left.startRow, right.startRow),
-    endRow: Math.max(left.endRow, right.endRow),
-  };
-}
-
-function encodeRangeAddress(range: GridRange): string {
-  return `${encodeAddress(range.startCol, range.startRow)}:${encodeAddress(range.endCol, range.endRow)}`;
-}
-
-function decodeAddress(address: string): CellAddress {
-  const match = address.match(/^([A-Z]+)(\d+)$/i);
-
-  if (!match) {
-    return { col: 0, row: 0 };
-  }
-
-  return {
-    col: decodeColumn(match[1] ?? "A"),
-    row: Math.max(0, Number.parseInt(match[2] ?? "1", 10) - 1),
-  };
-}
-
-function encodeAddress(col: number, row: number): string {
-  return `${encodeColumn(col)}${row + 1}`;
-}
-
-function encodeColumn(col: number): string {
-  let value = col + 1;
-  let label = "";
-
-  while (value > 0) {
-    const remainder = (value - 1) % 26;
-    label = String.fromCharCode(65 + remainder) + label;
-    value = Math.floor((value - 1) / 26);
-  }
-
-  return label;
-}
-
-function decodeColumn(label: string): number {
-  let result = 0;
-
-  for (const char of label.toUpperCase()) {
-    result = result * 26 + (char.charCodeAt(0) - 64);
-  }
-
-  return result - 1;
 }
 
 export function excelColumnWidthToPx(width: number | undefined): number {

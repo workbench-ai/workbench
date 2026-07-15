@@ -1,6 +1,7 @@
-import type {
-  Json,
-  SurfaceSnapshotFile,
+import {
+  normalizeWorkbenchSourcePath,
+  type Json,
+  type SurfaceSnapshotFile,
 } from "@workbench-ai/workbench-contract";
 
 export async function importNodeModule<T>(specifier: string): Promise<T> {
@@ -31,6 +32,15 @@ export function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+export function fileErrorCode(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+export async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function abortSignalOrUndefined(value: AbortSignal | undefined): AbortSignal | undefined {
   return value &&
     typeof value.aborted === "boolean" &&
@@ -52,6 +62,28 @@ export function normalizeRelativePath(filePath: string): string {
   return normalized;
 }
 
+export function dedupeSurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
+  const byPath = new Map<string, SurfaceSnapshotFile>();
+  for (const file of files) {
+    const normalized = normalizeWorkbenchSourcePath(file.path);
+    byPath.set(normalized, { ...file, path: normalized });
+  }
+  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function publicGradeMetrics(record: Record<string, unknown>, score: number): Record<string, number> {
+  const metrics: Record<string, number> = { score };
+  const source = record.metrics && typeof record.metrics === "object" && !Array.isArray(record.metrics)
+    ? record.metrics as Record<string, unknown>
+    : {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      metrics[key] = value;
+    }
+  }
+  return metrics;
+}
+
 export async function writeSurfaceFiles(
   root: string,
   files: readonly SurfaceSnapshotFile[],
@@ -67,9 +99,7 @@ export async function writeSurfaceFiles(
         ? Buffer.from(file.content, "base64")
         : Buffer.from(file.content, "utf8");
     await fs.writeFile(target, body);
-    if (file.executable) {
-      await fs.chmod(target, 0o755).catch(() => undefined);
-    }
+    await fs.chmod(target, file.executable === true ? 0o755 : 0o644);
   }
 }
 
@@ -147,19 +177,6 @@ function encodeSurfaceSnapshotContent(
   }
 }
 
-export function isJsonPayload(value: unknown): value is import("@workbench-ai/workbench-contract").Json {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return Number.isFinite(value as number) || typeof value !== "number";
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJsonPayload);
-  }
-  if (value && typeof value === "object") {
-    return Object.values(value).every(isJsonPayload);
-  }
-  return false;
-}
-
 export function resolveDockerRuntimeImageRef(
   imageRef: string,
   options: { runtimeRegistry: string; label: string; allowMutableLatest?: boolean },
@@ -220,7 +237,7 @@ function applyRuntimeRegistry(image: string, runtimeRegistry: string): string {
   return `${runtimeRegistry}/${image}`;
 }
 
-function hasRegistryHost(image: string): boolean {
+export function hasRegistryHost(image: string): boolean {
   const first = image.split("/")[0] ?? "";
   return first === "localhost" || first.includes(".") || first.includes(":");
 }

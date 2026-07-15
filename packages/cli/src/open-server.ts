@@ -4,29 +4,20 @@ import type { Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import YAML from "yaml";
-
 import {
   createWorkbenchActionCapabilities,
   createWorkbenchReadOnlyInspectionSnapshot,
   notifyWorkbenchReadOnlyInspectionChanged,
-  previewLocalWorkbenchOperation,
+  parseWorkbenchOperationRequest,
   readWorkbenchReadOnlyInspectionCursor,
   waitForWorkbenchReadOnlyInspectionNotice,
+  workbenchEvaluationCaseSourceFiles,
   workbenchJobEvidenceForSnapshot,
-  workbenchInspectionFileContent,
-  workbenchInspectionFileManifest,
+  writeWorkbenchEvaluationGradeSourceFiles,
   WorkbenchUserError,
-  type SurfaceSnapshotFile,
-  type WorkbenchArtifact,
-  type WorkbenchEvalCaseSnapshot,
-  type WorkbenchEvalSnapshot,
-  type WorkbenchInspectionFileContent,
-  type WorkbenchInspectionSnapshot,
-  type WorkbenchInspectionSnapshotEnvelope,
-  type WorkbenchTrace,
-  type WorkbenchVersion,
 } from "@workbench-ai/workbench-core";
+import { jsonValue } from "./output.js";
+import { asRecord, pathExists } from "./runtime-utils.js";
 import {
   isWorkbenchAuthoredControlPath,
   isWorkbenchPackageSourcePath,
@@ -34,21 +25,30 @@ import {
   normalizeWorkbenchSkillName,
   normalizeWorkbenchSourcePath,
   parseWorkbenchCaseFileOwnerId,
+  workbenchInspectionFileContent,
   workbenchInspectionFileOwnerKindFromRouteSegment,
+  workbenchInspectionSnapshotManifest,
   type Json,
+  type SurfaceSnapshotFile,
+  type WorkbenchArtifact,
   type WorkbenchCaseMutationRequest,
   type WorkbenchCaseMutationResponse,
+  type WorkbenchEvalCaseSnapshot,
+  type WorkbenchEvalSnapshot,
+  type WorkbenchGradeMutationRequest,
+  type WorkbenchGradeMutationResponse,
+  type WorkbenchInspectionFileContent,
   type WorkbenchInspectionFileOwnerKind,
-  type WorkbenchOperationGrader,
-  type WorkbenchOperationPhase,
-  type WorkbenchOperationRequest,
-  type WorkbenchOperationTarget,
+  type WorkbenchInspectionSnapshot,
+  type WorkbenchInspectionSnapshotEnvelope,
+  type WorkbenchTrace,
+  type WorkbenchVersion,
 } from "@workbench-ai/workbench-contract";
 import {
   startPrivateLocalWorkbenchOperation,
 } from "./local-worker-control.js";
 
-export interface StartWorkbenchOpenServerOptions {
+interface StartWorkbenchOpenServerOptions {
   dir?: string;
   authToken?: string;
   homeDir?: string;
@@ -56,7 +56,7 @@ export interface StartWorkbenchOpenServerOptions {
   port?: number;
 }
 
-export interface StartedWorkbenchOpenServer {
+interface StartedWorkbenchOpenServer {
   url: string;
   close(): Promise<void>;
 }
@@ -251,15 +251,10 @@ async function handleRequest({
       sendText(response, 200, `${JSON.stringify(result, null, 2)}\n`, "application/json; charset=utf-8");
       return;
     }
-    if (url.pathname === "/api/operations/preview" && request.method === "POST") {
-      const operationRequest = await readOperationRequest(request);
-      const preview = await previewLocalWorkbenchOperation({
-        dir,
-        authToken,
-        homeDir,
-        request: operationRequest,
-      });
-      sendText(response, 200, `${JSON.stringify(preview, null, 2)}\n`, "application/json; charset=utf-8");
+    if (url.pathname === "/api/evaluation/grader" && request.method === "POST") {
+      const mutation = await readGradeMutationRequest(request);
+      const result = await writeEvaluationGrader({ dir, authToken, homeDir, mutation });
+      sendText(response, 200, `${JSON.stringify(result, null, 2)}\n`, "application/json; charset=utf-8");
       return;
     }
     if (url.pathname === "/api/operations" && request.method === "POST") {
@@ -373,7 +368,7 @@ async function createInspectionSnapshotEnvelope(options: {
   return {
     schema: "workbench.inspection.snapshot-envelope.v1",
     cursor,
-    snapshot: inspectionSnapshotManifest(snapshot),
+    snapshot: workbenchInspectionSnapshotManifest(snapshot),
     actions: createWorkbenchActionCapabilities(snapshot, {
       variant: "local",
       evidenceAccess: "full",
@@ -383,20 +378,132 @@ async function createInspectionSnapshotEnvelope(options: {
 
 async function readCaseMutationRequest(request: IncomingMessage): Promise<WorkbenchCaseMutationRequest> {
   const body = await readJsonObject(request);
-  if ("caseId" in body) {
-    throw new WorkbenchUserError("Case creation derives case ids from the title or prompt.");
-  }
+  assertOnlyCaseMutationKeys(body);
+  const caseId = readCaseMutationCaseId(body.caseId);
+  const title = readCaseMutationTitle(body.title);
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   if (!prompt) {
     throw new WorkbenchUserError("Case prompt cannot be empty.");
   }
-  const metadata = body.metadata === undefined ? undefined : body.metadata as Json;
+  const grade = readCaseGradeMutation(body.grade);
+  const metadata = body.metadata === undefined ? undefined : jsonValue(body.metadata);
   return {
-    ...(typeof body.title === "string" && body.title.trim() ? { title: body.title.trim() } : {}),
+    ...(caseId ? { caseId } : {}),
+    ...(title ? { title } : {}),
     prompt,
-    ...(typeof body.expected === "string" && body.expected.trim() ? { expected: body.expected.trim() } : {}),
+    ...(grade ? { grade } : {}),
     ...(metadata !== undefined ? { metadata } : {}),
   };
+}
+
+function assertOnlyCaseMutationKeys(body: Record<string, unknown>): void {
+  const allowed = new Set(["caseId", "title", "prompt", "grade", "metadata"]);
+  for (const key of Object.keys(body)) {
+    if (!allowed.has(key)) {
+      throw new WorkbenchUserError(`Case field ${key} is not supported.`);
+    }
+  }
+}
+
+function readCaseMutationCaseId(value: unknown): string | undefined {
+  return readCaseDirectoryName(value, "Case id");
+}
+
+function readCaseMutationTitle(value: unknown): string | undefined {
+  const title = readCaseDirectoryName(value, "Case title");
+  if (title && !/^[a-z0-9][a-z0-9_-]*$/u.test(title)) {
+    throw new WorkbenchUserError("Case title must use lowercase letters, numbers, hyphens, or underscores.");
+  }
+  return title;
+}
+
+function readCaseDirectoryName(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new WorkbenchUserError(`${label} must be a string.`);
+  }
+  const caseId = value.trim();
+  if (!caseId) {
+    throw new WorkbenchUserError(`${label} cannot be empty.`);
+  }
+  if (
+    caseId === "." ||
+    caseId === ".." ||
+    caseId.includes("/") ||
+    caseId.includes("\\") ||
+    path.isAbsolute(caseId)
+  ) {
+    throw new WorkbenchUserError(`${label} must be a safe case directory name.`);
+  }
+  return caseId;
+}
+
+function readCaseGradeMutation(value: unknown): WorkbenchCaseMutationRequest["grade"] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const grade = asRecord(value);
+  if (!grade) {
+    throw new WorkbenchUserError("Case grade must be an object.");
+  }
+  assertOnlyGradeMutationKeys(grade, "Case grade.");
+  const adapter = grade.adapter === undefined
+    ? undefined
+    : typeof grade.adapter === "string" && grade.adapter.trim()
+      ? grade.adapter.trim().toLowerCase()
+      : "";
+  if (adapter === "") {
+    throw new WorkbenchUserError("Case grade.adapter must be a non-empty string.");
+  }
+  const authoring = readGradeAuthoringMutation(grade.authoring, "Case grade.authoring");
+  return adapter || authoring
+    ? {
+        ...(adapter ? { adapter } : {}),
+        ...(authoring ? { authoring } : {}),
+      }
+    : undefined;
+}
+
+async function readGradeMutationRequest(request: IncomingMessage): Promise<WorkbenchGradeMutationRequest> {
+  const body = await readJsonObject(request);
+  assertOnlyGradeMutationKeys(body, "Eval grader field ");
+  const adapter = typeof body.adapter === "string" && body.adapter.trim()
+    ? body.adapter.trim().toLowerCase()
+    : "";
+  if (!adapter) {
+    throw new WorkbenchUserError("Eval grade.adapter must be a non-empty string.");
+  }
+  const authoring = readGradeAuthoringMutation(body.authoring, "Eval grade.authoring");
+  return {
+    adapter,
+    ...(authoring ? { authoring } : {}),
+  };
+}
+
+const GRADE_MUTATION_KEYS = new Set(["adapter", "authoring"]);
+
+function assertOnlyGradeMutationKeys(body: Record<string, unknown>, fieldLabel: string): void {
+  for (const key of Object.keys(body)) {
+    if (!GRADE_MUTATION_KEYS.has(key)) {
+      throw new WorkbenchUserError(`${fieldLabel}${key} is not supported.`);
+    }
+  }
+}
+
+function readGradeAuthoringMutation(
+  value: unknown,
+  label: string,
+): Record<string, Json> | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const authoring = asRecord(value);
+  if (!authoring) {
+    throw new WorkbenchUserError(`${label} must be an object.`);
+  }
+  return Object.keys(authoring).length > 0 ? authoring as Record<string, Json> : undefined;
 }
 
 async function writeEvaluationCase(options: {
@@ -406,22 +513,41 @@ async function writeEvaluationCase(options: {
   mutation: WorkbenchCaseMutationRequest;
 }): Promise<WorkbenchCaseMutationResponse> {
   const root = path.resolve(options.dir ?? process.cwd());
-  const baseId = normalizeWorkbenchSkillName(options.mutation.title ?? options.mutation.prompt.slice(0, 60)) || "case";
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root, authToken: options.authToken, homeDir: options.homeDir });
+  const evalSnapshot = snapshot.evals[0];
+  if (!evalSnapshot) {
+    throw new WorkbenchUserError("No evaluation is configured.");
+  }
+  if (options.mutation.caseId) {
+    return writeExistingEvaluationCase({
+      root,
+      authToken: options.authToken,
+      homeDir: options.homeDir,
+      evalSnapshot,
+      mutation: { ...options.mutation, caseId: options.mutation.caseId },
+    });
+  }
+  const baseId = options.mutation.title ?? (normalizeWorkbenchSkillName(options.mutation.prompt.slice(0, 60)) || "case");
   for (let suffix = 1; ; suffix += 1) {
     const caseId = suffix === 1 ? baseId : `${baseId}-${suffix}`;
-    const relativePath = path.join("cases", caseId, "case.yaml").replace(/\\/gu, "/");
-    const absolutePath = path.join(root, ".workbench", relativePath);
-    const record: Record<string, Json> = {
-      version: 1,
-      id: caseId,
-      ...(options.mutation.title ? { title: options.mutation.title } : {}),
+    const caseDir = path.join(root, ".workbench", "cases", caseId);
+    const files = workbenchEvaluationCaseSourceFiles({
+      caseId,
       prompt: options.mutation.prompt,
-      ...(options.mutation.expected ? { expected: options.mutation.expected } : {}),
-      ...(options.mutation.metadata !== undefined ? { metadata: options.mutation.metadata } : {}),
-    };
+      defaultGrade: evalSnapshot.grade,
+      grade: options.mutation.grade,
+      metadata: options.mutation.metadata,
+    });
+    const caseFile = files.find((file) => file.path.endsWith("/case.yaml"));
+    const written: string[] = [];
     try {
-      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-      await fs.writeFile(absolutePath, YAML.stringify(record), { encoding: "utf8", flag: "wx" });
+      if (
+        await pathExists(caseDir) ||
+        await Promise.all(files.map((file) => pathExists(path.join(root, file.path)))).then((entries) => entries.some(Boolean))
+      ) {
+        continue;
+      }
+      await writeEvaluationCaseSourceFiles(root, files, "wx", written);
       await notifyWorkbenchReadOnlyInspectionChanged({
         dir: root,
         authToken: options.authToken,
@@ -429,10 +555,11 @@ async function writeEvaluationCase(options: {
       }).catch(() => undefined);
       return {
         caseId,
-        path: relativePath,
+        path: (caseFile?.path ?? `.workbench/cases/${caseId}/case.yaml`).replace(/^\.workbench\//u, ""),
       };
     } catch (error) {
       if (isFileAlreadyExistsError(error)) {
+        await Promise.all(written.map((filePath) => fs.rm(filePath, { force: true }).catch(() => undefined)));
         continue;
       }
       throw error;
@@ -440,130 +567,134 @@ async function writeEvaluationCase(options: {
   }
 }
 
+async function writeExistingEvaluationCase(options: {
+  root: string;
+  authToken?: string;
+  homeDir?: string;
+  evalSnapshot: WorkbenchEvalSnapshot;
+  mutation: WorkbenchCaseMutationRequest & { caseId: string };
+}): Promise<WorkbenchCaseMutationResponse> {
+  if (!options.evalSnapshot.cases.some((entry) => entry.id === options.mutation.caseId)) {
+    throw new WorkbenchUserError(`Case ${options.mutation.caseId} is not in the current evaluation.`);
+  }
+  const nextCaseId = options.mutation.title ?? options.mutation.caseId;
+  if (
+    nextCaseId !== options.mutation.caseId &&
+    options.evalSnapshot.cases.some((entry) => entry.id === nextCaseId)
+  ) {
+    throw new WorkbenchUserError(`Case ${nextCaseId} already exists.`);
+  }
+  const files = workbenchEvaluationCaseSourceFiles({
+    caseId: nextCaseId,
+    prompt: options.mutation.prompt,
+    defaultGrade: options.evalSnapshot.grade,
+    grade: options.mutation.grade,
+    metadata: options.mutation.metadata,
+  });
+  const caseFile = files.find((file) => file.path.endsWith("/case.yaml"));
+  if (nextCaseId !== options.mutation.caseId) {
+    await renameEvaluationCaseDirectory(options.root, options.mutation.caseId, nextCaseId);
+  }
+  await removeStaleGeneratedCaseFiles(options.root, nextCaseId, files);
+  await writeEvaluationCaseSourceFiles(options.root, files, "w");
+  await notifyWorkbenchReadOnlyInspectionChanged({
+    dir: options.root,
+    authToken: options.authToken,
+    homeDir: options.homeDir,
+  }).catch(() => undefined);
+  return {
+    caseId: nextCaseId,
+    path: (caseFile?.path ?? `.workbench/cases/${nextCaseId}/case.yaml`).replace(/^\.workbench\//u, ""),
+  };
+}
+
+async function renameEvaluationCaseDirectory(root: string, fromCaseId: string, toCaseId: string): Promise<void> {
+  const casesRoot = path.join(root, ".workbench", "cases");
+  const fromDir = path.join(casesRoot, fromCaseId);
+  const toDir = path.join(casesRoot, toCaseId);
+  if (await pathExists(toDir)) {
+    throw new WorkbenchUserError(`Case ${toCaseId} already exists.`);
+  }
+  try {
+    await fs.rename(fromDir, toDir);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      throw new WorkbenchUserError(`Case ${fromCaseId} source folder is missing.`);
+    }
+    throw error;
+  }
+}
+
+async function writeEvaluationCaseSourceFiles(
+  root: string,
+  files: readonly SurfaceSnapshotFile[],
+  flag: "w" | "wx",
+  written: string[] = [],
+): Promise<void> {
+  for (const file of files) {
+    const absolutePath = path.join(root, file.path);
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, file.content, { encoding: "utf8", flag });
+    written.push(absolutePath);
+    if (file.executable) {
+      await fs.chmod(absolutePath, 0o755);
+    }
+  }
+}
+
+async function removeStaleGeneratedCaseFiles(
+  root: string,
+  caseId: string,
+  files: readonly SurfaceSnapshotFile[],
+): Promise<void> {
+  const generatedFiles = new Set(files.map((file) => path.join(root, file.path)));
+  const staleGeneratedFiles = [
+    path.join(root, ".workbench", "cases", caseId, "tests", "test.sh"),
+  ];
+  for (const staleFile of staleGeneratedFiles) {
+    if (generatedFiles.has(staleFile)) {
+      continue;
+    }
+    await fs.rm(staleFile, { force: true }).catch(() => undefined);
+    await fs.rmdir(path.dirname(staleFile)).catch(() => undefined);
+  }
+}
+
+async function writeEvaluationGrader(options: {
+  dir?: string;
+  authToken?: string;
+  homeDir?: string;
+  mutation: WorkbenchGradeMutationRequest;
+}): Promise<WorkbenchGradeMutationResponse> {
+  const root = path.resolve(options.dir ?? process.cwd());
+  const files = await writeWorkbenchEvaluationGradeSourceFiles({
+    dir: root,
+    authToken: options.authToken,
+    homeDir: options.homeDir,
+    mutation: options.mutation,
+  });
+  const file = files[0];
+  if (!file) {
+    throw new WorkbenchUserError("Eval grader did not produce a source file.");
+  }
+  await notifyWorkbenchReadOnlyInspectionChanged({
+    dir: root,
+    authToken: options.authToken,
+    homeDir: options.homeDir,
+  }).catch(() => undefined);
+  const snapshot = await createWorkbenchReadOnlyInspectionSnapshot({ dir: root, authToken: options.authToken, homeDir: options.homeDir });
+  return {
+    path: file.path.replace(/^\.workbench\//u, ""),
+    evaluationHash: snapshot.evals[0]?.hash,
+  };
+}
+
 function isFileAlreadyExistsError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "EEXIST");
 }
 
-async function readOperationRequest(request: IncomingMessage): Promise<WorkbenchOperationRequest> {
-  const body = await readJsonObject(request);
-  if (body.kind === "improve") {
-    const target = readOptionalOperationTarget(body.target);
-    const samples = readPositiveInteger(body.samples);
-    const budget = readPositiveInteger(body.budget);
-    return {
-      kind: "improve",
-      variant: "local",
-      ...(target ? { target } : {}),
-      ...(typeof body.versionId === "string" && body.versionId.trim() ? { versionId: body.versionId.trim() } : {}),
-      ...(typeof body.evalHash === "string" && body.evalHash.trim() ? { evalHash: body.evalHash.trim() } : {}),
-      ...(samples ? { samples } : {}),
-      ...(budget ? { budget } : {}),
-      ...(Array.isArray(body.evidenceTraceIds)
-        ? { evidenceTraceIds: readStringArray(body.evidenceTraceIds) }
-        : {}),
-      ...(typeof body.retryOfRunId === "string" && body.retryOfRunId.trim() ? { retryOfRunId: body.retryOfRunId.trim() } : {}),
-    };
-  }
-  if (body.kind !== "eval") {
-    throw new WorkbenchUserError("Operation kind must be eval or improve.");
-  }
-  const phases = readOperationPhases(body.phases);
-  const samples = readPositiveInteger(body.samples);
-  const caseIds = Array.isArray(body.caseIds) ? readStringArray(body.caseIds) : [];
-  if (caseIds.length === 0) {
-    throw new WorkbenchUserError("Eval operations must include at least one case.");
-  }
-  return {
-    kind: "eval",
-    variant: "local",
-    caseIds,
-    targets: readOperationTargets(body.targets),
-    phases,
-    grader: readOperationGrader(body.grader, phases),
-    ...(samples ? { samples } : {}),
-    ...(body.rerun === true ? { rerun: true } : {}),
-    ...(typeof body.gradeOfRunId === "string" && body.gradeOfRunId.trim() ? { gradeOfRunId: body.gradeOfRunId.trim() } : {}),
-    ...(typeof body.retryOfRunId === "string" && body.retryOfRunId.trim() ? { retryOfRunId: body.retryOfRunId.trim() } : {}),
-  };
-}
-
-function readOperationTargets(value: unknown): WorkbenchOperationTarget[] {
-  if (!Array.isArray(value)) {
-    throw new WorkbenchUserError("Eval operation targets must be an array.");
-  }
-  const targets = value.map((entry) => readOperationTarget(entry));
-  if (targets.length === 0) {
-    throw new WorkbenchUserError("Eval operation targets must include at least one configuration.");
-  }
-  return targets;
-}
-
-function readOptionalOperationTarget(value: unknown): WorkbenchOperationTarget | undefined {
-  return asJsonRecord(value) ? readOperationTarget(value) : undefined;
-}
-
-function readOperationTarget(value: unknown): WorkbenchOperationTarget {
-  const target = asJsonRecord(value);
-  if (!target) {
-    throw new WorkbenchUserError("Operation target must be an object.");
-  }
-  const skill = readOptionalOperationTargetString(target.skill, "Operation target skill");
-  const versionId = readOptionalOperationTargetString(target.versionId, "Operation target versionId");
-  const agent = readOptionalOperationTargetString(target.agent, "Operation target agent");
-  return {
-    ...(skill ? { skill } : {}),
-    ...(versionId ? { versionId } : {}),
-    ...(agent ? { agent } : {}),
-  };
-}
-
-function readOptionalOperationTargetString(value: unknown, label: string): string | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== "string" || !value.trim()) {
-    throw new WorkbenchUserError(`${label} must be a non-empty string.`);
-  }
-  return value.trim();
-}
-
-function readOperationPhases(value: unknown): WorkbenchOperationPhase[] {
-  if (!Array.isArray(value)) {
-    throw new WorkbenchUserError("Eval operation phases must be an array.");
-  }
-  const phases: WorkbenchOperationPhase[] = [];
-  for (const entry of value) {
-    if ((entry === "execute" || entry === "grade") && !phases.includes(entry)) {
-      phases.push(entry);
-    }
-  }
-  if (phases.length === 0) {
-    throw new WorkbenchUserError("Eval operation phases must include execute or grade.");
-  }
-  return phases;
-}
-
-function readOperationGrader(value: unknown, phases: readonly WorkbenchOperationPhase[]): WorkbenchOperationGrader {
-  const grader = asJsonRecord(value);
-  if (!grader) {
-    return phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" };
-  }
-  if (grader.kind === "none" || grader.kind === "evaluation") {
-    return { kind: grader.kind };
-  }
-  throw new WorkbenchUserError("Eval operation grader must be none or evaluation.");
-}
-
-function readStringArray(value: readonly unknown[]): string[] {
-  return [...new Set(value
-    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-    .map((entry) => entry.trim()))];
-}
-
-function asJsonRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
+async function readOperationRequest(request: IncomingMessage) {
+  return parseWorkbenchOperationRequest(await readJsonObject(request), "local");
 }
 
 async function readJsonObject(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -585,10 +716,6 @@ async function readJsonObject(request: IncomingMessage): Promise<Record<string, 
   return parsed as Record<string, unknown>;
 }
 
-function readPositiveInteger(value: unknown): number | undefined {
-  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : NaN;
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
 
 async function sendStateEventStream({
   request,
@@ -642,50 +769,6 @@ function parseInspectionWaitTimeout(value: string | null): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function inspectionSnapshotManifest(snapshot: WorkbenchInspectionSnapshot): WorkbenchInspectionSnapshot {
-  return {
-    ...snapshot,
-    versions: snapshot.versions.map((version) => ({
-      ...version,
-      files: inspectionFileManifests(version.files),
-    })),
-    skillBundles: snapshot.skillBundles.map((bundle) => ({
-      ...bundle,
-      files: inspectionFileManifests(bundle.files),
-    })),
-    evals: snapshot.evals.map((evalSnapshot) => ({
-      ...evalSnapshot,
-      files: inspectionFileManifests(evalSnapshot.files),
-      cases: evalSnapshot.cases.map((evalCase) => ({
-        ...evalCase,
-        files: inspectionFileManifests(evalCase.files),
-      })),
-    })),
-    ...(snapshot.evaluationFiles ? { evaluationFiles: inspectionFileManifests(snapshot.evaluationFiles) } : {}),
-    ...(snapshot.results ? {
-      results: {
-        ...snapshot.results,
-        skillVersions: snapshot.results.skillVersions.map((version) => ({
-          ...version,
-          ...(version.files ? { files: inspectionFileManifests(version.files) } : {}),
-        })),
-      },
-    } : {}),
-    traces: snapshot.traces.map((trace) => ({
-      ...trace,
-      files: inspectionFileManifests(trace.files),
-    })),
-    artifacts: snapshot.artifacts.map((artifact) => ({
-      ...artifact,
-      files: inspectionFileManifests(artifact.files),
-    })),
-  };
-}
-
-function inspectionFileManifests(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
-  return files.map(workbenchInspectionFileManifest);
-}
-
 function parseJobEvidenceApiPath(pathname: string): { jobId: string } | null {
   const segments = pathname.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
   const [api, jobs, jobId, evidence] = segments;
@@ -733,7 +816,7 @@ function findInspectionFileOwner(
   snapshot: WorkbenchInspectionSnapshot,
   ownerKind: WorkbenchInspectionFileOwnerKind,
   ownerId: string,
-): Pick<WorkbenchVersion | WorkbenchTrace | WorkbenchArtifact | WorkbenchEvalCaseSnapshot | WorkbenchEvalSnapshot, "files"> | undefined {
+): Pick<WorkbenchVersion | WorkbenchTrace | WorkbenchArtifact | WorkbenchEvalCaseSnapshot, "files"> | undefined {
   if (ownerKind === "version") {
     return snapshot.versions.find((entry) => entry.id === ownerId);
   }
@@ -748,11 +831,6 @@ function findInspectionFileOwner(
     return snapshot.evals
       .find((entry) => entry.hash === parsed.evaluationHash)
       ?.cases.find((entry) => entry.id === parsed.caseId);
-  }
-  if (ownerKind === "evaluation") {
-    return ownerId === "current"
-      ? { files: snapshot.evaluationFiles ?? snapshot.evals[0]?.files ?? [] }
-      : snapshot.evals.find((entry) => entry.hash === ownerId);
   }
   return snapshot.artifacts.find((entry) => entry.id === ownerId);
 }

@@ -1,3 +1,5 @@
+import type { ComponentProps } from "react";
+
 import { cn } from "../../lib/utils";
 
 /**
@@ -9,12 +11,13 @@ import { cn } from "../../lib/utils";
 export function WorkbenchLogoMark({
   size = 22,
   className,
-}: {
+  ...props
+}: ComponentProps<"svg"> & {
   size?: number;
-  className?: string;
 }) {
   return (
     <svg
+      {...props}
       aria-hidden="true"
       className={className}
       fill="none"

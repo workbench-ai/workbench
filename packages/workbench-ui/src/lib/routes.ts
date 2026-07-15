@@ -1,13 +1,10 @@
-import {
-  isSnapshotPreviewMode,
-  type PreviewMode,
-} from "@workbench-ai/cli-web-ui/lib/file-preview";
+import { isPreviewMode, type PreviewMode } from "@workbench-ai/cli-web-ui/lib/file-preview";
 import type { WorkbenchInspectionFileOwnerKind } from "@workbench-ai/workbench-contract";
 
 export type WorkbenchPrimaryTab = "files" | "evaluation" | "runs";
 export type WorkbenchEvaluationView = "results" | "cases";
 export type WorkbenchCaseSection = "definition" | "runs";
-export type WorkbenchRunCasePhase = "execute" | "grade";
+export type WorkbenchRunCasePhase = "run" | "grade";
 export type WorkbenchRunJobEvidenceView = "timeline" | "output";
 export type WorkbenchFileOwnerKind = WorkbenchInspectionFileOwnerKind;
 
@@ -152,7 +149,7 @@ export function createRunsRoute(): WorkbenchRoute {
   return { kind: "runs" };
 }
 
-export function createNotFoundRoute(path: string[] | string): WorkbenchRoute {
+function createNotFoundRoute(path: string[] | string): WorkbenchRoute {
   return {
     kind: "not-found",
     path: Array.isArray(path) ? `/${path.join("/")}` : path,
@@ -248,15 +245,7 @@ function fileRouteQuery(file: WorkbenchFileRouteState, params: URLSearchParams):
   if (file.versionId) {
     params.set("version", file.versionId);
   }
-  if (file.filePath) {
-    params.set("file", file.filePath);
-  }
-  if (file.directoryPath) {
-    params.set("dir", file.directoryPath);
-  }
-  if (file.previewMode !== "rendered") {
-    params.set("view", file.previewMode);
-  }
+  sourceFileRouteQuery(file, params);
 }
 
 function sourceFileRouteQuery(file: WorkbenchFileRouteState, params: URLSearchParams): void {
@@ -276,7 +265,7 @@ function parseFileRouteState(searchParams: URLSearchParams): WorkbenchFileRouteS
   return normalizeFileRouteState({
     filePath: searchParams.get("file"),
     directoryPath: searchParams.get("dir"),
-    previewMode: previewMode && isSnapshotPreviewMode(previewMode) ? previewMode : "rendered",
+    previewMode: previewMode && isPreviewMode(previewMode) ? previewMode : "rendered",
     versionId: searchParams.get("version"),
   });
 }
@@ -289,7 +278,7 @@ function normalizeFileRouteState(file: Partial<WorkbenchFileRouteState> | null |
   return {
     filePath: normalizedQueryValue(file?.filePath ?? null),
     directoryPath: normalizedQueryValue(file?.directoryPath ?? null),
-    previewMode: file?.previewMode && isSnapshotPreviewMode(file.previewMode) ? file.previewMode : "rendered",
+    previewMode: file?.previewMode && isPreviewMode(file.previewMode) ? file.previewMode : "rendered",
     versionId: normalizedQueryValue(file?.versionId ?? null),
   };
 }

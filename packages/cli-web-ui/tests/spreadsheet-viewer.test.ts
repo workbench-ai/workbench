@@ -91,15 +91,20 @@ describe("spreadsheet viewer contracts", () => {
     const workbook = parseOoxmlWorkbook(createFormulaWorkbookFixture());
     const income = workbook.sheets.find((sheet) => sheet.name === "Income Statement");
 
-    expect(income?.worksheet.getRange("B2")).toMatchObject({
-      rawValues: [[30]],
-      values: [["30"]],
-      displayFormula: "=Support!A1+Support!B1",
+    expect(income?.cells.get("B2")).toMatchObject({
+      raw: 30,
+      text: "30",
+      formula: "=Support!A1+Support!B1",
     });
-    expect(income?.worksheet.getRange("B3")).toMatchObject({
-      rawValues: [[""]],
-      values: [[""]],
-      displayFormula: "=SUM(Support!A1:B1)",
+    expect(income?.cells.get("B3")).toMatchObject({
+      raw: "",
+      text: "",
+      formula: "=SUM(Support!A1:B1)",
+    });
+    expect(workbook.sheets[0]).toMatchObject({
+      showGridLines: false,
+      columns: [{ min: 2, max: 2, hidden: true }],
+      rows: [{ index: 1, hidden: true }],
     });
   });
 
@@ -108,7 +113,7 @@ describe("spreadsheet viewer contracts", () => {
 
     const workbook = parseOoxmlWorkbook(createStyledWorkbookFixture());
     const sheet = workbook.sheets.find((candidate) => candidate.name === "Sheet1");
-    const styledCell = sheet?.renderedCells.get("A1");
+    const styledCell = sheet?.cells.get("A1");
 
     expect(styledCell?.style).toMatchObject({
       backgroundColor: "#FFE8EC",
@@ -116,6 +121,7 @@ describe("spreadsheet viewer contracts", () => {
       borderRight: "3px solid #D33F49",
       borderTop: "3px solid #D33F49",
       borderBottom: "3px solid #D33F49",
+      whiteSpace: "normal",
     });
   });
 });
@@ -163,7 +169,7 @@ function createStyledWorkbookFixture(): Uint8Array {
         </borders>
         <cellXfs count="2">
           <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
-          <xf numFmtId="0" fontId="0" fillId="1" borderId="1" xfId="0"/>
+          <xf numFmtId="0" fontId="0" fillId="1" borderId="1" xfId="0"><alignment wrapText="true"/></xf>
         </cellXfs>
       </styleSheet>`),
     "xl/worksheets/sheet1.xml": xml(`<?xml version="1.0" encoding="UTF-8"?>
@@ -205,8 +211,10 @@ function createFormulaWorkbookFixture(): Uint8Array {
       </Relationships>`),
     "xl/worksheets/sheet1.xml": xml(`<?xml version="1.0" encoding="UTF-8"?>
       <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetViews><sheetView showGridLines="false"/></sheetViews>
+        <cols><col min="2" max="2" hidden="true"/></cols>
         <sheetData>
-          <row r="1"><c r="A1"><v>10</v></c><c r="B1"><v>20</v></c></row>
+          <row r="1" hidden="true"><c r="A1"><v>10</v></c><c r="B1"><v>20</v></c></row>
         </sheetData>
       </worksheet>`),
     "xl/worksheets/sheet2.xml": xml(`<?xml version="1.0" encoding="UTF-8"?>

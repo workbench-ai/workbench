@@ -1,22 +1,21 @@
 # Versions and lineage
 
-Package versions capture the source Workbench evaluated, improved, or published. Use lineage to compare a candidate with its base or restore a recorded version.
+Package versions capture the exact Skill package Workbench evaluated, improved, or published. Use lineage to compare a candidate with its base or restore a recorded version.
 
-See [Review candidate changes](improve-review.md) for improved candidates and [Publish](share.md) for source publication.
+See [Review candidate changes](improve-review.md) for improved candidates and [Publish](share.md) for package publication.
 
 ## Package versions
 
-Package versions are skill source snapshots. They are separate from eval identity.
+Package versions are immutable Skill package snapshots. They are separate from Eval identity.
 
 ```bash
-workbench log
-workbench versions
-workbench diff <base-version-id>..<candidate-version-id>
-workbench switch <version-id> --dry-run
-workbench switch <version-id> --yes
+workbench skill versions
+workbench skill diff <base-version-id>..<candidate-version-id>
+workbench skill switch <version-id> --dry-run
+workbench skill switch <version-id> --yes
 ```
 
-`versions` lists recorded package versions. `diff` compares package files. `switch --dry-run` previews the package files that would change. `switch --yes` restores a recorded package version into the working folder without invoking Git after you have reviewed the preview.
+`workbench skill versions` lists recorded package versions. `workbench skill diff` compares package files. `workbench skill switch --dry-run` previews the package files that would change. `workbench skill switch --yes` restores a recorded package version into the working folder without invoking Git after you have reviewed the preview.
 
 ## Lineage
 

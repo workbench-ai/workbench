@@ -1,9 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import type {
-  WorkbenchStateNotice,
+import {
+  clampWorkbenchInspectionWaitTimeout,
+  createWorkbenchStateNotice,
+  type WorkbenchStateNotice,
 } from "@workbench-ai/workbench-contract";
+import { sleep } from "./runtime-utils.ts";
 
 const WORKBENCH_DIR = ".workbench";
 const LIVE_DIR = "live";
@@ -29,14 +32,14 @@ export async function waitForLocalWorkbenchLiveStateNotice(options: {
   timeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<WorkbenchStateNotice> {
-  const timeoutMs = clampInspectionWaitTimeout(options.timeoutMs);
+  const timeoutMs = clampWorkbenchInspectionWaitTimeout(options.timeoutMs);
   const startedAt = Date.now();
   const requestedCursor = options.cursor?.trim();
   const requestedState = parseLocalWorkbenchLiveStateCursor(requestedCursor);
   let currentState = await readLocalWorkbenchLiveState(options.root);
   let currentCursor = localWorkbenchLiveStateCursor(currentState);
   if (!requestedState) {
-    return workbenchStateNotice("reset", currentCursor);
+    return createWorkbenchStateNotice("reset", currentCursor);
   }
   const immediateNotice = changedLocalWorkbenchStateNotice(requestedState, currentState);
   if (immediateNotice) {
@@ -44,7 +47,7 @@ export async function waitForLocalWorkbenchLiveStateNotice(options: {
   }
   while (Date.now() - startedAt < timeoutMs) {
     if (options.signal?.aborted) {
-      return workbenchStateNotice("heartbeat", currentCursor);
+      return createWorkbenchStateNotice("heartbeat", currentCursor);
     }
     await sleep(Math.min(250, Math.max(25, timeoutMs - (Date.now() - startedAt))));
     currentState = await readLocalWorkbenchLiveState(options.root);
@@ -54,7 +57,7 @@ export async function waitForLocalWorkbenchLiveStateNotice(options: {
       return nextNotice;
     }
   }
-  return workbenchStateNotice("heartbeat", currentCursor);
+  return createWorkbenchStateNotice("heartbeat", currentCursor);
 }
 
 export async function advanceLocalWorkbenchLiveState(
@@ -163,33 +166,15 @@ function changedLocalWorkbenchStateNotice(
 ): WorkbenchStateNotice | null {
   const cursor = localWorkbenchLiveStateCursor(current);
   if (requested.stateRevision !== current.stateRevision) {
-    return workbenchStateNotice("changed", cursor);
+    return createWorkbenchStateNotice("changed", cursor);
   }
   if (requested.progressRevision !== current.progressRevision) {
-    return workbenchStateNotice("progress", cursor, current);
+    return createWorkbenchStateNotice("progress", cursor, {
+      runIds: current.progressRunIds,
+      jobIds: current.progressJobIds,
+    });
   }
   return null;
-}
-
-function workbenchStateNotice(
-  type: WorkbenchStateNotice["type"],
-  cursor: string,
-  state?: LocalWorkbenchLiveState,
-): WorkbenchStateNotice {
-  if (type === "progress") {
-    return {
-      schema: "workbench.state.notice.v1",
-      type,
-      cursor,
-      ...(state?.progressRunIds?.length ? { runIds: state.progressRunIds } : {}),
-      ...(state?.progressJobIds?.length ? { jobIds: state.progressJobIds } : {}),
-    };
-  }
-  return {
-    schema: "workbench.state.notice.v1",
-    type,
-    cursor,
-  };
 }
 
 function stringArrayField(
@@ -203,17 +188,6 @@ function stringArrayField(
   return strings.length > 0
     ? { [key]: strings } as Partial<Pick<LocalWorkbenchLiveState, "progressRunIds" | "progressJobIds">>
     : {};
-}
-
-function clampInspectionWaitTimeout(timeoutMs: number | undefined): number {
-  if (!Number.isFinite(timeoutMs) || timeoutMs === undefined) {
-    return 25_000;
-  }
-  return Math.max(1_000, Math.min(30_000, Math.trunc(timeoutMs)));
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function liveDir(root: string): string {

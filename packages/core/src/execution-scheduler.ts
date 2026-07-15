@@ -1,6 +1,6 @@
-import type {
-  RemoteWorkbenchJob,
-  Json,
+import {
+  isWorkbenchJobStatusTerminal,
+  type WorkbenchExecutionJob,
 } from "@workbench-ai/workbench-contract";
 
 import {
@@ -9,6 +9,7 @@ import {
   type SandboxBackendRequestedResources,
   type WorkbenchSandboxBackendName,
 } from "./sandbox-backends/index.ts";
+import { jsonRecord } from "./runtime-utils.ts";
 
 export interface WorkbenchExecutionDagCapacity {
   cpu: number;
@@ -17,24 +18,24 @@ export interface WorkbenchExecutionDagCapacity {
 }
 
 export interface WorkbenchExecutionDagResult {
-  jobs: RemoteWorkbenchJob[];
+  jobs: WorkbenchExecutionJob[];
   maxConcurrency: number;
   startedJobCount: number;
   cancelledJobCount: number;
 }
 
-type WorkbenchExecutionDagJobHook = (job: RemoteWorkbenchJob) => void | Promise<void>;
+type WorkbenchExecutionDagJobHook = (job: WorkbenchExecutionJob) => void | Promise<void>;
 
 export interface WorkbenchExecutionDagJobControl {
   signal: AbortSignal;
 }
 
 export interface WorkbenchExecutionDagRunInput {
-  jobs: readonly RemoteWorkbenchJob[];
+  jobs: readonly WorkbenchExecutionJob[];
   capacity: WorkbenchExecutionDagCapacity;
   sandboxBackend: WorkbenchSandboxBackendName;
-  executeJob: (job: RemoteWorkbenchJob, control: WorkbenchExecutionDagJobControl) => Promise<RemoteWorkbenchJob>;
-  shouldCancelJob?: (job: RemoteWorkbenchJob) => boolean | Promise<boolean>;
+  executeJob: (job: WorkbenchExecutionJob, control: WorkbenchExecutionDagJobControl) => Promise<WorkbenchExecutionJob>;
+  shouldCancelJob?: (job: WorkbenchExecutionJob) => boolean | Promise<boolean>;
   now?: () => string;
   onJobQueued?: WorkbenchExecutionDagJobHook;
   onJobStarted?: WorkbenchExecutionDagJobHook;
@@ -52,12 +53,12 @@ export async function runWorkbenchExecutionDag(
 ): Promise<WorkbenchExecutionDagResult> {
   assertPositiveCapacity(args.capacity);
   const now = args.now ?? (() => new Date().toISOString());
-  const jobsById = new Map<string, RemoteWorkbenchJob>();
-  const pending = new Map<string, RemoteWorkbenchJob>();
-  const terminal = new Map<string, RemoteWorkbenchJob>();
+  const jobsById = new Map<string, WorkbenchExecutionJob>();
+  const pending = new Map<string, WorkbenchExecutionJob>();
+  const terminal = new Map<string, WorkbenchExecutionJob>();
   const running = new Map<string, RunningJob>();
   const dependencies = new Map<string, string[]>();
-  const results = new Map<string, RemoteWorkbenchJob>();
+  const results = new Map<string, WorkbenchExecutionJob>();
   const originalOrder = args.jobs.map((job) => job.id);
   let activeCost: WorkbenchExecutionDagCapacity = emptyCapacity();
   let maxConcurrency = 0;
@@ -79,7 +80,7 @@ export async function runWorkbenchExecutionDag(
         throw new Error(`Job ${job.id} depends on unknown job ${dependencyId}.`);
       }
     }
-    if (isTerminalJob(job)) {
+    if (isWorkbenchJobStatusTerminal(job.status)) {
       terminal.set(job.id, job);
       results.set(job.id, job);
       continue;
@@ -148,14 +149,14 @@ export async function runWorkbenchExecutionDag(
         continue;
       }
       if (await args.shouldCancelJob?.(job)) {
-        await cancelPendingJob(job, "cancelled", "Run cancellation requested.");
+        await cancelPendingJob(job, "canceled", "Run cancellation requested.");
         progressed = true;
         continue;
       }
       pending.delete(job.id);
       activeCost = addCapacity(activeCost, cost);
       const startedAt = now();
-      const runningJob: RemoteWorkbenchJob = {
+      const runningJob: WorkbenchExecutionJob = {
         ...job,
         status: "running",
         startedAt,
@@ -172,7 +173,7 @@ export async function runWorkbenchExecutionDag(
     return progressed;
   }
 
-  function readyPendingJobs(): RemoteWorkbenchJob[] {
+  function readyPendingJobs(): WorkbenchExecutionJob[] {
     return [...pending.values()].filter((job) => dependencyTerminalStatus(job) === "ready");
   }
 
@@ -180,7 +181,7 @@ export async function runWorkbenchExecutionDag(
     let cancelled = false;
     for (const job of [...pending.values()]) {
       const dependencyStatus = dependencyTerminalStatus(job);
-      if (dependencyStatus !== "failed" && dependencyStatus !== "cancelled") {
+      if (dependencyStatus !== "failed" && dependencyStatus !== "canceled") {
         continue;
       }
       await cancelPendingJob(job, dependencyStatus);
@@ -189,7 +190,7 @@ export async function runWorkbenchExecutionDag(
     return cancelled;
   }
 
-  function dependencyTerminalStatus(job: RemoteWorkbenchJob): "ready" | "blocked" | "failed" | "cancelled" {
+  function dependencyTerminalStatus(job: WorkbenchExecutionJob): "ready" | "blocked" | "failed" | "canceled" {
     const jobDependencies = dependencies.get(job.id) ?? [];
     let blocked = false;
     for (const dependencyId of jobDependencies) {
@@ -201,8 +202,8 @@ export async function runWorkbenchExecutionDag(
       if (dependency.status === "failed") {
         return "failed";
       }
-      if (dependency.status === "cancelled") {
-        return "cancelled";
+      if (dependency.status === "canceled") {
+        return "canceled";
       }
       if (dependency.status !== "succeeded") {
         blocked = true;
@@ -212,18 +213,18 @@ export async function runWorkbenchExecutionDag(
   }
 
   async function cancelPendingJob(
-    job: RemoteWorkbenchJob,
-    dependencyStatus: "failed" | "cancelled",
+    job: WorkbenchExecutionJob,
+    dependencyStatus: "failed" | "canceled",
     reason?: string,
   ): Promise<void> {
     pending.delete(job.id);
     const finishedAt = now();
-    const cancelled: RemoteWorkbenchJob = {
+    const cancelled: WorkbenchExecutionJob = {
       ...job,
-      status: "cancelled",
+      status: "canceled",
       updatedAt: finishedAt,
       finishedAt,
-      error: reason ?? `Dependency ${formatDependencyStatus(dependencyStatus)}.`,
+      error: reason ?? `Dependency ${dependencyStatus}.`,
     };
     cancelledJobCount += 1;
     terminal.set(job.id, cancelled);
@@ -232,11 +233,11 @@ export async function runWorkbenchExecutionDag(
   }
 
   async function finishJob(
-    runningJob: RemoteWorkbenchJob,
+    runningJob: WorkbenchExecutionJob,
     cost: WorkbenchExecutionDagCapacity,
     abortController: AbortController,
   ): Promise<void> {
-    let completed: RemoteWorkbenchJob;
+    let completed: WorkbenchExecutionJob;
     const stopCancellationWatcher = watchRunningJobCancellation(runningJob, abortController);
     try {
       completed = await args.executeJob(runningJob, { signal: abortController.signal });
@@ -258,7 +259,7 @@ export async function runWorkbenchExecutionDag(
       const finishedAt = completed.finishedAt ?? now();
       completed = {
         ...completed,
-        status: "cancelled",
+        status: "canceled",
         updatedAt: finishedAt,
         finishedAt,
         error: completed.error ?? "Run cancellation requested.",
@@ -271,7 +272,7 @@ export async function runWorkbenchExecutionDag(
   }
 
   function watchRunningJobCancellation(
-    runningJob: RemoteWorkbenchJob,
+    runningJob: WorkbenchExecutionJob,
     abortController: AbortController,
   ): () => void {
     if (!args.shouldCancelJob) {
@@ -303,13 +304,9 @@ export async function runWorkbenchExecutionDag(
   }
 }
 
-function formatDependencyStatus(status: "failed" | "cancelled"): string {
-  return status === "cancelled" ? "canceled" : status;
-}
-
 async function runJobHook(
   hook: WorkbenchExecutionDagJobHook | undefined,
-  job: RemoteWorkbenchJob,
+  job: WorkbenchExecutionJob,
 ): Promise<void> {
   if (!hook) {
     return;
@@ -317,7 +314,7 @@ async function runJobHook(
   await hook(job);
 }
 
-export function workbenchJobDependencies(job: RemoteWorkbenchJob): string[] {
+export function workbenchJobDependencies(job: WorkbenchExecutionJob): string[] {
   const input = jsonRecord(job.input);
   const dependsOn = input.dependsOn;
   return Array.isArray(dependsOn)
@@ -326,12 +323,9 @@ export function workbenchJobDependencies(job: RemoteWorkbenchJob): string[] {
 }
 
 export function workbenchJobResources(
-  job: RemoteWorkbenchJob,
+  job: WorkbenchExecutionJob,
 ): SandboxBackendRequestedResources {
-  const input = jsonRecord(job.input);
-  const resources = input.kind === "workbench.skill.eval.job.v1"
-    ? input.resources
-    : jsonRecord(jsonRecord(input.execution).policy).resources;
+  const resources = jsonRecord(jsonRecord(jsonRecord(job.input).execution).policy).resources;
   const record = jsonRecord(resources);
   return {
     cpu: readPositiveResource(record.cpu, job.id, "resources.cpu"),
@@ -342,7 +336,7 @@ export function workbenchJobResources(
 }
 
 export function workbenchJobHostCost(
-  job: RemoteWorkbenchJob,
+  job: WorkbenchExecutionJob,
   backend: WorkbenchSandboxBackendName,
 ): SandboxBackendHostCost {
   return sandboxBackendAdmissionForResources(backend, workbenchJobResources(job)).hostCost;
@@ -383,10 +377,6 @@ function emptyCapacity(): WorkbenchExecutionDagCapacity {
   return { cpu: 0, memoryGb: 0, diskGb: 0 };
 }
 
-function isTerminalJob(job: RemoteWorkbenchJob): boolean {
-  return job.status === "succeeded" || job.status === "failed" || job.status === "cancelled";
-}
-
 function assertPositiveCapacity(capacity: WorkbenchExecutionDagCapacity): void {
   readPositiveNumber(capacity.cpu, "capacity.cpu");
   readPositiveNumber(capacity.memoryGb, "capacity.memoryGb");
@@ -411,12 +401,6 @@ function readPositiveNumber(value: unknown, label: string): number {
     throw new Error(`${label} must be a positive number.`);
   }
   return number;
-}
-
-function jsonRecord(value: unknown): Record<string, Json> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, Json>
-    : {};
 }
 
 function formatCapacity(capacity: WorkbenchExecutionDagCapacity): string {

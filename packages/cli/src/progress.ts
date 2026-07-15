@@ -1,5 +1,9 @@
 import {
+  isWorkbenchJobStatusTerminal,
+  isWorkbenchRunStatusTerminal,
+  workbenchOperationStepsForRunKind,
   workbenchJobReportTotalCostUsd,
+  workbenchJobScore,
   type WorkbenchJob,
   type WorkbenchOperationRequest,
   type WorkbenchRun,
@@ -7,9 +11,9 @@ import {
   type WorkbenchRunSnapshot,
   type WorkbenchTrace,
 } from "@workbench-ai/workbench-contract";
-import {
-  createWorkbenchRunSnapshot,
-} from "@workbench-ai/workbench-core";
+import { createWorkbenchRunSnapshot } from "@workbench-ai/workbench-core";
+
+import { formatCostUsd } from "./human-format.js";
 
 export type WorkbenchProgressCommand = "run" | "grade" | "eval" | "improve" | "watch" | "retry";
 export type WorkbenchProgressPhase =
@@ -31,14 +35,14 @@ export interface ProgressEvidenceCounts {
   resultFiles?: number;
 }
 
-export interface ProgressRenderer {
+interface ProgressRenderer {
   render(
     snapshot: WorkbenchRunSnapshot | undefined,
     options?: { force?: boolean; command?: WorkbenchProgressCommand },
   ): void;
 }
 
-export interface RunProgressSnapshotInput {
+interface RunProgressSnapshotInput {
   command: WorkbenchProgressCommand;
   phase: WorkbenchProgressPhase;
   location: "local" | "cloud";
@@ -60,7 +64,7 @@ export function runProgressSnapshotFromRuns(input: RunProgressSnapshotInput): Wo
     return undefined;
   }
   const jobs = progressJobs(input.command, input.phase, input.jobs);
-  const nowMs = input.nowMs ?? (input.phase === "complete" || input.runs.every(isTerminalRun)
+  const nowMs = input.nowMs ?? (input.phase === "complete" || input.runs.every((run) => isWorkbenchRunStatusTerminal(run.status))
     ? terminalProgressObservedAtMs("complete", input.runs, jobs)
     : undefined) ?? Date.now();
   const base = createWorkbenchRunSnapshot(request, input.runs, {
@@ -175,7 +179,7 @@ export function formatProgressSnapshot(
   command: WorkbenchProgressCommand = progressCommandForSnapshot(snapshot),
 ): string {
   const parts = formatProgressSummaryParts(snapshot);
-  return `workbench ${command}: ${parts.join(", ")}.`;
+  return `${workbenchOperationInvocation(command)}: ${parts.join(", ")}.`;
 }
 
 export function formatProgressSummary(
@@ -184,22 +188,29 @@ export function formatProgressSummary(
   return formatProgressSummaryParts(snapshot).join(", ");
 }
 
-export function formatQueuedCloudGuidance(command: WorkbenchProgressCommand, runId: string): string {
-  return `workbench ${command}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch ${runId}.`;
+function formatQueuedCloudGuidance(command: WorkbenchProgressCommand, runId: string): string {
+  return `${workbenchOperationInvocation(command)}: queued runs are waiting for a hosted worker; press Ctrl-C to detach and resume with workbench watch ${runId}.`;
 }
 
-export function formatInspectableGuidance(
+function formatInspectableGuidance(
   command: WorkbenchProgressCommand,
   runId: string,
   location: "local" | "cloud",
 ): string {
   if (location === "cloud") {
-    return `workbench ${command}: press Ctrl-C to detach; resume with workbench watch ${runId}.`;
+    return `${workbenchOperationInvocation(command)}: press Ctrl-C to detach; resume with workbench watch ${runId}.`;
   }
-  return `workbench ${command}: inspect current evidence with workbench show ${runId}.`;
+  return `${workbenchOperationInvocation(command)}: inspect current evidence with workbench eval show ${runId}.`;
 }
 
-export function formatProgressDuration(elapsedMs: number): string {
+export function workbenchOperationInvocation(command: WorkbenchProgressCommand): string {
+  if (command === "grade") return "workbench eval grade";
+  if (command === "improve") return "workbench skill improve";
+  if (command === "run" || command === "eval") return "workbench eval run";
+  return `workbench ${command}`;
+}
+
+function formatProgressDuration(elapsedMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
   if (totalSeconds < 60) {
     return `${totalSeconds}s`;
@@ -220,7 +231,8 @@ function progressOperationRequest(input: RunProgressSnapshotInput): WorkbenchOpe
     return undefined;
   }
   const storedPlan = firstRun.operationPlan;
-  if ((storedPlan?.kind ?? firstRun.kind) === "improve") {
+  const kind = storedPlan?.kind ?? firstRun.kind;
+  if (kind === "improve") {
     return {
       kind: "improve",
       variant: storedPlan?.variant ?? input.location,
@@ -236,7 +248,7 @@ function progressOperationRequest(input: RunProgressSnapshotInput): WorkbenchOpe
       ...(storedPlan?.retryOfRunId ? { retryOfRunId: storedPlan.retryOfRunId } : firstRun.retryOfRunId ? { retryOfRunId: firstRun.retryOfRunId } : {}),
     };
   }
-  const phases = storedPlan?.phases ?? progressPhasesForRunKind(storedPlan?.kind ?? firstRun.kind);
+  const steps = storedPlan?.steps ?? workbenchOperationStepsForRunKind(kind);
   return {
     kind: "eval",
     variant: storedPlan?.variant ?? input.location,
@@ -246,22 +258,11 @@ function progressOperationRequest(input: RunProgressSnapshotInput): WorkbenchOpe
       ...(storedPlan?.skills[0] ?? firstRun.skillName ? { skill: storedPlan?.skills[0] ?? firstRun.skillName } : {}),
       agent,
     })),
-    phases,
-    grader: storedPlan?.grader ?? (phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" }),
+    steps,
     ...(storedPlan?.samples !== undefined ? { samples: storedPlan.samples } : firstRun.requestedSamples !== undefined ? { samples: firstRun.requestedSamples } : {}),
     ...(storedPlan?.rerun ? { rerun: true } : {}),
     ...(storedPlan?.retryOfRunId ? { retryOfRunId: storedPlan.retryOfRunId } : firstRun.retryOfRunId ? { retryOfRunId: firstRun.retryOfRunId } : {}),
   };
-}
-
-function progressPhasesForRunKind(kind: WorkbenchRun["kind"]): Array<"execute" | "grade"> {
-  if (kind === "run") {
-    return ["execute"];
-  }
-  if (kind === "grade") {
-    return ["grade"];
-  }
-  return ["execute", "grade"];
 }
 
 function runSnapshotPhase(
@@ -319,21 +320,14 @@ function progressPartialScore(base: WorkbenchRunSnapshot, jobs: readonly Workben
   if (base.status !== "queued" && base.status !== "running" && base.status !== "canceling") {
     return undefined;
   }
-  const scoredJobs = jobs.filter((job) => jobScore(job) !== undefined);
+  const scoredJobs = jobs.filter((job) => workbenchJobScore(job) !== undefined);
   if (scoredJobs.length > 0) {
-    return Number((scoredJobs.reduce((sum, job) => sum + (jobScore(job) ?? 0), 0) / scoredJobs.length).toFixed(3));
+    return Number((scoredJobs.reduce((sum, job) => sum + (workbenchJobScore(job) ?? 0), 0) / scoredJobs.length).toFixed(3));
   }
   if (typeof base.result?.score === "number") {
     return base.result.score;
   }
   return undefined;
-}
-
-function jobScore(job: WorkbenchJob): number | undefined {
-  const scoreItem = job.result?.items?.find((item) =>
-    item.kind === "score" && typeof item.score === "number" && Number.isFinite(item.score)
-  );
-  return typeof scoreItem?.score === "number" ? scoreItem.score : undefined;
 }
 
 function progressEvidenceCount(evidence: ProgressEvidenceCounts | undefined): number | undefined {
@@ -490,9 +484,9 @@ function terminalProgressObservedAtMs(
   const timestamps = [
     ...runs.flatMap((run) => [
       run.finishedAt,
-      isTerminalRun(run) ? run.lastProgressAt : undefined,
+      isWorkbenchRunStatusTerminal(run.status) ? run.lastProgressAt : undefined,
     ]),
-    ...jobs.filter(isTerminalJob).flatMap((job) => [
+    ...jobs.filter((job) => isWorkbenchJobStatusTerminal(job.status)).flatMap((job) => [
       job.finishedAt,
       job.startedAt,
     ]),
@@ -503,14 +497,6 @@ function terminalProgressObservedAtMs(
   return timestamps[0];
 }
 
-function isTerminalRun(run: WorkbenchRun): boolean {
-  return run.status === "succeeded" || run.status === "failed" || run.status === "canceled";
-}
-
-function isTerminalJob(job: WorkbenchJob): boolean {
-  return job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
-}
-
 function timestampMs(value: string): number {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : Date.now();
@@ -518,13 +504,4 @@ function timestampMs(value: string): number {
 
 function formatScore(score: number): string {
   return score.toFixed(3);
-}
-
-function formatCostUsd(costUsd: number): string {
-  return new Intl.NumberFormat("en-US", {
-    currency: "USD",
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 0,
-    style: "currency",
-  }).format(costUsd);
 }

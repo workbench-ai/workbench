@@ -1,3 +1,10 @@
+import { normalizeWorkbenchSourcePath } from "./source-path.js";
+import type {
+  ExecutionTrace,
+  TraceEvent,
+  TraceSpan,
+} from "@workbench-ai/agent-driver";
+
 export type Json =
   | null
   | boolean
@@ -6,7 +13,75 @@ export type Json =
   | Json[]
   | { [key: string]: Json };
 
+export interface WorkbenchCloudErrorBody {
+  schema: "workbench.cloud.error.v1";
+  code: string;
+  message: string;
+  retryable: boolean;
+  remediation?: string;
+  subject?: Record<string, Json>;
+}
+
+export function workbenchCloudErrorBody(
+  error: Omit<WorkbenchCloudErrorBody, "schema">,
+): WorkbenchCloudErrorBody {
+  const remediation = error.remediation
+    ? normalizeWorkbenchCommandRemediation(error.remediation)
+    : undefined;
+  return {
+    schema: "workbench.cloud.error.v1",
+    code: error.code,
+    message: error.message,
+    retryable: error.retryable,
+    ...(remediation ? { remediation } : {}),
+    ...(error.subject ? { subject: error.subject } : {}),
+  };
+}
+
+export function parseWorkbenchCloudErrorBody(text: string): WorkbenchCloudErrorBody | null {
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.schema !== "workbench.cloud.error.v1" || typeof record.code !== "string" || typeof record.message !== "string") {
+      return null;
+    }
+    const subject = record.subject && typeof record.subject === "object" && !Array.isArray(record.subject)
+      ? record.subject as Record<string, Json>
+      : undefined;
+    const remediation = typeof record.remediation === "string"
+      ? normalizeWorkbenchCommandRemediation(record.remediation)
+      : undefined;
+    return workbenchCloudErrorBody({
+      code: record.code,
+      message: record.message,
+      retryable: record.retryable === true,
+      ...(remediation ? { remediation } : {}),
+      ...(subject ? { subject } : {}),
+    });
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeWorkbenchCommandRemediation(value: string): string | undefined {
+  const trimmed = value.trim();
+  return /^(?:workbench|codex|claude|npm|mkdir)\b/u.test(trimmed) || /^[A-Z_][A-Z0-9_]*=.*\bworkbench\b/u.test(trimmed)
+    ? trimmed
+    : undefined;
+}
+
 export * from "./run-evidence.js";
+export * from "./ordering.js";
+export * from "./source-evals.js";
+export { normalizeWorkbenchSourcePath } from "./source-path.js";
+export {
+  parseWorkbenchProjectState,
+  isWorkbenchJson,
+  WorkbenchStateValidationError,
+} from "./state-validation.js";
 
 export interface SurfaceSnapshotFile {
   path: string;
@@ -14,6 +89,20 @@ export interface SurfaceSnapshotFile {
   encoding?: "utf8" | "base64";
   content: string;
   executable?: boolean;
+}
+
+export interface WorkbenchSkillPackageSnapshot {
+  schema: "workbench.skill-package.snapshot.v1";
+  owner: string;
+  name: string;
+  versionId: string;
+  files: Array<{
+    path: string;
+    kind?: SurfaceSnapshotFile["kind"];
+    encoding?: SurfaceSnapshotFile["encoding"];
+    executable?: boolean;
+    content: string;
+  }>;
 }
 
 const WORKBENCH_RUNTIME_METADATA_DIRS = new Set([
@@ -54,25 +143,6 @@ const WORKBENCH_PACKAGE_SOURCE_IGNORED_FILES = new Set([
   ".DS_Store",
 ]);
 
-export function normalizeWorkbenchSourcePath(filePath: string): string {
-  const normalized = filePath.replace(/\\/gu, "/");
-  if (!normalized || normalized.includes("\0")) {
-    throw new Error("Workbench source paths must be non-empty relative paths.");
-  }
-  if (normalized.startsWith("/")) {
-    throw new Error(`Unsafe Workbench source path: ${filePath}`);
-  }
-  const parts = normalized.split("/");
-  if (parts.some((part) => part === "" || part === "." || part === "..")) {
-    throw new Error(`Unsafe Workbench source path: ${filePath}`);
-  }
-  return normalized;
-}
-
-export function normalizeWorkbenchSourceRequestPath(filePath: string): string {
-  return normalizeWorkbenchSourcePath(filePath.replace(/^\/+/u, ""));
-}
-
 export function normalizeWorkbenchSkillName(value: string): string {
   return value
     .trim()
@@ -108,7 +178,7 @@ export function isWorkbenchLiveInspectableProjectPath(filePath: string): boolean
   return isWorkbenchPackageSourcePath(filePath) || isWorkbenchAuthoredControlPath(filePath);
 }
 
-export type WorkbenchInspectionFileOwnerKind = "version" | "trace" | "artifact" | "case" | "evaluation";
+export type WorkbenchInspectionFileOwnerKind = "version" | "trace" | "artifact" | "case";
 
 const WORKBENCH_CASE_FILE_OWNER_SEPARATOR = ":";
 
@@ -127,9 +197,6 @@ export function workbenchInspectionFileOwnerKindFromRouteSegment(
   if (value === "cases") {
     return "case";
   }
-  if (value === "evaluation") {
-    return "evaluation";
-  }
   return null;
 }
 
@@ -144,9 +211,6 @@ export function workbenchInspectionFileOwnerRouteSegment(
   }
   if (kind === "artifact") {
     return "artifacts";
-  }
-  if (kind === "evaluation") {
-    return "evaluation";
   }
   return "cases";
 }
@@ -168,44 +232,19 @@ export interface WorkbenchInspectionFileContent {
   kind?: SurfaceSnapshotFile["kind"];
   encoding?: SurfaceSnapshotFile["encoding"];
   executable?: boolean;
-  content?: string;
-  unavailableReason?: string;
-}
-
-export function workbenchInspectionFileContentUnavailableReason(
-  file: Pick<SurfaceSnapshotFile, "kind" | "encoding">,
-): string | null {
-  if (file.kind === "binary") {
-    return "Binary file content is not rendered.";
-  }
-  if (file.encoding === "base64") {
-    return "Base64 file content is not rendered.";
-  }
-  return null;
+  content: string;
 }
 
 export function workbenchInspectionFileContent(
   file: SurfaceSnapshotFile,
 ): WorkbenchInspectionFileContent {
-  const metadata = workbenchInspectionFileMetadata(file);
-  const unavailableReason = workbenchInspectionFileContentUnavailableReason(file);
-  return unavailableReason
-    ? { ...metadata, unavailableReason }
-    : { ...metadata, content: file.content };
+  return { ...workbenchInspectionFileManifest(file), content: file.content };
 }
 
 export function workbenchInspectionFileManifest(file: SurfaceSnapshotFile): SurfaceSnapshotFile {
   return {
-    ...file,
-    content: "",
-  };
-}
-
-function workbenchInspectionFileMetadata(
-  file: SurfaceSnapshotFile,
-): WorkbenchInspectionFileContent {
-  return {
     path: file.path,
+    content: "",
     ...(file.kind ? { kind: file.kind } : {}),
     ...(file.encoding ? { encoding: file.encoding } : {}),
     ...(file.executable !== undefined ? { executable: file.executable } : {}),
@@ -275,19 +314,30 @@ export interface WorkbenchVersion {
 export interface WorkbenchEvalSnapshot {
   hash: string;
   files: SurfaceSnapshotFile[];
+  grade: WorkbenchGradePlan;
+  gradeAdapters: WorkbenchGradeAdapterOption[];
   cases: WorkbenchEvalCaseSnapshot[];
   caseCount: number;
   createdAt: string;
   updatedAt: string;
-  gradeAdapter: string;
 }
 
-export interface WorkbenchEvalCaseGradePlan {
+export type WorkbenchGradePlanAdapterSource = "eval" | "case";
+
+export interface WorkbenchGradePlan {
   adapter: string;
+  adapterSource: WorkbenchGradePlanAdapterSource;
   label: string;
   summary: string;
   sources: WorkbenchGradePlanSource[];
   display: WorkbenchGradePlanDisplayBlock[];
+  authoring: WorkbenchGradePlanAuthoringControl[];
+}
+
+export interface WorkbenchGradeAdapterOption {
+  adapter: string;
+  label: string;
+  authoring: WorkbenchGradePlanAuthoringControl[];
 }
 
 export interface WorkbenchGradePlanSource {
@@ -318,26 +368,369 @@ export interface WorkbenchGradePlanFileRef {
   role?: string;
 }
 
+export interface WorkbenchGradePlanAuthoringBase {
+  name: string;
+  label: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface WorkbenchGradePlanAuthoringChoiceOption {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export type WorkbenchGradePlanAuthoringListField =
+  | {
+      kind: "text";
+      name: string;
+      label: string;
+      description?: string;
+      placeholder?: string;
+      defaultValue?: string;
+      required?: boolean;
+      multiline?: boolean;
+    }
+  | {
+      kind: "number";
+      name: string;
+      label: string;
+      description?: string;
+      defaultValue?: number;
+      required?: boolean;
+      min?: number;
+      max?: number;
+      step?: number;
+    }
+  | {
+      kind: "choice";
+      name: string;
+      label: string;
+      description?: string;
+      defaultValue?: string;
+      required?: boolean;
+      options: readonly WorkbenchGradePlanAuthoringChoiceOption[];
+    };
+
+export type WorkbenchGradePlanAuthoringControl =
+  | (WorkbenchGradePlanAuthoringBase & {
+      kind: "text";
+      placeholder?: string;
+      defaultValue?: string;
+      multiline?: boolean;
+    })
+  | (WorkbenchGradePlanAuthoringBase & {
+      kind: "list";
+      itemLabel?: string;
+      minItems?: number;
+      maxItems?: number;
+      fields: readonly WorkbenchGradePlanAuthoringListField[];
+      defaultItems?: readonly Record<string, Json>[];
+    })
+  | (WorkbenchGradePlanAuthoringBase & {
+      kind: "choice";
+      options: readonly WorkbenchGradePlanAuthoringChoiceOption[];
+      defaultValue?: string;
+    })
+  | (WorkbenchGradePlanAuthoringBase & {
+      kind: "file";
+      path: string;
+      language?: string;
+      defaultValue?: string;
+      executable?: boolean;
+    })
+  | {
+      kind: "notice";
+      name: string;
+      label: string;
+      message: string;
+    };
+
+export interface WorkbenchGradePlanAuthoringIssue {
+  name: string;
+  message: string;
+  path?: readonly (string | number)[];
+}
+
+type WorkbenchGradePlanAuthoringListControl = Extract<WorkbenchGradePlanAuthoringControl, { kind: "list" }>;
+
+export function workbenchGradePlanAuthoringListItemDefault(
+  control: WorkbenchGradePlanAuthoringListControl,
+): Record<string, Json> {
+  const item: Record<string, Json> = {};
+  for (const field of control.fields) {
+    if (field.kind === "choice") {
+      item[field.name] = field.defaultValue ?? field.options[0]?.value ?? "";
+      continue;
+    }
+    if (field.kind === "number") {
+      if (field.defaultValue !== undefined) {
+        item[field.name] = field.defaultValue;
+      }
+      continue;
+    }
+    item[field.name] = field.defaultValue ?? "";
+  }
+  return item;
+}
+
+export function workbenchGradePlanAuthoringDefaults(
+  controls: readonly WorkbenchGradePlanAuthoringControl[],
+): Record<string, Json> {
+  const values: Record<string, Json> = {};
+  for (const control of controls) {
+    if (control.kind === "notice") {
+      continue;
+    }
+    if (control.kind === "list") {
+      values[control.name] = control.defaultItems && control.defaultItems.length > 0
+        ? control.defaultItems.map((entry) => copyJson(entry) as Record<string, Json>)
+        : Array.from({ length: control.minItems ?? 0 }, () => workbenchGradePlanAuthoringListItemDefault(control));
+      continue;
+    }
+    if (control.kind === "choice") {
+      values[control.name] = control.defaultValue ?? control.options[0]?.value ?? "";
+      continue;
+    }
+    values[control.name] = control.defaultValue ?? "";
+  }
+  return values;
+}
+
+export function workbenchGradePlanAuthoringValues(
+  controls: readonly WorkbenchGradePlanAuthoringControl[],
+  values: Record<string, Json> = {},
+): Record<string, Json> {
+  const effective = workbenchGradePlanAuthoringDefaults(controls);
+  const declaredNames = new Set(controls
+    .filter((control) => control.kind !== "notice")
+    .map((control) => control.name));
+  for (const [name, value] of Object.entries(values)) {
+    if (declaredNames.has(name)) {
+      effective[name] = copyJson(value);
+    }
+  }
+  return effective;
+}
+
+export function workbenchGradePlanAuthoringIssues(
+  controls: readonly WorkbenchGradePlanAuthoringControl[],
+  values: Record<string, Json> = {},
+  options: { pathLabel?: string } = {},
+): WorkbenchGradePlanAuthoringIssue[] {
+  const issues: WorkbenchGradePlanAuthoringIssue[] = [];
+  const pathLabel = options.pathLabel ?? "Case grade.authoring";
+  const declaredNames = new Set(controls
+    .filter((control) => control.kind !== "notice")
+    .map((control) => control.name));
+  for (const name of Object.keys(values)) {
+    if (!declaredNames.has(name)) {
+      issues.push({
+        name,
+        message: `${pathLabel}.${name} is not supported by this grader.`,
+        path: [name],
+      });
+    }
+  }
+  const effective = workbenchGradePlanAuthoringValues(controls, values);
+  for (const control of controls) {
+    validateWorkbenchGradePlanAuthoringControlValue(control, effective[control.name], issues);
+  }
+  return issues;
+}
+
+function validateWorkbenchGradePlanAuthoringControlValue(
+  control: WorkbenchGradePlanAuthoringControl,
+  value: Json | undefined,
+  issues: WorkbenchGradePlanAuthoringIssue[],
+): void {
+  if (control.kind === "notice") {
+    return;
+  }
+  if (control.kind === "list") {
+    validateWorkbenchGradePlanAuthoringListValue(control, value, issues);
+    return;
+  }
+  if (control.kind === "choice") {
+    validateWorkbenchGradePlanAuthoringChoiceValue(control, value, issues);
+    return;
+  }
+  if (typeof value !== "string") {
+    if (control.required) {
+      issues.push({ name: control.name, message: `${control.label} is required.`, path: [control.name] });
+    }
+    return;
+  }
+  if (control.required && !value.trim()) {
+    issues.push({ name: control.name, message: `${control.label} is required.`, path: [control.name] });
+  }
+}
+
+function validateWorkbenchGradePlanAuthoringChoiceValue(
+  control: Extract<WorkbenchGradePlanAuthoringControl, { kind: "choice" }>,
+  value: Json | undefined,
+  issues: WorkbenchGradePlanAuthoringIssue[],
+): void {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) {
+    if (control.required) {
+      issues.push({ name: control.name, message: `${control.label} is required.`, path: [control.name] });
+    }
+    return;
+  }
+  if (!control.options.some((option) => option.value === text)) {
+    issues.push({ name: control.name, message: `${control.label} has an unsupported value.`, path: [control.name] });
+  }
+}
+
+function validateWorkbenchGradePlanAuthoringListValue(
+  control: WorkbenchGradePlanAuthoringListControl,
+  value: Json | undefined,
+  issues: WorkbenchGradePlanAuthoringIssue[],
+): void {
+  if (!Array.isArray(value)) {
+    issues.push({ name: control.name, message: `${control.label} must be a list.`, path: [control.name] });
+    return;
+  }
+  let validItemCount = 0;
+  value.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      issues.push({ name: control.name, message: `${control.itemLabel ?? "Item"} ${index + 1} must be an object.`, path: [control.name, index] });
+      return;
+    }
+    const item = entry as Record<string, Json>;
+    if (!workbenchGradePlanAuthoringListItemHasContent(control, item)) {
+      return;
+    }
+    const issueCount = issues.length;
+    for (const field of control.fields) {
+      validateWorkbenchGradePlanAuthoringListFieldValue(control, field, item[field.name], index, issues);
+    }
+    if (issues.length === issueCount) {
+      validItemCount += 1;
+    }
+  });
+  if ((control.minItems ?? 0) > validItemCount) {
+    const itemLabel = (control.itemLabel ?? "item").toLowerCase();
+    issues.push({
+      name: control.name,
+      message: `${control.label} requires at least ${control.minItems} ${itemLabel}${control.minItems === 1 ? "" : "s"}.`,
+      path: [control.name],
+    });
+  }
+}
+
+function validateWorkbenchGradePlanAuthoringListFieldValue(
+  control: WorkbenchGradePlanAuthoringListControl,
+  field: WorkbenchGradePlanAuthoringListField,
+  value: Json | undefined,
+  index: number,
+  issues: WorkbenchGradePlanAuthoringIssue[],
+): void {
+  if (field.kind === "number") {
+    if (value === undefined || value === "") {
+      if (field.required) {
+        issues.push({ name: control.name, message: `${field.label} is required.`, path: [control.name, index, field.name] });
+      }
+      return;
+    }
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      issues.push({ name: control.name, message: `${field.label} must be a number.`, path: [control.name, index, field.name] });
+      return;
+    }
+    if (field.min !== undefined && value < field.min) {
+      issues.push({ name: control.name, message: `${field.label} must be at least ${field.min}.`, path: [control.name, index, field.name] });
+    }
+    if (field.max !== undefined && value > field.max) {
+      issues.push({ name: control.name, message: `${field.label} must be at most ${field.max}.`, path: [control.name, index, field.name] });
+    }
+    return;
+  }
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) {
+    if (field.required) {
+      issues.push({ name: control.name, message: `${field.label} is required.`, path: [control.name, index, field.name] });
+    }
+    return;
+  }
+  if (field.kind === "choice" && !field.options.some((option) => option.value === text)) {
+    issues.push({ name: control.name, message: `${field.label} has an unsupported value.`, path: [control.name, index, field.name] });
+  }
+}
+
+function workbenchGradePlanAuthoringListItemHasContent(
+  control: WorkbenchGradePlanAuthoringListControl,
+  item: Record<string, Json>,
+): boolean {
+  return control.fields.some((field) => {
+    const value = item[field.name];
+    if (field.kind === "number") {
+      return typeof value === "number" && Number.isFinite(value);
+    }
+    return typeof value === "string" && value.trim().length > 0;
+  });
+}
+
+function copyJson(value: Json): Json {
+  if (Array.isArray(value)) {
+    return value.map(copyJson);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, copyJson(entry)]));
+  }
+  return value;
+}
+
 export interface WorkbenchEvalCaseSnapshot {
   id: string;
   path: string;
-  title?: string;
   description?: string;
   command?: string;
-  grade: WorkbenchEvalCaseGradePlan;
+  grade: WorkbenchGradePlan;
   files: SurfaceSnapshotFile[];
 }
 
 export type WorkbenchCaseRunKind = "run" | "grade" | "eval";
-export type WorkbenchRunKind = WorkbenchCaseRunKind | "improve" | "live";
+export type WorkbenchRunKind = WorkbenchCaseRunKind | "improve";
 export type WorkbenchRunLocation = "local" | "cloud";
 export type WorkbenchRunStatus = "queued" | "running" | "canceling" | "succeeded" | "failed" | "canceled";
 export type WorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
-export type WorkbenchArtifactKind = "file" | "directory" | "log" | "result";
-export type WorkbenchOperationKind = "eval" | "improve";
+
+export function isWorkbenchRunStatusTerminal(status: WorkbenchRunStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
+export function isWorkbenchJobStatusTerminal(status: WorkbenchJobStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
 export type WorkbenchOperationVariant = WorkbenchRunLocation;
-export type WorkbenchJobRole = "execute" | "grade" | "improve" | string;
-export type WorkbenchOperationPhase = "execute" | "grade";
+export type WorkbenchJobRole = string;
+export type WorkbenchOperationStep = "run" | "grade";
+
+export function workbenchOperationStepsForRunKind(
+  kind: WorkbenchCaseRunKind,
+): WorkbenchOperationStep[] {
+  if (kind === "run") {
+    return ["run"];
+  }
+  if (kind === "grade") {
+    return ["grade"];
+  }
+  return ["run", "grade"];
+}
+
+export function workbenchRunKindForOperationSteps(
+  steps: readonly WorkbenchOperationStep[],
+): WorkbenchCaseRunKind {
+  const hasRun = steps.includes("run");
+  const hasGrade = steps.includes("grade");
+  if (hasRun && hasGrade) {
+    return "eval";
+  }
+  return hasGrade ? "grade" : "run";
+}
 
 export interface WorkbenchOperationTarget {
   skill?: string;
@@ -345,18 +738,14 @@ export interface WorkbenchOperationTarget {
   agent?: string;
 }
 
-export type WorkbenchOperationGrader =
-  | { kind: "none" }
-  | { kind: "evaluation" };
-
 export interface WorkbenchEvalOperationRequest {
   kind: "eval";
   variant: WorkbenchOperationVariant;
   runId?: string;
+  evalHash?: string;
   caseIds: readonly string[];
   targets: readonly WorkbenchOperationTarget[];
-  phases: readonly WorkbenchOperationPhase[];
-  grader?: WorkbenchOperationGrader;
+  steps: readonly WorkbenchOperationStep[];
   samples?: number;
   rerun?: boolean;
   gradeOfRunId?: string;
@@ -378,44 +767,33 @@ export interface WorkbenchImproveOperationRequest {
 
 export type WorkbenchOperationRequest = WorkbenchEvalOperationRequest | WorkbenchImproveOperationRequest;
 
+export interface WorkbenchGradeMutationRequest {
+  adapter: string;
+  authoring?: Record<string, Json>;
+}
+
+export interface WorkbenchGradeMutationResponse {
+  path: string;
+  evaluationHash?: string;
+}
+
 export interface WorkbenchCaseMutationRequest {
+  caseId?: string;
   title?: string;
   prompt: string;
-  expected?: string;
+  grade?: WorkbenchCaseGradeMutation;
   metadata?: Json;
+}
+
+export interface WorkbenchCaseGradeMutation {
+  adapter?: string;
+  authoring?: Record<string, Json>;
 }
 
 export interface WorkbenchCaseMutationResponse {
   caseId: string;
   path: string;
   evaluationHash?: string;
-}
-
-export interface WorkbenchOperationSelection {
-  name: string;
-  hash?: string;
-}
-
-export interface WorkbenchOperationPreview {
-  kind: WorkbenchOperationKind;
-  variant: WorkbenchOperationVariant;
-  caseIds?: readonly string[];
-  targets?: readonly WorkbenchOperationTarget[];
-  phases?: readonly WorkbenchOperationPhase[];
-  grader?: WorkbenchOperationGrader;
-  canStart: boolean;
-  versionId?: string;
-  evalHash?: string;
-  skills: readonly WorkbenchOperationSelection[];
-  agents: readonly WorkbenchOperationSelection[];
-  caseCount: number;
-  samples: number;
-  budget?: number;
-  evidenceTraceIds?: readonly string[];
-  evidenceCount?: number;
-  disabledReason?: string;
-  setupCommands?: readonly string[];
-  cliEquivalent: string;
 }
 
 export interface WorkbenchOperationRouteTarget {
@@ -460,8 +838,7 @@ export interface WorkbenchOperationPlanSummary {
   kind: WorkbenchRunKind;
   variant: WorkbenchOperationVariant;
   targets?: readonly WorkbenchOperationTarget[];
-  phases?: readonly WorkbenchOperationPhase[];
-  grader?: WorkbenchOperationGrader;
+  steps?: readonly WorkbenchOperationStep[];
   versionId?: string;
   evalHash?: string;
   skills: readonly string[];
@@ -520,7 +897,6 @@ export interface WorkbenchRunSnapshot {
 export interface WorkbenchOperationCapability {
   enabled: boolean;
   defaultRequest: WorkbenchOperationRequest;
-  preview?: WorkbenchOperationPreview;
   disabledReason?: string;
 }
 
@@ -533,7 +909,7 @@ export interface WorkbenchAcquisitionOption {
 
 export interface WorkbenchActionCapabilities {
   variant: WorkbenchOperationVariant;
-  evidenceAccess: "full" | "source";
+  evidenceAccess: "full" | "package";
   run: WorkbenchOperationCapability;
   grade: WorkbenchOperationCapability;
   eval: WorkbenchOperationCapability;
@@ -552,7 +928,7 @@ export interface WorkbenchRun {
   agentHash: string;
   status: WorkbenchRunStatus;
   operationPlan?: WorkbenchOperationPlanSummary;
-  jobIds?: string[];
+  jobIds: string[];
   traceIds: string[];
   createdAt: string;
   finishedAt?: string;
@@ -571,9 +947,11 @@ export interface WorkbenchRun {
 
 export interface WorkbenchJob {
   id: string;
+  projectId?: string;
   runId: string;
   kind: WorkbenchRunKind;
-  role?: WorkbenchJobRole;
+  role: WorkbenchJobRole;
+  inputHash: string;
   versionId: string;
   skillName: string;
   skillBundleHash: string;
@@ -583,12 +961,14 @@ export interface WorkbenchJob {
   caseId: string;
   sample: number;
   status: WorkbenchJobStatus;
+  attempt?: number;
+  updatedAt?: string;
+  input?: WorkbenchExecutionJobInput;
+  output?: Json;
   adapter?: WorkbenchJobAdapterSummary;
   dependencies?: readonly WorkbenchJobDependency[];
   result?: WorkbenchJobResult;
   command?: string;
-  dockerImage?: string;
-  exitCode?: number;
   artifactIds: string[];
   traceIds: string[];
   createdAt: string;
@@ -657,65 +1037,30 @@ export interface WorkbenchArtifact {
   id: string;
   runId: string;
   jobId: string;
-  kind: WorkbenchArtifactKind;
-  path: string;
   createdAt: string;
   files: SurfaceSnapshotFile[];
 }
 
-export type WorkbenchTraceOrigin = "live" | "eval" | "imported";
-export type WorkbenchTraceCaptureStatus = "capturing" | "captured" | "discarded";
 export type WorkbenchTraceExecutionStatus = "running" | "completed" | "failed" | "canceled" | "unknown";
-export type WorkbenchTraceGradeStatus = "ungraded" | "graded";
-export type WorkbenchTraceReviewStatus = "unreviewed" | "passed" | "failed" | "deferred";
-export type WorkbenchTracePromotionStatus = "none" | "promoted";
-
-export interface WorkbenchTraceLifecycleStatus {
-  capture: WorkbenchTraceCaptureStatus;
-  execution: WorkbenchTraceExecutionStatus;
-  grade: WorkbenchTraceGradeStatus;
-  review: WorkbenchTraceReviewStatus;
-  promotion: WorkbenchTracePromotionStatus;
-}
 
 export interface WorkbenchTraceSource {
-  host?: string;
+  adapterId?: string;
   sessionId?: string;
   turnId?: string;
-  workspaceRoot?: string;
   command?: string;
 }
 
-export interface WorkbenchTraceSubject {
-  type: "skill" | "case" | "agent" | "version" | "run" | "job";
-  id: string;
-  versionId?: string;
-  confidence?: "exact" | "claimed" | "inferred";
-  activation?: "workbench-owned" | "host-skill" | "explicit-invocation" | "manual" | "unknown";
-}
-
 export interface WorkbenchTraceLink {
-  type: "run" | "job" | "case" | "version" | "agent" | "result" | "trace" | "promotion";
+  type: "run" | "job" | "case" | "version" | "agent" | "result" | "trace";
   id: string;
 }
 
 export interface WorkbenchTraceInput {
   prompt?: string;
-  attachments?: SurfaceSnapshotFile[];
 }
 
 export interface WorkbenchTraceOutput {
   assistantText?: string;
-  finalMessageId?: string;
-}
-
-export interface WorkbenchTraceReview {
-  status: WorkbenchTraceReviewStatus;
-  note?: string;
-  tags?: string[];
-  expected?: string;
-  reviewedAt?: string;
-  reviewer?: string;
 }
 
 export interface WorkbenchTrace {
@@ -732,147 +1077,40 @@ export interface WorkbenchTrace {
   request: Json;
   result: Json;
   files: SurfaceSnapshotFile[];
-  protocol?: "workbench.trace.v1";
-  origin?: WorkbenchTraceOrigin;
   updatedAt?: string;
   source?: WorkbenchTraceSource;
-  status?: WorkbenchTraceLifecycleStatus;
-  subjects?: WorkbenchTraceSubject[];
+  status?: WorkbenchTraceExecutionStatus;
   links?: WorkbenchTraceLink[];
   input?: WorkbenchTraceInput;
   output?: WorkbenchTraceOutput;
   spans?: WorkbenchTraceSpan[];
   events?: WorkbenchTraceEvent[];
-  usage?: UsageSummary;
-  artifacts?: SurfaceSnapshotFile[];
-  review?: WorkbenchTraceReview;
-  resultIds?: string[];
 }
-
-export type WorkbenchTracePromotionBlockerCode =
-  | "trace_not_captured"
-  | "trace_not_terminal"
-  | "trace_prompt_required"
-  | "trace_expected_required";
-
-export type WorkbenchTracePromotionReadiness =
-  | { ok: true }
-  | {
-      ok: false;
-      code: WorkbenchTracePromotionBlockerCode;
-      message: string;
-      reviewStatus?: WorkbenchTraceReviewStatus;
-    };
 
 export interface WorkbenchTraceProjection {
   lifecycleStatus: string;
-  reviewStatus: WorkbenchTraceReviewStatus;
-  promotionStatus: WorkbenchTracePromotionStatus;
   prompt: string | null;
   output: string | null;
-  promotionReadiness: WorkbenchTracePromotionReadiness;
 }
 
 export function workbenchTraceProjection(trace: WorkbenchTrace): WorkbenchTraceProjection {
   return {
     lifecycleStatus: workbenchTraceLifecycleStatus(trace),
-    reviewStatus: workbenchTraceReviewStatus(trace),
-    promotionStatus: trace.status?.promotion ?? "none",
     prompt: workbenchTracePrompt(trace),
     output: workbenchTraceOutputText(trace),
-    promotionReadiness: workbenchTracePromotionReadiness(trace),
   };
 }
 
 export function workbenchTraceLifecycleStatus(trace: WorkbenchTrace): string {
-  if (trace.status) {
-    return `${trace.status.capture}/${trace.status.execution}/${trace.status.grade}`;
-  }
-  const result = traceObjectValue(trace.result);
-  return typeof result?.status === "string" && result.status.trim()
-    ? result.status.trim()
-    : "unknown";
-}
-
-export function workbenchTraceReviewStatus(trace: WorkbenchTrace): WorkbenchTraceReviewStatus {
-  const explicitReviewStatus = trace.review?.status;
-  const lifecycleReviewStatus = trace.status?.review;
-  return explicitReviewStatus && explicitReviewStatus !== "unreviewed"
-    ? explicitReviewStatus
-    : lifecycleReviewStatus ?? explicitReviewStatus ?? "unreviewed";
+  return trace.status ?? "unknown";
 }
 
 export function workbenchTracePrompt(trace: WorkbenchTrace): string | null {
-  const inputPrompt = trimmedTraceString(trace.input?.prompt);
-  if (inputPrompt) {
-    return inputPrompt;
-  }
-  const request = traceObjectValue(trace.request);
-  const requestInput = traceObjectValue(request?.input);
-  const requestInputPrompt = trimmedTraceString(requestInput?.prompt);
-  if (requestInputPrompt) {
-    return requestInputPrompt;
-  }
-  const requestPrompt = trimmedTraceString(request?.prompt);
-  if (requestPrompt) {
-    return requestPrompt;
-  }
-  const promptEvent = trace.events?.find((event) => typeof event.attributes.prompt === "string");
-  return trimmedTraceString(promptEvent?.attributes.prompt);
+  return trimmedTraceString(trace.input?.prompt);
 }
 
 export function workbenchTraceOutputText(trace: WorkbenchTrace): string | null {
-  const assistantText = trimmedTraceString(trace.output?.assistantText);
-  if (assistantText) {
-    return assistantText;
-  }
-  const result = traceObjectValue(trace.result);
-  const resultOutput = traceObjectValue(result?.output);
-  const resultAssistantText = trimmedTraceString(resultOutput?.assistantText);
-  if (resultAssistantText) {
-    return resultAssistantText;
-  }
-  return trimmedTraceString(result?.summary);
-}
-
-export function workbenchTracePromotionReadiness(trace: WorkbenchTrace): WorkbenchTracePromotionReadiness {
-  if (trace.status?.capture && trace.status.capture !== "captured") {
-    return {
-      ok: false,
-      code: "trace_not_captured",
-      message: `Trace ${trace.id} is ${trace.status.capture}; promotion requires a captured trace.`,
-    };
-  }
-  if (trace.status?.execution === "running") {
-    return {
-      ok: false,
-      code: "trace_not_terminal",
-      message: `Trace ${trace.id} is still running; promotion requires a terminal trace.`,
-    };
-  }
-  if (!workbenchTracePrompt(trace)) {
-    return {
-      ok: false,
-      code: "trace_prompt_required",
-      message: `Trace ${trace.id} has no captured prompt; promotion requires trace input.`,
-    };
-  }
-  const reviewStatus = workbenchTraceReviewStatus(trace);
-  if ((reviewStatus === "failed" || reviewStatus === "deferred") && !trimmedTraceString(trace.review?.expected)) {
-    return {
-      ok: false,
-      code: "trace_expected_required",
-      message: `Trace ${trace.id} is reviewed as ${reviewStatus}; promotion requires an explicit expected correction.`,
-      reviewStatus,
-    };
-  }
-  return { ok: true };
-}
-
-function traceObjectValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
+  return trimmedTraceString(trace.output?.assistantText);
 }
 
 function trimmedTraceString(value: unknown): string | null {
@@ -889,11 +1127,24 @@ export interface WorkbenchLineageEdge {
 }
 
 export type WorkbenchRemoteKind = "workbench-cloud" | "file";
+export type WorkbenchSkillVisibility = "private" | "internal" | "public";
+
+export function isWorkbenchSkillVisibility(value: unknown): value is WorkbenchSkillVisibility {
+  return value === "private" || value === "internal" || value === "public";
+}
 
 export interface WorkbenchRemote {
   name: string;
   url: string;
   kind: WorkbenchRemoteKind;
+}
+
+export function workbenchPublishedSkillVersionRefMatches(versionId: string, ref: string): boolean {
+  const normalized = ref.trim();
+  const withoutVersionPrefix = normalized.startsWith("v_") ? normalized.slice(2) : normalized;
+  return versionId === normalized ||
+    versionId.startsWith(normalized) ||
+    versionId.startsWith(`v_${withoutVersionPrefix}`);
 }
 
 export interface WorkbenchRefs {
@@ -924,24 +1175,11 @@ export interface WorkbenchStatus {
   initialized: boolean;
   createdPaths?: string[];
   defaultAgentSelection?: WorkbenchDefaultAgentSelection;
-  currentSkillHash?: string;
   currentVersionId?: string;
   defaultSkill?: string;
   defaultAgent?: string;
-  versionCount: number;
-  skillCount: number;
-  agentCount: number;
   runCount: number;
-  remoteCount: number;
   pendingSyncCount?: number;
-  lastScore?: number;
-  environment?: WorkbenchEnvironmentStatus;
-}
-
-export interface WorkbenchEnvironmentStatus {
-  path: string;
-  state: "ready" | "missing" | "invalid";
-  message?: string;
 }
 
 export interface WorkbenchDefaultAgentSelection {
@@ -988,79 +1226,6 @@ export interface WorkbenchRemoteSyncErrorState extends WorkbenchRemoteSyncStateB
   } | null;
 }
 
-export interface WorkbenchStatusSnapshot {
-  schema: "workbench.status.v1";
-  ok: true;
-  project: {
-    root: string;
-    initialized: boolean;
-    currentVersionId?: string;
-    defaultSkill?: string;
-    defaultAgent?: string;
-  };
-  worktree: {
-    latestVersionId?: string;
-    sourceState?: "clean" | "edited" | "no_snapshot";
-  };
-  environment?: WorkbenchEnvironmentStatus;
-  runs: {
-    total: number;
-    lastRunId?: string;
-    lastStatus?: WorkbenchRunStatus;
-    lastScore?: number;
-    activeRuns?: Array<{
-      id: string;
-      kind: WorkbenchRunKind;
-      location: WorkbenchRunLocation;
-      status: WorkbenchRunStatus;
-      skillName: string;
-      agentName: string;
-      failed: number;
-      elapsedMs: number;
-      lastProgressAt?: string;
-      health: "healthy" | "stale_local_state" | "unknown";
-      next: string;
-    }>;
-  };
-  remotes: Array<{
-    name: string;
-    kind: WorkbenchRemoteKind;
-    url: string;
-    sync: {
-      status: "up_to_date" | "local_changes" | "auth_required" | "error" | "never";
-      lastSyncedAt?: string;
-      lastAttemptAt?: string;
-      lastError?: {
-        code: string;
-        message: string;
-      } | null;
-    };
-    publication: {
-      status: "published" | "unpublished";
-      visibility?: string;
-      currentVersionId?: string;
-      publishedVersionIds?: string[];
-      installHandle?: string;
-    };
-  }>;
-  auth?: {
-    workbenchCloud: {
-      status: "authenticated" | "not_authenticated";
-      baseUrl?: string;
-      username?: string;
-    };
-    adapters: Array<{
-      adapter: string;
-      slot?: string;
-      profile: string;
-      status: string;
-      method?: string;
-      updatedAt?: string;
-    }>;
-  };
-  next: string | null;
-}
-
 export interface WorkbenchSkillVersion {
   id: string;
   label: string;
@@ -1101,6 +1266,7 @@ export interface WorkbenchResultCell {
   evalVersionId: string;
   agentVersionId: string;
   runId?: string;
+  jobIds?: readonly string[];
   status?: WorkbenchRunStatus;
   quality?: number;
   coverage?: WorkbenchSampleCoverage;
@@ -1123,7 +1289,6 @@ export interface WorkbenchInspectionSnapshot {
   skillBundles: WorkbenchSkillBundleSnapshot[];
   evals: WorkbenchEvalSnapshot[];
   evalVersions: WorkbenchEvalVersionSummary[];
-  evaluationFiles?: SurfaceSnapshotFile[];
   agents: WorkbenchAgentSnapshot[];
   results?: WorkbenchResults;
   runs: WorkbenchRun[];
@@ -1135,6 +1300,50 @@ export interface WorkbenchInspectionSnapshot {
   remotes: WorkbenchRemote[];
   refs: WorkbenchRefs;
   publication?: WorkbenchPublication;
+}
+
+export function workbenchInspectionSnapshotManifest(
+  snapshot: WorkbenchInspectionSnapshot,
+  options: { includeEvidence?: boolean } = {},
+): WorkbenchInspectionSnapshot {
+  const fileManifests = (files: readonly SurfaceSnapshotFile[]) =>
+    files.map(workbenchInspectionFileManifest);
+  const authored = {
+    ...snapshot,
+    versions: snapshot.versions.map((version) => ({
+      ...version,
+      files: fileManifests(version.files),
+    })),
+    skillBundles: snapshot.skillBundles.map((bundle) => ({
+      ...bundle,
+      files: fileManifests(bundle.files),
+    })),
+    evals: snapshot.evals.map((evalSnapshot) => ({
+      ...evalSnapshot,
+      files: fileManifests(evalSnapshot.files),
+      cases: evalSnapshot.cases.map((evalCase) => ({
+        ...evalCase,
+        files: fileManifests(evalCase.files),
+      })),
+    })),
+  };
+  if (options.includeEvidence === false) {
+    return authored;
+  }
+  return {
+    ...authored,
+    ...(snapshot.results ? {
+      results: {
+        ...snapshot.results,
+        skillVersions: snapshot.results.skillVersions.map((version) => ({
+          ...version,
+          ...(version.files ? { files: fileManifests(version.files) } : {}),
+        })),
+      },
+    } : {}),
+    traces: snapshot.traces.map((trace) => ({ ...trace, files: fileManifests(trace.files) })),
+    artifacts: snapshot.artifacts.map((artifact) => ({ ...artifact, files: fileManifests(artifact.files) })),
+  };
 }
 
 export interface WorkbenchInspectionSnapshotEnvelope {
@@ -1168,46 +1377,39 @@ export type WorkbenchStateNotice =
       cursor: string;
     };
 
+export function createWorkbenchStateNotice(
+  type: WorkbenchStateNotice["type"],
+  cursor: string,
+  progress: { runIds?: readonly string[]; jobIds?: readonly string[] } = {},
+): WorkbenchStateNotice {
+  if (type === "progress") {
+    return {
+      schema: "workbench.state.notice.v1",
+      type,
+      cursor,
+      ...(progress.runIds?.length ? { runIds: [...progress.runIds] } : {}),
+      ...(progress.jobIds?.length ? { jobIds: [...progress.jobIds] } : {}),
+    };
+  }
+  return { schema: "workbench.state.notice.v1", type, cursor };
+}
+
+export function clampWorkbenchInspectionWaitTimeout(timeoutMs: number | undefined): number {
+  return timeoutMs === undefined || !Number.isFinite(timeoutMs)
+    ? 25_000
+    : Math.max(1_000, Math.min(30_000, Math.trunc(timeoutMs)));
+}
+
 export interface WorkbenchPublication {
   currentVersionId: string;
   publishedVersionIds: string[];
   installHandle: string;
-  visibility?: string;
+  visibility?: WorkbenchSkillVisibility;
 }
 
-export interface WorkbenchObjectPack {
+export interface WorkbenchObjectPack extends Omit<WorkbenchProjectState, "schema" | "root" | "remotes"> {
   schema: "workbench.object-pack.v1";
   createdAt: string;
-  refs: WorkbenchRefs;
-  versions: WorkbenchVersion[];
-  skillSources: WorkbenchSkillSource[];
-  skillBundles: WorkbenchSkillBundleSnapshot[];
-  evals: WorkbenchEvalSnapshot[];
-  agents: WorkbenchAgent[];
-  runs: WorkbenchRun[];
-  jobs: WorkbenchJob[];
-  traces: WorkbenchTrace[];
-  executionEvents: WorkbenchExecutionEventBatch[];
-  artifacts: WorkbenchArtifact[];
-  lineage: WorkbenchLineageEdge[];
-}
-
-export interface WorkbenchFilePreview {
-  path: string;
-  source?: SurfaceSnapshotFile;
-  renderedText?: string;
-  diff?: string;
-}
-
-export interface WorkbenchFileSurface {
-  files: SurfaceSnapshotFile[];
-  preview: WorkbenchFilePreview | null;
-}
-
-export interface WorkbenchSpecValidation {
-  ok: boolean;
-  errors: string[];
-  warnings: string[];
 }
 
 export interface RemoteWorkbenchEnvironmentSpec {
@@ -1239,14 +1441,6 @@ export interface RemoteWorkbenchEnvironmentVersion {
   status: "ready" | "building" | "failed";
   createdAt: string;
   updatedAt: string;
-}
-
-export interface EngineResolveBinding {
-  engine: string;
-  resolver: {
-    use: string;
-    withFingerprint: string;
-  };
 }
 
 export type WorkbenchExecutionPurpose = "improve" | "attempt";
@@ -1393,15 +1587,6 @@ export interface WorkbenchCaseCriterionScore {
   rationale?: string;
 }
 
-export interface MetricStats {
-  count: number;
-  mean: number;
-  variance: number;
-  stddev: number;
-  min: number;
-  max: number;
-}
-
 export type EvalCaseStatus = "completed" | "error";
 
 export type EvalCaseSource = Record<string, Json>;
@@ -1444,25 +1629,6 @@ export interface UsageSummary {
   engine?: ExecutionUsage;
 }
 
-export interface EvaluationUsageStats {
-  total?: ExecutionUsageStats;
-  improver?: ExecutionUsageStats;
-  runner?: ExecutionUsageStats;
-  engine?: ExecutionUsageStats;
-}
-
-export interface ExecutionUsageStats {
-  inputTokens?: MetricStats;
-  uncachedInputTokens?: MetricStats;
-  cachedInputTokens?: MetricStats;
-  cacheCreationInputTokens?: MetricStats;
-  cacheReadInputTokens?: MetricStats;
-  reasoningOutputTokens?: MetricStats;
-  outputTokens?: MetricStats;
-  totalTokens?: MetricStats;
-  costUsd?: MetricStats;
-}
-
 export interface WorkbenchResult {
   score: number;
   metrics?: Record<string, number>;
@@ -1474,7 +1640,7 @@ export interface WorkbenchResult {
 
 export interface WorkbenchExecutionResult {
   executionId: string;
-  status: "succeeded" | "failed" | "cancelled";
+  status: "succeeded" | "failed" | "canceled";
   startedAt: string;
   finishedAt: string;
   outputs: Record<string, BlobObjectRef>;
@@ -1509,96 +1675,9 @@ export interface WorkbenchExecutionEventBatch {
   events: WorkbenchExecutionEvent[];
 }
 
-export type WorkbenchTraceSpanKind =
-  | "hook"
-  | "stage"
-  | "turn"
-  | "tool_call"
-  | "assistant_output"
-  | "usage"
-  | "gate"
-  | "action"
-  | "error";
-
-export type WorkbenchTraceSpanStatus =
-  | "running"
-  | "completed"
-  | "failed"
-  | "canceled"
-  | "warning";
-
-export type WorkbenchTraceEventKind =
-  | "status"
-  | "message"
-  | "output"
-  | "usage"
-  | "error"
-  | "note";
-
-export interface WorkbenchTraceSpan {
-  id: string;
-  parent_id: string | null;
-  attempt_number: number;
-  stage_id: string | null;
-  stage_run_index: number | null;
-  kind: WorkbenchTraceSpanKind;
-  title: string;
-  status: WorkbenchTraceSpanStatus;
-  started_at: string;
-  ended_at: string | null;
-  attributes: Record<string, Json>;
-}
-
-export interface WorkbenchTraceEvent {
-  id: string;
-  span_id: string;
-  attempt_number: number;
-  stage_id: string | null;
-  stage_run_index: number | null;
-  kind: WorkbenchTraceEventKind;
-  at: string;
-  message: string;
-  attributes: Record<string, Json>;
-}
-
-export interface WorkbenchTraceUsageSummary {
-  provider: string | null;
-  model: string | null;
-  input_tokens: number | null;
-  uncached_input_tokens: number | null;
-  cached_input_tokens: number | null;
-  cache_creation_input_tokens: number | null;
-  cache_read_input_tokens: number | null;
-  output_tokens: number | null;
-  reasoning_output_tokens: number | null;
-  total_tokens: number | null;
-  total_cost_usd: number | null;
-  cost_source: string | null;
-  pricing_source: string | null;
-}
-
-export interface WorkbenchTraceSummary {
-  attempt_number: number;
-  stage_id: string | null;
-  stage_run_index: number | null;
-  status: WorkbenchTraceSpanStatus;
-  started_at: string;
-  ended_at: string | null;
-  duration_ms: number;
-  tool_call_count: number;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  usage?: WorkbenchTraceUsageSummary | null;
-  final_output_present: boolean;
-  error_message: string | null;
-}
-
-export interface WorkbenchExecutionTrace {
-  trace_id: string;
-  spans: WorkbenchTraceSpan[];
-  events: WorkbenchTraceEvent[];
-  summaries: WorkbenchTraceSummary[];
-}
+export type WorkbenchTraceSpan = TraceSpan;
+export type WorkbenchTraceEvent = TraceEvent;
+export type WorkbenchExecutionTrace = ExecutionTrace;
 
 export interface WorkbenchTraceSession {
   id: string;
@@ -1611,32 +1690,65 @@ export interface WorkbenchTraceSession {
   metadata?: Record<string, Json>;
 }
 
-export type RemoteWorkbenchJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
-export type RemoteWorkbenchJobKind = "execute";
-
-export interface RemoteWorkbenchJob {
-  id: string;
-  projectId: string;
-  runId: string;
-  versionId?: string;
-  kind: RemoteWorkbenchJobKind;
-  status: RemoteWorkbenchJobStatus;
-  attempt: number;
-  createdAt: string;
-  updatedAt: string;
-  startedAt?: string;
-  finishedAt?: string;
-  input: Json;
-  output?: Json;
-  error?: string;
+export interface WorkbenchPlannedExecutionJobInput {
+  execution: WorkbenchExecutionSpec;
+  dependsOn: readonly string[];
+  versionId: string;
+  attemptIndex: number;
+  sampleIndex: number;
+  caseId: string;
+  baseFiles?: readonly SurfaceSnapshotFile[];
+  traceFiles?: readonly SurfaceSnapshotFile[];
+  baseId?: string;
+  subjectJobId?: string;
+  role?: WorkbenchJobRole;
+  skillName?: string;
+  skillBundleHash?: string;
+  evalHash?: string;
+  agentName?: string;
+  smoke?: boolean;
+  skillEval?: true;
+  skillImprove?: true;
 }
+
+export interface WorkbenchWakeupExecutionJobInput {
+  skillEval: true;
+  skillId: string;
+  runId: string;
+  jobId: string;
+  role: WorkbenchJobRole;
+  caseId: string;
+  sample: number;
+}
+
+export interface WorkbenchImproveWakeupExecutionJobInput {
+  skillImprove: true;
+  skillId: string;
+  runId: string;
+  jobId: string;
+  role: "improve";
+  caseId: string;
+  sample: number;
+}
+
+export type WorkbenchExecutionJobInput =
+  | WorkbenchPlannedExecutionJobInput
+  | WorkbenchWakeupExecutionJobInput
+  | WorkbenchImproveWakeupExecutionJobInput;
+
+export type WorkbenchExecutionJob = WorkbenchJob & {
+  projectId: string;
+  attempt: number;
+  updatedAt: string;
+  input: WorkbenchExecutionJobInput;
+};
 
 export interface WorkbenchExecutionEvidence {
   id: string;
   kind: string;
   executionId: string | null;
   role: WorkbenchExecutionEventRole;
-  status: RemoteWorkbenchJobStatus;
+  status: WorkbenchJobStatus;
   jobIds: string[];
   executionIds: string[];
   versionId?: string;
@@ -1665,11 +1777,11 @@ export interface WorkbenchRemoteJobClaimRequest {
 
 export type WorkbenchRemoteJobClaimDisposition = "claimed" | "delete" | "retry";
 
-export type WorkbenchRemoteJobClaim =
-  | WorkbenchRemoteJobClaimGranted
+export type WorkbenchRemoteJobClaim<TInput> =
+  | WorkbenchRemoteJobClaimGranted<TInput>
   | WorkbenchRemoteJobClaimMiss;
 
-export interface WorkbenchRemoteJobClaimGranted {
+export interface WorkbenchRemoteJobClaimGranted<TInput> {
   schema: "workbench.remote.job.claim.v1";
   claimed: true;
   disposition: "claimed";
@@ -1680,8 +1792,8 @@ export interface WorkbenchRemoteJobClaimGranted {
   jobId: string;
   leaseToken: string;
   leaseUntil: string;
-  job: RemoteWorkbenchJob;
-  input: Json;
+  job: WorkbenchExecutionJob;
+  input: TInput;
 }
 
 export interface WorkbenchRemoteJobClaimMiss {
@@ -1720,7 +1832,7 @@ export interface WorkbenchRemoteJobCompletion {
   runId: string;
   jobId: string;
   leaseToken: string;
-  completedJob: RemoteWorkbenchJob;
+  completedJob: WorkbenchExecutionJob;
   adapterAuthProfiles?: Json[];
 }
 
@@ -1767,6 +1879,46 @@ const RESERVED_ADAPTER_AUTH_ENV_PREFIXES = [
   "WORKBENCH_",
 ];
 
+export type WorkbenchAdapterAuthStatus =
+  | "connected"
+  | "reauth_required"
+  | "disconnected";
+
+export interface WorkbenchAdapterAuthTarget {
+  adapterId: string;
+  slot?: string;
+  profile: string;
+}
+
+export interface WorkbenchAdapterAuthFile {
+  path: string;
+  content: string;
+  encoding: "utf8" | "base64";
+  mode?: number;
+}
+
+export interface WorkbenchAdapterAuthEnvVar {
+  name: string;
+  value: string;
+}
+
+export interface WorkbenchAdapterAuthBundle extends WorkbenchAdapterAuthTarget {
+  method: string;
+  status: "connected";
+  version: number;
+  files: WorkbenchAdapterAuthFile[];
+  env?: WorkbenchAdapterAuthEnvVar[];
+  updatedAt: string;
+}
+
+export interface WorkbenchAdapterAuthStatusRecord extends WorkbenchAdapterAuthTarget {
+  status: WorkbenchAdapterAuthStatus;
+  version: number;
+  method?: string;
+  updatedAt?: string;
+  reason?: string;
+}
+
 export function isReservedWorkbenchAdapterAuthEnvName(name: string): boolean {
   const normalized = name.trim();
   return RESERVED_ADAPTER_AUTH_ENV_NAMES.has(normalized) ||
@@ -1777,4 +1929,120 @@ export function assertWorkbenchAdapterAuthEnvNameAllowed(name: string): void {
   if (isReservedWorkbenchAdapterAuthEnvName(name)) {
     throw new Error(`Adapter auth env var is reserved: ${name}`);
   }
+}
+
+export function normalizeWorkbenchAdapterAuthTarget(target: {
+  adapterId: string;
+  slot?: string;
+  profile?: string;
+}): WorkbenchAdapterAuthTarget {
+  const adapterId = readWorkbenchAdapterAuthSegment(target.adapterId, "adapter id");
+  const slot = target.slot === undefined
+    ? undefined
+    : readWorkbenchAdapterAuthSegment(target.slot, "auth slot");
+  const profile = target.profile
+    ? readWorkbenchAdapterAuthSegment(target.profile, "auth profile")
+    : "default";
+  return {
+    adapterId,
+    ...(slot ? { slot } : {}),
+    profile,
+  };
+}
+
+export function sanitizeWorkbenchAdapterAuthBundle(
+  value: unknown,
+): WorkbenchAdapterAuthBundle {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Adapter auth bundle must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  const target = normalizeWorkbenchAdapterAuthTarget({
+    adapterId: readWorkbenchAdapterAuthString(record.adapterId, "adapterId"),
+    ...(record.slot !== undefined
+      ? { slot: readWorkbenchAdapterAuthString(record.slot, "slot") }
+      : {}),
+    profile: typeof record.profile === "string" ? record.profile : "default",
+  });
+  if (record.status !== "connected") {
+    throw new Error("Adapter auth bundle must be connected.");
+  }
+  const method = readWorkbenchAdapterAuthSegment(
+    readWorkbenchAdapterAuthString(record.method, "method"),
+    "auth method",
+  );
+  const files = Array.isArray(record.files)
+    ? record.files.map(sanitizeWorkbenchAdapterAuthFile)
+    : [];
+  const env = Array.isArray(record.env)
+    ? record.env.map(sanitizeWorkbenchAdapterAuthEnvVar)
+    : [];
+  if (files.length === 0 && env.length === 0) {
+    throw new Error("Adapter auth bundle must include files or env.");
+  }
+  return {
+    ...target,
+    method,
+    status: "connected",
+    version: typeof record.version === "number" && Number.isInteger(record.version)
+      ? record.version
+      : 1,
+    files,
+    ...(env.length > 0 ? { env } : {}),
+    updatedAt: typeof record.updatedAt === "string"
+      ? record.updatedAt
+      : new Date().toISOString(),
+  };
+}
+
+function sanitizeWorkbenchAdapterAuthFile(value: unknown): WorkbenchAdapterAuthFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Adapter auth file must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  const filePath = readWorkbenchAdapterAuthString(record.path, "file.path")
+    .replace(/\\/gu, "/")
+    .replace(/^\/+|\/+$/gu, "");
+  if (!filePath || filePath.split("/").some((part) => part === "." || part === ".." || !part)) {
+    throw new Error(`Unsafe adapter auth file path: ${filePath}`);
+  }
+  return {
+    path: filePath,
+    content: readWorkbenchAdapterAuthString(record.content, "file.content"),
+    encoding: record.encoding === "base64" ? "base64" : "utf8",
+    ...(typeof record.mode === "number" && Number.isInteger(record.mode)
+      ? { mode: record.mode }
+      : {}),
+  };
+}
+
+function sanitizeWorkbenchAdapterAuthEnvVar(value: unknown): WorkbenchAdapterAuthEnvVar {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Adapter auth env entry must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  const name = readWorkbenchAdapterAuthString(record.name, "env.name");
+  const envValue = readWorkbenchAdapterAuthString(record.value, "env.value");
+  if (!/^[A-Z_][A-Z0-9_]*$/u.test(name)) {
+    throw new Error(`Adapter auth env var is invalid: ${name}`);
+  }
+  assertWorkbenchAdapterAuthEnvNameAllowed(name);
+  if (!envValue.trim()) {
+    throw new Error(`Adapter auth env var ${name} is empty.`);
+  }
+  return { name, value: envValue };
+}
+
+function readWorkbenchAdapterAuthString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value) {
+    throw new Error(`Adapter auth ${label} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function readWorkbenchAdapterAuthSegment(value: string, label: string): string {
+  if (!/^[a-z][a-z0-9-]*$/u.test(value)) {
+    throw new Error(`Adapter auth ${label} must be a lowercase identifier.`);
+  }
+  return value;
 }

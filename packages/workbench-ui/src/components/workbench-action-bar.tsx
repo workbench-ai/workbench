@@ -17,6 +17,11 @@ import type {
   WorkbenchRunSnapshot,
 } from "@workbench-ai/workbench-contract";
 import { Button } from "@workbench-ai/cli-web-ui/components/ui/button";
+import {
+  Field,
+  FieldGroup,
+  FieldLabel,
+} from "@workbench-ai/cli-web-ui/components/ui/field";
 import { Input } from "@workbench-ai/cli-web-ui/components/ui/input";
 import {
   Popover,
@@ -26,7 +31,6 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "@workbench-ai/cli-web-ui/components/ui/popover";
-import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
 import { startWorkbenchOperation } from "../lib/operations";
 
@@ -34,17 +38,15 @@ export function WorkbenchActionBar({
   actions,
   apiBasePath,
   onOperationStarted,
-  operationPreview,
 }: {
   actions: WorkbenchActionCapabilities;
   apiBasePath: string;
   onOperationStarted: (started: WorkbenchRunSnapshot) => void;
-  operationPreview?: WorkbenchOperationPreviewState;
 }) {
-  const sourceOnly = actions.evidenceAccess === "source";
+  const packageOnly = actions.evidenceAccess === "package";
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2">
-      {!sourceOnly ? (
+      {!packageOnly ? (
         <>
           <OperationPopover
             apiBasePath={apiBasePath}
@@ -52,8 +54,6 @@ export function WorkbenchActionBar({
             fallbackOperation={actions.eval}
             onOperationStarted={onOperationStarted}
             operationKey="improve"
-            previewPortal={operationPreview?.portal}
-            previewOpen={operationPreview ? operationPreview.openOperation === "improve" : undefined}
             title="Improve"
           />
           <OperationPopover
@@ -62,25 +62,13 @@ export function WorkbenchActionBar({
             capability={actions.eval}
             onOperationStarted={onOperationStarted}
             operationKey="evaluate"
-            previewPortal={operationPreview?.portal}
-            previewOpen={operationPreview ? operationPreview.openOperation === "evaluate" : undefined}
             title="Evaluate"
           />
         </>
       ) : null}
-      <UseSkillPopover
-        acquisition={actions.acquisition}
-        primary={sourceOnly}
-      />
+      {actions.acquisition.length > 0 ? <UseSkillPopover acquisition={actions.acquisition} primary={packageOnly} /> : null}
     </div>
   );
-}
-
-export type WorkbenchOperationPreviewName = "improve" | "evaluate";
-
-export interface WorkbenchOperationPreviewState {
-  openOperation?: WorkbenchOperationPreviewName | null;
-  portal?: boolean;
 }
 
 function OperationPopover({
@@ -90,8 +78,6 @@ function OperationPopover({
   fallbackOperation,
   onOperationStarted,
   operationKey,
-  previewPortal,
-  previewOpen,
   title,
 }: {
   apiBasePath: string;
@@ -99,9 +85,7 @@ function OperationPopover({
   capability: WorkbenchOperationCapability;
   fallbackOperation?: WorkbenchOperationCapability;
   onOperationStarted: (started: WorkbenchRunSnapshot) => void;
-  operationKey: WorkbenchOperationPreviewName;
-  previewPortal?: boolean;
-  previewOpen?: boolean;
+  operationKey: "improve" | "evaluate";
   title: string;
 }) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
@@ -109,15 +93,11 @@ function OperationPopover({
   const [budget, setBudget] = useState(String(capability.defaultRequest.kind === "improve" ? capability.defaultRequest.budget ?? 1 : 1));
   const [uncontrolledPending, setUncontrolledPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const open = previewOpen ?? uncontrolledOpen;
   const pending = uncontrolledPending;
   const disabled = !capability.enabled;
   const request = requestWithFormValues(capability.defaultRequest, samples, budget);
 
   const submit = async (nextRequest: WorkbenchOperationRequest) => {
-    if (previewOpen !== undefined) {
-      return;
-    }
     setUncontrolledPending(true);
     setError(null);
     try {
@@ -133,18 +113,15 @@ function OperationPopover({
 
   return (
     <Popover
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (previewOpen === undefined) {
-          setUncontrolledOpen(nextOpen);
-        }
-      }}
+      open={uncontrolledOpen}
+      onOpenChange={setUncontrolledOpen}
     >
       <PopoverTrigger asChild>
         <Button
+          aria-disabled={disabled || undefined}
           data-workbench-operation={title.toLowerCase()}
           type="button"
-          variant={buttonVariant}
+          variant={disabled ? "outline" : buttonVariant}
           size="sm"
         >
           {title}
@@ -154,41 +131,44 @@ function OperationPopover({
       <PopoverContent
         align="end"
         className="w-[min(24rem,calc(100vw-2rem))] gap-3 p-3"
-        portal={previewPortal}
       >
         <PopoverHeader>
           <PopoverTitle>{title}</PopoverTitle>
           <PopoverDescription>{operationDescription(capability.defaultRequest)}</PopoverDescription>
         </PopoverHeader>
-        <div className="grid min-w-0 gap-3">
+        <div className="flex min-w-0 flex-col gap-3">
           <OperationSummary request={capability.defaultRequest} />
-          <label className="grid min-w-0 gap-1 text-xs font-medium text-muted-foreground">
-            Samples
-            <Input
-              min={1}
-              type="number"
-              value={samples}
-              onChange={(event) => setSamples(event.target.value)}
-            />
-          </label>
-          {capability.defaultRequest.kind === "improve" ? (
-            <label className="grid min-w-0 gap-1 text-xs font-medium text-muted-foreground">
-              Budget
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor={`${operationKey}-samples`}>Samples</FieldLabel>
               <Input
+                id={`${operationKey}-samples`}
                 min={1}
                 type="number"
-                value={budget}
-                onChange={(event) => setBudget(event.target.value)}
+                value={samples}
+                onChange={(event) => setSamples(event.target.value)}
               />
-            </label>
-          ) : null}
+            </Field>
+            {capability.defaultRequest.kind === "improve" ? (
+              <Field>
+                <FieldLabel htmlFor={`${operationKey}-budget`}>Budget</FieldLabel>
+                <Input
+                  id={`${operationKey}-budget`}
+                  min={1}
+                  type="number"
+                  value={budget}
+                  onChange={(event) => setBudget(event.target.value)}
+                />
+              </Field>
+            ) : null}
+          </FieldGroup>
           {disabled ? (
             <div className="rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-xs leading-5 text-muted-foreground">
               {capability.disabledReason ?? `${title} is not available for this skill.`}
             </div>
           ) : null}
           {error ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive-soft px-3 py-2 text-xs leading-5 text-destructive">
+            <div className="rounded-md border border-destructive/30 bg-destructive-soft px-3 py-2 text-xs leading-5 text-destructive" role="alert">
               {error}
             </div>
           ) : null}
@@ -229,9 +209,9 @@ function OperationSummary({ request }: { request: WorkbenchOperationRequest }) {
   ])];
   const items = [
     versionIds.length > 0 ? ["Version", versionIds.join(", ")] : null,
-    request.kind === "improve" && request.evalHash ? ["Evaluation", request.evalHash] : null,
+    request.evalHash ? ["Evaluation", request.evalHash] : null,
     request.kind === "eval" ? ["Cases", request.caseIds.length > 0 ? `${request.caseIds.length} cases` : "No cases"] : null,
-    request.kind === "eval" ? ["Phases", request.phases.join(" + ")] : null,
+    request.kind === "eval" ? ["Steps", request.steps.join(" + ")] : null,
     skills.length > 0 ? ["Skill", skills.join(", ")] : null,
     agents.length > 0 ? ["Agent", agents.join(", ")] : null,
   ].filter((entry): entry is [string, string] => Boolean(entry));
@@ -287,12 +267,10 @@ function UseSkillPopover({
 function CopyAction({ option }: { option: WorkbenchAcquisitionOption }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button
+    <Button
       type="button"
-      className={cn(
-        "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-border/70 px-3 py-2 text-left transition-colors hover:bg-muted/35",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-      )}
+      className="h-auto w-full justify-between py-2 text-left"
+      variant="outline"
       onClick={() => {
         void navigator.clipboard.writeText(option.value).then(() => {
           setCopied(true);
@@ -304,8 +282,8 @@ function CopyAction({ option }: { option: WorkbenchAcquisitionOption }) {
         <span className="text-sm font-medium text-foreground">{option.label}</span>
         <code className="truncate font-mono text-xs text-muted-foreground" title={option.value}>{option.value}</code>
       </span>
-      {copied ? <CheckIcon aria-hidden="true" className="size-4 text-success" /> : <CopyIcon aria-hidden="true" className="size-4 text-muted-foreground" />}
-    </button>
+      {copied ? <CheckIcon aria-hidden="true" data-icon="inline-end" /> : <CopyIcon aria-hidden="true" data-icon="inline-end" />}
+    </Button>
   );
 }
 

@@ -5,21 +5,43 @@ import {
   applyWorkbenchSkillPatch,
   composeRuntimeDockerfileWithAdapterInstallers,
   createWorkbenchActionCapabilities,
+  planWorkbenchOperationGraph,
+  parseWorkbenchOperationRequest,
   createWorkbenchRunSnapshot,
-  resolveWorkbenchRunRetryPlan,
+  resolveWorkbenchRunRetryRequest,
   runWorkbenchExecutionDag,
   workbenchOperationCliEquivalent,
   type WorkbenchInspectionSnapshot,
   type WorkbenchJob,
   type WorkbenchRun,
-  type RemoteWorkbenchJob,
+  type WorkbenchExecutionJob,
 } from "../src/index.ts";
 import {
   compileWorkbenchExecutionGraph,
   type CompileExecutionGraphInput,
 } from "../src/execution-graph.ts";
 import type { GenericRunSpec } from "../src/generic-spec.ts";
-import type { WorkbenchOperationPhase, WorkbenchOperationRequest } from "@workbench-ai/workbench-contract";
+import type { WorkbenchOperationStep, WorkbenchOperationRequest } from "@workbench-ai/workbench-contract";
+
+describe("workbench operation graph", () => {
+  test("plans selected samples and only concrete grade dependencies", () => {
+    const graph = planWorkbenchOperationGraph({
+      kind: "eval",
+      targetCount: 2,
+      cases: [
+        { id: "case-a", path: "a", gradableTargetIndexes: [0] },
+        { id: "case-b", path: "b", gradableTargetIndexes: [] },
+      ],
+      samples: 3,
+      selectedSamples: [{ caseId: "a", sample: 2 }],
+    });
+
+    expect(graph.nodes.filter((node) => node.role === "run")).toHaveLength(8);
+    expect(graph.nodes.filter((node) => node.role === "grade")).toEqual([
+      expect.objectContaining({ targetIndex: 0, caseId: "case-a", sample: 2, dependencies: ["0:case-a:2:run"] }),
+    ]);
+  });
+});
 
 function evalOperationRequest(options: {
   variant?: "local" | "cloud";
@@ -29,9 +51,9 @@ function evalOperationRequest(options: {
   agent?: string;
   caseIds?: readonly string[];
   samples?: number;
-  phases?: readonly WorkbenchOperationPhase[];
+  steps?: readonly WorkbenchOperationStep[];
 } = {}): WorkbenchOperationRequest {
-  const phases = options.phases ?? ["execute", "grade"];
+  const steps = options.steps ?? ["run", "grade"];
   return {
     kind: "eval",
     variant: options.variant ?? "local",
@@ -41,8 +63,7 @@ function evalOperationRequest(options: {
       ...(options.skill ? { skill: options.skill } : {}),
       ...(options.agent ? { agent: options.agent } : {}),
     }],
-    phases,
-    grader: phases.includes("grade") ? { kind: "evaluation" } : { kind: "none" },
+    steps,
     ...(options.samples !== undefined ? { samples: options.samples } : {}),
   };
 }
@@ -141,7 +162,7 @@ describe("workbench execution DAG scheduler", () => {
 
     expect(result.startedJobCount).toBe(1);
     expect(result.cancelledJobCount).toBe(1);
-    expect(result.jobs.map((job) => job.status)).toEqual(["failed", "cancelled"]);
+    expect(result.jobs.map((job) => job.status)).toEqual(["failed", "canceled"]);
     expect(result.jobs[1]?.error).toBe("Dependency failed.");
   });
 
@@ -172,11 +193,16 @@ describe("workbench execution DAG scheduler", () => {
     expect(observedAbort).toBe(true);
     expect(result.startedJobCount).toBe(1);
     expect(result.cancelledJobCount).toBe(1);
-    expect(result.jobs[0]?.status).toBe("cancelled");
+    expect(result.jobs[0]?.status).toBe("canceled");
   });
 
-  test("builds retry plans from the stored operation plan", () => {
+  test("builds retry operation requests from the stored operation plan", () => {
     for (const kind of ["run", "grade", "eval"] as const) {
+      const steps = kind === "run"
+        ? ["run"] as const
+        : kind === "grade"
+          ? ["grade"] as const
+          : ["run", "grade"] as const;
       const run: WorkbenchRun = {
         id: `run_${kind}`,
         kind,
@@ -198,18 +224,23 @@ describe("workbench execution DAG scheduler", () => {
           skills: ["current"],
           agents: ["default", "strict"],
           caseIds: ["case-a"],
+          steps,
           samples: 2,
         },
       };
 
-      expect(resolveWorkbenchRunRetryPlan(retrySnapshot({ run, jobs: [] }), run)).toEqual({
-        kind,
-        location: "local",
-        versionId: "v_base",
-        skillName: "current",
-        agentName: "default,strict",
+      expect(resolveWorkbenchRunRetryRequest(retrySnapshot({ run, jobs: [] }), run)).toEqual({
+        kind: "eval",
+        variant: "local",
+        evalHash: "eval_hash",
         caseIds: ["case-a"],
+        targets: [
+          { skill: "current", versionId: "v_base", agent: "default" },
+          { skill: "current", versionId: "v_base", agent: "strict" },
+        ],
+        steps,
         samples: 2,
+        rerun: true,
         retryOfRunId: `run_${kind}`,
       });
     }
@@ -249,12 +280,16 @@ describe("workbench execution DAG scheduler", () => {
       ],
     });
 
-    expect(resolveWorkbenchRunRetryPlan(snapshot, run)).toEqual({
+    expect(resolveWorkbenchRunRetryRequest(snapshot, run)).toEqual({
       kind: "improve",
-      location: "local",
-      baseVersionId: "v_base",
-      skillName: "current",
-      agentName: "patcher",
+      variant: "local",
+      versionId: "v_base",
+      evalHash: "eval_hash",
+      target: {
+        versionId: "v_base",
+        skill: "current",
+        agent: "patcher",
+      },
       samples: 2,
       budget: 3,
       retryOfRunId: "run_improve",
@@ -278,37 +313,36 @@ describe("workbench execution DAG scheduler", () => {
       requestedSamples: 2,
     };
 
-    expect(() => resolveWorkbenchRunRetryPlan(retrySnapshot({ run, jobs: [] }), run))
-      .toThrow(/does not record an operation plan/u);
+    expect(() => resolveWorkbenchRunRetryRequest(retrySnapshot({ run, jobs: [] }), run)).toThrow(expect.objectContaining({ code: "run_retry_incomplete", remediation: "workbench eval run" }) as Error);
   });
 
-  test("rejects live session retry before requiring an operation plan", () => {
+  test("rejects retry when the stored operation plan eval hash is missing", () => {
     const run: WorkbenchRun = {
-      id: "run_live",
-      kind: "live",
+      id: "run_eval",
+      kind: "eval",
       versionId: "v_base",
       skillName: "current",
       skillBundleHash: "bundle_hash",
-      evalHash: "live",
-      agentName: "claude",
+      evalHash: "eval_hash",
+      agentName: "default",
       agentHash: "agent_hash",
-      status: "succeeded",
+      status: "failed",
       jobIds: [],
-      traceIds: ["tr_live"],
+      traceIds: [],
       createdAt: "2026-06-15T00:00:00.000Z",
+      operationPlan: {
+        kind: "eval",
+        variant: "local",
+        versionId: "v_base",
+        skills: ["current"],
+        agents: ["default"],
+        steps: ["run", "grade"],
+        samples: 1,
+      },
     };
 
-    try {
-      resolveWorkbenchRunRetryPlan(retrySnapshot({ run, jobs: [] }), run);
-      throw new Error("Expected live run retry to fail.");
-    } catch (error) {
-      expect(error).toMatchObject({
-        code: "run_retry_incomplete",
-        remediation: "workbench show run_live",
-      });
-      expect(String((error as Error).message)).toMatch(/live session and cannot be retried/u);
-      expect(String((error as Error).message)).not.toMatch(/operation plan/u);
-    }
+    expect(() => resolveWorkbenchRunRetryRequest(retrySnapshot({ run, jobs: [] }), run))
+      .toThrow(/does not record operationPlan\.evalHash/u);
   });
 
   test("rejects retry when stored operation plan samples are not an integer", () => {
@@ -336,7 +370,7 @@ describe("workbench execution DAG scheduler", () => {
       },
     };
 
-    expect(() => resolveWorkbenchRunRetryPlan(retrySnapshot({ run, jobs: [] }), run))
+    expect(() => resolveWorkbenchRunRetryRequest(retrySnapshot({ run, jobs: [] }), run))
       .toThrow(/invalid operationPlan.samples/u);
   });
 
@@ -346,8 +380,7 @@ describe("workbench execution DAG scheduler", () => {
       variant: "local",
       caseIds: [],
       targets: [{}],
-      phases: ["execute", "grade"],
-      grader: { kind: "evaluation" },
+      steps: ["run", "grade"],
       samples: 1,
     };
     const explicit: WorkbenchOperationRequest = {
@@ -355,8 +388,73 @@ describe("workbench execution DAG scheduler", () => {
       targets: [{ skill: "current", agent: "default" }],
     };
 
-    expect(workbenchOperationCliEquivalent(omitted)).toBe("workbench eval");
-    expect(workbenchOperationCliEquivalent(explicit)).toBe("workbench eval --versions current --agents default");
+    expect(workbenchOperationCliEquivalent(omitted)).toBe("workbench eval run");
+    expect(workbenchOperationCliEquivalent(explicit)).toBe("workbench eval run --versions current --agents default");
+  });
+
+  test("operation requests reject empty or unsupported steps", () => {
+    expect(() => workbenchOperationCliEquivalent(evalOperationRequest({ steps: [] })))
+      .toThrow("Eval operation steps must include run or grade.");
+
+    expect(() => workbenchOperationCliEquivalent(evalOperationRequest({
+      steps: ["execute"] as unknown as readonly WorkbenchOperationStep[],
+    }))).toThrow("Eval operation steps must include only run or grade.");
+  });
+
+  test("parses canonical local and cloud operation requests", () => {
+    expect(parseWorkbenchOperationRequest({
+      kind: "eval",
+      caseIds: ["case-001", "case-001"],
+      targets: [{ skill: " current ", agent: "default" }, { skill: "candidate" }],
+      steps: ["run", "grade", "run"],
+      samples: 2,
+      rerun: true,
+    }, "local")).toMatchObject({
+      kind: "eval",
+      variant: "local",
+      caseIds: ["case-001"],
+      targets: [{ skill: "current", agent: "default" }, { skill: "candidate" }],
+      steps: ["run", "grade"],
+      samples: 2,
+      rerun: true,
+    });
+    expect(parseWorkbenchOperationRequest({
+      kind: "improve",
+      target: { versionId: "v1", agent: "patcher" },
+      evidenceTraceIds: ["tr1"],
+      budget: 1,
+    }, "cloud")).toMatchObject({
+      kind: "improve",
+      variant: "cloud",
+      target: { versionId: "v1", agent: "patcher" },
+      evidenceTraceIds: ["tr1"],
+      budget: 1,
+    });
+  });
+
+  test("rejects noncanonical values and variant-specific cardinality", () => {
+    expect(() => parseWorkbenchOperationRequest({
+      kind: "eval",
+      caseIds: [],
+      targets: [{}],
+      steps: ["run"],
+    }, "local")).toThrow("at least one case");
+    expect(() => parseWorkbenchOperationRequest({
+      kind: "eval",
+      targets: [{}, {}],
+      steps: ["run"],
+    }, "cloud")).toThrow("exactly one target");
+    expect(() => parseWorkbenchOperationRequest({
+      kind: "improve",
+      target: "current",
+    }, "local")).toThrow("target must be an object");
+    expect(() => parseWorkbenchOperationRequest({
+      kind: "eval",
+      caseIds: ["case-001"],
+      targets: [{}],
+      steps: ["run"],
+      samples: "2",
+    }, "local")).toThrow("samples must be a positive integer");
   });
 
   test("projects run snapshots with job-backed measurements", () => {
@@ -454,7 +552,7 @@ describe("workbench execution DAG scheduler", () => {
     };
     const jobs: WorkbenchJob[] = [
       retryJob(run, "job_execute_0", "case-001", 0, {
-        role: "execute",
+        role: "run",
         status: "succeeded",
         durationMs: 40,
         error: undefined,
@@ -465,7 +563,7 @@ describe("workbench execution DAG scheduler", () => {
         error: undefined,
       }),
       retryJob(run, "job_execute_1", "case-001", 1, {
-        role: "execute",
+        role: "run",
         status: "succeeded",
         durationMs: 60,
         error: undefined,
@@ -495,7 +593,7 @@ describe("workbench execution DAG scheduler", () => {
           unitCount: 2,
           roles: expect.arrayContaining([
             expect.objectContaining({
-              role: "execute",
+              role: "run",
               totalDurationMs: 100,
             }),
           ]),
@@ -533,7 +631,7 @@ describe("workbench execution DAG scheduler", () => {
         id: "job_live_execute",
         runId: run.id,
         kind: run.kind,
-        role: "execute",
+        role: "run",
         versionId: run.versionId,
         skillName: run.skillName,
         skillBundleHash: run.skillBundleHash,
@@ -621,7 +719,7 @@ describe("workbench execution DAG scheduler", () => {
       agent: "strict",
     }), [run]);
 
-    expect(snapshot.next).toBe("workbench results --agents strict");
+    expect(snapshot.next).toBe("workbench eval results --agents strict");
   });
 
   test("terminal run snapshots preserve selected case context for grade", () => {
@@ -645,10 +743,10 @@ describe("workbench execution DAG scheduler", () => {
       versionId: "v001",
       evalHash: "eval_hash",
       caseIds: ["investor-focus"],
-      phases: ["execute"],
+      steps: ["run"],
     }), [run]);
 
-    expect(snapshot.next).toBe("workbench grade --cases investor-focus");
+    expect(snapshot.next).toBe("workbench eval grade --cases investor-focus");
   });
 
   test("local web operation defaults keep CLI current-source semantics", () => {
@@ -683,26 +781,45 @@ describe("workbench execution DAG scheduler", () => {
 
     const evidence = createWorkbenchActionCapabilities({
       ...snapshot,
-      runs: [{
-        id: "run_failed",
-        kind: "eval",
-        versionId: "v_current",
-        skillName: "current",
-        skillBundleHash: "bundle_hash",
-        evalHash: "eval_hash",
-        agentName: "default",
-        agentHash: "agent_hash",
-        status: "failed",
-        jobIds: [],
-        traceIds: [],
-        createdAt: "2026-06-15T00:00:01.000Z",
-      }],
+      runs: [failedEvalRun("run_failed", "eval_hash")],
     }, {
       variant: "local",
       evidenceAccess: "full",
     });
     expect(evidence.improve.enabled).toBe(true);
     expect(evidence.improve).not.toHaveProperty("disabledReason");
+
+    delete snapshot.status.defaultAgent;
+    expect(createWorkbenchActionCapabilities(snapshot, { variant: "cloud", evidenceAccess: "full" }).eval).toMatchObject({ enabled: false, disabledReason: expect.stringMatching(/ready for review.*authored Skill/u) });
+  });
+
+  test("locked Eval actions use only that Eval's cases and improvement evidence", () => {
+    const snapshot = actionCapabilitySnapshot();
+    const current = snapshot.evals[0]!;
+    const historical = {
+      ...current,
+      hash: "eval_old",
+      cases: [{ id: "old-case", path: "cases/old-case/case.yaml", grade: testGradePlan(), files: [] }],
+      createdAt: "2026-06-14T00:00:00.000Z",
+      updatedAt: "2026-06-14T00:00:00.000Z",
+    };
+    snapshot.evals = [historical, current];
+    snapshot.evalVersions = [{ ...snapshot.evalVersions[0]!, id: "eval-v1", hash: historical.hash, current: false }];
+    snapshot.runs = [failedEvalRun("run_latest_failed", current.hash)];
+
+    const scoped = createWorkbenchActionCapabilities(snapshot, {
+      variant: "cloud", evidenceAccess: "full", evalRef: "eval-v1",
+    });
+    for (const capability of [scoped.run, scoped.grade, scoped.eval]) {
+      expect(capability.defaultRequest).toMatchObject({ evalHash: "eval_old", caseIds: ["old-case"] });
+    }
+    expect(scoped.improve.defaultRequest).toMatchObject({ evalHash: "eval_old" });
+    expect(scoped.improve.enabled).toBe(false);
+
+    snapshot.runs.push(failedEvalRun("run_old_failed", "eval_old"));
+    expect(createWorkbenchActionCapabilities(snapshot, {
+      variant: "cloud", evidenceAccess: "full", evalRef: "eval_old",
+    }).improve.enabled).toBe(true);
   });
 
   test("terminal prerequisite jobs satisfy queued dependents without re-execution", async () => {
@@ -826,7 +943,7 @@ describe("applyWorkbenchSkillPatch", () => {
     expect(() => applyWorkbenchSkillPatch({
       baseFiles,
       patch: {
-        files: [{ path: ".workbench/eval.yaml", content: "version: 1\n" }],
+        files: [{ path: ".workbench/eval.yaml", content: "grade:\n  adapter: tests\n" }],
         fileChanges: [".workbench/eval.yaml"],
       },
       edits: ["."],
@@ -937,13 +1054,13 @@ function genericSpec(): GenericRunSpec {
 function testJob(
   id: string,
   dependsOn: readonly string[] = [],
-): RemoteWorkbenchJob {
+): WorkbenchExecutionJob {
   return {
     id,
     projectId: "eval",
     runId: "run",
     skillId: "skill",
-    kind: "execute",
+    kind: "eval",
     status: "queued",
     attempt: 0,
     createdAt: "2026-05-03T00:00:00.000Z",
@@ -963,10 +1080,10 @@ function testJob(
         },
       },
     },
-  } as unknown as RemoteWorkbenchJob;
+  } as unknown as WorkbenchExecutionJob;
 }
 
-function succeededJob(job: RemoteWorkbenchJob): RemoteWorkbenchJob {
+function succeededJob(job: WorkbenchExecutionJob): WorkbenchExecutionJob {
   return {
     ...job,
     status: "succeeded",
@@ -975,7 +1092,7 @@ function succeededJob(job: RemoteWorkbenchJob): RemoteWorkbenchJob {
   };
 }
 
-function failedJob(job: RemoteWorkbenchJob, error: string): RemoteWorkbenchJob {
+function failedJob(job: WorkbenchExecutionJob, error: string): WorkbenchExecutionJob {
   return {
     ...job,
     status: "failed",
@@ -994,11 +1111,7 @@ function retrySnapshot(args: {
     status: {
       root: "/tmp/workbench-retry-test",
       initialized: true,
-      versionCount: 2,
-      skillCount: 1,
-      agentCount: 1,
       runCount: 1,
-      remoteCount: 0,
     },
     versions: [
       {
@@ -1042,13 +1155,7 @@ function actionCapabilitySnapshot(): WorkbenchInspectionSnapshot {
       defaultSkill: "current",
       defaultAgent: "default",
       currentVersionId: "v_current",
-      versionCount: 1,
-      skillCount: 1,
-      agentCount: 1,
-      evalCount: 1,
-      caseCount: 1,
       runCount: 0,
-      remoteCount: 0,
     },
     versions: [{
       id: "v_current",
@@ -1062,14 +1169,24 @@ function actionCapabilitySnapshot(): WorkbenchInspectionSnapshot {
     skillBundles: [],
     evals: [{
       hash: "eval_hash",
-      files: [],
-      cases: [],
+      files: [{ path: "environment/Dockerfile", content: "FROM node:22\n" }],
+      grade: testGradePlan(),
+      gradeAdapters: [{
+        adapter: "tests",
+        label: "Tests",
+        authoring: testGradePlan().authoring,
+      }],
+      cases: [{ id: "current-case", path: "cases/current-case/case.yaml", grade: testGradePlan(), files: [] }],
       caseCount: 1,
       createdAt: "2026-06-15T00:00:00.000Z",
       updatedAt: "2026-06-15T00:00:00.000Z",
-      gradeAdapter: "tests",
     }],
-    agents: [],
+    evalVersions: [{
+      id: "eval-v1", hash: "eval_hash", label: "Eval v1", ordinal: 1, current: true,
+      caseCount: 1, gradeAdapter: "tests", createdAt: "2026-06-15T00:00:00.000Z",
+      updatedAt: "2026-06-15T00:00:00.000Z", runCount: 0,
+    }],
+    agents: [{ hash: "agent_hash", agent: { name: "default", adapter: "command", config: {} } }],
     runs: [],
     jobs: [],
     traces: [],
@@ -1079,6 +1196,31 @@ function actionCapabilitySnapshot(): WorkbenchInspectionSnapshot {
     remotes: [],
     refs: { current: "v_current" },
   };
+}
+
+function testGradePlan(): WorkbenchInspectionSnapshot["evals"][number]["grade"] {
+  return {
+    adapter: "tests",
+    adapterSource: "eval",
+    label: "Tests",
+    summary: "Case test harness",
+    sources: [{ path: "eval.yaml", role: "global" }],
+    display: [{ kind: "text", text: "No adapter-specific grading details are configured." }],
+    authoring: [{
+      kind: "file",
+      name: "testScript",
+      label: "Test script",
+      path: "tests/test.sh",
+      language: "shell",
+      executable: true,
+      required: true,
+    }],
+  };
+}
+
+function failedEvalRun(id: string, evalHash: string): WorkbenchRun {
+  return { id, kind: "eval", versionId: "v_current", skillName: "current", skillBundleHash: "bundle_hash", evalHash,
+    agentName: "default", agentHash: "agent_hash", status: "failed", jobIds: [], traceIds: [], createdAt: "2026-06-15T00:00:01.000Z" };
 }
 
 function retryJob(

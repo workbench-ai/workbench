@@ -1,5 +1,5 @@
 import type {
-  RemoteWorkbenchJob,
+  WorkbenchExecutionJob,
   Json,
   SurfaceSnapshotFile,
   WorkbenchExecutionSpec,
@@ -12,48 +12,9 @@ import type {
   GenericRunSpec,
   WorkbenchEngineCase,
 } from "./generic-spec.ts";
+import { asRuntimeRecord } from "./runtime-utils.ts";
 
-export type WorkbenchRunWorkflow = "eval" | "improve";
-
-export const MAX_WORKBENCH_RUN_BUDGET = 20;
-
-export function expectedWorkbenchRunJobCount(args: {
-  workflow: WorkbenchRunWorkflow;
-  budget: number;
-  samples: number;
-  caseCount: number;
-}): number {
-  const caseCount = Math.max(1, Math.floor(args.caseCount));
-  if (args.workflow === "improve") {
-    return args.budget * (1 + (args.samples * caseCount));
-  }
-  return 1 + (args.samples * caseCount);
-}
-
-export function validateWorkbenchRunEnvelope(args: {
-  workflow: WorkbenchRunWorkflow;
-  budget: number;
-  samples: number;
-  caseCount: number;
-}): string | null {
-  if (!Number.isSafeInteger(args.budget) || args.budget <= 0) {
-    return "Run budget must be a positive integer.";
-  }
-  if (!Number.isSafeInteger(args.samples) || args.samples <= 0) {
-    return "Run samples must be a positive integer.";
-  }
-  if (!Number.isSafeInteger(args.caseCount) || args.caseCount <= 0) {
-    return "Run case count must be a positive integer.";
-  }
-  if (args.budget > MAX_WORKBENCH_RUN_BUDGET) {
-    return `Run budget cannot exceed ${MAX_WORKBENCH_RUN_BUDGET}.`;
-  }
-  return null;
-}
-
-export function attemptJobCountForRunSpec(_spec: GenericRunSpec): number {
-  return 1;
-}
+type WorkbenchRunWorkflow = "eval" | "improve";
 
 export function planWorkbenchExecutionJobsForPurpose(args: {
   ownerUserId: string;
@@ -77,8 +38,8 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
   environmentRefsByCase?: ReadonlyMap<string, string>;
   baseId?: string | null;
   metadata?: Record<string, Json>;
-}): RemoteWorkbenchJob[] {
-  const jobs: RemoteWorkbenchJob[] = [];
+}): WorkbenchExecutionJob[] {
+  const jobs: WorkbenchExecutionJob[] = [];
   const engineCases = args.engineCases;
   const caseIds = args.caseIds && args.caseIds.length > 0
     ? [...args.caseIds]
@@ -119,6 +80,7 @@ export function planWorkbenchExecutionJobsForPurpose(args: {
           runId: args.runId,
           versionId: args.versionId,
           execution: node.execution,
+          kind: args.workflow === "improve" ? "improve" : "eval",
           dependsOn: node.dependsOn,
           now: args.now,
           ...(args.baseFiles ? { baseFiles: args.baseFiles } : {}),
@@ -148,7 +110,7 @@ function sampleIndexesForCase(args: {
     .sort((left, right) => left - right);
 }
 
-export function engineCaseIds(engineCases: readonly WorkbenchEngineCase[]): string[] {
+function engineCaseIds(engineCases: readonly WorkbenchEngineCase[]): string[] {
   return [...new Set(engineCases.map((bundle) => bundle.id))].sort();
 }
 
@@ -168,25 +130,46 @@ export function createWorkbenchExecutionJob(args: {
   runId: string;
   versionId: string;
   execution: WorkbenchExecutionSpec;
+  kind: "eval" | "improve";
   dependsOn: readonly string[];
   now: string;
   baseFiles?: readonly SurfaceSnapshotFile[];
   traceFiles?: readonly SurfaceSnapshotFile[];
   baseId?: string | null;
-}): RemoteWorkbenchJob {
+}): WorkbenchExecutionJob {
   const attemptIndex = readExecutionMetadataNumber(args.execution, "attemptIndex");
   const sampleIndex = readExecutionMetadataNumber(args.execution, "sampleIndex");
   const caseId = readExecutionMetadataString(args.execution, "caseId");
+  const skillName = optionalExecutionMetadataString(args.execution, "skillName") ?? "current";
+  const skillBundleHash = optionalExecutionMetadataString(args.execution, "skillBundleHash") ?? args.versionId;
+  const evalHash = optionalExecutionMetadataString(args.execution, "evalHash") ?? "current";
+  const agentName = optionalExecutionMetadataString(args.execution, "agentName") ?? args.execution.adapter.use;
+  const role = args.execution.purpose === "improve"
+    ? "improve"
+    : optionalExecutionMetadataString(args.execution, "role") === "grade"
+      ? "grade"
+      : "run";
   return {
     id: workbenchExecutionJobId(args.execution.id),
     projectId: args.projectId,
     runId: args.runId,
     versionId: args.versionId,
-    kind: "execute",
+    kind: args.kind,
+    role,
+    inputHash: args.execution.id,
+    skillName,
+    skillBundleHash,
+    evalHash,
+    agentName,
+    agentHash: optionalExecutionMetadataString(args.execution, "agentHash") ?? agentName,
+    caseId,
+    sample: sampleIndex,
     status: "queued",
     attempt: 0,
     createdAt: args.now,
     updatedAt: args.now,
+    artifactIds: [],
+    traceIds: [],
     input: {
       execution: args.execution,
       dependsOn: args.dependsOn.map(workbenchExecutionJobId),
@@ -197,19 +180,24 @@ export function createWorkbenchExecutionJob(args: {
       ...(args.baseFiles ? { baseFiles: args.baseFiles.map((file) => ({ ...file })) } : {}),
       ...(args.traceFiles ? { traceFiles: args.traceFiles.map((file) => ({ ...file })) } : {}),
       ...(args.baseId ? { baseId: args.baseId } : {}),
-    } as unknown as Json,
+    },
   };
+}
+
+function optionalExecutionMetadataString(
+  execution: WorkbenchExecutionSpec,
+  key: string,
+): string | undefined {
+  const raw = execution.metadata[key];
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
 }
 
 export function workbenchExecutionJobId(executionId: string): string {
   return `job_${executionId.replace(/[^a-z0-9_]/giu, "_")}`;
 }
 
-export function workbenchExecutionJobPurpose(job: RemoteWorkbenchJob): WorkbenchExecutionSpec["purpose"] | null {
-  if (job.kind !== "execute") {
-    return null;
-  }
-  const execution = asRecord(asRecord(job.input).execution);
+export function workbenchExecutionJobPurpose(job: WorkbenchExecutionJob): WorkbenchExecutionSpec["purpose"] | null {
+  const execution = asRuntimeRecord(asRuntimeRecord(job.input).execution);
   const purpose = execution.purpose;
   return purpose === "improve" || purpose === "attempt" ? purpose : null;
 }
@@ -234,10 +222,4 @@ function readExecutionMetadataString(
     return raw;
   }
   throw new Error(`Execution ${execution.id} is missing string metadata.${key}.`);
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
 }

@@ -11,7 +11,7 @@ import type {
 describe("version lineage", () => {
   test("keeps parent-child edges in version order", () => {
     const graph = buildVersionLineageGraph({
-      currentVersionId: "v002",
+      selectedVersionId: "v002",
       publishedVersionId: "v001",
       versions: [
         version("v002", { parentIds: ["v001"], createdAt: "2026-01-01T00:01:00.000Z" }),
@@ -23,11 +23,13 @@ describe("version lineage", () => {
           id: "run_old",
           versionId: "v002",
           createdAt: "2026-01-01T00:03:00.000Z",
+          jobIds: ["job_old"],
         }),
         run({
           id: "run_new",
           versionId: "v002",
           createdAt: "2026-01-01T00:04:00.000Z",
+          jobIds: ["job_new"],
         }),
       ],
       jobs: [
@@ -39,7 +41,7 @@ describe("version lineage", () => {
     expect(graph.edgeCount).toBe(1);
     expect(graph.roots).toEqual(["v001"]);
     const child = graph.nodes.find((node) => node.version.id === "v002");
-    expect(child?.active).toBe(true);
+    expect(child?.selected).toBe(true);
     expect(child?.score).toBe(0.9);
     expect(child?.improvedFromLabel).toContain("1");
     const parent = graph.nodes.find((node) => node.version.id === "v001");

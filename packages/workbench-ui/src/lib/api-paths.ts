@@ -1,7 +1,4 @@
-import {
-  workbenchCaseFileOwnerId,
-  workbenchInspectionFileOwnerRouteSegment,
-} from "@workbench-ai/workbench-contract";
+import { workbenchInspectionFileOwnerRouteSegment } from "@workbench-ai/workbench-contract";
 
 import type { WorkbenchFileOwnerKind } from "./routes";
 
@@ -21,5 +18,3 @@ export function fileContentApiPath(
   const ownerSegment = workbenchInspectionFileOwnerRouteSegment(ownerKind);
   return `${base}/${ownerSegment}/${encodeURIComponent(ownerId)}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
-
-export const caseFileOwnerId = workbenchCaseFileOwnerId;

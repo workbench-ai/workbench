@@ -5,6 +5,10 @@ import type {
   UIEvent as ReactUIEvent,
 } from "react";
 import {
+  encodeAddress,
+  encodeColumn,
+} from "../../lib/spreadsheet-viewer-address";
+import {
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -33,8 +37,6 @@ import {
   expandSheetExtentToFitViewport,
   expandSheetExtentToIncludeCell,
   getBaseSheetExtent,
-  getCellAddress,
-  getColLabel,
   getColumnWidth,
   getMergeSpan,
   getRenderedCell,
@@ -45,12 +47,10 @@ import {
   isCoveredByMerge,
   safeSheetName,
   type MergeSpan,
-  type SelectionModel,
   type SheetViewportExtent,
   type SheetViewportMetrics,
-  type WorkbookFile,
+  type WorkbookModel,
 } from "../../lib/spreadsheet-viewer-model";
-import { cn } from "../../lib/utils";
 
 type DragSelectionMode = "cell" | "row" | "column";
 type DimensionOverrides = Record<string, Record<number, number>>;
@@ -101,10 +101,7 @@ function useEventCallback<T extends (...args: never[]) => unknown>(callback: T):
 }
 
 export interface SpreadsheetViewerProps {
-  workbookFile: WorkbookFile;
-  className?: string;
-  onActiveSheetNameChange?: (sheetName: string) => void;
-  onSelectionChange?: (selection: SelectionModel | null) => void;
+  workbook: WorkbookModel;
 }
 
 function updateOverride(
@@ -123,7 +120,7 @@ function updateOverride(
 }
 
 function createPendingSelectionScroll(
-  sheet: WorkbookFile["workbook"]["sheets"][string] | null,
+  sheet: WorkbookModel["sheets"][string] | null,
   sheetName: string,
   selection: GridSelection | null,
 ): PendingSelectionScroll | null {
@@ -138,7 +135,7 @@ function createPendingSelectionScroll(
 }
 
 function intersectsSelection(
-  sheet: WorkbookFile["workbook"]["sheets"][string],
+  sheet: WorkbookModel["sheets"][string],
   row: number,
   col: number,
   merge: MergeSpan | null,
@@ -172,14 +169,9 @@ function intersectsSelection(
   return false;
 }
 
-export function SpreadsheetViewer({
-  workbookFile,
-  className,
-  onActiveSheetNameChange,
-  onSelectionChange,
-}: SpreadsheetViewerProps) {
+export function SpreadsheetViewer({ workbook }: SpreadsheetViewerProps) {
   const [activeSheetName, setActiveSheetName] = useState(
-    () => workbookFile.workbook.activeSheetName,
+    () => workbook.activeSheetName,
   );
   const [selection, setSelection] = useState<GridSelection | null>(null);
   const [dragSelectionMode, setDragSelectionMode] = useState<DragSelectionMode | null>(null);
@@ -199,8 +191,8 @@ export function SpreadsheetViewer({
       return null;
     }
 
-    return workbookFile.workbook.sheets[activeSheetName] ?? null;
-  }, [workbookFile, activeSheetName]);
+    return workbook.sheets[activeSheetName] ?? null;
+  }, [workbook, activeSheetName]);
   const activeSheetExtent = useMemo(() => {
     if (!activeSheet) {
       return null;
@@ -451,17 +443,9 @@ export function SpreadsheetViewer({
   });
 
   useEffect(() => {
-    setActiveSheetName(workbookFile.workbook.activeSheetName);
+    setActiveSheetName(workbook.activeSheetName);
     setPendingSelectionScroll(null);
-  }, [workbookFile.id, workbookFile.workbook.activeSheetName]);
-
-  useEffect(() => {
-    onActiveSheetNameChange?.(activeSheetName);
-  }, [activeSheetName, onActiveSheetNameChange]);
-
-  useEffect(() => {
-    onSelectionChange?.(selectionInfo);
-  }, [onSelectionChange, selectionInfo]);
+  }, [workbook]);
 
   useEffect(() => {
     if (!activeSheet || !activeSheetExtent) {
@@ -474,16 +458,16 @@ export function SpreadsheetViewer({
     updateSelection(createInitialSelection(activeSheet, activeSheetExtent));
     setDragSelectionMode(null);
     setResizeSession(null);
-  }, [workbookFile.id, activeSheetName]);
+  }, [workbook, activeSheetName]);
 
   useEffect(() => {
     setSheetExtents({});
     setViewportMetrics(DEFAULT_VIEWPORT_METRICS);
-  }, [workbookFile.id]);
+  }, [workbook]);
 
   useIsomorphicLayoutEffect(() => {
     scheduleViewportSync(gridScrollRef.current);
-  }, [activeSheetName, workbookFile.id]);
+  }, [activeSheetName, workbook]);
 
   useEffect(() => {
     const container = gridScrollRef.current;
@@ -501,7 +485,7 @@ export function SpreadsheetViewer({
     return () => {
       observer.disconnect();
     };
-  }, [activeSheetName, workbookFile.id]);
+  }, [activeSheetName, workbook]);
 
   useEffect(() => {
     return () => {
@@ -835,7 +819,7 @@ export function SpreadsheetViewer({
           />
         </th>
         {visibleCols.map((col) => {
-          const address = getCellAddress(col, row);
+          const address = encodeAddress(col, row);
 
           if (isCoveredByMerge(activeSheet!, address)) {
             return null;
@@ -886,10 +870,9 @@ export function SpreadsheetViewer({
                 handleCellPointerEnter(address);
               }}
             >
-              <div
-                className="spreadsheet-cell-content"
-                dangerouslySetInnerHTML={{ __html: renderedCell?.html || "&nbsp;" }}
-              />
+              <div className="spreadsheet-cell-content">
+                {renderedCell?.text || "\u00a0"}
+              </div>
             </td>
           );
         })}
@@ -899,7 +882,7 @@ export function SpreadsheetViewer({
 
   if (!activeSheet) {
     return (
-      <main className={cn("spreadsheet-viewer-shell", className)}>
+      <main className="spreadsheet-viewer-shell">
         <section className="spreadsheet-viewer-message">
           This workbook does not contain a visible sheet to render.
         </section>
@@ -908,7 +891,7 @@ export function SpreadsheetViewer({
   }
 
   return (
-    <main className={cn("spreadsheet-viewer-shell", className)} data-testid="spreadsheet-viewer">
+    <main className="spreadsheet-viewer-shell" data-testid="spreadsheet-viewer">
       <header className="spreadsheet-formula-bar">
         <div className="spreadsheet-name-box" data-testid="selection-address">
           {selectionInfo?.address ?? ""}
@@ -982,7 +965,7 @@ export function SpreadsheetViewer({
                         : "spreadsheet-col-header"
                     }
                     style={buildColumnHeaderStyle(frozenColOffsets.get(col))}
-                    data-testid={`col-header-${getColLabel(col).toLowerCase()}`}
+                    data-testid={`col-header-${encodeColumn(col).toLowerCase()}`}
                     onPointerDown={(event) => {
                       handleColumnHeaderPointerDown(col, event);
                     }}
@@ -990,13 +973,13 @@ export function SpreadsheetViewer({
                       handleColumnHeaderPointerEnter(col);
                     }}
                   >
-                    <span className="spreadsheet-header-label">{getColLabel(col)}</span>
+                    <span className="spreadsheet-header-label">{encodeColumn(col)}</span>
                     <button
                       type="button"
                       className="spreadsheet-col-resize-handle"
-                      data-testid={`col-resize-${getColLabel(col).toLowerCase()}`}
+                      data-testid={`col-resize-${encodeColumn(col).toLowerCase()}`}
                       tabIndex={-1}
-                      aria-label={`Resize column ${getColLabel(col)}`}
+                      aria-label={`Resize column ${encodeColumn(col)}`}
                       onPointerDown={(event) => {
                         beginResize("column", col, event);
                       }}
@@ -1034,7 +1017,7 @@ export function SpreadsheetViewer({
       </section>
 
       <footer className="spreadsheet-sheet-tabs" data-testid="sheet-list">
-        {workbookFile.workbook.sheetNames.map((sheetName) => (
+        {Object.keys(workbook.sheets).map((sheetName) => (
           <button
             key={sheetName}
             type="button"
@@ -1206,7 +1189,7 @@ function getSelectionOutline(
 
 function scrollAddressIntoView(
   container: HTMLDivElement,
-  sheet: WorkbookFile["workbook"]["sheets"][string],
+  sheet: WorkbookModel["sheets"][string],
   address: string,
   getColumnWidth: (col: number) => number,
   getRowHeight: (row: number) => number,

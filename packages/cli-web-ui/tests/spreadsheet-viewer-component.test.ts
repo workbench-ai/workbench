@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { SpreadsheetViewer } from "../components/shared/spreadsheet-viewer";
-import type { WorkbookFile } from "../lib/spreadsheet-viewer-model";
+import type { WorkbookModel } from "../lib/spreadsheet-viewer-model";
 
 describe("spreadsheet viewer interactions", () => {
   let container: HTMLDivElement;
@@ -71,7 +71,7 @@ describe("spreadsheet viewer interactions", () => {
     await act(async () => {
       root = createRoot(container);
       root.render(createElement(SpreadsheetViewer, {
-        workbookFile: createWorkbookFile(),
+        workbook: createWorkbook(),
       }));
     });
 
@@ -118,7 +118,7 @@ describe("spreadsheet viewer interactions", () => {
     await act(async () => {
       root = createRoot(container);
       root.render(createElement(SpreadsheetViewer, {
-        workbookFile: createWorkbookFile(),
+        workbook: createWorkbook(),
       }));
     });
 
@@ -161,7 +161,7 @@ describe("spreadsheet viewer interactions", () => {
     await act(async () => {
       root = createRoot(container);
       root.render(createElement(SpreadsheetViewer, {
-        workbookFile: createWorkbookFile(),
+        workbook: createWorkbook(),
       }));
     });
 
@@ -208,69 +208,33 @@ describe("spreadsheet viewer interactions", () => {
   });
 });
 
-function createWorkbookFile(): WorkbookFile {
-  const worksheet = {
-    name: "Sheet1",
-    showGridLines: true,
-    freezePanes: {
-      rowCount: 0,
-      columnCount: 0,
-    },
-    getUsedRange() {
-      return {
-        address: "A1:C46",
-        rowCount: 46,
-        columnCount: 3,
-      };
-    },
-    getRange() {
-      return {
-        rawValues: [[null]],
-        values: [[null]],
-        displayFormula: "",
-        format: {
-          numberFormat: undefined,
-        },
-      };
-    },
-  } as unknown as WorkbookFile["workbook"]["sheets"][string]["worksheet"];
-
+function createWorkbook(): WorkbookModel {
   return {
-    id: "test.xlsx:1",
-    label: "test.xlsx",
-    source: "test fixture",
-    sizeBytes: 1,
-    workbook: {
-      activeSheetName: "Sheet1",
-      sheetNames: ["Sheet1"],
-      sheets: {
-        Sheet1: {
-          name: "Sheet1",
-          visible: true,
-          worksheet,
-          range: {
-            startCol: 0,
-            endCol: 2,
-            startRow: 0,
-            endRow: 45,
-          },
-          hiddenRows: new Set<number>(),
-          hiddenCols: new Set<number>(),
-          mergeLookup: new Map(),
-          mergeStartByAddress: new Map(),
-          coveredCells: new Set(),
-          colWidthMap: new Map([
-            [0, 360],
-            [1, 150],
-            [2, 96],
-          ]),
-          rowHeightMap: new Map(),
-          renderedCells: new Map(),
-          showGridLines: true,
-          freezePanes: {
-            rowCount: 0,
-            columnCount: 0,
-          },
+    activeSheetName: "Sheet1",
+    sheets: {
+      Sheet1: {
+        range: {
+          startCol: 0,
+          endCol: 2,
+          startRow: 0,
+          endRow: 45,
+        },
+        hiddenRows: new Set<number>(),
+        hiddenCols: new Set<number>(),
+        mergeLookup: new Map(),
+        mergeStartByAddress: new Map(),
+        coveredCells: new Set(),
+        colWidthMap: new Map([
+          [0, 360],
+          [1, 150],
+          [2, 96],
+        ]),
+        rowHeightMap: new Map(),
+        cells: new Map(),
+        showGridLines: true,
+        freezePanes: {
+          rowCount: 0,
+          columnCount: 0,
         },
       },
     },

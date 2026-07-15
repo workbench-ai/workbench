@@ -13,9 +13,11 @@ import type {
 } from "@workbench-ai/workbench-contract";
 import {
   createWorkbenchExecutionEventPublisher,
+  dedupeSurfaceFiles,
   jsonRecord,
   normalizeRelativePath,
   publishCommandStepEvent,
+  publicGradeMetrics,
   readSurfaceFiles,
   workbenchProviderAuthSetupCommand,
   writeSurfaceFiles,
@@ -23,26 +25,30 @@ import {
 } from "@workbench-ai/workbench-core";
 import {
   ensureWorkbenchAdapterOutputDir,
+  isWorkbenchBuiltInAdapterId,
   readWorkbenchAdapterOperationResult,
   readWorkbenchAdapterOperationRequest,
   WORKBENCH_RUNTIME_CONTROL_TIMEOUT_MS_ENV,
   writeWorkbenchAdapterOperationResult,
   workbenchAdapterOperationResultPath,
   type WorkbenchAdapterOperationRequest,
+  type WorkbenchBuiltInAdapterId,
   type WorkbenchEngineCase,
 } from "@workbench-ai/workbench-protocol";
 import YAML from "yaml";
+import { codexHarness } from "@workbench-ai/agent-driver-openai-codex";
+import { claudeCodeHarness } from "@workbench-ai/agent-driver-anthropic-claude-code";
+import type { HarnessProvider } from "@workbench-ai/agent-driver";
 
-import type {
-  AgentProviderSpec,
-  WorkbenchAgentTurnExecutor,
-  WorkbenchAgentTurnRequest,
-  WorkbenchAgentTurnResult,
-} from "./agent-turn.ts";
 import {
-  isWorkbenchBuiltInAdapterId,
-  type WorkbenchBuiltInAdapterId,
-} from "./manifests.ts";
+  createWorkbenchAgentTurnExecutor,
+  executeWorkbenchAgentTurn,
+  type HarnessProviderResolver,
+  type AgentProviderSpec,
+  type WorkbenchAgentTurnExecutor,
+  type WorkbenchAgentTurnRequest,
+  type WorkbenchAgentTurnResult,
+} from "./agent-turn.ts";
 import { importWorkbenchRuntime } from "./runtime.ts";
 
 export interface ExecuteWorkbenchBuiltInAdapterCommandOptions {
@@ -77,7 +83,6 @@ interface BuiltInAgentAdapterSpec {
 interface BuiltInRubricAdapterSpec {
   judge: AgentProviderSpec;
   instructions?: string;
-  parallelism: number;
   criteria: RubricCriterionSpec[];
 }
 
@@ -89,7 +94,15 @@ interface RubricCriterionSpec {
 
 const CASE_CONTROL_FILE = "case.yaml";
 const COMMAND_SKILL_PATCH_FILE = "skill-patch.json";
-const DEFAULT_RUBRIC_PARALLELISM = 4;
+const FIRST_PARTY_HARNESS_PROVIDERS = new Map<string, HarnessProvider<unknown>>([
+  ["codex", codexHarness()],
+  ["claude", claudeCodeHarness()],
+]);
+const resolveFirstPartyHarnessProvider: HarnessProviderResolver = (id) =>
+  FIRST_PARTY_HARNESS_PROVIDERS.get(id);
+const defaultWorkbenchAgentTurnExecutor = createWorkbenchAgentTurnExecutor(
+  resolveFirstPartyHarnessProvider,
+);
 
 interface AdapterWorkload {
   job: { id: string };
@@ -208,8 +221,7 @@ async function executeWorkbenchEngineRequest(
     return;
   }
   if (request.operation === "grade.run") {
-    await executeWorkbenchEngineRunRequest(request);
-    return;
+    throw new Error("Workbench grade.run is not implemented by the workbench adapter. Run the selected skill in core and invoke a grader adapter directly.");
   }
   throw new Error(`Workbench engine adapter cannot handle ${request.operation}.`);
 }
@@ -237,13 +249,6 @@ async function executeWorkbenchEngineResolveRequest(
   });
 }
 
-async function executeWorkbenchEngineRunRequest(
-  request: WorkbenchAdapterOperationRequest,
-): Promise<void> {
-  void request;
-  throw new Error("Workbench grade.run is not implemented by the workbench adapter. Run the selected skill in core and invoke a grader adapter directly.");
-}
-
 function workbenchEngineCasesPath(request: WorkbenchAdapterOperationRequest): string {
   const config = adapterCommandConfigRecord(request);
   const cases = config.cases;
@@ -255,23 +260,6 @@ function workbenchEngineCasesPath(request: WorkbenchAdapterOperationRequest): st
     return caseConfig.path;
   }
   throw new Error("Workbench engine cases must be an object with path.");
-}
-
-function dedupeSurfaceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
-  const byPath = new Map<string, SurfaceSnapshotFile>();
-  for (const file of files) {
-    const normalized = normalizeRelativePath(file.path);
-    byPath.set(normalized, {
-      ...file,
-      path: normalized,
-    });
-  }
-  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
-}
-
-function safeInternalPathSegment(value: string): string {
-  const safe = value.replace(/[^a-z0-9._-]+/giu, "_").replace(/^_+|_+$/gu, "");
-  return safe || "nested";
 }
 
 async function executeCommandAdapterRequest(
@@ -303,7 +291,23 @@ async function requireCommandScoreResult(
   request: WorkbenchAdapterOperationRequest,
 ): Promise<void> {
   if (!await fileExists(workbenchAdapterOperationResultPath(request.paths.output))) {
-    throw new Error("Command grader must write workbench-result.json for grade.run.");
+    const publicResult = await readOptionalJson(path.join(request.paths.output, "result.json"));
+    if (!publicResult) {
+      throw new Error("Command grader must write $OUTPUT_DIR/result.json for grade.run.");
+    }
+    const result = normalizePublicGradeResult(publicResult, request.context?.attempt?.caseId ?? "current");
+    await writeWorkbenchAdapterOperationResult(request.paths.output, {
+      protocol: "workbench.adapter-result.v1",
+      operation: "grade.run",
+      ok: true,
+      value: result,
+      ...(typeof result.summary === "string" ? { summary: result.summary } : {}),
+      feedback: {
+        engine: "command",
+        result: publicResult as Json,
+      },
+    });
+    return;
   }
   await readWorkbenchAdapterOperationResult(request.paths.output, "grade.run").catch((error: unknown) => {
     throw new Error(
@@ -826,7 +830,7 @@ async function readTestsResult(args: {
 }): Promise<WorkbenchResult> {
   const resultJson = await readOptionalJson(path.join(args.outputRoot, "result.json"));
   if (resultJson) {
-    return normalizeTestsResult(resultJson, args.caseId);
+    return normalizePublicGradeResult(resultJson, args.caseId);
   }
   throw new Error(
     `Tests engine did not find result.json under OUTPUT_DIR (${args.outputRoot}). ` +
@@ -851,7 +855,7 @@ async function readOptionalJson(filePath: string): Promise<Record<string, unknow
   return parsed as Record<string, unknown>;
 }
 
-function normalizeTestsResult(
+function normalizePublicGradeResult(
   record: Record<string, unknown>,
   caseId: string,
 ): WorkbenchResult {
@@ -868,9 +872,9 @@ function normalizeTestsResult(
       ? rawPassed ? 1 : 0
       : undefined;
   if (rawScore === undefined || !Number.isFinite(rawScore)) {
-    throw new Error("Tests engine result must include a finite numeric score or boolean ok/passed/pass.");
+    throw new Error("Grade result must include a finite numeric score or boolean ok/passed/pass.");
   }
-  const metrics = normalizeTestsMetrics(record, rawScore);
+  const metrics = publicGradeMetrics(record, rawScore);
   return {
     score: rawScore,
     metrics,
@@ -891,23 +895,6 @@ function normalizeTestsResult(
       result: record as Json,
     },
   };
-}
-
-function normalizeTestsMetrics(record: Record<string, unknown>, score: number): Record<string, number> {
-  const metrics: Record<string, number> = { score };
-  const source = record.metrics && typeof record.metrics === "object" && !Array.isArray(record.metrics)
-    ? record.metrics as Record<string, unknown>
-    : {};
-  for (const [key, value] of Object.entries(source)) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      metrics[key] = value;
-    }
-  }
-  return metrics;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/gu, "'\\''")}'`;
 }
 
 function workloadFromAdapterOperationRequest(
@@ -963,7 +950,6 @@ function builtInRubricSpecFromRequest(
     ...(typeof config.instructions === "string" && config.instructions.length > 0
       ? { instructions: config.instructions }
       : {}),
-    parallelism: rubricParallelism(config.parallelism, criteria.length),
     criteria,
   };
 }
@@ -1043,10 +1029,6 @@ async function executeBuiltInAgentTurn(
   request: WorkbenchAgentTurnRequest,
 ): Promise<WorkbenchAgentTurnResult> {
   requireWorkbenchAdapterAuthForProviderTurn(request.provider, request.adapterAuthRequest);
-  const {
-    defaultWorkbenchAgentTurnExecutor,
-    executeWorkbenchAgentTurn,
-  } = await import("./agent-turn.ts");
   return await executeWorkbenchAgentTurn(executor ?? defaultWorkbenchAgentTurnExecutor, request);
 }
 
@@ -1122,8 +1104,8 @@ async function writeAgentSkillOutput(
     }, null, 2)}\n`,
   };
   await writeSurfaceFiles(request.paths.output, [
-    ...agentSessionEvidenceFiles(workload.job.id, adapter.agent.use, agentResult.metadata),
     trace,
+    neutralAgentTraceFile(workload.job.id, "runner", adapter.agent.use, agentResult),
     ...agentResult.traceFiles,
   ]);
   const runtime = await importWorkbenchRuntime();
@@ -1154,41 +1136,6 @@ async function sealProviderSkillRunWorkspace(
       ? fs.rm(request.paths.traces, { recursive: true, force: true })
       : Promise.resolve(),
   ]);
-}
-
-function agentSessionEvidenceFiles(
-  jobId: string,
-  provider: string,
-  metadata: WorkbenchAgentTurnResult["metadata"],
-): SurfaceSnapshotFile[] {
-  const record = metadata && typeof metadata === "object" && !Array.isArray(metadata)
-    ? metadata as Record<string, unknown>
-    : {};
-  const sessionId = typeof record.sessionId === "string" && record.sessionId.trim()
-    ? record.sessionId.trim()
-    : undefined;
-  const providerId = typeof record.providerId === "string" && record.providerId.trim()
-    ? record.providerId.trim()
-    : provider;
-  const model = typeof record.model === "string" && record.model.trim()
-    ? record.model.trim()
-    : undefined;
-  if (!sessionId && !providerId && !model) {
-    return [];
-  }
-  return [
-    jsonSurfaceFile("agent-session.json", {
-      schema: "workbench.agent.session.v1",
-      jobId,
-      provider,
-      providerId,
-      ...(model ? { model } : {}),
-      ...(sessionId ? {
-        sessionId,
-        ref: `${provider}:${sessionId}`,
-      } : {}),
-    }),
-  ];
 }
 
 function buildAgentSkillPrompt(
@@ -1261,7 +1208,11 @@ async function writeAgentSkillRevisionOutput(
         metadata: agentResult.metadata,
       }, null, 2)}\n`,
     };
-    await writeSurfaceFiles(request.paths.output, [trace, ...agentResult.traceFiles]);
+    await writeSurfaceFiles(request.paths.output, [
+      trace,
+      neutralAgentTraceFile(workload.job.id, "improver", improver.agent.use, agentResult),
+      ...agentResult.traceFiles,
+    ]);
     const runtime = await importWorkbenchRuntime();
     const usage = runtime.assignUsageRole("improver", agentResult.usage);
     await writeWorkbenchAdapterOperationResult(request.paths.output, {
@@ -1310,36 +1261,31 @@ async function writeRubricJudgeResult(
   engine: BuiltInRubricAdapterSpec,
   options: AgentExecutionOptions = {},
 ): Promise<void> {
-  const agentExecutor = options.agentExecutor;
   const runtime = await importWorkbenchRuntime();
-  const criterionRuns = await mapWithConcurrency(
-    engine.criteria,
-    engine.parallelism,
-    async (criterion) => runRubricCriterionJudge({
-      request,
-      workload,
-      engine,
-      criterion,
-      agentExecutor,
-      adapterAuthRoot: options.adapterAuthRoot,
-      adapterAuthRequest: options.adapterAuthRequest,
-      adapterAuthEnv: options.adapterAuthEnv,
-      runtime,
-      eventPublisher: options.eventPublisher,
-    }),
-  );
-  const usage = runtime.mergeUsageSummaries(criterionRuns.map((run) => run.usage));
-  const result = rubricJudgeResultFromCriteria({
-    workload,
-    engine,
-    criterionRuns,
+  const judge = await executeBuiltInAgentTurn(options.agentExecutor, {
+    role: "engine",
+    provider: engine.judge,
+    adapterAuthRoot: options.adapterAuthRoot,
+    adapterAuthRequest: options.adapterAuthRequest,
+    adapterAuthEnv: options.adapterAuthEnv,
+    workspaceRoot: request.paths.workspace,
+    cwd: request.paths.workspace,
+    prompt: buildRubricJudgePrompt(workload, engine),
+    traceRoot: path.join(request.paths.output, ".workbench", "internal", "rubric", "judge"),
+    tracePath: `.workbench/traces/${workload.job.id}/engine/rubric/judge`,
+    jobId: workload.job.id,
+    eventPublisher: options.eventPublisher,
   });
+  const judged = parseRubricJudgeOutput(judge.output, engine.criteria);
+  const usage = runtime.assignUsageRole("engine", judge.usage);
+  const result = rubricJudgeResult({ workload, engine, judged, metadata: judge.metadata });
   await writeRubricEvidenceFiles({
     request,
     workload,
     engine,
     result,
-    criterionRuns,
+    judged,
+    judge,
     usage,
   });
   await writeWorkbenchAdapterOperationResult(request.paths.output, {
@@ -1349,32 +1295,33 @@ async function writeRubricJudgeResult(
     value: result,
     ...(typeof result.summary === "string" ? { summary: result.summary } : {}),
     feedback: {
-      rubric: "criterion-fanout",
+      rubric: "single-judge",
       judge: engine.judge.use,
-      parallelism: engine.parallelism,
       aggregation: "weighted_mean",
-      criteria: criterionRuns.map((run) => ({
-        id: run.result.criterion_id,
-        traceFiles: run.traceFiles.map((file) => file.path),
-        metadata: run.metadata as Json,
-        ...(run.repair ? { repair: run.repair } : {}),
-      })),
+      traceFiles: publicRubricAgentTraceFiles(judge.traceFiles).map((file) => file.path),
+      metadata: judge.metadata as Json,
     },
     ...(usage ? { usage } : {}),
   });
 }
 
-interface RubricCriterionJudgeRun {
-  result: NonNullable<EvalCaseResult["criteria"]>[number];
-  summary?: string;
-  feedback?: Json;
-  metadata: WorkbenchAgentTurnResult["metadata"];
-  traceFiles: SurfaceSnapshotFile[];
-  repair?: {
-    attempted: true;
-    originalError: string;
-  };
-  usage?: UsageSummary;
+interface RubricEvidence {
+  path: string;
+  locator?: string;
+  note: string;
+}
+
+interface RubricJudgedCriterion {
+  id: string;
+  score: number;
+  pass: boolean;
+  rationale: string;
+  evidence: RubricEvidence[];
+}
+
+interface RubricJudgeOutput {
+  summary: string;
+  criteria: RubricJudgedCriterion[];
 }
 
 async function writeRubricEvidenceFiles(args: {
@@ -1382,10 +1329,10 @@ async function writeRubricEvidenceFiles(args: {
   workload: AdapterWorkload;
   engine: BuiltInRubricAdapterSpec;
   result: WorkbenchResult;
-  criterionRuns: readonly RubricCriterionJudgeRun[];
+  judged: RubricJudgeOutput;
+  judge: WorkbenchAgentTurnResult;
   usage?: UsageSummary;
 }): Promise<void> {
-  const root = `.workbench/traces/${args.workload.job.id}/engine/rubric`;
   const scorecard = {
     schema: "workbench.engine.rubric.evidence.v1",
     safeForImprover: true,
@@ -1395,42 +1342,33 @@ async function writeRubricEvidenceFiles(args: {
     sampleIndex: args.workload.sampleIndex,
     caseId: args.workload.caseId,
     judge: args.engine.judge.use,
-    parallelism: args.engine.parallelism,
     aggregation: "weighted_mean",
     score: args.result.score,
     metrics: args.result.metrics ?? {},
     summary: args.result.summary ?? null,
-    criteria: args.criterionRuns.map((run) => ({
-      id: run.result.criterion_id,
-      label: run.result.label,
-      score: run.result.score,
-      pass: run.result.pass,
-      rationale: run.result.rationale ?? null,
-      errors: run.result.errors ?? [],
-      summary: run.summary ?? null,
-      metadata: safeRubricEvidenceMetadata(run.metadata),
-      repair: run.repair ?? null,
-    })),
+    criteria: args.judged.criteria,
+    metadata: safeRubricEvidenceMetadata(args.judge.metadata),
     ...(args.usage ? { usage: args.usage } : {}),
   };
   await writeSurfaceFiles(args.request.paths.output, [
     jsonSurfaceFile("rubric-scorecard.json", scorecard),
-    jsonSurfaceFile(`${root}/scorecard.json`, scorecard),
-    ...args.criterionRuns.map((run) =>
-      jsonSurfaceFile(`${root}/criteria/${safeInternalPathSegment(run.result.criterion_id)}/result.json`, {
-        schema: "workbench.engine.rubric.criterion-evidence.v1",
-        safeForImprover: true,
-        criterion: args.engine.criteria.find((criterion) => criterion.id === run.result.criterion_id) ?? {
-          id: run.result.criterion_id,
-        },
-        result: run.result,
-        summary: run.summary ?? null,
-        metadata: safeRubricEvidenceMetadata(run.metadata),
-        repair: run.repair ?? null,
-      })
-    ),
-    ...args.criterionRuns.flatMap((run) => run.traceFiles),
+    neutralAgentTraceFile(args.workload.job.id, "judge", args.engine.judge.use, args.judge),
+    ...publicRubricAgentTraceFiles(args.judge.traceFiles),
   ]);
+}
+
+function neutralAgentTraceFile(
+  jobId: string,
+  role: "runner" | "judge" | "improver",
+  adapterId: string,
+  result: WorkbenchAgentTurnResult,
+): SurfaceSnapshotFile {
+  return jsonSurfaceFile(`.workbench/agent-traces/${jobId}/${role}.json`, {
+    schema: "workbench.execution-agent-trace.v1",
+    role,
+    adapterId,
+    trace: result.agentTrace,
+  });
 }
 
 function safeRubricEvidenceMetadata(metadata: WorkbenchAgentTurnResult["metadata"]): Json | null {
@@ -1457,116 +1395,22 @@ function jsonSurfaceFile(pathname: string, value: unknown): SurfaceSnapshotFile 
   };
 }
 
-async function runRubricCriterionJudge(args: AgentExecutionOptions & {
-  request: WorkbenchAdapterOperationRequest;
-  workload: AdapterWorkload;
-  engine: BuiltInRubricAdapterSpec;
-  criterion: RubricCriterionSpec;
-  runtime: Awaited<ReturnType<typeof importWorkbenchRuntime>>;
-}): Promise<RubricCriterionJudgeRun> {
-  const traceRoot = path.join(
-    args.request.paths.output,
-    ".workbench",
-    "internal",
-    "rubric",
-    safeInternalPathSegment(args.criterion.id),
-  );
-  const tracePath = rubricCriterionTracePath(args.workload.job.id, args.criterion.id, "judge");
-  const agentResult = await executeBuiltInAgentTurn(args.agentExecutor, {
-    role: "engine",
-    provider: args.engine.judge,
-    adapterAuthRoot: args.adapterAuthRoot,
-    adapterAuthRequest: args.adapterAuthRequest,
-    adapterAuthEnv: args.adapterAuthEnv,
-    workspaceRoot: args.request.paths.workspace,
-    cwd: args.request.paths.workspace,
-    prompt: buildRubricCriterionJudgePrompt(args.workload, args.engine, args.criterion),
-    traceRoot: path.join(traceRoot, "judge"),
-    tracePath,
-    jobId: args.workload.job.id,
-    eventPublisher: args.eventPublisher,
-  });
-  let usage = args.runtime.assignUsageRole("engine", agentResult.usage);
-  try {
-    return {
-      ...normalizeRubricCriterionJudgeResult(agentResult.output, args.criterion),
-      metadata: agentResult.metadata,
-      traceFiles: publicRubricAgentTraceFiles(agentResult.traceFiles),
-      ...(usage ? { usage } : {}),
-    };
-  } catch (error) {
-    const repairError = error instanceof Error ? error.message : String(error);
-    const repairTracePath = rubricCriterionTracePath(args.workload.job.id, args.criterion.id, "repair");
-    const repairResult = await executeBuiltInAgentTurn(args.agentExecutor, {
-      role: "engine",
-      provider: args.engine.judge,
-      adapterAuthRoot: args.adapterAuthRoot,
-      adapterAuthRequest: args.adapterAuthRequest,
-      adapterAuthEnv: args.adapterAuthEnv,
-      workspaceRoot: args.request.paths.workspace,
-      cwd: args.request.paths.workspace,
-      prompt: buildRubricCriterionRepairPrompt({
-        output: agentResult.output,
-        error: repairError,
-        criterion: args.criterion,
-      }),
-      traceRoot: path.join(traceRoot, "repair"),
-      tracePath: repairTracePath,
-      jobId: args.workload.job.id,
-      eventPublisher: args.eventPublisher,
-    });
-    usage = args.runtime.mergeUsageSummaries([
-      usage,
-      args.runtime.assignUsageRole("engine", repairResult.usage),
-    ]);
-    return {
-      ...normalizeRubricCriterionJudgeResult(repairResult.output, args.criterion),
-      metadata: {
-        ...repairResult.metadata,
-        repair: {
-          attempted: true,
-          originalError: repairError,
-          originalMetadata: agentResult.metadata,
-        },
-      },
-      traceFiles: publicRubricAgentTraceFiles([
-        ...agentResult.traceFiles,
-        ...repairResult.traceFiles,
-      ]),
-      repair: {
-        attempted: true,
-        originalError: repairError,
-      },
-      ...(usage ? { usage } : {}),
-    };
-  }
-}
-
 function publicRubricAgentTraceFiles(files: readonly SurfaceSnapshotFile[]): SurfaceSnapshotFile[] {
   return files
     .filter((file) => file.encoding === "utf8" && file.path.endsWith("/trace.json"))
     .map((file) => ({ ...file }));
 }
 
-function rubricCriterionTracePath(
-  jobId: string,
-  criterionId: string,
-  turn: "judge" | "repair",
-): string {
-  return `.workbench/traces/${jobId}/engine/rubric/criteria/${safeInternalPathSegment(criterionId)}/${turn}`;
-}
-
-function buildRubricCriterionJudgePrompt(
+function buildRubricJudgePrompt(
   workload: AdapterWorkload,
   engine: BuiltInRubricAdapterSpec,
-  criterion: RubricCriterionSpec,
 ): string {
   requireWorkloadCase(workload, "Rubric judge");
   return [
     ...(engine.instructions ? ["Instructions:", engine.instructions, ""] : []),
     ...(workload.case?.prompt ? ["Case:", workload.case.prompt, ""] : []),
-    "Criterion:",
-    JSON.stringify(criterion, null, 2),
+    "Criteria:",
+    JSON.stringify(engine.criteria, null, 2),
     "",
     "Context:",
     "- The skill already ran in a separate execution job.",
@@ -1575,66 +1419,40 @@ function buildRubricCriterionJudgePrompt(
     "- The runner trace is mounted at /workspace/input/subject/traces.",
     "- Public case files are mounted at /workspace/input/case.",
     "- Private case files are mounted at /workspace/private/engine when the case provides them.",
-    "- Score only from the subject mounts, public case files, private case files, and the criterion above.",
+    "- Inspect relevant artifacts with the available tools before scoring.",
+    "- Score only from the subject mounts, public case files, private case files, and the criteria above.",
     "",
     "Output:",
     "Return only a JSON object. Do not wrap it in Markdown.",
-    "The JSON object must score exactly this one criterion. Use this shape:",
+    "The JSON object must cover every criterion exactly once. Use this shape:",
     JSON.stringify({
-      criterion_id: criterion.id,
-      score: 0.0,
-      pass: false,
-      rationale: "why this criterion received this score",
       summary: "short scoring summary",
-      feedback: {},
+      criteria: engine.criteria.map((criterion) => ({
+        id: criterion.id,
+        score: 0,
+        pass: false,
+        rationale: "why this criterion received this score",
+        evidence: [{ path: "output/example", locator: "optional sheet/cell or page", note: "what this proves" }],
+      })),
     }, null, 2),
-    `The only allowed criterion_id is ${criterion.id}.`,
-    "The rationale must be non-empty and specific to this criterion.",
+    "Scores must be numbers from 0 through 1. Rationales must be non-empty and criterion-specific.",
+    "Evidence is optional, but when present each item must name a path, optional precise locator, and note.",
   ].join("\n");
 }
 
-function buildRubricCriterionRepairPrompt(input: {
-  output: string;
-  error: string;
-  criterion: RubricCriterionSpec;
-}): string {
-  return [
-    "The previous Workbench rubric criterion judge response was rejected by the result parser.",
-    "",
-    `Parser error: ${input.error}`,
-    "",
-    "Convert the previous response into one valid JSON object. Return only JSON, with no Markdown.",
-    "Preserve the prior score, rationale, and feedback whenever they are present.",
-    "If the previous response uses clear qualitative scoring, convert only these terms: perfect/full pass/pass = 1, fail/no credit = 0, partial = 0.5.",
-    "If the required score is still not recoverable from the previous response, use score 0, pass false, and rationale \"The judge response did not provide a recoverable score and rationale for this criterion.\"",
-    "Do not invent file paths, log paths, or extra criterion ids.",
-    "",
-    "Criterion:",
-    JSON.stringify(input.criterion, null, 2),
-    "",
-    "Required JSON shape:",
-    JSON.stringify({
-      criterion_id: input.criterion.id,
-      score: 0.0,
-      pass: false,
-      rationale: "why this criterion received this score",
-      summary: "short scoring summary",
-      feedback: {},
-    }, null, 2),
-    "",
-    `The only allowed criterion_id is ${input.criterion.id}.`,
-    "",
-    "Previous response:",
-    input.output,
-  ].join("\n");
-}
-
-function rubricJudgeResultFromCriteria(args: {
+function rubricJudgeResult(args: {
   workload: AdapterWorkload;
   engine: BuiltInRubricAdapterSpec;
-  criterionRuns: readonly RubricCriterionJudgeRun[];
+  judged: RubricJudgeOutput;
+  metadata: WorkbenchAgentTurnResult["metadata"];
 }): WorkbenchResult {
-  const criteria = args.criterionRuns.map((run) => run.result);
+  const criteria = args.judged.criteria.map((criterion) => ({
+    criterion_id: criterion.id,
+    label: criterion.id,
+    score: criterion.score,
+    pass: criterion.pass,
+    rationale: criterion.rationale,
+  }));
   const score = weightedCriteriaScore(criteria, args.engine.criteria);
   if (!isBoundedScore(score)) {
     throw new Error("Rubric criterion scores must aggregate to a score in the 0..1 range.");
@@ -1645,46 +1463,51 @@ function rubricJudgeResultFromCriteria(args: {
     score,
     criteria,
   });
-  const passed = criteria.filter((criterion) => criterion.pass).length;
   return {
     score,
     metrics,
-    summary: `Rubric judged ${criteria.length} criteria (${passed} passed).`,
+    summary: args.judged.summary,
     cases: [caseResult],
     feedback: {
       judge: args.engine.judge.use,
       rubric: {
-        parallelism: args.engine.parallelism,
         aggregation: "weighted_mean",
-        criteria: args.criterionRuns.map((run) => ({
-          id: run.result.criterion_id,
-          score: run.result.score,
-          pass: run.result.pass,
-          ...(run.summary ? { summary: run.summary } : {}),
-          ...(run.feedback !== undefined ? { feedback: run.feedback } : {}),
-          metadata: run.metadata as Json,
-          ...(run.repair ? { repair: run.repair } : {}),
-        })),
+        criteria: args.judged.criteria as unknown as Json,
+        metadata: args.metadata as Json,
       },
     },
   };
 }
 
-function normalizeRubricCriterionJudgeResult(
+function parseRubricJudgeOutput(
   output: string,
-  criterion: RubricCriterionSpec,
-): Omit<RubricCriterionJudgeRun, "metadata" | "traceFiles" | "repair" | "usage"> {
+  criteria: readonly RubricCriterionSpec[],
+): RubricJudgeOutput {
   const parsed = parseAgentJsonObject(output, "Rubric judge");
-  const result = normalizeRubricCriterionObject(parsed, criterion);
-  const score = result.score;
-  if (!isBoundedScore(score)) {
-    throw new Error("Rubric criterion judge output must include a score in the 0..1 range.");
+  assertExactObjectKeys(parsed, ["summary", "criteria"], "Rubric judge output");
+  if (typeof parsed.summary !== "string" || !parsed.summary.trim()) {
+    throw new Error("Rubric judge output must include a non-empty summary.");
   }
-  return {
-    result,
-    ...(typeof parsed.summary === "string" ? { summary: parsed.summary } : {}),
-    ...(parsed.feedback !== undefined ? { feedback: parsed.feedback as Json } : {}),
-  };
+  if (!Array.isArray(parsed.criteria)) {
+    throw new Error("Rubric judge output criteria must be an array.");
+  }
+  const expected = new Set(criteria.map((criterion) => criterion.id));
+  const seen = new Set<string>();
+  const judged = parsed.criteria.map((value, index) => parseJudgedCriterion(value, index));
+  for (const criterion of judged) {
+    if (!expected.has(criterion.id)) {
+      throw new Error(`Rubric judge output contains unknown criterion id ${criterion.id}.`);
+    }
+    if (seen.has(criterion.id)) {
+      throw new Error(`Rubric judge output duplicates criterion id ${criterion.id}.`);
+    }
+    seen.add(criterion.id);
+  }
+  const missing = [...expected].filter((id) => !seen.has(id));
+  if (missing.length > 0) {
+    throw new Error(`Rubric judge output is missing criterion ids: ${missing.join(", ")}.`);
+  }
+  return { summary: parsed.summary.trim(), criteria: judged };
 }
 
 function rubricJudgeCaseResult(args: {
@@ -1700,40 +1523,73 @@ function rubricJudgeCaseResult(args: {
   };
 }
 
-function readCriterionRationale(record: Record<string, unknown>): string | undefined {
-  for (const key of ["rationale", "feedback", "reason", "explanation"]) {
-    const value = record[key];
-    if (typeof value === "string" && value.trim().length > 0) {
-      return value.trim();
-    }
+function parseJudgedCriterion(value: unknown, index: number): RubricJudgedCriterion {
+  const record = jsonRecord(value);
+  if (!record) {
+    throw new Error(`Rubric judge output criteria[${index}] must be an object.`);
   }
-  return undefined;
-}
-
-function normalizeRubricCriterionObject(
-  record: Record<string, unknown>,
-  criterion: RubricCriterionSpec,
-): NonNullable<EvalCaseResult["criteria"]>[number] {
-  const criterionId = typeof record.criterion_id === "string"
-    ? record.criterion_id
-    : "";
-  if (criterionId !== criterion.id) {
-    throw new Error(`Rubric criterion judge output must use criterion_id ${criterion.id}.`);
+  assertExactObjectKeys(record, ["id", "score", "pass", "rationale", "evidence"], `Rubric judge output criteria[${index}]`);
+  if (typeof record.id !== "string" || !record.id.trim()) {
+    throw new Error(`Rubric judge output criteria[${index}].id must be non-empty.`);
   }
   if (!isBoundedScore(record.score)) {
-    throw new Error(`Rubric criterion ${criterion.id} output must include a score in the 0..1 range.`);
+    throw new Error(`Rubric criterion ${record.id} score must be in the 0..1 range.`);
   }
-  const rationale = readCriterionRationale(record);
-  if (!rationale) {
-    throw new Error(`Rubric criterion ${criterion.id} output must include a non-empty rationale.`);
+  if (typeof record.pass !== "boolean") {
+    throw new Error(`Rubric criterion ${record.id} pass must be boolean.`);
+  }
+  if (typeof record.rationale !== "string" || !record.rationale.trim()) {
+    throw new Error(`Rubric criterion ${record.id} rationale must be non-empty.`);
   }
   return {
-    criterion_id: criterion.id,
-    label: typeof record.label === "string" && record.label.length > 0 ? record.label : criterion.id,
+    id: record.id,
     score: record.score,
-    pass: typeof record.pass === "boolean" ? record.pass : record.score >= 0.5,
-    rationale,
+    pass: record.pass,
+    rationale: record.rationale.trim(),
+    evidence: parseRubricEvidence(record.evidence, record.id),
   };
+}
+
+function parseRubricEvidence(value: unknown, criterionId: string): RubricEvidence[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`Rubric criterion ${criterionId} evidence must be an array.`);
+  }
+  return value.map((entry, index) => {
+    const record = jsonRecord(entry);
+    if (!record) {
+      throw new Error(`Rubric criterion ${criterionId} evidence[${index}] must be an object.`);
+    }
+    assertExactObjectKeys(record, ["path", "locator", "note"], `Rubric criterion ${criterionId} evidence[${index}]`);
+    if (typeof record.path !== "string" || !record.path.trim()) {
+      throw new Error(`Rubric criterion ${criterionId} evidence[${index}].path must be non-empty.`);
+    }
+    if (record.locator !== undefined && (typeof record.locator !== "string" || !record.locator.trim())) {
+      throw new Error(`Rubric criterion ${criterionId} evidence[${index}].locator must be non-empty when present.`);
+    }
+    if (typeof record.note !== "string" || !record.note.trim()) {
+      throw new Error(`Rubric criterion ${criterionId} evidence[${index}].note must be non-empty.`);
+    }
+    return {
+      path: record.path.trim(),
+      ...(typeof record.locator === "string" ? { locator: record.locator.trim() } : {}),
+      note: record.note.trim(),
+    };
+  });
+}
+
+function assertExactObjectKeys(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const allowedKeys = new Set(allowed);
+  const extra = Object.keys(record).filter((key) => !allowedKeys.has(key));
+  if (extra.length > 0) {
+    throw new Error(`${label} contains unsupported fields: ${extra.join(", ")}.`);
+  }
 }
 
 function rubricCriteria(value: unknown, label: string): RubricCriterionSpec[] {
@@ -1761,40 +1617,6 @@ function rubricCriteria(value: unknown, label: string): RubricCriterionSpec[] {
       ...(typeof record.weight === "number" ? { weight: record.weight } : {}),
     };
   });
-}
-
-function rubricParallelism(value: unknown, criterionCount: number): number {
-  if (criterionCount <= 0) {
-    return 1;
-  }
-  if (value === undefined) {
-    return Math.min(DEFAULT_RUBRIC_PARALLELISM, criterionCount);
-  }
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new Error("adapter.with.parallelism must be a positive integer.");
-  }
-  return Math.min(value, criterionCount);
-}
-
-async function mapWithConcurrency<TInput, TOutput>(
-  inputs: readonly TInput[],
-  concurrency: number,
-  mapper: (input: TInput, index: number) => Promise<TOutput>,
-): Promise<TOutput[]> {
-  const limit = Math.max(1, Math.min(concurrency, inputs.length || 1));
-  const results = new Array<TOutput>(inputs.length);
-  let nextIndex = 0;
-  async function worker(): Promise<void> {
-    while (nextIndex < inputs.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(inputs[index]!, index);
-    }
-  }
-  await Promise.all(
-    Array.from({ length: limit }, async () => worker()),
-  );
-  return results;
 }
 
 function requireWorkloadCase(workload: AdapterWorkload, label: string): void {
@@ -1862,15 +1684,12 @@ function isAllowedSkillEditPath(filePath: string, edits: readonly string[]): boo
 
 function parseAgentJsonObject(output: string, label: string): Record<string, unknown> {
   const trimmed = output.trim();
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start < 0 || end < start) {
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
     throw new Error(`${label} output must be a JSON object.`);
   }
   let parsed: unknown;
-  const jsonText = trimmed.slice(start, end + 1);
   try {
-    parsed = parseAgentJsonText(jsonText);
+    parsed = JSON.parse(trimmed);
   } catch (error) {
     throw new Error(`${label} output must parse as a JSON object: ${error instanceof Error ? error.message : String(error)}.`);
   }
@@ -1878,66 +1697,6 @@ function parseAgentJsonObject(output: string, label: string): Record<string, unk
     throw new Error(`${label} output must be a JSON object.`);
   }
   return parsed as Record<string, unknown>;
-}
-
-function parseAgentJsonText(jsonText: string): unknown {
-  try {
-    return JSON.parse(jsonText);
-  } catch (error) {
-    const repaired = repairInvalidJsonStringEscapes(jsonText);
-    if (repaired !== jsonText) {
-      try {
-        return JSON.parse(repaired);
-      } catch {
-        // Preserve the original parse error; it points at the model output.
-      }
-    }
-    throw error;
-  }
-}
-
-function repairInvalidJsonStringEscapes(jsonText: string): string {
-  let repaired = "";
-  let inString = false;
-  let escaped = false;
-  for (const char of jsonText) {
-    if (!inString) {
-      repaired += char;
-      if (char === "\"") {
-        inString = true;
-      }
-      continue;
-    }
-    if (escaped) {
-      repaired += isJsonEscapeCharacter(char) ? char : `\\${char}`;
-      escaped = false;
-      continue;
-    }
-    repaired += char;
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === "\"") {
-      inString = false;
-    }
-  }
-  if (escaped) {
-    repaired += "\\";
-  }
-  return repaired;
-}
-
-function isJsonEscapeCharacter(char: string): boolean {
-  return char === "\""
-    || char === "\\"
-    || char === "/"
-    || char === "b"
-    || char === "f"
-    || char === "n"
-    || char === "r"
-    || char === "t"
-    || char === "u";
 }
 
 function isBoundedScore(value: unknown): value is number {

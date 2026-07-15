@@ -1,12 +1,14 @@
-import type {
-  BlobObjectRef,
-  RemoteWorkbenchJob,
-  Json,
-  SurfaceSnapshotFile,
-  WorkbenchExecutionCapability,
-  WorkbenchExecutionResult,
-  WorkbenchExecutionSpec,
-  WorkbenchSandboxExecutionMetadata,
+import {
+  isWorkbenchJson,
+  type BlobObjectRef,
+  type WorkbenchExecutionJob,
+  type WorkbenchPlannedExecutionJobInput,
+  type Json,
+  type SurfaceSnapshotFile,
+  type WorkbenchExecutionCapability,
+  type WorkbenchExecutionResult,
+  type WorkbenchExecutionSpec,
+  type WorkbenchSandboxExecutionMetadata,
 } from "@workbench-ai/workbench-contract";
 
 import {
@@ -21,7 +23,6 @@ import type {
 import {
   asRuntimeRecord,
   importNodeModule,
-  isJsonPayload,
   nodeBuiltin,
 } from "./runtime-utils.ts";
 import {
@@ -31,13 +32,19 @@ import {
   engineCaseFilesForRuntimeInput,
 } from "./generic-spec.ts";
 
-export function readWorkbenchExecutionSpec(job: RemoteWorkbenchJob): WorkbenchExecutionSpec {
-  const input = asRuntimeRecord(job.input);
-  const execution = input.execution;
-  if (!execution || typeof execution !== "object" || Array.isArray(execution)) {
+export { isSurfaceSnapshotFile } from "@workbench-ai/workbench-protocol";
+
+export function readWorkbenchExecutionSpec(job: WorkbenchExecutionJob): WorkbenchExecutionSpec {
+  return readWorkbenchPlannedExecutionJobInput(job).execution;
+}
+
+export function readWorkbenchPlannedExecutionJobInput(
+  job: WorkbenchExecutionJob,
+): WorkbenchPlannedExecutionJobInput {
+  if (!("execution" in job.input)) {
     throw new Error(`Execution job ${job.id} is missing input.execution.`);
   }
-  return execution as WorkbenchExecutionSpec;
+  return job.input;
 }
 
 export function createWorkbenchSandboxFileStore(args: WorkbenchExecutionRuntimeInput): SandboxExecutionFileStore {
@@ -62,7 +69,7 @@ export function createWorkbenchSandboxFileStore(args: WorkbenchExecutionRuntimeI
   };
 }
 
-export function materializeWorkbenchSandboxInput(
+function materializeWorkbenchSandboxInput(
   args: WorkbenchExecutionRuntimeInput,
   execution: WorkbenchExecutionSpec,
   input: WorkbenchExecutionSpec["inputs"][number],
@@ -98,7 +105,7 @@ function selectSandboxCaseFiles(
   return engineCaseFilesForRuntimeInput({ spec: args.spec, engineCase });
 }
 
-export function materializedFileInput(
+function materializedFileInput(
   input: WorkbenchExecutionSpec["inputs"][number],
   files: readonly SurfaceSnapshotFile[],
 ): SandboxMaterializedInput {
@@ -135,28 +142,22 @@ export function createSandboxAdapterRequest(
   };
 }
 
-export function sanitizeWorkbenchExecutionJobForSandbox(
-  job: RemoteWorkbenchJob,
+function sanitizeWorkbenchExecutionJobForSandbox(
+  job: WorkbenchExecutionJob,
   execution: WorkbenchExecutionSpec,
-): RemoteWorkbenchJob {
-  const input = asRuntimeRecord(job.input);
-  const sanitizedInput: Record<string, Json> = {};
-  for (const [key, value] of Object.entries(input)) {
-    if (key === "baseFiles" || key === "traceFiles") {
-      continue;
-    }
-    if (isJsonPayload(value)) {
-      sanitizedInput[key] = value;
-    }
-  }
-  sanitizedInput.execution = execution as unknown as Json;
+): WorkbenchExecutionJob {
+  const { baseFiles: _baseFiles, traceFiles: _traceFiles, ...input } =
+    readWorkbenchPlannedExecutionJobInput(job);
   return {
     ...job,
-    input: sanitizedInput as unknown as Json,
+    input: {
+      ...input,
+      execution,
+    },
   };
 }
 
-export function materializedInputForSandboxRequest(input: SandboxMaterializedInput): Record<string, Json> {
+function materializedInputForSandboxRequest(input: SandboxMaterializedInput): Record<string, Json> {
   const base = {
     input: input.input as unknown as Json,
     mountPath: input.mountPath,
@@ -175,7 +176,7 @@ export function materializedInputForSandboxRequest(input: SandboxMaterializedInp
 }
 
 export async function executionResultFromCompletedSandboxJob(args: {
-  completedJob: RemoteWorkbenchJob;
+  completedJob: WorkbenchExecutionJob;
   execution: WorkbenchExecutionSpec;
   startedAt: string;
   backend: string;
@@ -193,7 +194,7 @@ export async function executionResultFromCompletedSandboxJob(args: {
   if (completedJob.status !== "succeeded") {
     return {
       executionId: args.execution.id,
-      status: completedJob.status === "cancelled" ? "cancelled" : "failed",
+      status: completedJob.status === "canceled" ? "canceled" : "failed",
       startedAt: completedJob.startedAt ?? args.startedAt,
       finishedAt: completedJob.finishedAt ?? new Date().toISOString(),
       outputs: {},
@@ -230,50 +231,46 @@ export async function executionResultFromCompletedSandboxJob(args: {
   };
 }
 
-export function outputPayloadForContract(output: Record<string, unknown>, outputName: string): Json | undefined {
+function outputPayloadForContract(output: Record<string, unknown>, outputName: string): Json | undefined {
   if (outputName === "skill_patch") {
-    return isJsonPayload(output.skillPatch) ? output.skillPatch : undefined;
+    return isWorkbenchJson(output.skillPatch) ? output.skillPatch : undefined;
   }
   if (outputName === "result") {
-    return isJsonPayload(output.result) ? output.result : undefined;
+    return isWorkbenchJson(output.result) ? output.result : undefined;
   }
-  return isJsonPayload(output[outputName]) ? output[outputName] : undefined;
+  return isWorkbenchJson(output[outputName]) ? output[outputName] : undefined;
 }
 
-export async function sandboxOutputRef(
+async function sandboxOutputRef(
   capability: WorkbenchExecutionCapability,
   outputName: string,
   body: string,
 ): Promise<BlobObjectRef> {
   const prefix = capability.outputPrefix.endsWith("/") ? capability.outputPrefix : `${capability.outputPrefix}/`;
-  const key = `${prefix}${outputName}.json`;
-  if (!key.startsWith(prefix)) {
-    throw new Error(`Sandbox output ${outputName} escaped capability output prefix.`);
-  }
   return {
     bucket: "memory",
-    key,
+    key: `${prefix}${outputName}.json`,
     byteLength: Buffer.byteLength(body, "utf8"),
     sha256: await sha256Hex(body),
   };
 }
 
-export async function sha256Hex(body: string): Promise<string> {
+async function sha256Hex(body: string): Promise<string> {
   const crypto = await importNodeModule<typeof import("node:crypto")>(nodeBuiltin("crypto"));
   return crypto.createHash("sha256").update(body).digest("hex");
 }
 
-export function withSandboxCompletionMetadata(
-  job: RemoteWorkbenchJob,
+function withSandboxCompletionMetadata(
+  job: WorkbenchExecutionJob,
   metadata: WorkbenchSandboxExecutionMetadata,
-): RemoteWorkbenchJob {
+): WorkbenchExecutionJob {
   return attachSandboxMetadataToJob(job, createWorkbenchSandboxExecutionMetadata(metadata) as unknown as Json);
 }
 
 export function attachSandboxMetadataToJob(
-  job: RemoteWorkbenchJob,
+  job: WorkbenchExecutionJob,
   metadata: unknown,
-): RemoteWorkbenchJob {
+): WorkbenchExecutionJob {
   const output = asRuntimeRecord(job.output);
   if (!job.output || Array.isArray(job.output) || typeof job.output !== "object") {
     return job;
@@ -288,17 +285,4 @@ export function attachSandboxMetadataToJob(
       sandbox: metadata as Json,
     } as unknown as Json,
   };
-}
-
-export function isSurfaceSnapshotFile(value: unknown): value is SurfaceSnapshotFile {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    typeof (value as SurfaceSnapshotFile).path === "string" &&
-    ((value as SurfaceSnapshotFile).kind === "text" || (value as SurfaceSnapshotFile).kind === "binary") &&
-    ((value as SurfaceSnapshotFile).encoding === "utf8" || (value as SurfaceSnapshotFile).encoding === "base64") &&
-    typeof (value as SurfaceSnapshotFile).content === "string" &&
-    typeof (value as SurfaceSnapshotFile).executable === "boolean",
-  );
 }

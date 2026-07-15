@@ -1,6 +1,5 @@
 import {
-  WORKBENCH_EXECUTION_NETWORK_EGRESS_VALUES,
-  type RemoteWorkbenchJob,
+  type WorkbenchExecutionJob,
   type Json,
   type WorkbenchExecutionSpec,
 } from "@workbench-ai/workbench-contract";
@@ -8,7 +7,6 @@ import {
   createHash,
 } from "node:crypto";
 import {
-  createWriteStream,
   existsSync,
 } from "node:fs";
 import path from "node:path";
@@ -20,13 +18,12 @@ import {
   createSandboxAdapterRequest,
   executionResultFromCompletedSandboxJob,
 } from "../sandbox-inputs.ts";
-import {
-  persistWorkbenchAdapterAuthUpdates,
-} from "../adapter-auth-updates.ts";
+import { readWorkbenchSandboxAdapterJobResponse } from "../sandbox-response.ts";
 import type {
   WorkbenchExecutionRuntimeInput,
 } from "../execution-runtime-types.ts";
 import {
+  createSandboxBackendDescriptor,
   type SandboxBackendDescriptor,
   type SandboxCreateRequest,
   type SandboxExecutionFileStore,
@@ -34,16 +31,15 @@ import {
   type SandboxPlane,
 } from "../sandbox-plane.ts";
 import {
-  abortSignalOrUndefined,
   asRuntimeRecord,
+  hasRegistryHost,
   importNodeModule,
   nodeBuiltin,
 } from "../runtime-utils.ts";
 import {
-  createWorkbenchProgressStdoutParser,
-  publishWorkbenchProgressStdoutEnvelope,
-  type WorkbenchExecutionProgressTarget,
+  readOptionalWorkbenchExecutionProgressTarget,
 } from "../execution-events.ts";
+import { runWorkbenchSandboxProcess } from "../sandbox-process.ts";
 import {
   resolveSandboxTemplateImage,
 } from "./template-images.ts";
@@ -85,17 +81,7 @@ interface DockerSandboxUser {
 
 export function createDockerSandboxBackendDescriptor(
 ): SandboxBackendDescriptor {
-  return {
-    name: DOCKER_SANDBOX_BACKEND,
-    version: "1",
-    capabilities: {
-      snapshots: true,
-      interactiveExec: false,
-      filesystemDiff: false,
-      networkPolicy: WORKBENCH_EXECUTION_NETWORK_EGRESS_VALUES,
-      fileCapabilities: true,
-    },
-  };
+  return createSandboxBackendDescriptor(DOCKER_SANDBOX_BACKEND);
 }
 
 export function createDockerSandboxPlane(
@@ -323,7 +309,7 @@ async function runDockerSandboxExecution(
   sandbox: SandboxHandle,
   execution: WorkbenchExecutionSpec,
   signal?: AbortSignal,
-): Promise<RemoteWorkbenchJob> {
+): Promise<WorkbenchExecutionJob> {
   const metadata = asRuntimeRecord(sandbox.metadata);
   const root = readRequiredMetadataString(metadata, "root", DOCKER_SANDBOX_BACKEND);
   const responsePath = readRequiredMetadataString(metadata, "response", DOCKER_SANDBOX_BACKEND);
@@ -337,7 +323,7 @@ async function runDockerSandboxExecution(
   const builtInAdaptersImport = readRequiredMetadataString(metadata, "builtInAdaptersImport", DOCKER_SANDBOX_BACKEND);
   const sandboxUid = readRequiredMetadataNumber(metadata, "sandboxUid", DOCKER_SANDBOX_BACKEND);
   const sandboxGid = readRequiredMetadataNumber(metadata, "sandboxGid", DOCKER_SANDBOX_BACKEND);
-  const progressTarget = args.progress ?? readOptionalProgressTarget(metadata.progressTarget);
+  const progressTarget = args.progress ?? readOptionalWorkbenchExecutionProgressTarget(metadata.progressTarget);
   const network = asRuntimeRecord(metadata.network);
   const resources = execution.policy.resources;
   const tmpfsSize = dockerSize(resources.diskGb);
@@ -398,13 +384,17 @@ async function runDockerSandboxExecution(
   const timeoutMs = Math.max(60_000, execution.policy.resources.timeoutMinutes * 60_000 + 30_000);
   let dockerError: string | null = null;
   try {
-    await runDockerSandboxProcess(spawn, dockerArgs, {
+    await runWorkbenchSandboxProcess(spawn, "docker", dockerArgs, {
+      backendName: "Docker sandbox",
       stdoutPath,
       stderrPath,
       timeoutMs,
       progressTarget,
       signal,
-      containerName,
+      beforeTerminate: () => {
+        const remover = spawn("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+        remover.on("error", () => undefined);
+      },
     });
   } catch (error) {
     dockerError = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -422,15 +412,7 @@ async function runDockerSandboxExecution(
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Docker sandbox exited without a response: ${message}${details ? `. ${details}` : ""}`);
   });
-  const response = JSON.parse(responseText);
-  if (!response.ok) {
-    throw new Error(typeof response.error === "string" ? response.error : "Sandbox adapter runner failed.");
-  }
-  if (!response.job || typeof response.job !== "object") {
-    throw new Error("Sandbox adapter runner response omitted job.");
-  }
-  await persistWorkbenchAdapterAuthUpdates(args, response.adapterAuthProfiles);
-  return response.job as RemoteWorkbenchJob;
+  return await readWorkbenchSandboxAdapterJobResponse(responseText, args);
 }
 
 function dockerRuntimeMountArgs(mounts: readonly DockerRuntimeMount[]): string[] {
@@ -493,111 +475,6 @@ async function destroyDockerSandbox(sandbox: SandboxHandle): Promise<void> {
   if (root) {
     await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
   }
-}
-
-function runDockerSandboxProcess(
-  spawn: typeof import("node:child_process").spawn,
-  args: string[],
-  options: {
-    stdoutPath: string;
-    stderrPath: string;
-    timeoutMs: number;
-    progressTarget?: WorkbenchExecutionProgressTarget;
-    signal?: AbortSignal;
-    containerName?: string;
-  },
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const signal = abortSignalOrUndefined(options.signal);
-    let settled = false;
-    let timedOut = false;
-    let aborted = false;
-    const progressPublishes: Promise<void>[] = [];
-    const progressParser = createWorkbenchProgressStdoutParser((envelope) => {
-      progressPublishes.push(
-        publishWorkbenchProgressStdoutEnvelope(envelope, options.progressTarget)
-          .catch(() => undefined),
-      );
-    });
-    const stdout = createWriteStream(options.stdoutPath);
-    const stderr = createWriteStream(options.stderrPath);
-    const child = spawn("docker", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const removeContainer = (): void => {
-      if (!options.containerName) {
-        return;
-      }
-      const remover = spawn("docker", ["rm", "-f", options.containerName], {
-        stdio: "ignore",
-      });
-      remover.on("error", () => undefined);
-    };
-    if (signal?.aborted) {
-      aborted = true;
-      removeContainer();
-      child.kill("SIGTERM");
-    }
-    const abort = () => {
-      aborted = true;
-      removeContainer();
-      child.kill("SIGTERM");
-    };
-    signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      removeContainer();
-      child.kill("SIGKILL");
-    }, options.timeoutMs);
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdout.write(chunk);
-      progressParser.write(chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr.write(chunk);
-    });
-
-    const finish = (error?: Error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      progressParser.flush();
-      const stdoutClosed = new Promise<void>((closeResolve) => stdout.end(closeResolve));
-      const stderrClosed = new Promise<void>((closeResolve) => stderr.end(closeResolve));
-      Promise.allSettled([...progressPublishes, stdoutClosed, stderrClosed]).then(() => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      });
-    };
-
-    child.on("error", (error) => finish(error));
-    child.on("exit", (code, signal) => {
-      if (timedOut) {
-        finish(new Error(`Docker sandbox timed out after ${options.timeoutMs}ms.`));
-        return;
-      }
-      if (aborted) {
-        finish(new Error("Run cancellation requested."));
-        return;
-      }
-      if (code === 0) {
-        finish();
-        return;
-      }
-      finish(new Error(
-        code === null
-          ? `Docker sandbox exited from signal ${signal ?? "unknown"}.`
-          : `Docker sandbox exited with code ${code}.`,
-      ));
-    });
-  });
 }
 
 function dockerNetworkConfigForExecution(execution: WorkbenchExecutionSpec): Record<string, Json> {
@@ -719,11 +596,6 @@ function localBuiltInDockerfileForImage(image: string): string | null {
     return null;
   }
   return path.join(resolveLocalDockerRuntimePayload().builtInDockerfileRoot, dockerfile.replace(/^products\/workbench\/environments\//u, ""));
-}
-
-function hasRegistryHost(image: string): boolean {
-  const first = image.split("/")[0] ?? "";
-  return first === "localhost" || first.includes(".") || first.includes(":");
 }
 
 function resolveLocalDockerRuntimePayload(): DockerRuntimePayload {
@@ -905,27 +777,6 @@ function isSafeDockerRuntimeMountTarget(target: string): boolean {
   return !target.startsWith("/") &&
     !target.split("/").includes("..") &&
     !/[\0\r\n:,]/u.test(target);
-}
-
-function readOptionalProgressTarget(
-  value: unknown,
-): WorkbenchExecutionProgressTarget | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const record = value as Record<string, unknown>;
-  if (typeof record.url !== "string" || typeof record.token !== "string") {
-    return undefined;
-  }
-  return {
-    url: record.url,
-    token: record.token,
-    ...(typeof record.ownerUserId === "string" ? { ownerUserId: record.ownerUserId } : {}),
-    ...(typeof record.flushWindowMs === "number" ? { flushWindowMs: record.flushWindowMs } : {}),
-    ...(record.transport === "stdout" || record.transport === "both" || record.transport === "http"
-      ? { transport: record.transport }
-      : {}),
-  };
 }
 
 function dockerSandboxUser(): DockerSandboxUser {

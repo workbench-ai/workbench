@@ -22,24 +22,24 @@ export interface WorkbenchRuntimeSpec {
   network?: WorkbenchExecutionNetworkPolicy;
 }
 
-export interface WorkbenchPathRef {
+interface WorkbenchPathRef {
   path: string;
 }
 
-export interface WorkbenchSkillPrepareSpec {
+interface WorkbenchSkillPrepareSpec {
   command: string;
 }
 
-export interface WorkbenchSkillAgentSpec extends WorkbenchAdapterInvocation {
+interface WorkbenchSkillAgentSpec extends WorkbenchAdapterInvocation {
   name: string;
 }
 
-export interface WorkbenchCaseSelector {
+interface WorkbenchCaseSelector {
   all?: true;
   split?: string;
 }
 
-export interface WorkbenchSelectionSpec {
+interface WorkbenchSelectionSpec {
   metric: string;
   cases?: WorkbenchCaseSelector;
 }
@@ -77,13 +77,13 @@ export interface GenericRunSpec {
 export type GenericEngineCaseSpec = WorkbenchEngineCaseSpec;
 export type { WorkbenchEngineCase } from "@workbench-ai/workbench-protocol";
 
-export interface ResolvedEngineCaseExecutionConfig {
+interface ResolvedEngineCaseExecutionConfig {
   prompt: string;
   environment: WorkbenchRuntimeSpec;
   run: WorkbenchAdapterInvocation;
 }
 
-export const DEFAULT_EXECUTION_RESOURCES: WorkbenchExecutionResources = {
+const DEFAULT_EXECUTION_RESOURCES: WorkbenchExecutionResources = {
   cpu: 2,
   memoryGb: 4,
   diskGb: 10,
@@ -109,7 +109,7 @@ export function engineCaseFilesForRuntimeInput(args: {
   return engineCasePublicFiles(args.engineCase);
 }
 
-export function engineCasePublicFiles(
+function engineCasePublicFiles(
   engineCase: WorkbenchEngineCase,
 ): SurfaceSnapshotFile[] {
   return (engineCase.files.public ?? [])

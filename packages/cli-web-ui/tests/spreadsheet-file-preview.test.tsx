@@ -6,29 +6,19 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const { parseSpreadsheetViewerWorkbookMock } = vi.hoisted(() => ({
-  parseSpreadsheetViewerWorkbookMock: vi.fn(async (fileLike: { name: string }) => ({
-    id: `${fileLike.name}:1`,
-    label: fileLike.name,
-    source: fileLike.name,
-    sizeBytes: 1,
-    workbook: {
-      activeSheetName: "Sheet1",
-      sheetNames: ["Sheet1"],
-      sheets: {},
-    },
+  parseSpreadsheetViewerWorkbookMock: vi.fn(() => ({
+    activeSheetName: "Sheet1",
+    sheets: { Sheet1: {} },
   })),
 }));
 
 vi.mock("../spreadsheet-viewer", () => ({
-  SpreadsheetViewer: ({ workbookFile }: { workbookFile: { label: string } }) =>
-    createElement("div", { "data-testid": "mock-spreadsheet-viewer" }, workbookFile.label),
+  SpreadsheetViewer: ({ workbook }: { workbook: { activeSheetName: string } }) =>
+    createElement("div", { "data-testid": "mock-spreadsheet-viewer" }, workbook.activeSheetName),
   parseSpreadsheetViewerWorkbook: parseSpreadsheetViewerWorkbookMock,
 }));
 
-import {
-  SpreadsheetFilePreview,
-  clearSpreadsheetFilePreviewCache,
-} from "../components/shared/spreadsheet-file-preview";
+import { SpreadsheetFilePreview } from "../components/shared/spreadsheet-file-preview";
 import type { FilePreviewData } from "../lib/file-preview";
 
 describe("spreadsheet file preview", () => {
@@ -39,7 +29,6 @@ describe("spreadsheet file preview", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = null;
-    clearSpreadsheetFilePreviewCache();
     parseSpreadsheetViewerWorkbookMock.mockClear();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   });
@@ -58,7 +47,7 @@ describe("spreadsheet file preview", () => {
     await renderPreview(preview);
     expect(parseSpreadsheetViewerWorkbookMock).toHaveBeenCalledTimes(1);
     expect(container.querySelector("[data-testid='mock-spreadsheet-viewer']")?.textContent).toBe(
-      "statement.xlsx",
+      "Sheet1",
     );
 
     act(() => {
@@ -70,12 +59,22 @@ describe("spreadsheet file preview", () => {
     expect(parseSpreadsheetViewerWorkbookMock).toHaveBeenCalledTimes(1);
   });
 
+  test("bounds a spreadsheet when its host does not provide a height", async () => {
+    await renderPreview(createPreview("bounded.xlsx"));
+
+    const classes = container
+      .querySelector("[data-testid='preview-spreadsheet']")
+      ?.className.split(" ");
+
+    expect(classes).toContain("h-[min(36rem,70vh)]");
+    expect(classes).toContain("overflow-hidden");
+  });
+
   async function renderPreview(preview: FilePreviewData) {
     await act(async () => {
       root = createRoot(container);
       root.render(createElement(SpreadsheetFilePreview, {
         preview,
-        fillHeight: true,
       }));
     });
 
@@ -86,17 +85,15 @@ describe("spreadsheet file preview", () => {
   }
 });
 
-function createPreview(): FilePreviewData {
+function createPreview(fileName = "statement.xlsx"): FilePreviewData {
   return {
-    path: "models/statement.xlsx",
+    path: `models/${fileName}`,
     view: "rendered",
     mime_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     preview_kind: "spreadsheet",
-    diff: null,
     source: {
       content: "UEsDBA==",
       encoding: "base64",
     },
-    rendered_html: null,
   };
 }

@@ -3,15 +3,18 @@ import { CircleAlertIcon, FileTextIcon, FolderOpenIcon } from "lucide-react";
 
 import {
   workbenchInspectionFileContent,
-  workbenchInspectionFileContentUnavailableReason,
   type SurfaceSnapshotFile,
   type WorkbenchInspectionFileContent,
 } from "@workbench-ai/workbench-contract";
 import { PreviewPanel } from "@workbench-ai/cli-web-ui/components/shared/preview-panel";
 import { ProblemState } from "@workbench-ai/cli-web-ui/components/shared/problem-state";
 import { Button } from "@workbench-ai/cli-web-ui/components/ui/button";
+import { Skeleton } from "@workbench-ai/cli-web-ui/components/ui/skeleton";
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@workbench-ai/cli-web-ui/components/ui/toggle-group";
 import { supportedPreviewModes, type PreviewMode } from "@workbench-ai/cli-web-ui/lib/file-preview";
-import { cn } from "@workbench-ai/cli-web-ui/lib/utils";
 
 import { directoryPathForFile, formatCount } from "../lib/format";
 import {
@@ -328,26 +331,30 @@ function SourceBreadcrumbs({
   const parts = relativeDirectoryPath?.split("/").filter(Boolean) ?? [];
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm">
-      <button
-        className="cursor-pointer rounded-sm font-medium text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <Button
+        className="h-auto p-0"
+        size="sm"
         type="button"
+        variant="link"
         onClick={() => onSelectDirectory(null)}
       >
         root
-      </button>
+      </Button>
       {parts.map((part, index) => {
         const relativePath = parts.slice(0, index + 1).join("/");
         const path = rootPath ? `${rootPath}/${relativePath}` : relativePath;
         return (
           <span className="contents" key={path}>
             <span aria-hidden="true" className="text-muted-foreground">/</span>
-            <button
-              className="cursor-pointer rounded-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            <Button
+              className="h-auto p-0"
+              size="sm"
               type="button"
+              variant="link"
               onClick={() => onSelectDirectory(path)}
             >
               {part}
-            </button>
+            </Button>
           </span>
         );
       })}
@@ -371,22 +378,20 @@ function RepositoryRow({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Button
       aria-current={active ? "true" : undefined}
-      className={cn(
-        "grid w-full min-w-0 cursor-pointer grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        active ? "bg-muted/55" : "hover:bg-muted/35",
-      )}
+      className="h-auto w-full justify-start rounded-none px-4 py-3 text-left"
       type="button"
+      variant={active ? "secondary" : "ghost"}
       onClick={onClick}
     >
-      <Icon aria-hidden="true" className="size-4 text-muted-foreground" />
-      <span className="grid min-w-0 gap-0.5">
+      <Icon aria-hidden="true" data-icon="inline-start" />
+      <span className="grid min-w-0 flex-1 gap-0.5">
         <span className="truncate font-medium text-foreground">{label}</span>
         <span className="truncate text-xs text-muted-foreground">{description}</span>
       </span>
       <span className="shrink-0 text-xs text-muted-foreground">{meta}</span>
-    </button>
+    </Button>
   );
 }
 
@@ -407,20 +412,23 @@ function PreviewModeButtons({
   value: PreviewMode;
 }) {
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1" role="group" aria-label="File preview mode">
+    <ToggleGroup
+      aria-label="File preview mode"
+      onValueChange={(nextValue) => nextValue && onValueChange(nextValue as PreviewMode)}
+      size="sm"
+      type="single"
+      value={value}
+      variant="outline"
+    >
       {supportedPreviewModes().map((mode) => (
-        <Button
-          aria-pressed={value === mode}
+        <ToggleGroupItem
           key={mode}
-          size="xs"
-          type="button"
-          variant={value === mode ? "secondary" : "ghost"}
-          onClick={() => onValueChange(mode)}
+          value={mode}
         >
           {mode.charAt(0).toUpperCase() + mode.slice(1)}
-        </Button>
+        </ToggleGroupItem>
       ))}
-    </div>
+    </ToggleGroup>
   );
 }
 
@@ -434,7 +442,7 @@ function SourcePreviewBody({
   preview: ReturnType<typeof surfaceFileToPreview> | null;
 }) {
   if (loading && !preview) {
-    return <p className="text-sm text-muted-foreground">Loading preview...</p>;
+    return <SourcePreviewSkeleton />;
   }
   if (error && !preview) {
     return (
@@ -447,9 +455,29 @@ function SourcePreviewBody({
     );
   }
   if (!preview) {
-    return <p className="text-sm text-muted-foreground">Loading preview...</p>;
+    return <SourcePreviewSkeleton />;
   }
   return <PreviewPanel preview={preview} />;
+}
+
+function SourcePreviewSkeleton() {
+  return (
+    <div
+      aria-busy="true"
+      aria-label="Loading source preview"
+      className="grid gap-3"
+      data-testid="source-preview-loading"
+      role="status"
+    >
+      <Skeleton className="h-4 w-2/3" />
+      <Skeleton className="h-4 w-11/12" />
+      <Skeleton className="h-4 w-5/6" />
+      <Skeleton className="h-4 w-3/4" />
+      <div className="pt-3">
+        <Skeleton className="h-48 w-full rounded-lg" />
+      </div>
+    </div>
+  );
 }
 
 function useInspectionFilePreview({
@@ -475,16 +503,6 @@ function useInspectionFilePreview({
   const embeddedContent = useMemo(() => {
     if (!path || !fileEntry) {
       return null;
-    }
-    const unavailableReason = workbenchInspectionFileContentUnavailableReason(fileEntry);
-    if (unavailableReason) {
-      return {
-        path: fileEntry.path,
-        kind: fileEntry.kind,
-        encoding: fileEntry.encoding,
-        executable: fileEntry.executable,
-        unavailableReason,
-      } satisfies WorkbenchInspectionFileContent;
     }
     if ("content" in fileEntry && typeof fileEntry.content === "string" && fileEntry.content.length > 0) {
       return workbenchInspectionFileContent(fileEntry);

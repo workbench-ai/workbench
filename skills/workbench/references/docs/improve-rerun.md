@@ -9,9 +9,8 @@ Use [Review candidate changes](improve-review.md) to decide whether a candidate 
 Use `--rerun` to force fresh evidence for the selected phase:
 
 ```bash
-workbench run --rerun
-workbench grade --rerun
-workbench eval --rerun
+workbench eval run --rerun
+workbench eval grade --rerun
 ```
 
 `--rerun` bypasses reusable evidence for the selected phase. Use it when you need a result that does not depend on stale or noisy evidence.
@@ -32,8 +31,9 @@ Retry starts a new run from the stored plan. It does not patch only failed jobs.
 When a one-sample proof switches source, run a higher-sample eval before publishing:
 
 ```bash
-workbench eval -n 5
-workbench results
+workbench eval run -n 5
+workbench eval grade
+workbench eval results
 ```
 
 Use a sample count that matches the workflow risk. Skills that produce files, financial models, legal text, or other high-review artifacts need stronger proof than a one-shot smoke check.
